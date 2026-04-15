@@ -4,3 +4,8 @@ export const chat: (userMessage: string) => string;
 export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
 
+// Agent mode (prefix KV cache reuse)
+export const agentPrefill: (prefix: string) => Promise<string>;
+export const agentStep: (variablePart: string) => Promise<string>;
+export const agentReset: () => Promise<string>;
+

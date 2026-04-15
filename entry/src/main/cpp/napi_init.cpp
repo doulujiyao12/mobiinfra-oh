@@ -237,6 +237,11 @@ static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
 
+// Agent mode state (prefix KV cache reuse)
+static bool g_agent_mode = false;
+static size_t g_prefix_pos = 0;
+static int g_agent_step = 0;
+
 // ======================= 基础工具函数 =======================
 
 struct AsyncData {
@@ -447,7 +452,167 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
     return promise;
 }
 
-// ========== 5. 重置对话 ==========
+// ========== 5. Agent Prefill (prefix KV cache reuse) ==========
+static void AgentPrefillExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    // If already in agent mode, reset first
+    if (g_agent_mode) {
+        g_llm->reset();
+        g_agent_mode = false;
+    }
+
+    // Configure for prefix reuse
+    g_llm->set_config("{\"reuse_kv\":true}");
+    g_llm->set_config("{\"use_template\":false}");
+
+    // Prefill prefix only (max_new_tokens = 0)
+    g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
+    g_prefix_pos = g_llm->getCurrentHistory();
+    g_agent_mode = true;
+    g_agent_step = 0;
+
+    LOGI("AgentPrefill: prefix cached at %{public}zu tokens", g_prefix_pos);
+    asyncData->success = true;
+    asyncData->outputStr = "ok:" + std::to_string(g_prefix_pos);
+}
+
+static napi_value AgentPrefillAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    // Dynamic string extraction for large prefix
+    size_t strLen = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+    std::string prefix(strLen, '\0');
+    napi_get_value_string_utf8(env, args[0], &prefix[0], strLen + 1, &strLen);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(prefix);
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "AgentPrefillAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, AgentPrefillExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 6. Agent Step (erase + prefill variable + generate) ==========
+static void AgentStepExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+    if (!g_agent_mode) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: agent mode not active, call agentPrefill first";
+        return;
+    }
+
+    // Erase previous step's variable + generated tokens, keep prefix KV
+    if (g_agent_step > 0) {
+        g_llm->eraseHistory(g_prefix_pos, 0);
+        LOGI("AgentStep: erased KV after prefix pos %{public}zu", g_prefix_pos);
+    }
+
+    // Prefill variable part and generate
+    std::ostringstream oss;
+    g_llm->response(asyncData->inputStr, &oss, nullptr, -1);
+    g_agent_step++;
+
+    std::string response = oss.str();
+    auto context = g_llm->getContext();
+    if (context) {
+        float prefill_s = context->prefill_us / 1e6;
+        float decode_s = context->decode_us / 1e6;
+        LOGI("AgentStep %{public}d: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
+             g_agent_step, context->prompt_len, context->gen_seq_len,
+             prefill_s > 0 ? context->prompt_len / prefill_s : 0,
+             decode_s > 0 ? context->gen_seq_len / decode_s : 0,
+             g_llm->getCurrentHistory());
+    }
+
+    asyncData->success = true;
+    asyncData->outputStr = response;
+}
+
+static napi_value AgentStepAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    // Dynamic string extraction
+    size_t strLen = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+    std::string variable(strLen, '\0');
+    napi_get_value_string_utf8(env, args[0], &variable[0], strLen + 1, &strLen);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(variable);
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "AgentStepAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, AgentStepExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 7. Agent Reset (exit agent mode, restore defaults) ==========
+static void AgentResetExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (g_llm) {
+        g_llm->reset();
+        g_llm->set_config("{\"reuse_kv\":false}");
+        g_llm->set_config("{\"use_template\":true}");
+    }
+    g_agent_mode = false;
+    g_prefix_pos = 0;
+    g_agent_step = 0;
+    g_messages.clear();
+    g_messages.emplace_back("system", "You are a helpful assistant.");
+
+    LOGI("AgentReset: agent mode disabled, LLM restored to default");
+    asyncData->success = true;
+    asyncData->outputStr = "ok";
+}
+
+static napi_value AgentResetAsync(napi_env env, napi_callback_info info) {
+    AsyncData* asyncData = new AsyncData();
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "AgentResetAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, AgentResetExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 8. 重置对话 ==========
 static napi_value Reset(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_llm) {
@@ -465,11 +630,14 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
-        {"copyModel", nullptr, CopyModel, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"loadModel", nullptr, LoadModelAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"generate",  nullptr, GenerateAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"chat",      nullptr, ChatAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"reset",     nullptr, Reset,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"copyModel",    nullptr, CopyModel,         nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

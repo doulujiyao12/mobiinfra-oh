@@ -52,7 +52,10 @@ export class LlmServer {
             } else if (reqType === "clear") {
                // PC 端要求清除任务（达到步数或手动终止）
                this.currentTask = "";
-               if (mnnllm && typeof mnnllm['reset'] === 'function') {
+               // Reset agent mode if active, then normal reset
+               if (mnnllm && typeof mnnllm['agentReset'] === 'function') {
+                 try { await mnnllm.agentReset(); } catch(e) {}
+               } else if (mnnllm && typeof mnnllm['reset'] === 'function') {
                  mnnllm['reset']();
                }
                onLog(`>> [任务被PC端终止] 当前任务已清空，并已重置大模型上下文。`);
@@ -64,8 +67,90 @@ export class LlmServer {
                onLog(`>> [PC端执行异常] ${errMsg}`);
                client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
                return;
+            } else if (reqType === "agent_prefill") {
+              // Agent mode: prefill fixed prefix for KV cache reuse
+              let prefix = req['prefix'] as string;
+              onLog(`>> [Agent Prefill] Caching prefix (${prefix.length} chars)...`);
+              try {
+                let result = await mnnllm.agentPrefill(prefix) as string;
+                onLog(`>> [Agent Prefill] ${result}`);
+                client.send({ data: JSON.stringify({ status: "ok", result: result }) + "<<EOF>>" });
+              } catch(e) {
+                onLog(`>> [Agent Prefill ERROR] ${e}`);
+                client.send({ data: JSON.stringify({ status: "error", message: String(e) }) + "<<EOF>>" });
+              }
+            } else if (reqType === "agent_step") {
+              // Agent mode: erase previous step, prefill variable, generate
+              let variable = req['variable'] as string;
+              if (req['image_b64']) {
+                // Clean up previous snapshots
+                try {
+                  let fList = fs.listFileSync(filesDir);
+                  for (let f of fList) {
+                    if (f.startsWith('agent_snapshot_')) {
+                      fs.unlinkSync(filesDir + '/' + f);
+                    }
+                  }
+                } catch(e) {}
+
+                let ts = new Date().getTime();
+                let imgPath = filesDir + `/agent_snapshot_${ts}.jpg`;
+                let base64Helper = new util.Base64Helper();
+                let imgBuffer = base64Helper.decodeSync(req['image_b64'] as string);
+
+                let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+                fs.writeSync(file.fd, imgBuffer.buffer);
+                fs.closeSync(file);
+
+                let w = req['width'];
+                let h = req['height'];
+                let imgTag = `<img>${imgPath}<hw>${h},${w}</hw></img>`;
+                onLog(`>> [Agent Step] image saved: ${imgPath} (${w}x${h})`);
+
+                if (variable.indexOf('<image_placeholder>') !== -1) {
+                  variable = variable.replace('<image_placeholder>', imgTag);
+                } else {
+                  variable = imgTag + variable;
+                }
+              }
+
+              onLog(`>> [Agent Step] Prefilling variable (${variable.length} chars)...`);
+              try {
+                let response = await mnnllm.agentStep(variable) as string;
+                onLog(`>> [Agent Step] Response: ${response}`);
+
+                if (onRequireApproval) {
+                  let isApproved = await onRequireApproval(response);
+                  if (!isApproved) {
+                    onLog(`>> [Agent Step] User rejected action.`);
+                    this.currentTask = "";
+                    client.send({ data: `{"action": "error", "reason": "User rejected"}` + "<<EOF>>" });
+                    return;
+                  }
+                }
+
+                if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
+                  this.currentTask = "";
+                  onLog(`>> [Agent] Task completed.`);
+                }
+
+                client.send({ data: response + "<<EOF>>" });
+              } catch(e) {
+                onLog(`>> [Agent Step ERROR] ${e}`);
+                client.send({ data: JSON.stringify({ action: "error", reason: String(e) }) + "<<EOF>>" });
+              }
+            } else if (reqType === "agent_reset") {
+              // Agent mode: exit and restore LLM defaults
+              try {
+                if (mnnllm && typeof mnnllm['agentReset'] === 'function') {
+                  await mnnllm.agentReset();
+                }
+              } catch(e) {}
+              this.currentTask = "";
+              onLog(`>> [Agent Reset] Agent mode disabled, LLM restored.`);
+              client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
             } else if (reqType === "action") {
-              // PC 端发来截图，要求推理
+              // PC 端发来截图，要求推理（原有 chat 模式）
               let prompt = req['prompt'] as string;
               if (req['image_b64']) {
                 // 先清理之前的缓存截图，避免占满存储
@@ -77,22 +162,22 @@ export class LlmServer {
                     }
                   }
                 } catch(e) {}
-                
+
                 // 生成带有时间戳的文件名，防止 C++ 模型底层因路径相同而缓存不刷新图片
                 let ts = new Date().getTime()
                 let imgPath = filesDir + `/agent_snapshot_${ts}.jpg`;
                 let base64Helper = new util.Base64Helper();
                 let imgBuffer = base64Helper.decodeSync(req['image_b64'] as string);
-                
+
                 let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
                 fs.writeSync(file.fd, imgBuffer.buffer);
                 fs.closeSync(file);
-                
+
                 let w = req['width'];
                 let h = req['height'];
                 let imgTag = `<img>${imgPath}<hw>${h},${w}</hw></img>`;
                 onLog(`>> [Debug] req['width']: ${w}, req['height']: ${h}, imgPath: ${imgPath}`);
-                
+
                 if (prompt.indexOf('<image_placeholder>') !== -1) {
                   prompt = prompt.replace('<image_placeholder>', imgTag);
                 } else {
@@ -100,7 +185,7 @@ export class LlmServer {
                   prompt = imgTag + '\n' + prompt;
                 }
               }
-              
+
               onLog(`>> [接收到 PC 发来的推理请求(含图片)]\n原始文本任务: ${req['prompt'] as string}\n构造给大模型的完整 Prompt:\n${prompt}`);
               let response = await mnnllm.chat(prompt) as string;
               onLog(`>> [模型推理返回结果]: \n${response}`);
@@ -122,7 +207,7 @@ export class LlmServer {
                  this.currentTask = "";
                  onLog(`>> [任务完成] Agent 停止。`);
               }
-              
+
               onLog(`>> [下发至 PC]: \n${response}`);
               client.send({ data: response + "<<EOF>>" });
             }

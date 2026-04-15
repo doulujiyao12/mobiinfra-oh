@@ -22,6 +22,9 @@ PORT = 9126
 HOST = '127.0.0.1'
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
+# Agent mode toggle: True = prefix KV cache reuse, False = original chat-based flow
+USE_AGENT_MODE = True
+
 # 常数定义
 MAX_STEPS = 15
 MAX_RETRIES = 5
@@ -529,9 +532,73 @@ def launch_app(app_name):
         return False
 
 # ===================== Stage 2: Task in App =====================
+def run_task_in_app_agent(task):
+    """Agent mode with prefix KV cache reuse. Fixed prefix is prefilled once,
+    each step only prefills the variable part (action history + screenshot)."""
+    history_list = []
+
+    # 1. Build and send prefix (fixed across all steps)
+    prefix_template = load_prompt("e2e_v2_agent_prefix.md")
+    if not prefix_template:
+        print(">> [Agent] 找不到 prefix 模板，回退到普通模式")
+        return run_task_in_app(task)
+
+    prefix = prefix_template.replace("{task}", task)
+    print(f">> [Agent] Prefilling prefix ({len(prefix)} chars)...")
+    prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
+    print(f">> [Agent] Prefill result: {prefill_res}")
+
+    variable_template = load_prompt("e2e_v2_agent_variable.md")
+    if not variable_template:
+        print(">> [Agent] 找不到 variable 模板，回退到普通模式")
+        send_request({"type": "agent_reset"})
+        return run_task_in_app(task)
+
+    # 2. Step loop
+    for step_idx in range(MAX_STEPS):
+        print(f"\n--- [Agent Step {step_idx+1}/{MAX_STEPS}] ---")
+
+        b64, w, h = capture_screen()
+        history_str = "  ".join(history_list) if history_list else "(No history)"
+
+        variable = variable_template.replace("{history}", history_str)
+
+        print(f">> [Agent] Sending step request (history: {len(history_list)} entries)...")
+        res = send_request({
+            "type": "agent_step",
+            "variable": variable,
+            "image_b64": b64,
+            "width": w,
+            "height": h
+        })
+
+        print(f">> [Agent] Response:\n{res}")
+        sys.stdout.flush()
+        time.sleep(0.3)
+
+        w_full = w * 4
+        h_full = h * 4
+        img_size = (w_full, h_full)
+        action, params = execute_action_and_get_details(res, img_size=img_size)
+
+        if action in ["done", "stop", "terminate"]:
+            print(">> [Agent] Task completed!")
+            break
+        elif action == "error":
+            print(">> [Agent] Parse error, aborting.")
+            break
+
+        history_list.append(f"Step {step_idx+1}: Action={action}")
+        time.sleep(1.7)
+
+    # 3. Cleanup agent mode
+    print(">> [Agent] Resetting agent mode...")
+    send_request({"type": "agent_reset"})
+
+
 def run_task_in_app(task):
     history_list = []
-    
+
     template = load_prompt("e2e_v2.md")
     if not template:
         # Fallback 的极简模板
@@ -628,9 +695,12 @@ if __name__ == "__main__":
                 
                 # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
                 send_request({"type": "clear"})
-                
+
                 # 4. Stage 2: 任务在 App 内循环执行
-                run_task_in_app(task)
+                if USE_AGENT_MODE:
+                    run_task_in_app_agent(task)
+                else:
+                    run_task_in_app(task)
                 bring_llm_app_to_foreground()
                 
                 # 6. 任务全部结束，清除手机端状态
