@@ -229,7 +229,17 @@ def extract_json_payload(raw_text):
     candidates = []
     if block_match:
         candidates.append(block_match.group(1).strip())
-    text = text.replace("…", "...").replace("\r", "").replace("\n", " ")
+    text = text.replace("…", "...").replace("\r", " ").replace("\n", " ")
+    
+    # 将包含多余非JSON字符的开头清理掉（比如响应开头包含的 "Otherwise ### Response " 等）
+    # 找到第一个出现的 {，在此之前的都切掉
+    first_brace = text.find('{')
+    if first_brace > 0:
+        text = text[first_brace:]
+
+    # 清理开头可能未闭合的 ```json
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text)
 
     # 修复数组中数字之间漏掉逗号的问题，如 [818, 119, 96 131]
     text = re.sub(r'(\d+)\s+(\d+)', r'\1, \2', text)
