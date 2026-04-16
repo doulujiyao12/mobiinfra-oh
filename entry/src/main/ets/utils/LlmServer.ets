@@ -70,10 +70,10 @@ export class LlmServer {
             } else if (reqType === "agent_prefill") {
               // Agent mode: prefill fixed prefix for KV cache reuse
               let prefix = req['prefix'] as string;
-              onLog(`>> [Agent Prefill] Caching prefix (${prefix.length} chars)...`);
+              onLog(`>> [Agent Prefill] 固定前缀 Prompt (${prefix.length} chars):\n${prefix}`);
               try {
                 let result = await mnnllm.agentPrefill(prefix) as string;
-                onLog(`>> [Agent Prefill] ${result}`);
+                onLog(`>> [Agent Prefill 完成] ${result}`);
                 client.send({ data: JSON.stringify({ status: "ok", result: result }) + "<<EOF>>" });
               } catch(e) {
                 onLog(`>> [Agent Prefill ERROR] ${e}`);
@@ -114,10 +114,10 @@ export class LlmServer {
                 }
               }
 
-              onLog(`>> [Agent Step] Prefilling variable (${variable.length} chars)...`);
+              onLog(`>> [Agent Step] 本步变量 Prompt:\n${variable}`);
               try {
                 let response = await mnnllm.agentStep(variable) as string;
-                onLog(`>> [Agent Step] Response: ${response}`);
+                onLog(`>> [Agent Step] 模型推理返回结果:\n${response}`);
 
                 if (onRequireApproval) {
                   let isApproved = await onRequireApproval(response);
