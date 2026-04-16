@@ -327,6 +327,8 @@ struct Index {
   @State debugImagePath: string = '';
   @State isModelV2: boolean = false;
   @State threadNumInput: string = '4';
+  @State backendTypeInput: string = 'cpu';
+  @State mllmBackendTypeInput: string = 'cpu';
   @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
   @StorageLink('hdcServerIp') hdcServerIp: string = 'http://166.111.53.96:9124';
   @StorageLink('wirelessIp') wirelessIp: string = '101.5.155.98:35729';
@@ -464,6 +466,55 @@ struct Index {
       fs.closeSync(fileWrite);
       
       this.output = `更新线程数成功: ${num}\n====== 新配置 ======\n${newStr}`;
+    } catch (e) {
+      this.output = `更新 config.json 失败: ${e}`;
+    }
+  }
+
+  updateConfigBackendType(target: string) {
+    let value = (target === 'mllm') ? this.mllmBackendTypeInput.trim() : this.backendTypeInput.trim();
+    if (value.length === 0) {
+      this.output = '请输入有效的 backend_type';
+      return;
+    }
+
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(cfgPath)) {
+        this.output = `文件不存在: ${cfgPath}`;
+        return;
+      }
+
+      let fileRead = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(cfgPath);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(fileRead.fd, buf);
+      fs.closeSync(fileRead);
+
+      let textDecoder = util.TextDecoder.create('utf-8');
+      let content = textDecoder.decodeWithStream(new Uint8Array(buf));
+      let configObj = JSON.parse(content) as Record<string, Object>;
+
+      if (target === 'mllm') {
+        if (configObj['mllm']) {
+          let mllmObj = configObj['mllm'] as Record<string, Object>;
+          mllmObj['backend_type'] = value;
+        } else {
+          this.output = 'config.json 中不存在 mllm 字段';
+          return;
+        }
+      } else {
+        configObj['backend_type'] = value;
+      }
+
+      let newStr = JSON.stringify(configObj, null, 4);
+      let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
+      let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      fs.writeSync(fileWrite.fd, byteStr.buffer);
+      fs.closeSync(fileWrite);
+
+      let label = (target === 'mllm') ? 'mllm.backend_type' : 'backend_type';
+      this.output = `更新 ${label} 成功: ${value}\n====== 新配置 ======\n${newStr}`;
     } catch (e) {
       this.output = `更新 config.json 失败: ${e}`;
     }
@@ -1019,6 +1070,30 @@ struct Index {
                 Button('查看 Config')
                   .onClick(() => { this.showConfigJson(); })
                   .height(40).layoutWeight(1).backgroundColor('#607D8B').borderRadius(8)
+              }.width('100%').margin({ bottom: 10 })
+
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('LLM Backend:').fontSize(14).fontColor('#666').width(100)
+                TextInput({ text: this.backendTypeInput })
+                  .width(80).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .margin({ right: 10 })
+                  .onChange((val: string) => { this.backendTypeInput = val; })
+
+                Button('修改')
+                  .onClick(() => { this.updateConfigBackendType('llm'); })
+                  .height(40).layoutWeight(1).backgroundColor('#3F51B5').borderRadius(8)
+              }.width('100%').margin({ bottom: 10 })
+
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('MLLM Backend:').fontSize(14).fontColor('#666').width(100)
+                TextInput({ text: this.mllmBackendTypeInput })
+                  .width(80).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .margin({ right: 10 })
+                  .onChange((val: string) => { this.mllmBackendTypeInput = val; })
+
+                Button('修改')
+                  .onClick(() => { this.updateConfigBackendType('mllm'); })
+                  .height(40).layoutWeight(1).backgroundColor('#009688').borderRadius(8)
               }.width('100%')
             }
             .width('95%')
