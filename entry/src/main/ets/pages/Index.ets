@@ -310,6 +310,8 @@ interface ServerFile {
   size: number;
 }
 
+PersistentStorage.persistProp('wirelessIp', '101.5.155.98:35729');
+
 @Entry
 @Component
 struct Index {
@@ -325,7 +327,7 @@ struct Index {
   @State threadNumInput: string = '4';
   @State serverIp: string = 'http://166.111.53.96:9123';
   @State hdcServerIp: string = 'http://166.111.53.96:9124';
-  @State wirelessIp: string = '101.5.155.98:35729';
+  @StorageLink('wirelessIp') wirelessIp: string = '101.5.155.98:35729';
   @State isThinking: boolean = false;
   @State buttonScale: number = 1.0;
 

@@ -1,22 +1,27 @@
 @Entry
 @Component
 struct FloatWindow {
-  @StorageLink('floatText') floatText: string = 'AI Agent 运行中...'
+  @StorageLink('floatText') @Watch('onTextChange') floatText: string = 'AI Agent 运行中...'
+  private scroller: Scroller = new Scroller()
+
+  onTextChange(): void {
+    setTimeout(() => {
+      this.scroller.scrollEdge(Edge.Bottom)
+    }, 50)
+  }
 
   build() {
-    Row() {
-      Column() {
+    Column() {
+      Scroll(this.scroller) {
         Text(this.floatText)
           .fontSize(11)
           .fontWeight(FontWeight.Bold)
           .fontColor(Color.White)
-          .maxLines(4)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
           .padding(4)
       }
       .width('100%')
       .height('100%')
-      .justifyContent(FlexAlign.Center)
+      .scrollable(ScrollDirection.Vertical)
     }
     .width('100%')
     .height('100%')
