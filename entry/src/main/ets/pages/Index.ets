@@ -311,6 +311,8 @@ interface ServerFile {
 }
 
 PersistentStorage.persistProp('wirelessIp', '101.5.155.98:35729');
+PersistentStorage.persistProp('serverIp', 'http://166.111.53.96:9123');
+PersistentStorage.persistProp('hdcServerIp', 'http://166.111.53.96:9124');
 
 @Entry
 @Component
@@ -325,8 +327,8 @@ struct Index {
   @State debugImagePath: string = '';
   @State isModelV2: boolean = false;
   @State threadNumInput: string = '4';
-  @State serverIp: string = 'http://166.111.53.96:9123';
-  @State hdcServerIp: string = 'http://166.111.53.96:9124';
+  @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
+  @StorageLink('hdcServerIp') hdcServerIp: string = 'http://166.111.53.96:9124';
   @StorageLink('wirelessIp') wirelessIp: string = '101.5.155.98:35729';
   @State isThinking: boolean = false;
   @State buttonScale: number = 1.0;
