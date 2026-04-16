@@ -3,6 +3,7 @@ import { util } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { wantAgent } from '@kit.AbilityKit';
+import { AppStorage } from '@kit.ArkUI';
 
 export class LlmServer {
   private server: socket.TCPSocketServer | null = null;
@@ -71,8 +72,10 @@ export class LlmServer {
               // Agent mode: prefill fixed prefix for KV cache reuse
               let prefix = req['prefix'] as string;
               onLog(`>> [Agent Prefill] 固定前缀 Prompt (${prefix.length} chars):\n${prefix}`);
+              AppStorage.set('floatText', 'Prefill 中...');
               try {
                 let result = await mnnllm.agentPrefill(prefix) as string;
+                AppStorage.set('floatText', 'AI Agent 运行中...');
                 onLog(`>> [Agent Prefill 完成] ${result}`);
                 client.send({ data: JSON.stringify({ status: "ok", result: result }) + "<<EOF>>" });
               } catch(e) {
@@ -115,8 +118,14 @@ export class LlmServer {
               }
 
               onLog(`>> [Agent Step] 本步变量 Prompt:\n${variable}`);
+              AppStorage.set('floatText', '思考中...');
+              let streamedText = '';
               try {
-                let response = await mnnllm.agentStep(variable) as string;
+                let response = await mnnllm.agentStep(variable, (token: string) => {
+                  streamedText += token;
+                  AppStorage.set('floatText', streamedText);
+                }) as string;
+                AppStorage.set('floatText', 'AI Agent 运行中...');
                 onLog(`>> [Agent Step] 模型推理返回结果:\n${response}`);
 
                 if (onRequireApproval) {
@@ -147,6 +156,7 @@ export class LlmServer {
                 }
               } catch(e) {}
               this.currentTask = "";
+              AppStorage.set('floatText', 'AI Agent 运行中...');
               onLog(`>> [Agent Reset] Agent mode disabled, LLM restored.`);
               client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
             } else if (reqType === "action") {
@@ -187,7 +197,9 @@ export class LlmServer {
               }
 
               onLog(`>> [接收到 PC 发来的推理请求(含图片)]\n原始文本任务: ${req['prompt'] as string}\n构造给大模型的完整 Prompt:\n${prompt}`);
+              AppStorage.set('floatText', '正在推理...');
               let response = await mnnllm.chat(prompt) as string;
+              AppStorage.set('floatText', 'AI Agent 运行中...');
               onLog(`>> [模型推理返回结果]: \n${response}`);
 
               if (onRequireApproval) {

@@ -250,6 +250,55 @@ struct AsyncData {
     std::string inputStr;
     std::string outputStr;
     bool success;
+    napi_threadsafe_function tsfn = nullptr;  // for token streaming
+};
+
+// ======================= Token streaming via TSFN =======================
+
+// Called on JS main thread for each token
+static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
+    if (data) {
+        std::string* token = static_cast<std::string*>(data);
+        napi_value argv;
+        napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
+        napi_value undefined;
+        napi_get_undefined(env, &undefined);
+        napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
+        delete token;
+    }
+}
+
+// Custom streambuf: accumulates full output AND streams each token chunk via TSFN
+class TsfnStreambuf : public std::streambuf {
+public:
+    TsfnStreambuf(napi_threadsafe_function tsfn) : tsfn_(tsfn) {}
+    std::string str() const { return accumulated_; }
+
+protected:
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        accumulated_.append(s, n);
+        if (tsfn_ && n > 0) {
+            std::string* data = new std::string(s, n);
+            napi_call_threadsafe_function(tsfn_, data, napi_tsfn_blocking);
+        }
+        return n;
+    }
+
+    int_type overflow(int_type ch) override {
+        if (ch != EOF) {
+            char c = static_cast<char>(ch);
+            accumulated_ += c;
+            if (tsfn_) {
+                std::string* data = new std::string(1, c);
+                napi_call_threadsafe_function(tsfn_, data, napi_tsfn_blocking);
+            }
+        }
+        return ch;
+    }
+
+private:
+    napi_threadsafe_function tsfn_;
+    std::string accumulated_;
 };
 
 // ========== 1. 拷贝模型到沙箱 (不耗时太多，可保留同步) ==========
@@ -305,6 +354,13 @@ static void LoadModelExecute(napi_env env, void* data) {
 
 static void AsyncComplete(napi_env env, napi_status status, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
+
+    // Release TSFN if present (token streaming finished)
+    if (asyncData->tsfn) {
+        napi_release_threadsafe_function(asyncData->tsfn, napi_tsfn_release);
+        asyncData->tsfn = nullptr;
+    }
+
     napi_value result;
     napi_create_string_utf8(env, asyncData->outputStr.c_str(), asyncData->outputStr.size(), &result);
 
@@ -531,12 +587,19 @@ static void AgentStepExecute(napi_env env, void* data) {
         LOGI("AgentStep: erased KV after prefix pos %{public}zu", g_prefix_pos);
     }
 
-    // Prefill variable part and generate
-    std::ostringstream oss;
-    g_llm->response(asyncData->inputStr, &oss, nullptr, -1);
+    // Prefill variable part and generate (with optional token streaming)
+    std::string response;
+    if (asyncData->tsfn) {
+        TsfnStreambuf buf(asyncData->tsfn);
+        std::ostream tokenStream(&buf);
+        g_llm->response(asyncData->inputStr, &tokenStream, nullptr, -1);
+        response = buf.str();
+    } else {
+        std::ostringstream oss;
+        g_llm->response(asyncData->inputStr, &oss, nullptr, -1);
+        response = oss.str();
+    }
     g_agent_step++;
-
-    std::string response = oss.str();
     auto context = g_llm->getContext();
     if (context) {
         float prefill_s = context->prefill_us / 1e6;
@@ -553,8 +616,8 @@ static void AgentStepExecute(napi_env env, void* data) {
 }
 
 static napi_value AgentStepAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     // Dynamic string extraction
@@ -565,6 +628,18 @@ static napi_value AgentStepAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = std::move(variable);
+
+    // Optional 2nd arg: onToken callback for streaming to floating window
+    if (argc >= 2) {
+        napi_valuetype argType;
+        napi_typeof(env, args[1], &argType);
+        if (argType == napi_function) {
+            napi_value tsfnName;
+            napi_create_string_utf8(env, "AgentStepTokenCb", NAPI_AUTO_LENGTH, &tsfnName);
+            napi_create_threadsafe_function(env, args[1], nullptr, tsfnName,
+                0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &asyncData->tsfn);
+        }
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);

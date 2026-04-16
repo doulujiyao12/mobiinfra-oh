@@ -14,6 +14,8 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
+    // Initialize floating window text for @StorageLink binding
+    AppStorage.setOrCreate('floatText', 'AI Agent 运行中...');
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 

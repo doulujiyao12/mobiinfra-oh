@@ -599,7 +599,7 @@ def run_task_in_app_agent(task):
             break
 
         history_list.append(f"Step {step_idx+1}: Action={action}")
-        time.sleep(1.7)
+        time.sleep(0.7)
 
     # 3. Cleanup agent mode
     print(">> [Agent] Resetting agent mode...")
@@ -658,7 +658,7 @@ def run_task_in_app(task):
 
         # history_list.append(f"Step {step_idx+1}: Action={action}, Params={params}")
         
-        time.sleep(1.7)
+        time.sleep(0.7)
 
 # ===================== Main Loop =====================
 if __name__ == "__main__":
