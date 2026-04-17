@@ -9,6 +9,34 @@ struct OpTest {
   @State testResult: string = 'Click a button to start testing'
   @State running: boolean = false
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
+  // HiAI conv-op mode: 'auto' | 'matmul' | 'conv'
+  @State convMode: string = 'auto'
+
+  private runWithMode(cfg: string, banner: string) {
+    this.running = true
+    native.setConvMode(this.convMode)
+    this.testResult = '[HiAI mode=' + this.convMode + ']\n' + banner
+    let p: Promise<string> = native.opTest(cfg)
+    p.then((result: string) => {
+      this.testResult = '[HiAI mode=' + this.convMode + ']\n' + result
+      this.running = false
+    }).catch((e: Error) => {
+      this.testResult = 'Error: ' + e.message
+      this.running = false
+    })
+  }
+
+  @Builder ModeBtn(label: string, value: string) {
+    Button(label)
+      .width('32%')
+      .height(36)
+      .backgroundColor(this.convMode === value ? '#00796B' : '#CFD8DC')
+      .fontColor(this.convMode === value ? '#FFFFFF' : '#333333')
+      .borderRadius(8)
+      .fontSize(14)
+      .enabled(!this.running)
+      .onClick(() => { this.convMode = value })
+  }
 
   build() {
     Column() {
@@ -20,7 +48,22 @@ struct OpTest {
       Text('CPU vs HiAI Delegate (USER_1)')
         .fontSize(13)
         .fontColor('#666666')
-        .margin({ bottom: 15 })
+        .margin({ bottom: 10 })
+
+      // HiAI conv path selector (applies to subsequent test runs)
+      Text('HiAI path:')
+        .fontSize(12)
+        .fontColor('#666666')
+        .alignSelf(ItemAlign.Start)
+        .margin({ left: '5%', bottom: 4 })
+      Row() {
+        this.ModeBtn('Auto', 'auto')
+        this.ModeBtn('MatMul', 'matmul')
+        this.ModeBtn('Conv', 'conv')
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.SpaceBetween)
+      .margin({ bottom: 12 })
 
       // Preset test button
       Button(this.running ? 'Running...' : 'Run Preset Tests')
@@ -32,16 +75,7 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          this.running = true
-          this.testResult = 'Running preset test suite...\n'
-          let p: Promise<string> = native.opTest('preset')
-          p.then((result: string) => {
-            this.testResult = result
-            this.running = false
-          }).catch((e: Error) => {
-            this.testResult = 'Error: ' + e.message
-            this.running = false
-          })
+          this.runWithMode('preset', 'Running preset test suite...\n')
         })
 
       // Qwen3VL visual encoder test button
@@ -54,16 +88,7 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          this.running = true
-          this.testResult = 'Running Qwen3VL visual encoder ops (N=608, 1x1 conv)...\n'
-          let p: Promise<string> = native.opTest('qwen3vl')
-          p.then((result: string) => {
-            this.testResult = result
-            this.running = false
-          }).catch((e: Error) => {
-            this.testResult = 'Error: ' + e.message
-            this.running = false
-          })
+          this.runWithMode('qwen3vl', 'Running Qwen3VL visual encoder ops (N=608, 1x1 conv)...\n')
         })
 
       // Custom test section
@@ -83,16 +108,7 @@ struct OpTest {
           .enabled(!this.running)
           .margin({ left: '3%' })
           .onClick(() => {
-            this.running = true
-            this.testResult = 'Running: ' + this.customConfig + '\n'
-            let p: Promise<string> = native.opTest(this.customConfig)
-            p.then((result: string) => {
-              this.testResult = result
-              this.running = false
-            }).catch((e: Error) => {
-              this.testResult = 'Error: ' + e.message
-              this.running = false
-            })
+            this.runWithMode(this.customConfig, 'Running: ' + this.customConfig + '\n')
           })
       }
       .width('90%')

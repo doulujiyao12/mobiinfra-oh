@@ -874,7 +874,33 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// ========== 9. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
+// ========== 9. HiAI Conv mode override (auto / matmul / conv) ==========
+// Mirrors HIAI_CONV_MODE env consumed by HiAIConvExecution.cpp.
+// Must be called BEFORE opTest (env is read during compileHiAIModel).
+static napi_value SetConvMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char mode[32] = {0};
+    size_t len = 0;
+    if (argc >= 1) {
+        napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), &len);
+    }
+
+    if (len == 0 || std::strcmp(mode, "auto") == 0) {
+        unsetenv("HIAI_CONV_MODE");
+        LOGI("HIAI_CONV_MODE unset (auto)");
+    } else {
+        setenv("HIAI_CONV_MODE", mode, 1);
+        LOGI("HIAI_CONV_MODE=%{public}s", mode);
+    }
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+
+// ========== 10. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
 using namespace MNN::Express;
 
 // batch: input batch size (N); warmup/repeat: timing iterations
@@ -1155,6 +1181,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLogs",      nullptr, GetLogs,            nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
