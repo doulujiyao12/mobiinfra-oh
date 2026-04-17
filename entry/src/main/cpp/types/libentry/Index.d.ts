@@ -13,6 +13,10 @@ export const agentReset: () => Promise<string>;
 // config: "preset" for built-in test suite, or "ic,oc,ih,iw,kh,kw,sh,sw,group" for custom
 export const opTest: (config: string) => Promise<string>;
 
+// HiAI conv-path override for A/B testing: 'auto' | 'matmul' | 'conv'
+// Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_MODE env).
+export const setConvMode: (mode: string) => string;
+
 // Runtime log capture (stdout/stderr redirected to file + in-memory ring buffer)
 export const initLogFile: (path: string) => string;
 export const getLogs: () => string;
