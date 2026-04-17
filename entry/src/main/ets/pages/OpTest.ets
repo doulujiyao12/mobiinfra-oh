@@ -1,5 +1,7 @@
 import native from 'libentry.so';
 import { router } from '@kit.ArkUI';
+import pasteboard from '@ohos.pasteboard';
+import promptAction from '@ohos.promptAction';
 
 @Entry
 @Component
@@ -108,17 +110,39 @@ struct OpTest {
       .layoutWeight(1)
       .backgroundColor('#1A1A2E')
       .borderRadius(10)
-      .margin({ bottom: 15 })
+      .margin({ bottom: 8 })
 
-      Button('Back')
-        .width('90%')
-        .height(40)
-        .backgroundColor('#757575')
-        .borderRadius(8)
-        .margin({ bottom: 15 })
-        .onClick(() => {
-          router.back()
-        })
+      // Action row: Copy + Back
+      Row() {
+        Button('Copy Log')
+          .width('48%')
+          .height(40)
+          .backgroundColor('#FF9800')
+          .borderRadius(8)
+          .fontSize(15)
+          .onClick(() => {
+            let pb = pasteboard.getSystemPasteboard();
+            let data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.testResult);
+            pb.setData(data).then(() => {
+              promptAction.showToast({ message: 'Copied!', duration: 1500 });
+            }).catch(() => {
+              promptAction.showToast({ message: 'Copy failed', duration: 1500 });
+            });
+          })
+
+        Button('Back')
+          .width('48%')
+          .height(40)
+          .backgroundColor('#757575')
+          .borderRadius(8)
+          .fontSize(15)
+          .margin({ left: '4%' })
+          .onClick(() => {
+            router.back()
+          })
+      }
+      .width('90%')
+      .margin({ bottom: 15 })
     }
     .width('100%')
     .height('100%')
