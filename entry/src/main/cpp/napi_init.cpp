@@ -897,75 +897,93 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
     std::vector<float> inputData(inputSize);
     for (int i = 0; i < inputSize; i++) inputData[i] = (float)((i % 11) - 5) * 0.1f;
 
-    // CPU: precision + timing
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms    = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+
+    // ── CPU ──────────────────────────────────────────────────────────────
     std::vector<float> cpuOutput;
-    double cpuAvgMs = -1;
+    double cpuFirstMs = -1, cpuAvgMs = -1;
+    std::vector<double> cpuWarmupMs;
     {
         auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
         auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
         auto convWeight = weight;
-        auto convBias = bias;
+        auto convBias   = bias;
         auto y = _Conv(std::move(convWeight), std::move(convBias), x,
                        {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
         y = _Convert(y, NCHW);
+
+        // first call: includes kernel selection + weight packing
+        auto t0 = Clock::now();
         auto ptr = y->readMap<float>();
+        cpuFirstMs = elapsed(t0, Clock::now());
         if (!ptr) { log << "ERROR: CPU conv output is null\n"; return log.str(); }
-        int outSize = y->getInfo()->size;
-        cpuOutput.assign(ptr, ptr + outSize);
-        log << "CPU output: " << outSize << " elems  shape="
+        cpuOutput.assign(ptr, ptr + y->getInfo()->size);
+        log << "CPU output: " << cpuOutput.size() << " elems  shape="
             << y->getInfo()->dim[0] << "x" << y->getInfo()->dim[1]
             << "x" << y->getInfo()->dim[2] << "x" << y->getInfo()->dim[3] << "\n";
-        // warmup
+
+        // warmup – record each iteration
         for (int i = 0; i < warmup; i++) {
             ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            auto tw0 = Clock::now();
             y->readMap<float>();
+            cpuWarmupMs.push_back(elapsed(tw0, Clock::now()));
         }
-        // timed
-        auto t0 = std::chrono::high_resolution_clock::now();
+        // steady-state
+        auto ts0 = Clock::now();
         for (int i = 0; i < repeat; i++) {
             ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
             y->readMap<float>();
         }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        cpuAvgMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / repeat;
+        cpuAvgMs = elapsed(ts0, Clock::now()) / repeat;
     }
 
-    // HiAI: precision + timing
+    // ── HiAI ─────────────────────────────────────────────────────────────
     std::vector<float> hiaiOutput;
-    double hiaiAvgMs = -1;
+    double hiaiFirstMs = -1, hiaiAvgMs = -1;
+    std::vector<double> hiaiWarmupMs;
     {
         auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
         auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
         auto convWeight = weight;
-        auto convBias = bias;
+        auto convBias   = bias;
         auto y = _Conv(std::move(convWeight), std::move(convBias), x,
                        {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
         y = _Convert(y, NCHW);
+
+        // first call: includes BuildIRModel + Load + 1st NPU inference
+        auto t0 = Clock::now();
         auto ptr = y->readMap<float>();
+        hiaiFirstMs = elapsed(t0, Clock::now());
         if (!ptr) { log << "ERROR: HiAI conv output is null (backend not available?)\n"; return log.str(); }
-        int outSize = y->getInfo()->size;
-        hiaiOutput.assign(ptr, ptr + outSize);
-        log << "HiAI output: " << outSize << " elems\n";
-        // warmup
+        hiaiOutput.assign(ptr, ptr + y->getInfo()->size);
+        log << "HiAI output: " << hiaiOutput.size() << " elems\n";
+
+        // warmup – record each iteration
         for (int i = 0; i < warmup; i++) {
             ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            auto tw0 = Clock::now();
             y->readMap<float>();
+            hiaiWarmupMs.push_back(elapsed(tw0, Clock::now()));
         }
-        // timed
-        auto t0 = std::chrono::high_resolution_clock::now();
+        // steady-state
+        auto ts0 = Clock::now();
         for (int i = 0; i < repeat; i++) {
             ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
             y->readMap<float>();
         }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        hiaiAvgMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / repeat;
+        hiaiAvgMs = elapsed(ts0, Clock::now()) / repeat;
     }
 
-    // Precision comparison
+    // ── Precision ────────────────────────────────────────────────────────
     if (cpuOutput.size() != hiaiOutput.size()) {
         log << "FAIL: size mismatch CPU=" << cpuOutput.size()
             << " HiAI=" << hiaiOutput.size() << "\n";
@@ -987,15 +1005,33 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
         << "  @idx=" << maxDiffIdx << "\n";
     log << "fail_count=" << failCount << "/" << cpuOutput.size() << "\n";
 
-    // Timing report
-    char timeBuf[128];
-    if (cpuAvgMs >= 0 && hiaiAvgMs >= 0) {
-        snprintf(timeBuf, sizeof(timeBuf),
-                 "CPU: %.2f ms  HiAI: %.2f ms  speedup: %.2fx\n",
-                 cpuAvgMs, hiaiAvgMs,
-                 hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
-        log << timeBuf;
+    // ── Timing report ────────────────────────────────────────────────────
+    char buf[256];
+    // CPU
+    snprintf(buf, sizeof(buf), "CPU  first=%.2fms", cpuFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)cpuWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, cpuWarmupMs[i]);
+        log << buf;
     }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
+    log << buf;
+
+    // HiAI
+    snprintf(buf, sizeof(buf), "HiAI first=%.2fms(compile+infer)", hiaiFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)hiaiWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, hiaiWarmupMs[i]);
+        log << buf;
+    }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, hiaiAvgMs);
+    log << buf;
+
+    // speedup
+    snprintf(buf, sizeof(buf),
+             "speedup(steady) CPU/HiAI=%.2fx  (>1=NPU faster)\n",
+             hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
+    log << buf;
 
     if (relError < 0.01f) {
         log << "PASS\n";
