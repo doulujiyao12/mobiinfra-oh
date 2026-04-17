@@ -4,19 +4,18 @@ import { router } from '@kit.ArkUI';
 @Entry
 @Component
 struct OpTest {
-  @State testResult: string = ''
+  @State testResult: string = 'Click a button to start testing'
   @State running: boolean = false
   @State customConfig: string = '64,128,7,7,1,1,1,1,1'
 
   build() {
     Column() {
-      // Title
       Text('Conv Op Precision Test')
         .fontSize(22)
         .fontWeight(FontWeight.Bold)
-        .margin({ top: 15, bottom: 10 })
+        .margin({ top: 15, bottom: 5 })
 
-      Text('CPU vs HiAI Delegate (MNN_FORWARD_USER_1)')
+      Text('CPU vs HiAI Delegate (USER_1)')
         .fontSize(13)
         .fontColor('#666666')
         .margin({ bottom: 15 })
@@ -30,16 +29,17 @@ struct OpTest {
         .fontSize(16)
         .enabled(!this.running)
         .margin({ bottom: 10 })
-        .onClick(async () => {
+        .onClick(() => {
           this.running = true
           this.testResult = 'Running preset test suite...\n'
-          try {
-            let result: string = await native.opTest('preset')
+          let p: Promise<string> = native.opTest('preset')
+          p.then((result: string) => {
             this.testResult = result
-          } catch (e) {
-            this.testResult = 'Error: ' + JSON.stringify(e)
-          }
-          this.running = false
+            this.running = false
+          }).catch((e: Error) => {
+            this.testResult = 'Error: ' + e.message
+            this.running = false
+          })
         })
 
       // Custom test section
@@ -58,26 +58,27 @@ struct OpTest {
           .borderRadius(8)
           .enabled(!this.running)
           .margin({ left: '3%' })
-          .onClick(async () => {
+          .onClick(() => {
             this.running = true
-            this.testResult = 'Running custom test: ' + this.customConfig + '\n'
-            try {
-              let result: string = await native.opTest(this.customConfig)
+            this.testResult = 'Running: ' + this.customConfig + '\n'
+            let p: Promise<string> = native.opTest(this.customConfig)
+            p.then((result: string) => {
               this.testResult = result
-            } catch (e) {
-              this.testResult = 'Error: ' + JSON.stringify(e)
-            }
-            this.running = false
+              this.running = false
+            }).catch((e: Error) => {
+              this.testResult = 'Error: ' + e.message
+              this.running = false
+            })
           })
       }
       .width('90%')
       .margin({ bottom: 15 })
 
-      // Result display
+      // Result display - white text on dark background
       Scroll() {
         Text(this.testResult)
-          .fontSize(12)
-          .fontFamily('monospace')
+          .fontSize(13)
+          .fontColor('#E0E0E0')
           .width('100%')
           .padding(12)
       }
@@ -87,7 +88,6 @@ struct OpTest {
       .borderRadius(10)
       .margin({ bottom: 15 })
 
-      // Back button
       Button('Back')
         .width('90%')
         .height(40)
