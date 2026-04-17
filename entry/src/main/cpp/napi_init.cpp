@@ -229,6 +229,7 @@
 #include <thread>
 #include <deque>
 #include <atomic>
+#include <cstdarg>
 
 #include "llm/llm.hpp"
 
@@ -296,18 +297,34 @@ static void initLogCapture(const std::string& path) {
     bool expected = false;
     if (!gLog.started.compare_exchange_strong(expected, true)) return;
     gLog.filePath = path;
+
+    // Load previous session's log into ring buffer (survives crash/restart)
+    FILE* rf = fopen(path.c_str(), "r");
+    if (rf) {
+        char linebuf[2048];
+        while (fgets(linebuf, sizeof(linebuf), rf)) {
+            std::string line(linebuf);
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            if (!line.empty()) gLog.append(line);
+        }
+        fclose(rf);
+    }
+
     gLog.file = fopen(path.c_str(), "a");
+
+    // Also redirect stdout/stderr for any printf-based logging
     int pipefd[2];
-    if (pipe(pipefd) != 0) return;
-    gLog.origStdout = dup(STDOUT_FILENO);
-    gLog.origStderr = dup(STDERR_FILENO);
-    dup2(pipefd[1], STDOUT_FILENO);
-    dup2(pipefd[1], STDERR_FILENO);
-    close(pipefd[1]);
-    setvbuf(stdout, nullptr, _IOLBF, 0);
-    setvbuf(stderr, nullptr, _IOLBF, 0);
-    std::thread(logReader, pipefd[0]).detach();
-    gLog.append("==== log capture started ====");
+    if (pipe(pipefd) == 0) {
+        gLog.origStdout = dup(STDOUT_FILENO);
+        gLog.origStderr = dup(STDERR_FILENO);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        setvbuf(stdout, nullptr, _IOLBF, 0);
+        setvbuf(stderr, nullptr, _IOLBF, 0);
+        std::thread(logReader, pipefd[0]).detach();
+    }
+    gLog.append("==== session started ====");
 }
 
 static napi_value InitLogFile(napi_env env, napi_callback_info info) {
@@ -352,6 +369,43 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
     return ret;
 }
 } // anonymous namespace
+
+// Strip HiLog privacy annotations (%{public}d -> %d) so vsnprintf can parse cleanly
+static std::string stripHiLogFmt(const char* fmt) {
+    std::string out;
+    for (const char* p = fmt; *p; ++p) {
+        if (*p == '%' && *(p + 1) == '{') {
+            out += '%';
+            p += 2;
+            while (*p && *p != '}') ++p; // skip to closing '}'
+        } else {
+            out += *p;
+        }
+    }
+    return out;
+}
+
+static void appLog(const char* fmt, ...) {
+    std::string cleanFmt = stripHiLogFmt(fmt);
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), cleanFmt.c_str(), ap);
+    va_end(ap);
+    gLog.append(buf);
+}
+
+// Redefine LOGI/LOGE to write to both HiLog and the in-app ring buffer
+#undef LOGI
+#undef LOGE
+#define LOGI(fmt, ...) do { \
+    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, fmt, ##__VA_ARGS__); \
+    appLog(fmt, ##__VA_ARGS__); \
+} while(0)
+#define LOGE(fmt, ...) do { \
+    OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, fmt, ##__VA_ARGS__); \
+    appLog("[ERR] " fmt, ##__VA_ARGS__); \
+} while(0)
 
 // Agent mode state (prefix KV cache reuse)
 static bool g_agent_mode = false;
@@ -461,10 +515,12 @@ static void LoadModelExecute(napi_env env, void* data) {
     if (res) {
         asyncData->success = true;
         asyncData->outputStr = "ok";
+        LOGI("Model loaded OK");
     } else {
         g_llm.reset();
         asyncData->success = false;
         asyncData->outputStr = "error: load failed";
+        LOGE("Model load FAILED");
     }
 }
 
