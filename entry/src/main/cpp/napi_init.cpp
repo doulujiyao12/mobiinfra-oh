@@ -227,6 +227,14 @@
 
 #include "llm/llm.hpp"
 
+#include <MNN/expr/Expr.hpp>
+#include <MNN/expr/ExprCreator.hpp>
+#include <MNN/expr/NeuralNetWorkOp.hpp>
+#include <MNN/expr/Executor.hpp>
+#include <MNN/expr/ExecutorScope.hpp>
+#include <MNN/MNNForwardType.h>
+#include <cmath>
+
 #define LOG_TAG "MnnLlm"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
@@ -701,6 +709,202 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ========== 9. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
+using namespace MNN::Express;
+
+static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
+                               int strideH, int strideW, int group) {
+    std::ostringstream log;
+    log << "=== Conv Test: ic=" << ic << " oc=" << oc
+        << " ih=" << ih << " iw=" << iw
+        << " kh=" << kh << " kw=" << kw
+        << " stride=" << strideH << " group=" << group << " ===\n";
+
+    // 1. Generate deterministic weights and bias
+    int weightSize = oc * (ic / group) * kh * kw;
+    std::vector<float> weight(weightSize);
+    std::vector<float> bias(oc);
+    for (int i = 0; i < weightSize; i++) {
+        weight[i] = (float)((i % 7) - 3) * 0.1f;
+    }
+    for (int i = 0; i < oc; i++) {
+        bias[i] = (float)((i % 5) - 2) * 0.05f;
+    }
+
+    // 2. Generate input data
+    int inputSize = 1 * ic * ih * iw;
+    std::vector<float> inputData(inputSize);
+    for (int i = 0; i < inputSize; i++) {
+        inputData[i] = (float)((i % 11) - 5) * 0.1f;
+    }
+
+    // 3. Run on CPU
+    std::vector<float> cpuOutput;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
+        ExecutorScope scope(exe);
+        auto x = _Input({1, ic, ih, iw}, NCHW);
+        ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+        auto convWeight = weight;
+        auto convBias = bias;
+        auto y = _Conv(std::move(convWeight), std::move(convBias), x,
+                       {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
+        y = _Convert(y, NCHW);
+        auto ptr = y->readMap<float>();
+        if (ptr == nullptr) {
+            log << "ERROR: CPU conv output is null\n";
+            return log.str();
+        }
+        int outSize = y->getInfo()->size;
+        cpuOutput.assign(ptr, ptr + outSize);
+        log << "CPU output size: " << outSize
+            << " shape: " << y->getInfo()->dim[0] << "x" << y->getInfo()->dim[1]
+            << "x" << y->getInfo()->dim[2] << "x" << y->getInfo()->dim[3] << "\n";
+    }
+
+    // 4. Run on HiAI Delegate (MNN_FORWARD_USER_1)
+    std::vector<float> hiaiOutput;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
+        ExecutorScope scope(exe);
+        auto x = _Input({1, ic, ih, iw}, NCHW);
+        ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+        auto convWeight = weight;
+        auto convBias = bias;
+        auto y = _Conv(std::move(convWeight), std::move(convBias), x,
+                       {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
+        y = _Convert(y, NCHW);
+        auto ptr = y->readMap<float>();
+        if (ptr == nullptr) {
+            log << "ERROR: HiAI conv output is null (backend not available?)\n";
+            return log.str();
+        }
+        int outSize = y->getInfo()->size;
+        hiaiOutput.assign(ptr, ptr + outSize);
+        log << "HiAI output size: " << outSize << "\n";
+    }
+
+    // 5. Compare outputs
+    if (cpuOutput.size() != hiaiOutput.size()) {
+        log << "FAIL: output size mismatch CPU=" << cpuOutput.size()
+            << " HiAI=" << hiaiOutput.size() << "\n";
+        return log.str();
+    }
+
+    float maxRef = 0.0f;
+    for (auto v : cpuOutput) {
+        maxRef = std::max(maxRef, std::abs(v));
+    }
+    if (maxRef < 1e-6f) maxRef = 1e-6f;
+
+    float maxDiff = 0.0f;
+    int maxDiffIdx = 0;
+    int failCount = 0;
+    for (int i = 0; i < (int)cpuOutput.size(); i++) {
+        float diff = std::abs(cpuOutput[i] - hiaiOutput[i]);
+        if (diff > maxDiff) {
+            maxDiff = diff;
+            maxDiffIdx = i;
+        }
+        if (diff / maxRef > 0.01f) { // 1% relative error threshold
+            failCount++;
+        }
+    }
+
+    float relError = maxDiff / maxRef;
+    log << "max|ref|=" << maxRef << "  max|diff|=" << maxDiff
+        << "  relError=" << (relError * 100.0f) << "%"
+        << "  @idx=" << maxDiffIdx
+        << "  (cpu=" << cpuOutput[maxDiffIdx] << " hiai=" << hiaiOutput[maxDiffIdx] << ")\n";
+    log << "fail_count=" << failCount << "/" << cpuOutput.size() << "\n";
+
+    if (relError < 0.01f) {
+        log << "PASS\n";
+    } else if (relError < 0.05f) {
+        log << "WARN: relative error " << (relError * 100.0f) << "% (threshold 1%)\n";
+    } else {
+        log << "FAIL: relative error " << (relError * 100.0f) << "% exceeds threshold\n";
+    }
+
+    return log.str();
+}
+
+static void OpTestExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::ostringstream result;
+
+    // Parse config: "ic,oc,ih,iw,kh,kw,strideH,strideW,group"
+    // or "preset" for predefined test suite
+    std::string cfg = asyncData->inputStr;
+
+    if (cfg == "preset" || cfg.empty()) {
+        // Run preset test cases matching typical ViT conv patterns
+        struct TestCase { int ic, oc, ih, iw, kh, kw, sh, sw, g; const char* name; };
+        TestCase cases[] = {
+            {3,   64,  14, 14, 7, 7, 2, 2, 1, "patch_embed_7x7"},
+            {64,  128, 7,  7,  1, 1, 1, 1, 1, "proj_1x1_small"},
+            {128, 256, 7,  7,  1, 1, 1, 1, 1, "proj_1x1_medium"},
+            {3,   768, 14, 14, 14,14,14,14,1, "vit_patch14"},
+            {32,  32,  8,  8,  3, 3, 1, 1, 1, "conv3x3_basic"},
+            {64,  64,  8,  8,  3, 3, 1, 1, 64,"depthwise_3x3"},
+        };
+        int n = sizeof(cases) / sizeof(cases[0]);
+        int pass = 0;
+        for (int i = 0; i < n; i++) {
+            auto& c = cases[i];
+            result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
+            result << runConvTest(c.ic, c.oc, c.ih, c.iw, c.kh, c.kw, c.sh, c.sw, c.g);
+            if (result.str().find("PASS") != std::string::npos) pass++;
+            result << "\n";
+        }
+        result << "=== Summary: " << pass << "/" << n << " passed ===\n";
+    } else {
+        // Parse custom: "ic,oc,ih,iw,kh,kw,sh,sw,group"
+        int ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;
+        sscanf(cfg.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+               &ic, &oc, &ih, &iw, &kh, &kw, &sh, &sw, &g);
+        if (ic <= 0 || oc <= 0 || ih <= 0 || iw <= 0) {
+            result << "ERROR: invalid config: " << cfg << "\n";
+            result << "Format: ic,oc,ih,iw[,kh,kw,sh,sw,group]\n";
+        } else {
+            result << runConvTest(ic, oc, ih, iw, kh, kw, sh, sw, g);
+        }
+    }
+
+    asyncData->success = true;
+    asyncData->outputStr = result.str();
+}
+
+static napi_value OpTestAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string config = "preset";
+    if (argc >= 1) {
+        size_t strLen = 0;
+        napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+        if (strLen > 0) {
+            config.resize(strLen);
+            napi_get_value_string_utf8(env, args[0], &config[0], strLen + 1, &strLen);
+        }
+    }
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(config);
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "OpTestAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, OpTestExecute, AsyncComplete,
+                           asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
 // ========== N-API 模块注册 ==========
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
@@ -713,6 +917,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

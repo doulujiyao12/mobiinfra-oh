@@ -1,4 +1,5 @@
 import entry from 'libentry.so';
+import { router } from '@kit.ArkUI';
 
 // @Entry
 // @Component
@@ -981,6 +982,17 @@ struct Index {
               .borderRadius(8)
             }
             .width('95%')
+
+            Button('Op Precision Test')
+              .width('95%')
+              .height(44)
+              .backgroundColor('#FF9800')
+              .borderRadius(10)
+              .fontSize(16)
+              .margin({ top: 15 })
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/OpTest' })
+              })
 
             Blank().height(40)
           }

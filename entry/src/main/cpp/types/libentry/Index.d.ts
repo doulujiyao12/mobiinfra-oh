@@ -9,3 +9,7 @@ export const agentPrefill: (prefix: string) => Promise<string>;
 export const agentStep: (variablePart: string, onToken?: (token: string) => void) => Promise<string>;
 export const agentReset: () => Promise<string>;
 
+// Op precision test (CPU vs HiAI delegate)
+// config: "preset" for built-in test suite, or "ic,oc,ih,iw,kh,kw,sh,sw,group" for custom
+export const opTest: (config: string) => Promise<string>;
+
