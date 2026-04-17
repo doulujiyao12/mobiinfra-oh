@@ -348,6 +348,11 @@ struct Index {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     this.modelDir = this.filesDir + '/model';
+    try {
+      native.initLogFile(this.filesDir + '/mnn_runtime.log');
+    } catch (e) {
+      console.error('initLogFile failed: ' + JSON.stringify(e));
+    }
   }
 
   formatSize(bytes: number): string {
@@ -992,6 +997,17 @@ struct Index {
               .margin({ top: 15 })
               .onClick(() => {
                 router.pushUrl({ url: 'pages/OpTest' })
+              })
+
+            Button('Runtime Logs')
+              .width('95%')
+              .height(44)
+              .backgroundColor('#607D8B')
+              .borderRadius(10)
+              .fontSize(16)
+              .margin({ top: 10 })
+              .onClick(() => {
+                router.pushUrl({ url: 'pages/LogView' })
               })
 
             Blank().height(40)

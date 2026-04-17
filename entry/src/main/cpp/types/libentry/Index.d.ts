@@ -13,3 +13,8 @@ export const agentReset: () => Promise<string>;
 // config: "preset" for built-in test suite, or "ic,oc,ih,iw,kh,kw,sh,sw,group" for custom
 export const opTest: (config: string) => Promise<string>;
 
+// Runtime log capture (stdout/stderr redirected to file + in-memory ring buffer)
+export const initLogFile: (path: string) => string;
+export const getLogs: () => string;
+export const clearLogs: () => string;
+

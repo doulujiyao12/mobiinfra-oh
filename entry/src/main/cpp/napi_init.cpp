@@ -224,6 +224,11 @@
 #include <sstream>
 #include <mutex>
 #include <cstdlib>
+#include <unistd.h>
+#include <fcntl.h>
+#include <thread>
+#include <deque>
+#include <atomic>
 
 #include "llm/llm.hpp"
 
@@ -244,6 +249,109 @@ using namespace MNN::Transformer;
 static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
+
+// ==================== Runtime log capture ====================
+namespace {
+struct LogCapture {
+    std::mutex mu;
+    std::deque<std::string> ring;
+    size_t maxLines = 4000;
+    FILE* file = nullptr;
+    std::string filePath;
+    std::atomic<bool> started{false};
+    int origStdout = -1;
+    int origStderr = -1;
+
+    void append(const std::string& line) {
+        std::lock_guard<std::mutex> g(mu);
+        ring.push_back(line);
+        if (ring.size() > maxLines) ring.pop_front();
+        if (file) {
+            fputs(line.c_str(), file);
+            fputc('\n', file);
+            fflush(file);
+        }
+    }
+};
+static LogCapture gLog;
+
+static void logReader(int readFd) {
+    char buf[4096];
+    std::string pending;
+    while (true) {
+        ssize_t n = read(readFd, buf, sizeof(buf));
+        if (n <= 0) break;
+        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, "MnnLlmCap", "%.*s", (int)n, buf);
+        pending.append(buf, n);
+        size_t pos;
+        while ((pos = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, pos);
+            pending.erase(0, pos + 1);
+            if (!line.empty()) gLog.append(line);
+        }
+    }
+}
+
+static void initLogCapture(const std::string& path) {
+    bool expected = false;
+    if (!gLog.started.compare_exchange_strong(expected, true)) return;
+    gLog.filePath = path;
+    gLog.file = fopen(path.c_str(), "a");
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return;
+    gLog.origStdout = dup(STDOUT_FILENO);
+    gLog.origStderr = dup(STDERR_FILENO);
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IOLBF, 0);
+    std::thread(logReader, pipefd[0]).detach();
+    gLog.append("==== log capture started ====");
+}
+
+static napi_value InitLogFile(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char path[1024] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], path, sizeof(path), &len);
+    initLogCapture(std::string(path, len));
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+
+static napi_value GetLogs(napi_env env, napi_callback_info) {
+    std::string all;
+    {
+        std::lock_guard<std::mutex> g(gLog.mu);
+        all.reserve(gLog.ring.size() * 80);
+        for (auto& l : gLog.ring) {
+            all += l;
+            all += '\n';
+        }
+    }
+    napi_value ret;
+    napi_create_string_utf8(env, all.c_str(), all.size(), &ret);
+    return ret;
+}
+
+static napi_value ClearLogs(napi_env env, napi_callback_info) {
+    {
+        std::lock_guard<std::mutex> g(gLog.mu);
+        gLog.ring.clear();
+        if (gLog.file) {
+            fclose(gLog.file);
+            gLog.file = fopen(gLog.filePath.c_str(), "w");
+        }
+    }
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+} // anonymous namespace
 
 // Agent mode state (prefix KV cache reuse)
 static bool g_agent_mode = false;
@@ -918,6 +1026,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getLogs",      nullptr, GetLogs,            nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
