@@ -1,5 +1,7 @@
 import native from 'libentry.so';
 import { router } from '@kit.ArkUI';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { promptAction } from '@kit.ArkUI';
 
 @Entry
 @Component
@@ -73,6 +75,14 @@ struct LogView {
           .onClick(() => {
             this.autoScroll = !this.autoScroll
             if (this.autoScroll) this.scroller.scrollEdge(Edge.Bottom)
+          })
+        Button('Copy').fontSize(14).height(36).flexGrow(1).margin({ left: 8 })
+          .backgroundColor('#FF9800')
+          .onClick(() => {
+            const pb = pasteboard.getSystemPasteboard()
+            pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.logs))
+              .then(() => { promptAction.showToast({ message: 'Copied!', duration: 1500 }) })
+              .catch(() => { promptAction.showToast({ message: 'Copy failed', duration: 1500 }) })
           })
         Button('Clear').fontSize(14).height(36).flexGrow(1).margin({ left: 8 })
           .backgroundColor('#F44336')
