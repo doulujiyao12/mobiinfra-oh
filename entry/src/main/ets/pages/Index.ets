@@ -349,7 +349,7 @@ struct Index {
     this.filesDir = ctx.filesDir;
     this.modelDir = this.filesDir + '/model';
     try {
-      native.initLogFile(this.filesDir + '/mnn_runtime.log');
+      mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
       console.error('initLogFile failed: ' + JSON.stringify(e));
     }
