@@ -240,6 +240,7 @@
 #include <MNN/expr/ExecutorScope.hpp>
 #include <MNN/MNNForwardType.h>
 #include <cmath>
+#include <chrono>
 
 #define LOG_TAG "MnnLlm"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
@@ -876,38 +877,33 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
 // ========== 9. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
 using namespace MNN::Express;
 
+// batch: input batch size (N); warmup/repeat: timing iterations
 static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
-                               int strideH, int strideW, int group) {
+                               int strideH, int strideW, int group,
+                               int batch = 1, int warmup = 3, int repeat = 10) {
     std::ostringstream log;
-    log << "=== Conv Test: ic=" << ic << " oc=" << oc
+    log << "=== Conv Test: N=" << batch << " ic=" << ic << " oc=" << oc
         << " ih=" << ih << " iw=" << iw
         << " kh=" << kh << " kw=" << kw
         << " stride=" << strideH << " group=" << group << " ===\n";
 
-    // 1. Generate deterministic weights and bias
     int weightSize = oc * (ic / group) * kh * kw;
     std::vector<float> weight(weightSize);
     std::vector<float> bias(oc);
-    for (int i = 0; i < weightSize; i++) {
-        weight[i] = (float)((i % 7) - 3) * 0.1f;
-    }
-    for (int i = 0; i < oc; i++) {
-        bias[i] = (float)((i % 5) - 2) * 0.05f;
-    }
+    for (int i = 0; i < weightSize; i++) weight[i] = (float)((i % 7) - 3) * 0.1f;
+    for (int i = 0; i < oc; i++) bias[i] = (float)((i % 5) - 2) * 0.05f;
 
-    // 2. Generate input data
-    int inputSize = 1 * ic * ih * iw;
+    int inputSize = batch * ic * ih * iw;
     std::vector<float> inputData(inputSize);
-    for (int i = 0; i < inputSize; i++) {
-        inputData[i] = (float)((i % 11) - 5) * 0.1f;
-    }
+    for (int i = 0; i < inputSize; i++) inputData[i] = (float)((i % 11) - 5) * 0.1f;
 
-    // 3. Run on CPU
+    // CPU: precision + timing
     std::vector<float> cpuOutput;
+    double cpuAvgMs = -1;
     {
         auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
-        auto x = _Input({1, ic, ih, iw}, NCHW);
+        auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
         auto convWeight = weight;
         auto convBias = bias;
@@ -915,23 +911,34 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
                        {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
         y = _Convert(y, NCHW);
         auto ptr = y->readMap<float>();
-        if (ptr == nullptr) {
-            log << "ERROR: CPU conv output is null\n";
-            return log.str();
-        }
+        if (!ptr) { log << "ERROR: CPU conv output is null\n"; return log.str(); }
         int outSize = y->getInfo()->size;
         cpuOutput.assign(ptr, ptr + outSize);
-        log << "CPU output size: " << outSize
-            << " shape: " << y->getInfo()->dim[0] << "x" << y->getInfo()->dim[1]
+        log << "CPU output: " << outSize << " elems  shape="
+            << y->getInfo()->dim[0] << "x" << y->getInfo()->dim[1]
             << "x" << y->getInfo()->dim[2] << "x" << y->getInfo()->dim[3] << "\n";
+        // warmup
+        for (int i = 0; i < warmup; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        // timed
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < repeat; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        cpuAvgMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / repeat;
     }
 
-    // 4. Run on HiAI Delegate (MNN_FORWARD_USER_1)
+    // HiAI: precision + timing
     std::vector<float> hiaiOutput;
+    double hiaiAvgMs = -1;
     {
         auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
-        auto x = _Input({1, ic, ih, iw}, NCHW);
+        auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
         auto convWeight = weight;
         auto convBias = bias;
@@ -939,55 +946,63 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
                        {ic, oc}, {kw, kh}, VALID, {strideW, strideH}, {1, 1}, group);
         y = _Convert(y, NCHW);
         auto ptr = y->readMap<float>();
-        if (ptr == nullptr) {
-            log << "ERROR: HiAI conv output is null (backend not available?)\n";
-            return log.str();
-        }
+        if (!ptr) { log << "ERROR: HiAI conv output is null (backend not available?)\n"; return log.str(); }
         int outSize = y->getInfo()->size;
         hiaiOutput.assign(ptr, ptr + outSize);
-        log << "HiAI output size: " << outSize << "\n";
+        log << "HiAI output: " << outSize << " elems\n";
+        // warmup
+        for (int i = 0; i < warmup; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        // timed
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < repeat; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        hiaiAvgMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / repeat;
     }
 
-    // 5. Compare outputs
+    // Precision comparison
     if (cpuOutput.size() != hiaiOutput.size()) {
-        log << "FAIL: output size mismatch CPU=" << cpuOutput.size()
+        log << "FAIL: size mismatch CPU=" << cpuOutput.size()
             << " HiAI=" << hiaiOutput.size() << "\n";
         return log.str();
     }
-
     float maxRef = 0.0f;
-    for (auto v : cpuOutput) {
-        maxRef = std::max(maxRef, std::abs(v));
-    }
+    for (auto v : cpuOutput) maxRef = std::max(maxRef, std::abs(v));
     if (maxRef < 1e-6f) maxRef = 1e-6f;
-
     float maxDiff = 0.0f;
-    int maxDiffIdx = 0;
-    int failCount = 0;
+    int maxDiffIdx = 0, failCount = 0;
     for (int i = 0; i < (int)cpuOutput.size(); i++) {
         float diff = std::abs(cpuOutput[i] - hiaiOutput[i]);
-        if (diff > maxDiff) {
-            maxDiff = diff;
-            maxDiffIdx = i;
-        }
-        if (diff / maxRef > 0.01f) { // 1% relative error threshold
-            failCount++;
-        }
+        if (diff > maxDiff) { maxDiff = diff; maxDiffIdx = i; }
+        if (diff / maxRef > 0.01f) failCount++;
     }
-
     float relError = maxDiff / maxRef;
-    log << "max|ref|=" << maxRef << "  max|diff|=" << maxDiff
-        << "  relError=" << (relError * 100.0f) << "%"
-        << "  @idx=" << maxDiffIdx
-        << "  (cpu=" << cpuOutput[maxDiffIdx] << " hiai=" << hiaiOutput[maxDiffIdx] << ")\n";
+    log << "max|ref|=" << maxRef << "  maxDiff=" << maxDiff
+        << "  relErr=" << (relError * 100.0f) << "%"
+        << "  @idx=" << maxDiffIdx << "\n";
     log << "fail_count=" << failCount << "/" << cpuOutput.size() << "\n";
+
+    // Timing report
+    char timeBuf[128];
+    if (cpuAvgMs >= 0 && hiaiAvgMs >= 0) {
+        snprintf(timeBuf, sizeof(timeBuf),
+                 "CPU: %.2f ms  HiAI: %.2f ms  speedup: %.2fx\n",
+                 cpuAvgMs, hiaiAvgMs,
+                 hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
+        log << timeBuf;
+    }
 
     if (relError < 0.01f) {
         log << "PASS\n";
     } else if (relError < 0.05f) {
-        log << "WARN: relative error " << (relError * 100.0f) << "% (threshold 1%)\n";
+        log << "WARN: relErr=" << (relError * 100.0f) << "% (>1% threshold)\n";
     } else {
-        log << "FAIL: relative error " << (relError * 100.0f) << "% exceeds threshold\n";
+        log << "FAIL: relErr=" << (relError * 100.0f) << "% (>5%)\n";
     }
 
     return log.str();
@@ -1002,7 +1017,7 @@ static void OpTestExecute(napi_env env, void* data) {
     std::string cfg = asyncData->inputStr;
 
     if (cfg == "preset" || cfg.empty()) {
-        // Run preset test cases matching typical ViT conv patterns
+        // Typical ViT conv patterns, batch=1
         struct TestCase { int ic, oc, ih, iw, kh, kw, sh, sw, g; const char* name; };
         TestCase cases[] = {
             {3,   64,  14, 14, 7, 7, 2, 2, 1, "patch_embed_7x7"},
@@ -1017,21 +1032,43 @@ static void OpTestExecute(napi_env env, void* data) {
         for (int i = 0; i < n; i++) {
             auto& c = cases[i];
             result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
-            result << runConvTest(c.ic, c.oc, c.ih, c.iw, c.kh, c.kw, c.sh, c.sw, c.g);
-            if (result.str().find("PASS") != std::string::npos) pass++;
+            std::string r = runConvTest(c.ic, c.oc, c.ih, c.iw, c.kh, c.kw, c.sh, c.sw, c.g);
+            result << r;
+            if (r.find("PASS") != std::string::npos) pass++;
             result << "\n";
         }
         result << "=== Summary: " << pass << "/" << n << " passed ===\n";
+    } else if (cfg == "qwen3vl") {
+        // Real Qwen3VL visual encoder ops (matmul-converted 1x1 conv, N=608 tokens)
+        // warmup=2 repeat=5 to keep runtime reasonable on device
+        struct TestCase { int n, ic, oc, kh, kw, g; const char* name; };
+        TestCase cases[] = {
+            {608, 1024, 1024, 1, 1, 1, "attn_qkv/out_proj (1024->1024)"},
+            {608, 1024, 4096, 1, 1, 1, "mlp_fc1 (1024->4096)"},
+            {608, 4096, 1024, 1, 1, 1, "mlp_fc2 (4096->1024)"},
+        };
+        int n = sizeof(cases) / sizeof(cases[0]);
+        int pass = 0;
+        for (int i = 0; i < n; i++) {
+            auto& c = cases[i];
+            result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
+            // ih=iw=1 (matmul-as-conv), batch=N
+            std::string r = runConvTest(c.ic, c.oc, 1, 1, c.kh, c.kw, 1, 1, c.g, c.n, 2, 5);
+            result << r;
+            if (r.find("PASS") != std::string::npos) pass++;
+            result << "\n";
+        }
+        result << "=== Qwen3VL Summary: " << pass << "/" << n << " passed ===\n";
     } else {
-        // Parse custom: "ic,oc,ih,iw,kh,kw,sh,sw,group"
-        int ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;
-        sscanf(cfg.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               &ic, &oc, &ih, &iw, &kh, &kw, &sh, &sw, &g);
-        if (ic <= 0 || oc <= 0 || ih <= 0 || iw <= 0) {
+        // Custom: "N,ic,oc,ih,iw[,kh,kw,sh,sw,group]"
+        int N=1, ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;
+        int parsed = sscanf(cfg.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                            &N, &ic, &oc, &ih, &iw, &kh, &kw, &sh, &sw, &g);
+        if (parsed < 5 || ic <= 0 || oc <= 0 || ih <= 0 || iw <= 0 || N <= 0) {
             result << "ERROR: invalid config: " << cfg << "\n";
-            result << "Format: ic,oc,ih,iw[,kh,kw,sh,sw,group]\n";
+            result << "Format: N,ic,oc,ih,iw[,kh,kw,sh,sw,group]\n";
         } else {
-            result << runConvTest(ic, oc, ih, iw, kh, kw, sh, sw, g);
+            result << runConvTest(ic, oc, ih, iw, kh, kw, sh, sw, g, N);
         }
     }
 

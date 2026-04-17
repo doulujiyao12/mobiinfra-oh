@@ -6,7 +6,7 @@ import { router } from '@kit.ArkUI';
 struct OpTest {
   @State testResult: string = 'Click a button to start testing'
   @State running: boolean = false
-  @State customConfig: string = '64,128,7,7,1,1,1,1,1'
+  @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
 
   build() {
     Column() {
@@ -42,9 +42,31 @@ struct OpTest {
           })
         })
 
+      // Qwen3VL visual encoder test button
+      Button(this.running ? 'Running...' : 'Run Qwen3VL Visual (N=608)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#9C27B0')
+        .borderRadius(10)
+        .fontSize(16)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.running = true
+          this.testResult = 'Running Qwen3VL visual encoder ops (N=608, 1x1 conv)...\n'
+          let p: Promise<string> = native.opTest('qwen3vl')
+          p.then((result: string) => {
+            this.testResult = result
+            this.running = false
+          }).catch((e: Error) => {
+            this.testResult = 'Error: ' + e.message
+            this.running = false
+          })
+        })
+
       // Custom test section
       Row() {
-        TextInput({ placeholder: 'ic,oc,ih,iw,kh,kw,sh,sw,group', text: this.customConfig })
+        TextInput({ placeholder: 'N,ic,oc,ih,iw,kh,kw,sh,sw,group', text: this.customConfig })
           .width('65%')
           .height(40)
           .borderRadius(8)
