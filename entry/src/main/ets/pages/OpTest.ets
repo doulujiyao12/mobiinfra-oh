@@ -53,13 +53,14 @@ struct OpTest {
 
   @Builder QuantBtn(label: string, value: string) {
     Button(label)
-      .width('24%')
+      .width('32%')
       .height(34)
       .backgroundColor(this.convQuant === value ? '#00695C' : '#CFD8DC')
       .fontColor(this.convQuant === value ? '#FFFFFF' : '#333333')
       .borderRadius(8)
       .fontSize(11)
       .enabled(!this.running)
+      .margin({ bottom: 8 })
       .onClick(() => { this.convQuant = value })
   }
 
@@ -88,7 +89,8 @@ struct OpTest {
   }
 
   build() {
-    Column() {
+    Scroll() {
+      Column() {
       Text('Conv Op Precision Test')
         .fontSize(22)
         .fontWeight(FontWeight.Bold)
@@ -120,14 +122,14 @@ struct OpTest {
         .fontColor('#666666')
         .alignSelf(ItemAlign.Start)
         .margin({ left: '5%', bottom: 4 })
-      Row() {
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
         this.QuantBtn('w-only',    'auto')
         this.QuantBtn('full',      'full')
         this.QuantBtn('mm_int8',   'matmul_int8')
+        this.QuantBtn('fc_int8',   'fc_int8')
         this.QuantBtn('off',       'off')
       }
       .width('90%')
-      .justifyContent(FlexAlign.SpaceBetween)
       .margin({ bottom: 8 })
 
       // CPU precision selector (fp32 normal/high, fp16 via ARM82, bf16)
@@ -232,7 +234,7 @@ struct OpTest {
           .padding(12)
       }
       .width('90%')
-      .layoutWeight(1)
+      .minHeight(400)
       .backgroundColor('#1A1A2E')
       .borderRadius(10)
       .margin({ bottom: 8 })
@@ -268,6 +270,9 @@ struct OpTest {
       }
       .width('90%')
       .margin({ bottom: 15 })
+    }
+    .width('100%')
+    .backgroundColor('#F7F9FC')
     }
     .width('100%')
     .height('100%')

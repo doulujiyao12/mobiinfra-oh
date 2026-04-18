@@ -1307,7 +1307,8 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
         const char* qm = std::getenv("HIAI_CONV_QUANT");
         bool needXScale = qm != nullptr &&
                           (std::strcmp(qm, "full")        == 0 ||
-                           std::strcmp(qm, "matmul_int8") == 0);
+                           std::strcmp(qm, "matmul_int8") == 0 ||
+                           std::strcmp(qm, "fc_int8")     == 0);
         if (needXScale) {
             float amax = 1e-8f;
             for (int i = 0; i < inputSize; i++) {
@@ -1385,6 +1386,7 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
         if      (std::strcmp(qm, "off")         == 0) hiaiLbl = "HiAI (dequant->fp16)";
         else if (std::strcmp(qm, "full")        == 0) hiaiLbl = "HiAI (int8 MAC, Conv)";
         else if (std::strcmp(qm, "matmul_int8") == 0) hiaiLbl = "HiAI (int8 MAC, MatMul chain)";
+        else if (std::strcmp(qm, "fc_int8")     == 0) hiaiLbl = "HiAI (int8 MAC, QuantizedFullyConnection)";
     }
     snprintf(buf, sizeof(buf), "%s first=%.2fms(compile+infer)", hiaiLbl, hiaiFirstMs);
     log << buf;
