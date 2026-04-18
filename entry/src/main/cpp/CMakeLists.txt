@@ -56,9 +56,19 @@
   set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
   set(MNN_LIB_DIR ${NATIVERENDER_ROOT_PATH}/../../../libs/${OHOS_ARCH})
   set(MNN_INCLUDE_DIR ${NATIVERENDER_ROOT_PATH}/include)
+  # Extra header paths for IDSTEncoder (per-channel int8 quant helper used by
+  # the op precision test). These are MNN's internal headers, needed only to
+  # build a quant Convolution2DT description inline; libMNN.so still supplies
+  # the runtime symbols.
+  set(MNN_SRC_ROOT ${NATIVERENDER_ROOT_PATH}/../../../../../source)
+  set(MNN_SCHEMA_ROOT ${NATIVERENDER_ROOT_PATH}/../../../../../schema/current)
 
   add_library(entry SHARED napi_init.cpp)
-  target_include_directories(entry PRIVATE ${MNN_INCLUDE_DIR})
+  target_include_directories(entry PRIVATE
+      ${MNN_INCLUDE_DIR}
+      ${MNN_SRC_ROOT}
+      ${MNN_SCHEMA_ROOT}
+  )
   target_link_directories(entry PUBLIC ${MNN_LIB_DIR})
 
   target_link_libraries(entry PUBLIC

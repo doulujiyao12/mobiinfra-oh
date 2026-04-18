@@ -242,6 +242,13 @@
 #include <cmath>
 #include <chrono>
 
+// MNN internal headers for per-channel int8 quantization helper.
+// Added via CMake include paths (source/ and schema/current/). libMNN still
+// provides runtime symbols; these headers only let us build a Convolution2DT
+// with a correctly-encoded IDSTQuanT on the fly.
+#include "MNN_generated.h"
+#include "core/IDSTEncoder.hpp"
+
 #define LOG_TAG "MnnLlm"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
@@ -1070,6 +1077,222 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
     return log.str();
 }
 
+// ── Per-channel int8 symmetric quant helper ───────────────────────────────
+// Builds a Convolution2DT whose quanParameter holds int8 weights + per-channel
+// scales, mirroring what mnn_converter.py::rebuild_linear produces when
+// --quant_bit=8 --quant_block=0. Returns an Express VARP.
+//
+// Shape convention: weight is laid out as [oc, ic_per_group * kh * kw] in row-major,
+// which is also what MNN's IDSTEncoder expects (kernelNum=oc, kernelSize=ic*kh*kw).
+static MNN::Express::VARP _PerChannelInt8Conv(
+    const std::vector<float>& weight,
+    const std::vector<float>& bias,
+    MNN::Express::VARP x,
+    int ic, int oc, int kh, int kw,
+    int strideH, int strideW, int group) {
+    using namespace MNN;
+    using namespace MNN::Express;
+
+    int kSize = (ic / group) * kh * kw;   // per-output-channel weight count
+    int kNum  = oc;
+
+    // Compute per-channel symmetric scale: scale[o] = max|w[o,:]| / 127
+    std::vector<float> alpha(kNum, 0.f);
+    for (int o = 0; o < kNum; o++) {
+        float amax = 1e-8f;
+        const float* row = weight.data() + o * kSize;
+        for (int i = 0; i < kSize; i++) {
+            float v = std::fabs(row[i]);
+            if (v > amax) amax = v;
+        }
+        alpha[o] = amax / 127.f;
+    }
+
+    std::unique_ptr<OpT> convOp(new OpT);
+    convOp->type = OpType_Convolution;
+    if (ic == oc && ic == group) {
+        convOp->type = OpType_ConvolutionDepthwise;
+    }
+    convOp->main.type  = OpParameter_Convolution2D;
+    convOp->main.value = new Convolution2DT;
+    auto conv2D = convOp->main.AsConvolution2D();
+    conv2D->common.reset(new Convolution2DCommonT);
+    conv2D->common->padMode     = PadMode_VALID;
+    conv2D->common->padX        = 0;
+    conv2D->common->padY        = 0;
+    conv2D->common->strideX     = strideW;
+    conv2D->common->strideY     = strideH;
+    conv2D->common->group       = group;
+    conv2D->common->outputCount = oc;
+    conv2D->common->inputCount  = ic;
+    conv2D->common->dilateX     = 1;
+    conv2D->common->dilateY     = 1;
+    conv2D->common->kernelX     = kw;
+    conv2D->common->kernelY     = kh;
+    conv2D->common->relu        = false;
+    conv2D->common->relu6       = false;
+
+    // Symmetric int8: clampMin = -128, bits = 8, asymmetric = false.
+    // detectSparse=false so we always use the dense CQ layout.
+    conv2D->quanParameter = IDSTEncoder::encode(
+        weight.data(), alpha, kSize, kNum,
+        /*asymmetricQuantFlag=*/false, /*quantWeightPtr=*/nullptr,
+        /*clampMin=*/-128, /*bits=*/8, /*detectSparse=*/false);
+    conv2D->weight.clear();
+    conv2D->bias = bias;
+
+    return Variable::create(Expr::create(convOp.get(), {x}));
+}
+
+// ── Int8 per-channel variant of runConvTest ───────────────────────────────
+// CPU side: MNN picks the DynamicQuant hybrid int8 kernel (float I/O, int8 weight).
+// HiAI side: HiAIConvExecution dequantizes to fp32 via ConvolutionCommon::load,
+//            then uses the normal MatMul/Conv NPU graph — so NPU itself is still fp16.
+//            This comparison shows whether int8-weight-on-CPU is competitive
+//            with fp16-on-NPU for the matmul-converted shapes.
+static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int kw,
+                                    int strideH, int strideW, int group,
+                                    int batch = 1, int warmup = 3, int repeat = 10) {
+    using namespace MNN::Express;
+    std::ostringstream log;
+    log << "=== INT8 per-channel: N=" << batch << " ic=" << ic << " oc=" << oc
+        << " ih=" << ih << " iw=" << iw
+        << " kh=" << kh << " kw=" << kw
+        << " stride=" << strideH << " group=" << group << " ===\n";
+
+    int weightSize = oc * (ic / group) * kh * kw;
+    std::vector<float> weight(weightSize);
+    std::vector<float> bias(oc);
+    for (int i = 0; i < weightSize; i++) weight[i] = (float)((i % 7) - 3) * 0.1f;
+    for (int i = 0; i < oc; i++) bias[i] = (float)((i % 5) - 2) * 0.05f;
+
+    int inputSize = batch * ic * ih * iw;
+    std::vector<float> inputData(inputSize);
+    for (int i = 0; i < inputSize; i++) inputData[i] = (float)((i % 11) - 5) * 0.1f;
+
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms    = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+
+    // ── CPU (int8 per-channel weight, fp32 I/O) ─────────────────────────
+    std::vector<float> cpuOutput;
+    double cpuFirstMs = -1, cpuAvgMs = -1;
+    std::vector<double> cpuWarmupMs;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
+        ExecutorScope scope(exe);
+        auto x = _Input({batch, ic, ih, iw}, NCHW);
+        ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+        auto y = _PerChannelInt8Conv(weight, bias, x, ic, oc, kh, kw,
+                                     strideH, strideW, group);
+        y = _Convert(y, NCHW);
+
+        auto t0 = Clock::now();
+        auto ptr = y->readMap<float>();
+        cpuFirstMs = elapsed(t0, Clock::now());
+        if (!ptr) { log << "ERROR: CPU int8 output null\n"; return log.str(); }
+        cpuOutput.assign(ptr, ptr + y->getInfo()->size);
+
+        for (int i = 0; i < warmup; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            auto tw0 = Clock::now();
+            y->readMap<float>();
+            cpuWarmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        cpuAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    }
+
+    // ── HiAI (same quant op; HiAIConvExecution dequant to fp32 internally) ──
+    std::vector<float> hiaiOutput;
+    double hiaiFirstMs = -1, hiaiAvgMs = -1;
+    std::vector<double> hiaiWarmupMs;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
+        ExecutorScope scope(exe);
+        auto x = _Input({batch, ic, ih, iw}, NCHW);
+        ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+        auto y = _PerChannelInt8Conv(weight, bias, x, ic, oc, kh, kw,
+                                     strideH, strideW, group);
+        y = _Convert(y, NCHW);
+
+        auto t0 = Clock::now();
+        auto ptr = y->readMap<float>();
+        hiaiFirstMs = elapsed(t0, Clock::now());
+        if (!ptr) { log << "ERROR: HiAI int8 output null\n"; return log.str(); }
+        hiaiOutput.assign(ptr, ptr + y->getInfo()->size);
+
+        for (int i = 0; i < warmup; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            auto tw0 = Clock::now();
+            y->readMap<float>();
+            hiaiWarmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; i++) {
+            ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
+            y->readMap<float>();
+        }
+        hiaiAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    }
+
+    // ── Precision vs each other ─────────────────────────────────────────
+    if (cpuOutput.size() != hiaiOutput.size()) {
+        log << "FAIL: size mismatch CPU=" << cpuOutput.size()
+            << " HiAI=" << hiaiOutput.size() << "\n";
+        return log.str();
+    }
+    float maxRef = 0.0f;
+    for (auto v : cpuOutput) maxRef = std::max(maxRef, std::abs(v));
+    if (maxRef < 1e-6f) maxRef = 1e-6f;
+    float maxDiff = 0.0f;
+    int failCount = 0;
+    for (int i = 0; i < (int)cpuOutput.size(); i++) {
+        float diff = std::abs(cpuOutput[i] - hiaiOutput[i]);
+        if (diff > maxDiff) maxDiff = diff;
+        if (diff / maxRef > 0.02f) failCount++;  // looser threshold vs fp32 (quant noise)
+    }
+    float relError = maxDiff / maxRef;
+    log << "max|ref|=" << maxRef << "  maxDiff=" << maxDiff
+        << "  relErr=" << (relError * 100.0f) << "%"
+        << "  fail=" << failCount << "/" << cpuOutput.size() << "\n";
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "CPU  (int8 DynamicQuant) first=%.2fms", cpuFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)cpuWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, cpuWarmupMs[i]);
+        log << buf;
+    }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
+    log << buf;
+
+    snprintf(buf, sizeof(buf), "HiAI (dequant->fp16) first=%.2fms(compile+infer)", hiaiFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)hiaiWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, hiaiWarmupMs[i]);
+        log << buf;
+    }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, hiaiAvgMs);
+    log << buf;
+
+    snprintf(buf, sizeof(buf),
+             "speedup(steady) CPU/HiAI=%.2fx  (>1=NPU faster)\n",
+             hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
+    log << buf;
+
+    if (relError < 0.02f) log << "PASS\n";
+    else if (relError < 0.05f) log << "WARN: relErr=" << (relError * 100.0f) << "% (>2%)\n";
+    else log << "FAIL: relErr=" << (relError * 100.0f) << "% (>5%)\n";
+    return log.str();
+}
+
 static void OpTestExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::ostringstream result;
@@ -1121,6 +1344,26 @@ static void OpTestExecute(napi_env env, void* data) {
             result << "\n";
         }
         result << "=== Qwen3VL Summary: " << pass << "/" << n << " passed ===\n";
+    } else if (cfg == "qwen3vl_int8") {
+        // Same ops as qwen3vl but weights quantized to int8 per-channel symmetric.
+        // Lets us see if CPU's int8 DynamicQuant beats fp16-on-NPU for these shapes.
+        struct TestCase { int n, ic, oc, kh, kw, g; const char* name; };
+        TestCase cases[] = {
+            {608, 1024, 1024, 1, 1, 1, "attn_qkv/out_proj (1024->1024)"},
+            {608, 1024, 4096, 1, 1, 1, "mlp_fc1 (1024->4096)"},
+            {608, 4096, 1024, 1, 1, 1, "mlp_fc2 (4096->1024)"},
+        };
+        int n = sizeof(cases) / sizeof(cases[0]);
+        int pass = 0;
+        for (int i = 0; i < n; i++) {
+            auto& c = cases[i];
+            result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
+            std::string r = runConvTestInt8(c.ic, c.oc, 1, 1, c.kh, c.kw, 1, 1, c.g, c.n, 2, 5);
+            result << r;
+            if (r.find("PASS") != std::string::npos) pass++;
+            result << "\n";
+        }
+        result << "=== Qwen3VL Int8 Summary: " << pass << "/" << n << " passed ===\n";
     } else {
         // Custom: "N,ic,oc,ih,iw[,kh,kw,sh,sw,group]"
         int N=1, ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;

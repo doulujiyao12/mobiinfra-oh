@@ -78,8 +78,8 @@ struct OpTest {
           this.runWithMode('preset', 'Running preset test suite...\n')
         })
 
-      // Qwen3VL visual encoder test button
-      Button(this.running ? 'Running...' : 'Run Qwen3VL Visual (N=608)')
+      // Qwen3VL visual encoder test button (FP32)
+      Button(this.running ? 'Running...' : 'Run Qwen3VL Visual FP32 (N=608)')
         .width('90%')
         .height(48)
         .backgroundColor(this.running ? '#BBBBBB' : '#9C27B0')
@@ -88,7 +88,20 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          this.runWithMode('qwen3vl', 'Running Qwen3VL visual encoder ops (N=608, 1x1 conv)...\n')
+          this.runWithMode('qwen3vl', 'Running Qwen3VL visual encoder ops (fp32, 1x1 conv, N=608)...\n')
+        })
+
+      // Qwen3VL visual encoder test button (Int8 per-channel)
+      Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Int8 PerChannel (N=608)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#E91E63')
+        .borderRadius(10)
+        .fontSize(15)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_int8', 'Running Qwen3VL visual encoder ops (int8 per-channel, N=608)...\n')
         })
 
       // Custom test section
