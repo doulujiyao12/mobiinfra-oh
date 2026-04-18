@@ -147,6 +147,15 @@ MNN_PUBLIC VARP _Conv(std::vector<int8_t>&& weight, std::vector<float>&& bias, s
                       float scaleIn, float scaleOut,
                       int8_t inputZeroPoint, int8_t outputZeroPoint,
                       int8_t minValue, int8_t maxValue, float weightClampValue, bool accumulateToInt16);
+// Float-IO, int8 weight hybrid conv (DynamicQuant-style). weightFloat is laid
+// out as [oc, ic/group * kh * kw]. quantBlock=0 → per-output-channel symmetric
+// quant, matching llmexport.py's --quant_block=0. Other values currently fall
+// back to per-channel.
+MNN_PUBLIC VARP _HybridInt8Conv(std::vector<float>&& weightFloat, std::vector<float>&& bias,
+                                VARP x, INTS channel, INTS kernelSize,
+                                PaddingMode pad = VALID, INTS stride = {1, 1}, INTS dilate = {1, 1},
+                                int group = 1, INTS pads = {0, 0}, bool relu = false, bool relu6 = false,
+                                int nbits = 8, int quantBlock = 0);
 MNN_PUBLIC VARP _CosineSimilarity(VARP input0, VARP input1, VARP inputDim);
 
 enum GridSamplePaddingMode {GRID_SAMPLE_PADDING_ZEROS, GRID_SAMPLE_PADDING_BORDER, GRID_SAMPLE_PADDING_REFLECTION};

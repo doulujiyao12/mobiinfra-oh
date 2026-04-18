@@ -242,13 +242,6 @@
 #include <cmath>
 #include <chrono>
 
-// MNN internal headers for per-channel int8 quantization helper.
-// Added via CMake include paths (source/ and schema/current/). libMNN still
-// provides runtime symbols; these headers only let us build a Convolution2DT
-// with a correctly-encoded IDSTQuanT on the fly.
-#include "MNN_generated.h"
-#include "core/IDSTEncoder.hpp"
-
 #define LOG_TAG "MnnLlm"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
@@ -1077,71 +1070,29 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
     return log.str();
 }
 
-// ── Per-channel int8 symmetric quant helper ───────────────────────────────
-// Builds a Convolution2DT whose quanParameter holds int8 weights + per-channel
-// scales, mirroring what mnn_converter.py::rebuild_linear produces when
-// --quant_bit=8 --quant_block=0. Returns an Express VARP.
-//
-// Shape convention: weight is laid out as [oc, ic_per_group * kh * kw] in row-major,
-// which is also what MNN's IDSTEncoder expects (kernelNum=oc, kernelSize=ic*kh*kw).
+// Per-channel int8 symmetric quant helper — thin wrapper around the public
+// MNN::Express::_HybridInt8Conv (DynamicQuant-style float-IO + int8 weight).
+// Equivalent to what mnn_converter.py::rebuild_linear emits for
+// --quant_bit=8 --quant_block=0 (channel-wise).
 static MNN::Express::VARP _PerChannelInt8Conv(
     const std::vector<float>& weight,
     const std::vector<float>& bias,
     MNN::Express::VARP x,
     int ic, int oc, int kh, int kw,
     int strideH, int strideW, int group) {
-    using namespace MNN;
     using namespace MNN::Express;
-
-    int kSize = (ic / group) * kh * kw;   // per-output-channel weight count
-    int kNum  = oc;
-
-    // Compute per-channel symmetric scale: scale[o] = max|w[o,:]| / 127
-    std::vector<float> alpha(kNum, 0.f);
-    for (int o = 0; o < kNum; o++) {
-        float amax = 1e-8f;
-        const float* row = weight.data() + o * kSize;
-        for (int i = 0; i < kSize; i++) {
-            float v = std::fabs(row[i]);
-            if (v > amax) amax = v;
-        }
-        alpha[o] = amax / 127.f;
-    }
-
-    std::unique_ptr<OpT> convOp(new OpT);
-    convOp->type = OpType_Convolution;
-    if (ic == oc && ic == group) {
-        convOp->type = OpType_ConvolutionDepthwise;
-    }
-    convOp->main.type  = OpParameter_Convolution2D;
-    convOp->main.value = new Convolution2DT;
-    auto conv2D = convOp->main.AsConvolution2D();
-    conv2D->common.reset(new Convolution2DCommonT);
-    conv2D->common->padMode     = PadMode_VALID;
-    conv2D->common->padX        = 0;
-    conv2D->common->padY        = 0;
-    conv2D->common->strideX     = strideW;
-    conv2D->common->strideY     = strideH;
-    conv2D->common->group       = group;
-    conv2D->common->outputCount = oc;
-    conv2D->common->inputCount  = ic;
-    conv2D->common->dilateX     = 1;
-    conv2D->common->dilateY     = 1;
-    conv2D->common->kernelX     = kw;
-    conv2D->common->kernelY     = kh;
-    conv2D->common->relu        = false;
-    conv2D->common->relu6       = false;
-
-    // Symmetric int8: clampMin = -128, bits = 8, asymmetric = false.
-    // detectSparse=false so we always use the dense CQ layout.
-    conv2D->quanParameter = IDSTEncoder::encode(
-        weight.data(), alpha, kSize, kNum,
-        /*asymmetricQuantFlag=*/false, /*quantWeightPtr=*/nullptr,
-        /*clampMin=*/-128, /*bits=*/8, /*detectSparse=*/false);
-    conv2D->weight.clear();
-    conv2D->bias = bias;
-
-    return Variable::create(Expr::create(convOp.get(), {x}));
+    std::vector<float> w = weight;
+    std::vector<float> b = bias;
+    return _HybridInt8Conv(std::move(w), std::move(b), x,
+                           /*channel=*/{ic, oc},
+                           /*kernelSize=*/{kw, kh},
+                           /*pad=*/VALID,
+                           /*stride=*/{strideW, strideH},
+                           /*dilate=*/{1, 1},
+                           /*group=*/group,
+                           /*pads=*/{0, 0},
+                           /*relu=*/false, /*relu6=*/false,
+                           /*nbits=*/8, /*quantBlock=*/0);
 }
 
 // ── Int8 per-channel variant of runConvTest ───────────────────────────────

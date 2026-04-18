@@ -56,18 +56,9 @@
   set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
   set(MNN_LIB_DIR ${NATIVERENDER_ROOT_PATH}/../../../libs/${OHOS_ARCH})
   set(MNN_INCLUDE_DIR ${NATIVERENDER_ROOT_PATH}/include)
-  # Vendored MNN internal headers (FlatBuffers schema + IDSTEncoder) needed
-  # to build a per-channel int8 Convolution2DT inline for the op precision
-  # test. libMNN.so still supplies the runtime symbols. Keeping them under
-  # include/MNN_internal/ means the build is self-contained and does not
-  # depend on the outer MNN source tree (important for DevEco on Windows).
-  set(MNN_INTERNAL_INCLUDE_DIR ${MNN_INCLUDE_DIR}/MNN_internal)
 
   add_library(entry SHARED napi_init.cpp)
-  target_include_directories(entry PRIVATE
-      ${MNN_INCLUDE_DIR}
-      ${MNN_INTERNAL_INCLUDE_DIR}
-  )
+  target_include_directories(entry PRIVATE ${MNN_INCLUDE_DIR})
   target_link_directories(entry PUBLIC ${MNN_LIB_DIR})
 
   target_link_libraries(entry PUBLIC
