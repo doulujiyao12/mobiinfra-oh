@@ -11,14 +11,23 @@ struct OpTest {
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
   // HiAI conv-op mode: 'auto' | 'matmul' | 'conv'
   @State convMode: string = 'auto'
+  // CPU precision: 'normal' (fp32) | 'high' (fp32) | 'low' (fp16/ARM82) | 'low_bf16'
+  @State cpuPrecision: string = 'normal'
+  // CPU memory: 'normal' | 'high' | 'low' (int8 test needs 'low')
+  @State cpuMemory: string = 'normal'
 
   private runWithMode(cfg: string, banner: string) {
     this.running = true
     native.setConvMode(this.convMode)
-    this.testResult = '[HiAI mode=' + this.convMode + ']\n' + banner
+    native.setCpuPrecision(this.cpuPrecision)
+    native.setCpuMemory(this.cpuMemory)
+    const header = '[HiAI=' + this.convMode
+      + ' | CPU prec=' + this.cpuPrecision
+      + ' mem=' + this.cpuMemory + ']\n'
+    this.testResult = header + banner
     let p: Promise<string> = native.opTest(cfg)
     p.then((result: string) => {
-      this.testResult = '[HiAI mode=' + this.convMode + ']\n' + result
+      this.testResult = header + result
       this.running = false
     }).catch((e: Error) => {
       this.testResult = 'Error: ' + e.message
@@ -36,6 +45,30 @@ struct OpTest {
       .fontSize(14)
       .enabled(!this.running)
       .onClick(() => { this.convMode = value })
+  }
+
+  @Builder PrecBtn(label: string, value: string) {
+    Button(label)
+      .width('24%')
+      .height(34)
+      .backgroundColor(this.cpuPrecision === value ? '#1565C0' : '#CFD8DC')
+      .fontColor(this.cpuPrecision === value ? '#FFFFFF' : '#333333')
+      .borderRadius(8)
+      .fontSize(13)
+      .enabled(!this.running)
+      .onClick(() => { this.cpuPrecision = value })
+  }
+
+  @Builder MemBtn(label: string, value: string) {
+    Button(label)
+      .width('32%')
+      .height(34)
+      .backgroundColor(this.cpuMemory === value ? '#6A1B9A' : '#CFD8DC')
+      .fontColor(this.cpuMemory === value ? '#FFFFFF' : '#333333')
+      .borderRadius(8)
+      .fontSize(13)
+      .enabled(!this.running)
+      .onClick(() => { this.cpuMemory = value })
   }
 
   build() {
@@ -60,6 +93,37 @@ struct OpTest {
         this.ModeBtn('Auto', 'auto')
         this.ModeBtn('MatMul', 'matmul')
         this.ModeBtn('Conv', 'conv')
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.SpaceBetween)
+      .margin({ bottom: 8 })
+
+      // CPU precision selector (fp32 normal/high, fp16 via ARM82, bf16)
+      Text('CPU precision:')
+        .fontSize(12)
+        .fontColor('#666666')
+        .alignSelf(ItemAlign.Start)
+        .margin({ left: '5%', bottom: 4 })
+      Row() {
+        this.PrecBtn('Normal', 'normal')
+        this.PrecBtn('High',   'high')
+        this.PrecBtn('Low(fp16)', 'low')
+        this.PrecBtn('BF16',   'low_bf16')
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.SpaceBetween)
+      .margin({ bottom: 8 })
+
+      // CPU memory selector (Low keeps int8 weights for the int8 test)
+      Text('CPU memory:')
+        .fontSize(12)
+        .fontColor('#666666')
+        .alignSelf(ItemAlign.Start)
+        .margin({ left: '5%', bottom: 4 })
+      Row() {
+        this.MemBtn('Normal', 'normal')
+        this.MemBtn('High',   'high')
+        this.MemBtn('Low',    'low')
       }
       .width('90%')
       .justifyContent(FlexAlign.SpaceBetween)

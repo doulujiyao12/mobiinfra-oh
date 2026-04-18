@@ -874,7 +874,67 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// ========== 9. HiAI Conv mode override (auto / matmul / conv) ==========
+// ========== 9. CPU BackendConfig overrides for op precision test ==========
+// These globals are consumed by runConvTest / runConvTestInt8 when building
+// the CPU Executor. HiAI side is unaffected (its backend has no use for
+// BackendConfig). Values map directly onto MNN::BackendConfig::PrecisionMode
+// and MemoryMode enums.
+static MNN::BackendConfig::PrecisionMode g_cpuPrecision = MNN::BackendConfig::Precision_Normal;
+static MNN::BackendConfig::MemoryMode    g_cpuMemory    = MNN::BackendConfig::Memory_Normal;
+
+static MNN::BackendConfig makeCpuBackendConfig() {
+    MNN::BackendConfig cfg;
+    cfg.precision = g_cpuPrecision;
+    cfg.memory    = g_cpuMemory;
+    return cfg;
+}
+
+static const char* precisionName(MNN::BackendConfig::PrecisionMode p) {
+    switch (p) {
+        case MNN::BackendConfig::Precision_Normal:    return "Normal(fp32)";
+        case MNN::BackendConfig::Precision_High:      return "High(fp32)";
+        case MNN::BackendConfig::Precision_Low:       return "Low(fp16/ARM82)";
+        case MNN::BackendConfig::Precision_Low_BF16:  return "Low_BF16";
+        default:                                      return "?";
+    }
+}
+static const char* memoryName(MNN::BackendConfig::MemoryMode m) {
+    switch (m) {
+        case MNN::BackendConfig::Memory_Normal: return "Normal";
+        case MNN::BackendConfig::Memory_High:   return "High";
+        case MNN::BackendConfig::Memory_Low:    return "Low";
+        default:                                return "?";
+    }
+}
+
+static napi_value SetCpuPrecision(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char mode[32] = {0}; size_t len = 0;
+    if (argc >= 1) napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), &len);
+    if      (std::strcmp(mode, "high") == 0)     g_cpuPrecision = MNN::BackendConfig::Precision_High;
+    else if (std::strcmp(mode, "low") == 0)      g_cpuPrecision = MNN::BackendConfig::Precision_Low;
+    else if (std::strcmp(mode, "low_bf16") == 0) g_cpuPrecision = MNN::BackendConfig::Precision_Low_BF16;
+    else                                         g_cpuPrecision = MNN::BackendConfig::Precision_Normal;
+    LOGI("cpu precision=%{public}s", precisionName(g_cpuPrecision));
+    napi_value ret; napi_create_string_utf8(env, "ok", 2, &ret); return ret;
+}
+
+static napi_value SetCpuMemory(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char mode[32] = {0}; size_t len = 0;
+    if (argc >= 1) napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), &len);
+    if      (std::strcmp(mode, "high") == 0) g_cpuMemory = MNN::BackendConfig::Memory_High;
+    else if (std::strcmp(mode, "low") == 0)  g_cpuMemory = MNN::BackendConfig::Memory_Low;
+    else                                     g_cpuMemory = MNN::BackendConfig::Memory_Normal;
+    LOGI("cpu memory=%{public}s", memoryName(g_cpuMemory));
+    napi_value ret; napi_create_string_utf8(env, "ok", 2, &ret); return ret;
+}
+
+// ========== 10. HiAI Conv mode override (auto / matmul / conv) ==========
 // Mirrors HIAI_CONV_MODE env consumed by HiAIConvExecution.cpp.
 // Must be called BEFORE opTest (env is read during compileHiAIModel).
 static napi_value SetConvMode(napi_env env, napi_callback_info info) {
@@ -930,11 +990,13 @@ static std::string runConvTest(int ic, int oc, int ih, int iw, int kh, int kw,
     };
 
     // ── CPU ──────────────────────────────────────────────────────────────
+    log << "CPU cfg: memory=" << memoryName(g_cpuMemory)
+        << " precision=" << precisionName(g_cpuPrecision) << "\n";
     std::vector<float> cpuOutput;
     double cpuFirstMs = -1, cpuAvgMs = -1;
     std::vector<double> cpuWarmupMs;
     {
-        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
+        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, makeCpuBackendConfig(), 1);
         ExecutorScope scope(exe);
         auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
@@ -1127,12 +1189,22 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
         return Ms(b - a).count();
     };
 
-    // ── CPU (int8 per-channel weight, fp32 I/O) ─────────────────────────
+    // ── CPU (int8 per-channel weight, fp32/fp16 I/O depending on config) ──
+    // Note: int8 weight is only kept when memory==Memory_Low (gated by
+    // MNN_LOW_MEMORY). If user picks Memory_Normal/High, weights will be
+    // dequantized to fp32 at load time and CPU will fall back to the same
+    // kernel as the fp32 test — useful for A/B inspection.
+    log << "CPU cfg: memory=" << memoryName(g_cpuMemory)
+        << " precision=" << precisionName(g_cpuPrecision);
+    if (g_cpuMemory != MNN::BackendConfig::Memory_Low) {
+        log << "  [WARN: non-Low memory → int8 weights get dequantized]";
+    }
+    log << "\n";
     std::vector<float> cpuOutput;
     double cpuFirstMs = -1, cpuAvgMs = -1;
     std::vector<double> cpuWarmupMs;
     {
-        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, MNN::BackendConfig(), 1);
+        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, makeCpuBackendConfig(), 1);
         ExecutorScope scope(exe);
         auto x = _Input({batch, ic, ih, iw}, NCHW);
         ::memcpy(x->writeMap<float>(), inputData.data(), inputSize * sizeof(float));
@@ -1376,6 +1448,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLogs",      nullptr, GetLogs,            nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
