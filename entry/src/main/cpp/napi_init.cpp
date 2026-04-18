@@ -960,6 +960,36 @@ static napi_value SetConvMode(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+// ========== 10b. HiAI int8 quant path override (auto / on / off) ==========
+// Mirrors HIAI_CONV_QUANT env consumed by HiAIConvExecution.cpp.
+//   auto/on -> use hiai::op::QuantizedConvolution when op has symmetric
+//              per-channel int8 weights (real int8 CUBE MAC on the NPU)
+//   off     -> dequantize to fp32 at compile time and use the plain
+//              Convolution / MatMul float path (legacy behaviour)
+// Must be called BEFORE opTest (env is read during compileHiAIModel).
+static napi_value SetConvQuant(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char mode[32] = {0};
+    size_t len = 0;
+    if (argc >= 1) {
+        napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), &len);
+    }
+
+    if (len == 0 || std::strcmp(mode, "auto") == 0 || std::strcmp(mode, "on") == 0) {
+        unsetenv("HIAI_CONV_QUANT");
+        LOGI("HIAI_CONV_QUANT unset (auto: int8 NPU op when eligible)");
+    } else {
+        setenv("HIAI_CONV_QUANT", mode, 1);
+        LOGI("HIAI_CONV_QUANT=%{public}s", mode);
+    }
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+
 // ========== 10. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
 using namespace MNN::Express;
 
@@ -1159,10 +1189,11 @@ static MNN::Express::VARP _PerChannelInt8Conv(
 
 // ── Int8 per-channel variant of runConvTest ───────────────────────────────
 // CPU side: MNN picks the DynamicQuant hybrid int8 kernel (float I/O, int8 weight).
-// HiAI side: HiAIConvExecution dequantizes to fp32 via ConvolutionCommon::load,
-//            then uses the normal MatMul/Conv NPU graph — so NPU itself is still fp16.
-//            This comparison shows whether int8-weight-on-CPU is competitive
-//            with fp16-on-NPU for the matmul-converted shapes.
+// HiAI side: by default (HIAI_CONV_QUANT=auto) HiAIConvExecution now builds a
+//            hiai::op::QuantizedConvolution graph with DT_INT8 filter +
+//            per-OC filter_quant_scales, so the Da Vinci CUBE runs its
+//            int8 MAC path. Set HIAI_CONV_QUANT=off to fall back to the
+//            legacy dequant-to-fp32 Convolution/MatMul graph for comparison.
 static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int kw,
                                     int strideH, int strideW, int group,
                                     int batch = 1, int warmup = 3, int repeat = 10) {
@@ -1296,7 +1327,11 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
     snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
     log << buf;
 
-    snprintf(buf, sizeof(buf), "HiAI (dequant->fp16) first=%.2fms(compile+infer)", hiaiFirstMs);
+    const char* hiaiLbl = "HiAI (QuantizedConvolution int8)";
+    if (const char* qm = std::getenv("HIAI_CONV_QUANT")) {
+        if (std::strcmp(qm, "off") == 0) hiaiLbl = "HiAI (dequant->fp16)";
+    }
+    snprintf(buf, sizeof(buf), "%s first=%.2fms(compile+infer)", hiaiLbl, hiaiFirstMs);
     log << buf;
     for (int i = 0; i < (int)hiaiWarmupMs.size(); i++) {
         snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, hiaiWarmupMs[i]);
@@ -1448,6 +1483,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},

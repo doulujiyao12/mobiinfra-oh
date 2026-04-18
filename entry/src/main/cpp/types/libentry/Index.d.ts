@@ -17,6 +17,15 @@ export const opTest: (config: string) => Promise<string>;
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_MODE env).
 export const setConvMode: (mode: string) => string;
 
+// HiAI int8 quant-path override for A/B testing: 'auto' | 'on' | 'off'
+//   auto / on (default): build hiai::op::QuantizedConvolution with DT_INT8
+//                        filter + per-OC scales when the op is symmetric
+//                        per-channel int8 (real NPU int8 CUBE MAC).
+//   off:                 legacy path — dequantize to fp32 at compile time and
+//                        use the plain Convolution/MatMul float graph.
+// Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_QUANT env).
+export const setConvQuant: (mode: string) => string;
+
 // CPU BackendConfig overrides for the op precision test (applied to runConvTest
 // and runConvTestInt8 when they create the CPU Executor).
 //   precision: 'normal' (fp32) | 'high' (fp32) | 'low' (fp16/ARM82) | 'low_bf16'

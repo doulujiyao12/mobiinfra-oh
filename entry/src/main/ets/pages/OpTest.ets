@@ -11,6 +11,8 @@ struct OpTest {
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
   // HiAI conv-op mode: 'auto' | 'matmul' | 'conv'
   @State convMode: string = 'auto'
+  // HiAI int8 quant mode: 'auto' (on) | 'off' — use real hiai::op::QuantizedConvolution when eligible
+  @State convQuant: string = 'auto'
   // CPU precision: 'normal' (fp32) | 'high' (fp32) | 'low' (fp16/ARM82) | 'low_bf16'
   @State cpuPrecision: string = 'normal'
   // CPU memory: 'normal' | 'high' | 'low' (int8 test needs 'low')
@@ -19,9 +21,11 @@ struct OpTest {
   private runWithMode(cfg: string, banner: string) {
     this.running = true
     native.setConvMode(this.convMode)
+    native.setConvQuant(this.convQuant)
     native.setCpuPrecision(this.cpuPrecision)
     native.setCpuMemory(this.cpuMemory)
     const header = '[HiAI=' + this.convMode
+      + ' quant=' + this.convQuant
       + ' | CPU prec=' + this.cpuPrecision
       + ' mem=' + this.cpuMemory + ']\n'
     this.testResult = header + banner
@@ -45,6 +49,18 @@ struct OpTest {
       .fontSize(14)
       .enabled(!this.running)
       .onClick(() => { this.convMode = value })
+  }
+
+  @Builder QuantBtn(label: string, value: string) {
+    Button(label)
+      .width('48%')
+      .height(34)
+      .backgroundColor(this.convQuant === value ? '#00695C' : '#CFD8DC')
+      .fontColor(this.convQuant === value ? '#FFFFFF' : '#333333')
+      .borderRadius(8)
+      .fontSize(13)
+      .enabled(!this.running)
+      .onClick(() => { this.convQuant = value })
   }
 
   @Builder PrecBtn(label: string, value: string) {
@@ -93,6 +109,20 @@ struct OpTest {
         this.ModeBtn('Auto', 'auto')
         this.ModeBtn('MatMul', 'matmul')
         this.ModeBtn('Conv', 'conv')
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.SpaceBetween)
+      .margin({ bottom: 8 })
+
+      // HiAI int8 path selector — real hiai::op::QuantizedConvolution vs dequant-to-fp32
+      Text('HiAI int8 path (affects int8 tests only):')
+        .fontSize(12)
+        .fontColor('#666666')
+        .alignSelf(ItemAlign.Start)
+        .margin({ left: '5%', bottom: 4 })
+      Row() {
+        this.QuantBtn('Auto (int8 NPU)', 'auto')
+        this.QuantBtn('Off (dequant fp16)', 'off')
       }
       .width('90%')
       .justifyContent(FlexAlign.SpaceBetween)
