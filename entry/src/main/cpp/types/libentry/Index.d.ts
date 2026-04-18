@@ -23,15 +23,21 @@ export const setConvMode: (mode: string) => string;
 //   full:                int8×int8 CUBE MAC inside QuantizedConvolution.
 //                        NPU quantizes input with a fixed x_scale (see
 //                        setInt8XScale). Accuracy rough, perf A/B only.
-//   matmul_int8:         QuantizeV2 → MatMul(int8×int8→int32) → DequantizeV2.
-//                        Symmetric int8 on both sides (x1 is INT8, offset=0)
-//                        — HiAI IR lowers hiai::op::MatMul to CANN's
-//                        ge::op::MatMulV2 whose x1 type list only has INT8
-//                        (UINT8 gets rejected). Real int8 MAC + MatMul engine
-//                        + per-channel weight quant (via DequantizeV2.deq_scale).
+//   matmul_int8:         single hiai::op::QuantizedMatMul. x1 fp32 in (NPU
+//                        quantizes internally via x1_quant_scale from
+//                        setInt8XScale, x1_quant_offset=0), x2 int8 const with
+//                        per-OC x2_quant_scales (LIST_FLOAT, length=OC), int32
+//                        bias, fp32 out. Real int8×int8 CUBE MAC through the
+//                        MatMul engine and per-channel weight quant preserved.
+//                        Replaces the earlier QuantizeV2 → MatMul(int8) →
+//                        DequantizeV2 chain — that chain is illegal on current
+//                        DDK because frontend hiai::op::MatMul x1 TensorType
+//                        is {FLOAT, UINT8} (math_defs.h:454) while backend
+//                        ge::op::MatMulV2 x1 list has no UINT8, and
+//                        DequantizeV2 alone also fails BuildIRModel.
 //                        Only active when op shape is 1×1 linear; others
 //                        auto-degrade to weight-only. Requires HiAI firmware
-//                        >= 100.515.
+//                        >= 100.500.010.010.
 //   off:                 legacy — dequantize to fp32 at compile time.
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_QUANT env).
 export const setConvQuant: (mode: string) => string;
