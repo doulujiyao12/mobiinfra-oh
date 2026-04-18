@@ -960,17 +960,19 @@ static napi_value SetConvMode(napi_env env, napi_callback_info info) {
     return ret;
 }
 
-// ========== 10b. HiAI int8 quant path override (auto / on / off / full) ==========
+// ========== 10b. HiAI int8 quant path override ==========
 // Mirrors HIAI_CONV_QUANT env consumed by HiAIConvExecution.cpp.
+// Values:
 //   auto / on (default): weight-only int8 — x_quant_type=0, filter int8 per-OC.
-//                        fp16 CUBE MAC on the NPU; int8 just compresses weight
-//                        storage. Matches accuracy of fp16 path.
-//   full:                genuine int8×int8 CUBE MAC — x_quant_type=1, NPU
-//                        quantizes input with a fixed x_scale read from
-//                        HIAI_INT8_X_SCALE (default 1/127). Accuracy is rough,
-//                        for perf A/B only.
-//   off:                 legacy path — dequantize to fp32 at compile time
-//                        and use the plain Convolution/MatMul float path.
+//                        fp16 CUBE MAC; int8 just compresses weight storage.
+//   full:                genuine int8×int8 inside QuantizedConvolution —
+//                        x_quant_type=1, x_quant_scale from HIAI_INT8_X_SCALE.
+//   matmul_int8:         QuantizeV2 → MatMul(uint8×int8→int32) → DequantizeV2.
+//                        Real int8 CUBE MAC + MatMul engine + per-channel
+//                        weight quant via DequantizeV2.deq_scale. Only active
+//                        when the op shape is 1×1 linear; other shapes
+//                        degrade to the weight-only path automatically.
+//   off:                 legacy — dequantize to fp32 at compile time.
 // Must be called BEFORE opTest (env is read during compileHiAIModel).
 static napi_value SetConvQuant(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -1299,12 +1301,14 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
     double hiaiFirstMs = -1, hiaiAvgMs = -1;
     std::vector<double> hiaiWarmupMs;
     {
-        // In 'full' int8 mode the NPU needs a fixed x_scale at compile time.
-        // Auto-calibrate from the test input's amax so the A/B is semantically
-        // meaningful (user doesn't have to guess a scale manually).
+        // In 'full' / 'matmul_int8' int8 modes the NPU needs a fixed x_scale
+        // at compile time. Auto-calibrate from the test input's amax so the
+        // A/B is semantically meaningful (user doesn't have to guess).
         const char* qm = std::getenv("HIAI_CONV_QUANT");
-        bool fullMode = (qm != nullptr && std::strcmp(qm, "full") == 0);
-        if (fullMode) {
+        bool needXScale = qm != nullptr &&
+                          (std::strcmp(qm, "full")        == 0 ||
+                           std::strcmp(qm, "matmul_int8") == 0);
+        if (needXScale) {
             float amax = 1e-8f;
             for (int i = 0; i < inputSize; i++) {
                 float v = std::fabs(inputData[i]);
@@ -1314,7 +1318,7 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
             char buf[64];
             snprintf(buf, sizeof(buf), "%.8g", xScale);
             setenv("HIAI_INT8_X_SCALE", buf, 1);
-            log << "full-int8 x_scale (amax/127) = " << buf << "\n";
+            log << qm << " x_scale (amax/127) = " << buf << "\n";
         }
 
         auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
@@ -1378,8 +1382,9 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
 
     const char* hiaiLbl = "HiAI (int8 weight, fp16 MAC)";
     if (const char* qm = std::getenv("HIAI_CONV_QUANT")) {
-        if      (std::strcmp(qm, "off")  == 0) hiaiLbl = "HiAI (dequant->fp16)";
-        else if (std::strcmp(qm, "full") == 0) hiaiLbl = "HiAI (int8 MAC)";
+        if      (std::strcmp(qm, "off")         == 0) hiaiLbl = "HiAI (dequant->fp16)";
+        else if (std::strcmp(qm, "full")        == 0) hiaiLbl = "HiAI (int8 MAC, Conv)";
+        else if (std::strcmp(qm, "matmul_int8") == 0) hiaiLbl = "HiAI (int8 MAC, MatMul chain)";
     }
     snprintf(buf, sizeof(buf), "%s first=%.2fms(compile+infer)", hiaiLbl, hiaiFirstMs);
     log << buf;

@@ -17,14 +17,18 @@ export const opTest: (config: string) => Promise<string>;
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_MODE env).
 export const setConvMode: (mode: string) => string;
 
-// HiAI int8 quant-path override for A/B testing: 'auto' | 'on' | 'off' | 'full'
+// HiAI int8 quant-path override: 'auto' | 'on' | 'off' | 'full' | 'matmul_int8'
 //   auto / on (default): weight-only int8 — filter int8 per-OC, x stays fp32,
 //                        CUBE MAC is fp16. int8 just compresses weight storage.
-//   full:                genuine int8×int8 CUBE MAC. NPU quantizes input with
-//                        a fixed x_scale (see setInt8XScale). Accuracy rough,
-//                        perf A/B only.
-//   off:                 legacy path — dequantize to fp32 at compile time and
-//                        use the plain Convolution/MatMul float graph.
+//   full:                int8×int8 CUBE MAC inside QuantizedConvolution.
+//                        NPU quantizes input with a fixed x_scale (see
+//                        setInt8XScale). Accuracy rough, perf A/B only.
+//   matmul_int8:         QuantizeV2 → MatMul(uint8×int8→int32) → DequantizeV2.
+//                        Real int8 MAC + MatMul engine + per-channel weight
+//                        quant. Only active when op shape is 1×1 linear;
+//                        others auto-degrade to weight-only. Requires HiAI
+//                        firmware >= 100.515.
+//   off:                 legacy — dequantize to fp32 at compile time.
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_QUANT env).
 export const setConvQuant: (mode: string) => string;
 
