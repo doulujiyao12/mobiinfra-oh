@@ -23,11 +23,15 @@ export const setConvMode: (mode: string) => string;
 //   full:                int8×int8 CUBE MAC inside QuantizedConvolution.
 //                        NPU quantizes input with a fixed x_scale (see
 //                        setInt8XScale). Accuracy rough, perf A/B only.
-//   matmul_int8:         QuantizeV2 → MatMul(uint8×int8→int32) → DequantizeV2.
-//                        Real int8 MAC + MatMul engine + per-channel weight
-//                        quant. Only active when op shape is 1×1 linear;
-//                        others auto-degrade to weight-only. Requires HiAI
-//                        firmware >= 100.515.
+//   matmul_int8:         QuantizeV2 → MatMul(int8×int8→int32) → DequantizeV2.
+//                        Symmetric int8 on both sides (x1 is INT8, offset=0)
+//                        — HiAI IR lowers hiai::op::MatMul to CANN's
+//                        ge::op::MatMulV2 whose x1 type list only has INT8
+//                        (UINT8 gets rejected). Real int8 MAC + MatMul engine
+//                        + per-channel weight quant (via DequantizeV2.deq_scale).
+//                        Only active when op shape is 1×1 linear; others
+//                        auto-degrade to weight-only. Requires HiAI firmware
+//                        >= 100.515.
 //   off:                 legacy — dequantize to fp32 at compile time.
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_QUANT env).
 export const setConvQuant: (mode: string) => string;
