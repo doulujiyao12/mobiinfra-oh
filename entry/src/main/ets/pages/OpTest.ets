@@ -234,7 +234,7 @@ struct OpTest {
           .padding(12)
       }
       .width('90%')
-      .minHeight(400)
+      .height(400)
       .backgroundColor('#1A1A2E')
       .borderRadius(10)
       .margin({ bottom: 8 })
