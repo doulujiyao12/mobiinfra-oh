@@ -960,12 +960,17 @@ static napi_value SetConvMode(napi_env env, napi_callback_info info) {
     return ret;
 }
 
-// ========== 10b. HiAI int8 quant path override (auto / on / off) ==========
+// ========== 10b. HiAI int8 quant path override (auto / on / off / full) ==========
 // Mirrors HIAI_CONV_QUANT env consumed by HiAIConvExecution.cpp.
-//   auto/on -> use hiai::op::QuantizedConvolution when op has symmetric
-//              per-channel int8 weights (real int8 CUBE MAC on the NPU)
-//   off     -> dequantize to fp32 at compile time and use the plain
-//              Convolution / MatMul float path (legacy behaviour)
+//   auto / on (default): weight-only int8 — x_quant_type=0, filter int8 per-OC.
+//                        fp16 CUBE MAC on the NPU; int8 just compresses weight
+//                        storage. Matches accuracy of fp16 path.
+//   full:                genuine int8×int8 CUBE MAC — x_quant_type=1, NPU
+//                        quantizes input with a fixed x_scale read from
+//                        HIAI_INT8_X_SCALE (default 1/127). Accuracy is rough,
+//                        for perf A/B only.
+//   off:                 legacy path — dequantize to fp32 at compile time
+//                        and use the plain Convolution/MatMul float path.
 // Must be called BEFORE opTest (env is read during compileHiAIModel).
 static napi_value SetConvQuant(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -980,10 +985,36 @@ static napi_value SetConvQuant(napi_env env, napi_callback_info info) {
 
     if (len == 0 || std::strcmp(mode, "auto") == 0 || std::strcmp(mode, "on") == 0) {
         unsetenv("HIAI_CONV_QUANT");
-        LOGI("HIAI_CONV_QUANT unset (auto: int8 NPU op when eligible)");
+        LOGI("HIAI_CONV_QUANT unset (auto: weight-only int8)");
     } else {
         setenv("HIAI_CONV_QUANT", mode, 1);
         LOGI("HIAI_CONV_QUANT=%{public}s", mode);
+    }
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+
+// ========== 10c. HiAI int8 x_scale override (used only in 'full' mode) =========
+// Sets HIAI_INT8_X_SCALE consumed by HiAIConvExecution.cpp when building a
+// QuantizedConvolution with x_quant_type=1. Pass 0 (or any <=0) to clear.
+static napi_value SetInt8XScale(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    double v = 0.0;
+    if (argc >= 1) {
+        napi_get_value_double(env, args[0], &v);
+    }
+    if (v > 0.0 && std::isfinite(v)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.8g", v);
+        setenv("HIAI_INT8_X_SCALE", buf, 1);
+        LOGI("HIAI_INT8_X_SCALE=%{public}s", buf);
+    } else {
+        unsetenv("HIAI_INT8_X_SCALE");
+        LOGI("HIAI_INT8_X_SCALE unset (default 1/127)");
     }
     napi_value ret;
     napi_create_string_utf8(env, "ok", 2, &ret);
@@ -1268,6 +1299,24 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
     double hiaiFirstMs = -1, hiaiAvgMs = -1;
     std::vector<double> hiaiWarmupMs;
     {
+        // In 'full' int8 mode the NPU needs a fixed x_scale at compile time.
+        // Auto-calibrate from the test input's amax so the A/B is semantically
+        // meaningful (user doesn't have to guess a scale manually).
+        const char* qm = std::getenv("HIAI_CONV_QUANT");
+        bool fullMode = (qm != nullptr && std::strcmp(qm, "full") == 0);
+        if (fullMode) {
+            float amax = 1e-8f;
+            for (int i = 0; i < inputSize; i++) {
+                float v = std::fabs(inputData[i]);
+                if (v > amax) amax = v;
+            }
+            float xScale = amax / 127.0f;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.8g", xScale);
+            setenv("HIAI_INT8_X_SCALE", buf, 1);
+            log << "full-int8 x_scale (amax/127) = " << buf << "\n";
+        }
+
         auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
         auto x = _Input({batch, ic, ih, iw}, NCHW);
@@ -1327,9 +1376,10 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
     snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
     log << buf;
 
-    const char* hiaiLbl = "HiAI (QuantizedConvolution int8)";
+    const char* hiaiLbl = "HiAI (int8 weight, fp16 MAC)";
     if (const char* qm = std::getenv("HIAI_CONV_QUANT")) {
-        if (std::strcmp(qm, "off") == 0) hiaiLbl = "HiAI (dequant->fp16)";
+        if      (std::strcmp(qm, "off")  == 0) hiaiLbl = "HiAI (dequant->fp16)";
+        else if (std::strcmp(qm, "full") == 0) hiaiLbl = "HiAI (int8 MAC)";
     }
     snprintf(buf, sizeof(buf), "%s first=%.2fms(compile+infer)", hiaiLbl, hiaiFirstMs);
     log << buf;
@@ -1484,6 +1534,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setInt8XScale",nullptr, SetInt8XScale,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},

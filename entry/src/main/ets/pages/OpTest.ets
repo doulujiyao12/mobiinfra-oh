@@ -53,12 +53,12 @@ struct OpTest {
 
   @Builder QuantBtn(label: string, value: string) {
     Button(label)
-      .width('48%')
+      .width('32%')
       .height(34)
       .backgroundColor(this.convQuant === value ? '#00695C' : '#CFD8DC')
       .fontColor(this.convQuant === value ? '#FFFFFF' : '#333333')
       .borderRadius(8)
-      .fontSize(13)
+      .fontSize(12)
       .enabled(!this.running)
       .onClick(() => { this.convQuant = value })
   }
@@ -121,8 +121,9 @@ struct OpTest {
         .alignSelf(ItemAlign.Start)
         .margin({ left: '5%', bottom: 4 })
       Row() {
-        this.QuantBtn('Auto (int8 NPU)', 'auto')
-        this.QuantBtn('Off (dequant fp16)', 'off')
+        this.QuantBtn('Auto (w-only)', 'auto')
+        this.QuantBtn('Full (int8 MAC)', 'full')
+        this.QuantBtn('Off (fp16)', 'off')
       }
       .width('90%')
       .justifyContent(FlexAlign.SpaceBetween)
