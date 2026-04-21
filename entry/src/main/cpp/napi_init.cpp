@@ -1508,12 +1508,13 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
         cpuAvgMs = elapsed(ts0, Clock::now()) / repeat;
     }
 
-    // ── HiAI (MNN_FORWARD_USER_1) ────────────────────────────────────────
+    // ── HiAI NPU (MNN_FORWARD_USER_0 — full NPUBackend, not the conv-only
+    //    delegate on USER_1; NPUAttention is only registered on USER_0). ───
     std::vector<float> hiaiOutput;
     double hiaiFirstMs = -1, hiaiAvgMs = -1;
     std::vector<double> hiaiWarmupMs;
     {
-        auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
+        auto exe = Executor::newExecutor(MNN_FORWARD_USER_0, MNN::BackendConfig(), 1);
         ExecutorScope scope(exe);
         VARP q, k, v, m;
         auto y = buildGraph(q, k, v, m);
