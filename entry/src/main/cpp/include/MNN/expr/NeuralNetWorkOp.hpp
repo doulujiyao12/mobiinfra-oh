@@ -156,6 +156,13 @@ MNN_PUBLIC VARP _HybridInt8Conv(std::vector<float>&& weightFloat, std::vector<fl
                                 PaddingMode pad = VALID, INTS stride = {1, 1}, INTS dilate = {1, 1},
                                 int group = 1, INTS pads = {0, 0}, bool relu = false, bool relu6 = false,
                                 int nbits = 8, int quantBlock = 0);
+
+// Fused self-attention op (OpType_Attention). Expects Q/K/V shaped
+// [B, S, H, D]; mask (optional) broadcastable to [B, H, S_q, S_kv]. Pass a
+// null VARP to omit the mask. Output is [B, S_q, H*D]. With kv_cache=false
+// (the default) this is plain cross-/self-attention without KV reuse.
+MNN_PUBLIC VARP _Attention(VARP query, VARP key, VARP value, VARP mask = nullptr,
+                           bool kv_cache = false);
 MNN_PUBLIC VARP _CosineSimilarity(VARP input0, VARP input1, VARP inputDim);
 
 enum GridSamplePaddingMode {GRID_SAMPLE_PADDING_ZEROS, GRID_SAMPLE_PADDING_BORDER, GRID_SAMPLE_PADDING_REFLECTION};
