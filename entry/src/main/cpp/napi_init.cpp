@@ -1408,6 +1408,206 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
     return log.str();
 }
 
+// ── Attention (fused OpType_Attention) precision test ────────────────────
+// Mirrors runConvTest but builds an fp32 self-attention via the
+// _Attention Express helper (Q,K,V are [B,S,H,D]; mask is [B,S,S] additive).
+// Both CPU and HiAI executors get the same graph; we compare outputs element-
+// wise on the host side. kv_cache=false so no KVMeta plumbing is needed.
+static std::string runAttentionTest(int batch, int seqLen, int numHead, int headDim,
+                                    bool useMask,
+                                    int warmup = 2, int repeat = 5) {
+    std::ostringstream log;
+    log << "=== Attention Test: B=" << batch << " S=" << seqLen
+        << " H=" << numHead << " D=" << headDim
+        << " mask=" << (useMask ? "yes" : "no") << " ===\n";
+
+    const int qkvElem = batch * seqLen * numHead * headDim;
+    const int maskElem = batch * seqLen * seqLen;
+    std::vector<float> qData(qkvElem), kData(qkvElem), vData(qkvElem);
+    std::vector<float> maskData(useMask ? maskElem : 0, 0.0f);
+    // Deterministic small-magnitude inputs — keep softmax numerically stable
+    // across fp32/fp16 paths so we're measuring algorithmic divergence, not
+    // over/underflow.
+    for (int i = 0; i < qkvElem; i++) qData[i] = (float)((i % 13) - 6) * 0.02f;
+    for (int i = 0; i < qkvElem; i++) kData[i] = (float)((i % 11) - 5) * 0.02f;
+    for (int i = 0; i < qkvElem; i++) vData[i] = (float)((i % 9)  - 4) * 0.05f;
+    // Mask stays all-zero (every position visible) — matches Qwen3VL visual
+    // encoder where a single-image packed sequence has no boundaries to hide.
+    (void)maskData;
+
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms    = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+
+    auto buildGraph = [&](VARP& qOut, VARP& kOut, VARP& vOut, VARP& mOut) -> VARP {
+        qOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        kOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        vOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        ::memcpy(qOut->writeMap<float>(), qData.data(), qkvElem * sizeof(float));
+        ::memcpy(kOut->writeMap<float>(), kData.data(), qkvElem * sizeof(float));
+        ::memcpy(vOut->writeMap<float>(), vData.data(), qkvElem * sizeof(float));
+        VARP mask = nullptr;
+        if (useMask) {
+            mOut = _Input({batch, seqLen, seqLen}, NCHW);
+            ::memcpy(mOut->writeMap<float>(), maskData.data(), maskElem * sizeof(float));
+            mask = mOut;
+        }
+        auto y = _Attention(qOut, kOut, vOut, mask, /*kv_cache=*/false);
+        return y;
+    };
+
+    auto refillInputs = [&](VARP q, VARP k, VARP v, VARP m) {
+        ::memcpy(q->writeMap<float>(), qData.data(), qkvElem * sizeof(float));
+        ::memcpy(k->writeMap<float>(), kData.data(), qkvElem * sizeof(float));
+        ::memcpy(v->writeMap<float>(), vData.data(), qkvElem * sizeof(float));
+        if (m.get() != nullptr) {
+            ::memcpy(m->writeMap<float>(), maskData.data(), maskElem * sizeof(float));
+        }
+    };
+
+    // ── CPU ──────────────────────────────────────────────────────────────
+    log << "CPU cfg: memory=" << memoryName(g_cpuMemory)
+        << " precision=" << precisionName(g_cpuPrecision) << "\n";
+    std::vector<float> cpuOutput;
+    double cpuFirstMs = -1, cpuAvgMs = -1;
+    std::vector<double> cpuWarmupMs;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, makeCpuBackendConfig(), 1);
+        ExecutorScope scope(exe);
+        VARP q, k, v, m;
+        auto y = buildGraph(q, k, v, m);
+        if (y.get() == nullptr) {
+            log << "ERROR: _Attention returned null (MNN_SUPPORT_TRANSFORMER_FUSE off?)\n";
+            return log.str();
+        }
+
+        auto t0 = Clock::now();
+        auto ptr = y->readMap<float>();
+        cpuFirstMs = elapsed(t0, Clock::now());
+        if (!ptr) { log << "ERROR: CPU attention output is null\n"; return log.str(); }
+        auto info = y->getInfo();
+        cpuOutput.assign(ptr, ptr + info->size);
+        log << "CPU output: " << cpuOutput.size() << " elems  shape=";
+        for (int d = 0; d < (int)info->dim.size(); d++) {
+            log << info->dim[d] << (d + 1 < (int)info->dim.size() ? "x" : "\n");
+        }
+
+        for (int i = 0; i < warmup; i++) {
+            refillInputs(q, k, v, m);
+            auto tw0 = Clock::now();
+            y->readMap<float>();
+            cpuWarmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; i++) {
+            refillInputs(q, k, v, m);
+            y->readMap<float>();
+        }
+        cpuAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    }
+
+    // ── HiAI (MNN_FORWARD_USER_1) ────────────────────────────────────────
+    std::vector<float> hiaiOutput;
+    double hiaiFirstMs = -1, hiaiAvgMs = -1;
+    std::vector<double> hiaiWarmupMs;
+    {
+        auto exe = Executor::newExecutor(MNN_FORWARD_USER_1, MNN::BackendConfig(), 1);
+        ExecutorScope scope(exe);
+        VARP q, k, v, m;
+        auto y = buildGraph(q, k, v, m);
+        if (y.get() == nullptr) {
+            log << "ERROR: _Attention returned null on HiAI path\n";
+            return log.str();
+        }
+
+        auto t0 = Clock::now();
+        auto ptr = y->readMap<float>();
+        hiaiFirstMs = elapsed(t0, Clock::now());
+        if (!ptr) {
+            log << "ERROR: HiAI attention output is null (backend not available or unsupported shape?)\n";
+            return log.str();
+        }
+        auto info = y->getInfo();
+        hiaiOutput.assign(ptr, ptr + info->size);
+        log << "HiAI output: " << hiaiOutput.size() << " elems\n";
+
+        for (int i = 0; i < warmup; i++) {
+            refillInputs(q, k, v, m);
+            auto tw0 = Clock::now();
+            y->readMap<float>();
+            hiaiWarmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; i++) {
+            refillInputs(q, k, v, m);
+            y->readMap<float>();
+        }
+        hiaiAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    }
+
+    // ── Precision ────────────────────────────────────────────────────────
+    if (cpuOutput.size() != hiaiOutput.size()) {
+        log << "FAIL: size mismatch CPU=" << cpuOutput.size()
+            << " HiAI=" << hiaiOutput.size() << "\n";
+        return log.str();
+    }
+    float maxRef = 0.0f;
+    for (auto v : cpuOutput) maxRef = std::max(maxRef, std::abs(v));
+    if (maxRef < 1e-6f) maxRef = 1e-6f;
+    float maxDiff = 0.0f;
+    int maxDiffIdx = 0, failCount = 0;
+    for (int i = 0; i < (int)cpuOutput.size(); i++) {
+        float diff = std::abs(cpuOutput[i] - hiaiOutput[i]);
+        if (diff > maxDiff) { maxDiff = diff; maxDiffIdx = i; }
+        if (diff / maxRef > 0.01f) failCount++;
+    }
+    float relError = maxDiff / maxRef;
+    log << "max|ref|=" << maxRef << "  maxDiff=" << maxDiff
+        << "  relErr=" << (relError * 100.0f) << "%"
+        << "  @idx=" << maxDiffIdx << "\n";
+    log << "fail_count=" << failCount << "/" << cpuOutput.size() << "\n";
+
+    // ── Timing report ────────────────────────────────────────────────────
+    char buf[256];
+    snprintf(buf, sizeof(buf), "CPU  first=%.2fms", cpuFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)cpuWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, cpuWarmupMs[i]);
+        log << buf;
+    }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
+    log << buf;
+
+    snprintf(buf, sizeof(buf), "HiAI first=%.2fms(compile+infer)", hiaiFirstMs);
+    log << buf;
+    for (int i = 0; i < (int)hiaiWarmupMs.size(); i++) {
+        snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, hiaiWarmupMs[i]);
+        log << buf;
+    }
+    snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, hiaiAvgMs);
+    log << buf;
+
+    snprintf(buf, sizeof(buf),
+             "speedup(steady) CPU/HiAI=%.2fx  (>1=NPU faster)\n",
+             hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
+    log << buf;
+
+    // Attention through softmax can amplify small fp accumulation errors, so
+    // we widen the PASS gate to 2% (vs 1% for conv) but still flag >5% as
+    // FAIL — anything past that is a real algorithmic divergence.
+    if (relError < 0.02f) {
+        log << "PASS\n";
+    } else if (relError < 0.05f) {
+        log << "WARN: relErr=" << (relError * 100.0f) << "% (>2% threshold)\n";
+    } else {
+        log << "FAIL: relErr=" << (relError * 100.0f) << "% (>5%)\n";
+    }
+
+    return log.str();
+}
+
 static void OpTestExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::ostringstream result;
@@ -1479,6 +1679,28 @@ static void OpTestExecute(napi_env env, void* data) {
             result << "\n";
         }
         result << "=== Qwen3VL Int8 Summary: " << pass << "/" << n << " passed ===\n";
+    } else if (cfg == "qwen3vl_attn") {
+        // Qwen3VL visual encoder self-attention — shape captured from
+        // on-device NPUAttention.onResize log:
+        //   Q[B=1,Sq=608,H=16,D=64] K[1,608,16,64] V[1,608,16,64] mask=3D[1,608,608]
+        // One case with mask, one without, so we cover both NPUAttention code
+        // paths (the mask-Reshape-Add branch and the no-mask branch).
+        struct TestCase { int b, s, h, d; bool mask; const char* name; };
+        TestCase cases[] = {
+            {1, 608, 16, 64, true,  "attn_block0 with mask [1,608,608]"},
+            {1, 608, 16, 64, false, "attn_block0 no-mask"},
+        };
+        int n = sizeof(cases) / sizeof(cases[0]);
+        int pass = 0;
+        for (int i = 0; i < n; i++) {
+            auto& c = cases[i];
+            result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
+            std::string r = runAttentionTest(c.b, c.s, c.h, c.d, c.mask, 2, 5);
+            result << r;
+            if (r.find("PASS") != std::string::npos) pass++;
+            result << "\n";
+        }
+        result << "=== Qwen3VL Attn Summary: " << pass << "/" << n << " passed ===\n";
     } else {
         // Custom: "N,ic,oc,ih,iw[,kh,kw,sh,sw,group]"
         int N=1, ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;

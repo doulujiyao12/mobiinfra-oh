@@ -202,6 +202,22 @@ struct OpTest {
           this.runWithMode('qwen3vl_int8', 'Running Qwen3VL visual encoder ops (int8 per-channel, N=608)...\n')
         })
 
+      // Qwen3VL visual encoder Attention precision test (FP32)
+      // Q/K/V=[1,608,16,64] mask=[1,608,608] — shape comes from the
+      // real on-device NPUAttention.onResize log for blocks.0/self_attn.
+      Button(this.running ? 'Running...' : 'Run Qwen3VL Attention FP32 (B=1 S=608 H=16 D=64)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#00BCD4')
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_attn',
+            'Running Qwen3VL visual encoder attention (fp32, B=1 S=608 H=16 D=64, with/without mask)...\n')
+        })
+
       // Custom test section
       Row() {
         TextInput({ placeholder: 'N,ic,oc,ih,iw,kh,kw,sh,sw,group', text: this.customConfig })
