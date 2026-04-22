@@ -1605,7 +1605,12 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
     double hiaiFirstMs = -1, hiaiAvgMs = -1;
     std::vector<double> hiaiWarmupMs;
     std::string hiaiInfo;
-    if (!runOnBackend(MNN_FORWARD_USER_0, MNN::BackendConfig(),
+    
+    // Fix: Set memory mode to High to disable memory reuse for NPU tensor matching
+    MNN::BackendConfig npuConfig;
+    npuConfig.memory = MNN::BackendConfig::Memory_High;
+    
+    if (!runOnBackend(MNN_FORWARD_USER_0, npuConfig,
                       hiaiOutput, hiaiFirstMs, hiaiWarmupMs, hiaiAvgMs, hiaiInfo)) {
         log << "ERROR: HiAI NPU Module path failed (" << hiaiInfo << ")\n";
         return log.str();
