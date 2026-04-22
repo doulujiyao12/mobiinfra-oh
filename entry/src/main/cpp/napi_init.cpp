@@ -238,6 +238,8 @@
 #include <MNN/expr/NeuralNetWorkOp.hpp>
 #include <MNN/expr/Executor.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
+#include <MNN/expr/Module.hpp>
+#include <MNN/Interpreter.hpp>
 #include <MNN/MNNForwardType.h>
 #include <cmath>
 #include <chrono>
@@ -1409,10 +1411,13 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
 }
 
 // ── Attention (fused OpType_Attention) precision test ────────────────────
-// Mirrors runConvTest but builds an fp32 self-attention via the
-// _Attention Express helper (Q,K,V are [B,S,H,D]; mask is [B,S,S] additive).
-// Both CPU and HiAI executors get the same graph; we compare outputs element-
-// wise on the host side. kv_cache=false so no KVMeta plumbing is needed.
+// Builds a 4-input VARP graph (Q,K,V,[mask]) with _Attention, serializes it
+// once via Variable::save, then loads it back as a Module twice — once with
+// a CPU RuntimeManager and once with a HiAI NPU (MNN_FORWARD_USER_0)
+// RuntimeManager. Going through Module (rather than raw VARP + ExecutorScope)
+// is the only path where Variable::save populates the op's inputIndexes/
+// outputIndexes — the Express lazy-eval path leaves those null, which
+// NPUAttention::onResize dereferences at line 68 → SIGSEGV.
 static std::string runAttentionTest(int batch, int seqLen, int numHead, int headDim,
                                     bool useMask,
                                     int warmup = 2, int repeat = 5) {
@@ -1421,13 +1426,13 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
         << " H=" << numHead << " D=" << headDim
         << " mask=" << (useMask ? "yes" : "no") << " ===\n";
 
-    const int qkvElem = batch * seqLen * numHead * headDim;
+    const int qkvElem  = batch * seqLen * numHead * headDim;
     const int maskElem = batch * seqLen * seqLen;
     std::vector<float> qData(qkvElem), kData(qkvElem), vData(qkvElem);
     std::vector<float> maskData(useMask ? maskElem : 0, 0.0f);
-    // Deterministic small-magnitude inputs — keep softmax numerically stable
-    // across fp32/fp16 paths so we're measuring algorithmic divergence, not
-    // over/underflow.
+    // Deterministic small-magnitude inputs so softmax stays numerically
+    // stable across fp32/fp16 paths — we're measuring algorithmic divergence
+    // between CPU and NPU, not fp over/underflow.
     for (int i = 0; i < qkvElem; i++) qData[i] = (float)((i % 13) - 6) * 0.02f;
     for (int i = 0; i < qkvElem; i++) kData[i] = (float)((i % 11) - 5) * 0.02f;
     for (int i = 0; i < qkvElem; i++) vData[i] = (float)((i % 9)  - 4) * 0.05f;
@@ -1441,30 +1446,143 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
         return Ms(b - a).count();
     };
 
-    auto buildGraph = [&](VARP& qOut, VARP& kOut, VARP& vOut, VARP& mOut) -> VARP {
-        qOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
-        kOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
-        vOut = _Input({batch, seqLen, numHead, headDim}, NCHW);
-        ::memcpy(qOut->writeMap<float>(), qData.data(), qkvElem * sizeof(float));
-        ::memcpy(kOut->writeMap<float>(), kData.data(), qkvElem * sizeof(float));
-        ::memcpy(vOut->writeMap<float>(), vData.data(), qkvElem * sizeof(float));
+    // ── Build VARP graph once and serialize to a buffer ──────────────────
+    // The buffer is constructed under the default (CPU) executor scope. No
+    // kernels run here — Variable::save just walks the Expr tree and writes
+    // a flatbuffer, filling inputIndexes/outputIndexes from tensor positions.
+    std::vector<int8_t> graphBuffer;
+    {
+        auto q = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        auto k = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        auto v = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        q->setName("attn_q");
+        k->setName("attn_k");
+        v->setName("attn_v");
         VARP mask = nullptr;
         if (useMask) {
-            mOut = _Input({batch, seqLen, seqLen}, NCHW);
-            ::memcpy(mOut->writeMap<float>(), maskData.data(), maskElem * sizeof(float));
-            mask = mOut;
+            mask = _Input({batch, seqLen, seqLen}, NCHW);
+            mask->setName("attn_mask");
         }
-        auto y = _Attention(qOut, kOut, vOut, mask, /*kv_cache=*/false);
-        return y;
+        auto y = _Attention(q, k, v, mask, /*kv_cache=*/false);
+        if (y.get() == nullptr) {
+            log << "ERROR: _Attention returned null (MNN_SUPPORT_TRANSFORMER_FUSE off?)\n";
+            return log.str();
+        }
+        y->setName("attn_out");
+        graphBuffer = Variable::save({y});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save produced empty buffer\n";
+            return log.str();
+        }
+    }
+
+    // Build a fresh input VARP batch (with real data copied in) for one
+    // forward pass. New VARPs per call keeps the Module's input lifetime
+    // simple — the Module doesn't reuse host buffers across invocations.
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        std::vector<VARP> ins;
+        auto qv = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        ::memcpy(qv->writeMap<float>(), qData.data(), qkvElem * sizeof(float));
+        ins.push_back(qv);
+        auto kv = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        ::memcpy(kv->writeMap<float>(), kData.data(), qkvElem * sizeof(float));
+        ins.push_back(kv);
+        auto vv = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        ::memcpy(vv->writeMap<float>(), vData.data(), qkvElem * sizeof(float));
+        ins.push_back(vv);
+        if (useMask) {
+            auto mv = _Input({batch, seqLen, seqLen}, NCHW);
+            ::memcpy(mv->writeMap<float>(), maskData.data(), maskElem * sizeof(float));
+            ins.push_back(mv);
+        }
+        return ins;
     };
 
-    auto refillInputs = [&](VARP q, VARP k, VARP v, VARP m) {
-        ::memcpy(q->writeMap<float>(), qData.data(), qkvElem * sizeof(float));
-        ::memcpy(k->writeMap<float>(), kData.data(), qkvElem * sizeof(float));
-        ::memcpy(v->writeMap<float>(), vData.data(), qkvElem * sizeof(float));
-        if (m.get() != nullptr) {
-            ::memcpy(m->writeMap<float>(), maskData.data(), maskElem * sizeof(float));
+    // Per-backend run: build RuntimeManager + Module, do first+warmup+steady.
+    // Same code path for CPU and NPU; only the ScheduleConfig.type differs.
+    auto runOnBackend = [&](MNNForwardType fwdType,
+                            const MNN::BackendConfig& bnCfgIn,
+                            std::vector<float>& outVec,
+                            double& firstMs,
+                            std::vector<double>& warmupLog,
+                            double& avgMs,
+                            std::string& errOut) -> bool {
+        MNN::ScheduleConfig sched;
+        sched.type      = fwdType;
+        sched.numThread = 1;
+        MNN::BackendConfig bnCfg = bnCfgIn; // copy so the ptr we hand out lives
+        sched.backendConfig = &bnCfg;
+
+        std::shared_ptr<Executor::RuntimeManager> rtmgr(
+            Executor::RuntimeManager::createRuntimeManager(sched));
+        if (rtmgr.get() == nullptr) {
+            errOut = "createRuntimeManager failed";
+            return false;
         }
+
+        // NPUBackend compiles the HiAI OM model at load time and expects a
+        // fixed shape — shapeMutable must be false or resize-time shape
+        // re-inference would blow away the compiled graph. Mirrors
+        // omni.cpp::loadVisual's npuModuleCfg for MNN_FORWARD_USER_0/USER_1.
+        Module::Config mcfg;
+        if (fwdType == MNN_FORWARD_USER_0 || fwdType == MNN_FORWARD_USER_1) {
+            mcfg.shapeMutable = false;
+            mcfg.rearrange    = false;
+        }
+
+        std::shared_ptr<Module> m(Module::load(
+            /*inputs=*/{}, /*outputs=*/{},
+            reinterpret_cast<const uint8_t*>(graphBuffer.data()),
+            graphBuffer.size(),
+            rtmgr, &mcfg));
+        if (m.get() == nullptr) {
+            errOut = "Module::load returned nullptr";
+            return false;
+        }
+
+        // ── First call: includes graph compile + weight packing + 1st infer
+        auto t0 = Clock::now();
+        auto ins = makeInputs();
+        auto outs = m->onForward(ins);
+        if (outs.empty() || outs[0].get() == nullptr) {
+            errOut = "onForward returned empty/null output";
+            return false;
+        }
+        auto ptr = outs[0]->readMap<float>();
+        firstMs = elapsed(t0, Clock::now());
+        if (ptr == nullptr) {
+            errOut = "output readMap returned null";
+            return false;
+        }
+        auto info = outs[0]->getInfo();
+        outVec.assign(ptr, ptr + info->size);
+
+        // ── Warmup (per-iteration timing)
+        for (int i = 0; i < warmup; i++) {
+            auto tw_ins = makeInputs();
+            auto tw0 = Clock::now();
+            auto o = m->onForward(tw_ins);
+            o[0]->readMap<float>();
+            warmupLog.push_back(elapsed(tw0, Clock::now()));
+        }
+        // ── Steady-state average
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; i++) {
+            auto st_ins = makeInputs();
+            auto o = m->onForward(st_ins);
+            o[0]->readMap<float>();
+        }
+        avgMs = elapsed(ts0, Clock::now()) / repeat;
+
+        // Dump output shape (first pass only — same across iterations).
+        if (info != nullptr) {
+            std::ostringstream shapeStr;
+            for (int d = 0; d < (int)info->dim.size(); d++) {
+                shapeStr << info->dim[d] << (d + 1 < (int)info->dim.size() ? "x" : "");
+            }
+            errOut = shapeStr.str(); // repurpose errOut to return the shape string
+        }
+        return true;
     };
 
     // ── CPU ──────────────────────────────────────────────────────────────
@@ -1473,80 +1591,26 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
     std::vector<float> cpuOutput;
     double cpuFirstMs = -1, cpuAvgMs = -1;
     std::vector<double> cpuWarmupMs;
-    {
-        auto exe = Executor::newExecutor(MNN_FORWARD_CPU, makeCpuBackendConfig(), 1);
-        ExecutorScope scope(exe);
-        VARP q, k, v, m;
-        auto y = buildGraph(q, k, v, m);
-        if (y.get() == nullptr) {
-            log << "ERROR: _Attention returned null (MNN_SUPPORT_TRANSFORMER_FUSE off?)\n";
-            return log.str();
-        }
-
-        auto t0 = Clock::now();
-        auto ptr = y->readMap<float>();
-        cpuFirstMs = elapsed(t0, Clock::now());
-        if (!ptr) { log << "ERROR: CPU attention output is null\n"; return log.str(); }
-        auto info = y->getInfo();
-        cpuOutput.assign(ptr, ptr + info->size);
-        log << "CPU output: " << cpuOutput.size() << " elems  shape=";
-        for (int d = 0; d < (int)info->dim.size(); d++) {
-            log << info->dim[d] << (d + 1 < (int)info->dim.size() ? "x" : "\n");
-        }
-
-        for (int i = 0; i < warmup; i++) {
-            refillInputs(q, k, v, m);
-            auto tw0 = Clock::now();
-            y->readMap<float>();
-            cpuWarmupMs.push_back(elapsed(tw0, Clock::now()));
-        }
-        auto ts0 = Clock::now();
-        for (int i = 0; i < repeat; i++) {
-            refillInputs(q, k, v, m);
-            y->readMap<float>();
-        }
-        cpuAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    std::string cpuInfo;
+    if (!runOnBackend(MNN_FORWARD_CPU, makeCpuBackendConfig(),
+                      cpuOutput, cpuFirstMs, cpuWarmupMs, cpuAvgMs, cpuInfo)) {
+        log << "ERROR: CPU Module path failed (" << cpuInfo << ")\n";
+        return log.str();
     }
+    log << "CPU output: " << cpuOutput.size() << " elems  shape=" << cpuInfo << "\n";
 
-    // ── HiAI NPU (MNN_FORWARD_USER_0 — full NPUBackend, not the conv-only
-    //    delegate on USER_1; NPUAttention is only registered on USER_0). ───
+    // ── HiAI NPU (MNN_FORWARD_USER_0 — the full NPUBackend where
+    //    NPUAttention is registered; not the conv-only delegate on USER_1) ─
     std::vector<float> hiaiOutput;
     double hiaiFirstMs = -1, hiaiAvgMs = -1;
     std::vector<double> hiaiWarmupMs;
-    {
-        auto exe = Executor::newExecutor(MNN_FORWARD_USER_0, MNN::BackendConfig(), 1);
-        ExecutorScope scope(exe);
-        VARP q, k, v, m;
-        auto y = buildGraph(q, k, v, m);
-        if (y.get() == nullptr) {
-            log << "ERROR: _Attention returned null on HiAI path\n";
-            return log.str();
-        }
-
-        auto t0 = Clock::now();
-        auto ptr = y->readMap<float>();
-        hiaiFirstMs = elapsed(t0, Clock::now());
-        if (!ptr) {
-            log << "ERROR: HiAI attention output is null (backend not available or unsupported shape?)\n";
-            return log.str();
-        }
-        auto info = y->getInfo();
-        hiaiOutput.assign(ptr, ptr + info->size);
-        log << "HiAI output: " << hiaiOutput.size() << " elems\n";
-
-        for (int i = 0; i < warmup; i++) {
-            refillInputs(q, k, v, m);
-            auto tw0 = Clock::now();
-            y->readMap<float>();
-            hiaiWarmupMs.push_back(elapsed(tw0, Clock::now()));
-        }
-        auto ts0 = Clock::now();
-        for (int i = 0; i < repeat; i++) {
-            refillInputs(q, k, v, m);
-            y->readMap<float>();
-        }
-        hiaiAvgMs = elapsed(ts0, Clock::now()) / repeat;
+    std::string hiaiInfo;
+    if (!runOnBackend(MNN_FORWARD_USER_0, MNN::BackendConfig(),
+                      hiaiOutput, hiaiFirstMs, hiaiWarmupMs, hiaiAvgMs, hiaiInfo)) {
+        log << "ERROR: HiAI NPU Module path failed (" << hiaiInfo << ")\n";
+        return log.str();
     }
+    log << "HiAI output: " << hiaiOutput.size() << " elems  shape=" << hiaiInfo << "\n";
 
     // ── Precision ────────────────────────────────────────────────────────
     if (cpuOutput.size() != hiaiOutput.size()) {
@@ -1572,7 +1636,7 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
 
     // ── Timing report ────────────────────────────────────────────────────
     char buf[256];
-    snprintf(buf, sizeof(buf), "CPU  first=%.2fms", cpuFirstMs);
+    snprintf(buf, sizeof(buf), "CPU  first=%.2fms(load+compile+infer)", cpuFirstMs);
     log << buf;
     for (int i = 0; i < (int)cpuWarmupMs.size(); i++) {
         snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, cpuWarmupMs[i]);
@@ -1581,7 +1645,7 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
     snprintf(buf, sizeof(buf), "  steady(x%d)=%.2fms\n", repeat, cpuAvgMs);
     log << buf;
 
-    snprintf(buf, sizeof(buf), "HiAI first=%.2fms(compile+infer)", hiaiFirstMs);
+    snprintf(buf, sizeof(buf), "HiAI first=%.2fms(load+compile+infer)", hiaiFirstMs);
     log << buf;
     for (int i = 0; i < (int)hiaiWarmupMs.size(); i++) {
         snprintf(buf, sizeof(buf), "  w%d=%.2fms", i, hiaiWarmupMs[i]);
@@ -1595,7 +1659,7 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
              hiaiAvgMs > 0 ? cpuAvgMs / hiaiAvgMs : 0.0);
     log << buf;
 
-    // Attention through softmax can amplify small fp accumulation errors, so
+    // Attention through softmax amplifies small fp accumulation errors, so
     // we widen the PASS gate to 2% (vs 1% for conv) but still flag >5% as
     // FAIL — anything past that is a real algorithmic divergence.
     if (relError < 0.02f) {
