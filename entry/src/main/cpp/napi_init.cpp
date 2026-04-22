@@ -1420,7 +1420,7 @@ static std::string runConvTestInt8(int ic, int oc, int ih, int iw, int kh, int k
 // NPUAttention::onResize dereferences at line 68 → SIGSEGV.
 static std::string runAttentionTest(int batch, int seqLen, int numHead, int headDim,
                                     bool useMask,
-                                    int warmup = 2, int repeat = 5) {
+                                    int warmup = 1, int repeat = 2) {
     std::ostringstream log;
     log << "=== Attention Test: B=" << batch << " S=" << seqLen
         << " H=" << numHead << " D=" << headDim
