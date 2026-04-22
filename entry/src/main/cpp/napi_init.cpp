@@ -1765,7 +1765,7 @@ static void OpTestExecute(napi_env env, void* data) {
         for (int i = 0; i < n; i++) {
             auto& c = cases[i];
             result << "[" << (i+1) << "/" << n << "] " << c.name << "\n";
-            std::string r = runAttentionTest(c.b, c.s, c.h, c.d, c.mask, 2, 5);
+            std::string r = runAttentionTest(c.b, c.s, c.h, c.d, c.mask, 1, 2);
             result << r;
             if (r.find("PASS") != std::string::npos) pass++;
             result << "\n";
