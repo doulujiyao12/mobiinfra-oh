@@ -412,6 +412,25 @@ struct Index {
     }
   }
 
+  deleteModelConfigJson() {
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.output = `模型文件夹不存在: ${this.modelDir}`;
+        return;
+      }
+      if (!fs.accessSync(cfgPath)) {
+        this.output = `文件不存在: ${cfgPath}\n无需删除。`;
+        return;
+      }
+      fs.unlinkSync(cfgPath);
+      this.modelLoaded = false;
+      this.output = `已删除 ${this.isModelV2 ? 'modelv2' : 'model'}/config.json。\n其他模型文件保留，可重新下载仅补 config.json。`;
+    } catch (e) {
+      this.output = `删除 config.json 失败: ${e}`;
+    }
+  }
+
   showConfigJson() {
     let cfgPath = this.modelDir + '/config.json';
     try {
@@ -1157,6 +1176,15 @@ struct Index {
                   .backgroundColor('#F44336')
                   .borderRadius(8)
               }.width('100%').margin({ bottom: 15 })
+
+              Button('仅删当前目录 Config')
+                .onClick(() => { this.deleteModelConfigJson(); })
+                .enabled(!this.downloading)
+                .height(40)
+                .width('100%')
+                .backgroundColor('#FF7043')
+                .borderRadius(8)
+                .margin({ bottom: 15 })
 
               Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
                 Button('列出沙箱图片')

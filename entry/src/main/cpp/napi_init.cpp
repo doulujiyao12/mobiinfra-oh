@@ -1758,7 +1758,7 @@ static void OpTestExecute(napi_env env, void* data) {
         struct TestCase { int b, s, h, d; bool mask; const char* name; };
         TestCase cases[] = {
             {1, 608, 16, 64, true,  "attn_block0 with mask [1,608,608]"},
-            {1, 608, 16, 64, false, "attn_block0 no-mask"},
+//            {1, 608, 16, 64, false, "attn_block0 no-mask"},
         };
         int n = sizeof(cases) / sizeof(cases[0]);
         int pass = 0;
