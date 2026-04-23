@@ -431,6 +431,99 @@ struct Index {
     }
   }
 
+  private calcPathSize(path: string): number {
+    try {
+      let children = fs.listFileSync(path);
+      let sum = 0;
+      for (let name of children) {
+        let childPath = `${path}/${name}`;
+        sum += this.calcPathSize(childPath);
+      }
+      return sum;
+    } catch (e) {
+      try {
+        return fs.statSync(path).size;
+      } catch (ee) {
+        return 0;
+      }
+    }
+  }
+
+  private buildFileTree(path: string, depth: number, out: string[]): void {
+    let indent = '';
+    for (let i = 0; i < depth; i++) {
+      indent += '  ';
+    }
+    try {
+      let children = fs.listFileSync(path);
+      let dirSize = this.calcPathSize(path);
+      let baseName = path.substring(path.lastIndexOf('/') + 1);
+      out.push(`${indent}[D] ${baseName}/ (${this.formatSize(dirSize)})`);
+      children.sort();
+      for (let name of children) {
+        this.buildFileTree(`${path}/${name}`, depth + 1, out);
+      }
+    } catch (e) {
+      let fileSize = 0;
+      try { fileSize = fs.statSync(path).size; } catch (ee) {}
+      let baseName = path.substring(path.lastIndexOf('/') + 1);
+      out.push(`${indent}[F] ${baseName} (${this.formatSize(fileSize)})`);
+    }
+  }
+
+  listModelFilesTree() {
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.output = `模型目录不存在: ${this.modelDir}`;
+        return;
+      }
+      let lines: string[] = [];
+      this.buildFileTree(this.modelDir, 0, lines);
+      this.output = `====== ${this.isModelV2 ? 'modelv2' : 'model'} 文件树 ======\n` +
+        `根目录: ${this.modelDir}\n` +
+        lines.join('\n');
+    } catch (e) {
+      this.output = `查看模型文件树失败: ${e}`;
+    }
+  }
+
+  private deleteChunkVisionOmUnder(path: string): number {
+    let deleted = 0;
+    let children: string[] = [];
+    try {
+      children = fs.listFileSync(path);
+    } catch (e) {
+      return 0;
+    }
+    for (let name of children) {
+      let childPath = `${path}/${name}`;
+      if (name.startsWith('chunk_')) {
+        let visionPath = `${childPath}/vision.om`;
+        try {
+          if (fs.accessSync(visionPath)) {
+            fs.unlinkSync(visionPath);
+            deleted++;
+          }
+        } catch (e) {}
+      }
+      deleted += this.deleteChunkVisionOmUnder(childPath);
+    }
+    return deleted;
+  }
+
+  deleteChunkVisionOmFiles() {
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.output = `模型目录不存在: ${this.modelDir}`;
+        return;
+      }
+      let count = this.deleteChunkVisionOmUnder(this.modelDir);
+      this.output = `已在 ${this.isModelV2 ? 'modelv2' : 'model'} 下删除 ${count} 个 chunk_*/vision.om`;
+    } catch (e) {
+      this.output = `删除 chunk_*/vision.om 失败: ${e}`;
+    }
+  }
+
   showConfigJson() {
     let cfgPath = this.modelDir + '/config.json';
     try {
@@ -1185,6 +1278,24 @@ struct Index {
                 .backgroundColor('#FF7043')
                 .borderRadius(8)
                 .margin({ bottom: 15 })
+
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                Button('查看模型文件树')
+                  .onClick(() => { this.listModelFilesTree(); })
+                  .enabled(!this.downloading)
+                  .height(40)
+                  .width('48%')
+                  .backgroundColor('#5C6BC0')
+                  .borderRadius(8)
+
+                Button('删 chunk/vision.om')
+                  .onClick(() => { this.deleteChunkVisionOmFiles(); })
+                  .enabled(!this.downloading)
+                  .height(40)
+                  .width('48%')
+                  .backgroundColor('#8D6E63')
+                  .borderRadius(8)
+              }.width('100%').margin({ bottom: 15 })
 
               Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
                 Button('列出沙箱图片')
