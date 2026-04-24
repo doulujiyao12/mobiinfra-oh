@@ -2131,7 +2131,7 @@ static std::string runQwen3VlChunkModelTest(const std::string& modelRoot,
 
     const std::string configPath = modelDir + "/config.json";
     const std::string configText = readTextFile(configPath);
-    const int numGridPerSide = extractJsonInt(configText, "num_grid_per_side", 1);
+    const int numGridPerSide = extractJsonInt(configText, "num_grid_per_side", 48);
     const std::string visualBackend = extractJsonString(configText, "visual_blocks_backend_type", "hiai");
     const MNNForwardType npuType = visualBackendFromString(visualBackend);
 
