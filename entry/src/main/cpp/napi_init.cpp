@@ -230,6 +230,12 @@
 #include <deque>
 #include <atomic>
 #include <cstdarg>
+#include <algorithm>
+#include <dirent.h>
+#include <fstream>
+#include <limits>
+#include <sys/stat.h>
+#include <vector>
 
 #include "llm/llm.hpp"
 
@@ -1678,6 +1684,634 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
     return log.str();
 }
 
+namespace {
+
+struct ChunkBenchResult {
+    VARPS outputs;
+    double firstMs = -1.0;
+    double avgMs = -1.0;
+    std::vector<double> warmupMs;
+    std::string info;
+};
+
+static bool fileExists(const std::string& path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0;
+}
+
+static bool isDirectory(const std::string& path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static std::string readTextFile(const std::string& path) {
+    std::ifstream ifs(path);
+    if (!ifs.good()) {
+        return "";
+    }
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    return oss.str();
+}
+
+static int extractJsonInt(const std::string& jsonText, const std::string& key, int defaultValue) {
+    const std::regex r("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+    std::smatch m;
+    if (std::regex_search(jsonText, m, r) && m.size() >= 2) {
+        return std::atoi(m[1].str().c_str());
+    }
+    return defaultValue;
+}
+
+static std::string extractJsonString(const std::string& jsonText, const std::string& key,
+                                     const std::string& defaultValue) {
+    const std::regex r("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::smatch m;
+    if (std::regex_search(jsonText, m, r) && m.size() >= 2) {
+        return m[1].str();
+    }
+    return defaultValue;
+}
+
+static int extractChunkIndex(const std::string& path) {
+    std::smatch m;
+    if (std::regex_search(path, m, std::regex(R"(visual_blocks_npu_(\d+)\.mnn$)")) && m.size() >= 2) {
+        return std::atoi(m[1].str().c_str());
+    }
+    return std::numeric_limits<int>::max();
+}
+
+static std::string basenameOf(const std::string& path) {
+    auto pos = path.find_last_of('/');
+    if (pos == std::string::npos) {
+        return path;
+    }
+    return path.substr(pos + 1);
+}
+
+static std::vector<std::string> listVisualChunkModels(const std::string& modelDir) {
+    std::vector<std::string> out;
+    DIR* dir = ::opendir(modelDir.c_str());
+    if (dir == nullptr) {
+        return out;
+    }
+    struct dirent* ent = nullptr;
+    while ((ent = ::readdir(dir)) != nullptr) {
+        if (ent->d_name == nullptr) {
+            continue;
+        }
+        std::string name = ent->d_name;
+        if (std::regex_match(name, std::regex(R"(visual_blocks_npu_\d+\.mnn)"))) {
+            out.push_back(modelDir + "/" + name);
+        }
+    }
+    ::closedir(dir);
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        int ia = extractChunkIndex(a);
+        int ib = extractChunkIndex(b);
+        if (ia != ib) {
+            return ia < ib;
+        }
+        return a < b;
+    });
+    return out;
+}
+
+static MNNForwardType visualBackendFromString(const std::string& backend) {
+    std::string v = backend;
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (v == "npu") {
+        return MNN_FORWARD_NN;
+    }
+    if (v == "hiai_delegate") {
+        return MNN_FORWARD_USER_1;
+    }
+    if (v == "hiai") {
+        return MNN_FORWARD_USER_0;
+    }
+    return MNN_FORWARD_USER_0;
+}
+
+static std::string forwardTypeName(MNNForwardType type) {
+    switch (type) {
+        case MNN_FORWARD_CPU: return "CPU";
+        case MNN_FORWARD_NN: return "NN";
+        case MNN_FORWARD_USER_0: return "HiAI";
+        case MNN_FORWARD_USER_1: return "HiAIDelegate";
+        default: return "Unknown";
+    }
+}
+
+static std::string varShapeStringLocal(const VARP& v) {
+    if (v.get() == nullptr || v->getInfo() == nullptr) {
+        return "<null>";
+    }
+    std::ostringstream oss;
+    auto info = v->getInfo();
+    for (int i = 0; i < (int)info->dim.size(); ++i) {
+        oss << info->dim[i];
+        if (i + 1 < (int)info->dim.size()) {
+            oss << "x";
+        }
+    }
+    return oss.str();
+}
+
+static VARP cloneToHostInput(const VARP& src, const char* name = nullptr) {
+    if (src.get() == nullptr || src->getInfo() == nullptr) {
+        return nullptr;
+    }
+    auto info = src->getInfo();
+    auto srcHost = src->readMap<uint8_t>();
+    if (srcHost == nullptr) {
+        return nullptr;
+    }
+    auto dst = _Input(info->dim, NCHW, info->type);
+    auto dstHost = dst->writeMap<uint8_t>();
+    if (dstHost == nullptr) {
+        return nullptr;
+    }
+    ::memcpy(dstHost, srcHost, (size_t)info->size * (size_t)info->type.bytes());
+    if (name != nullptr) {
+        dst->setName(name);
+    }
+    return dst;
+}
+
+static bool readVarToFloatVector(const VARP& src, std::vector<float>& out, std::string& err) {
+    if (src.get() == nullptr || src->getInfo() == nullptr) {
+        err = "null output";
+        return false;
+    }
+    VARP readVar = src;
+    auto info = src->getInfo();
+    if (!(info->type.code == halide_type_float && info->type.bits == 32)) {
+        readVar = _Cast(src, halide_type_of<float>());
+        if (readVar.get() == nullptr || readVar->getInfo() == nullptr) {
+            err = "cast to float failed";
+            return false;
+        }
+        info = readVar->getInfo();
+    }
+    auto ptr = readVar->readMap<float>();
+    if (ptr == nullptr) {
+        err = "readMap<float> returned null";
+        return false;
+    }
+    out.assign(ptr, ptr + info->size);
+    return true;
+}
+
+static std::vector<VARP> cloneInputs(const std::vector<VARP>& srcs) {
+    std::vector<VARP> out;
+    out.reserve(srcs.size());
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        out.push_back(cloneToHostInput(srcs[i]));
+    }
+    return out;
+}
+
+static bool pickEvenGrid(int seqLen, int& gridH, int& gridW) {
+    int bestH = 0, bestW = 0;
+    int bestDiff = std::numeric_limits<int>::max();
+    for (int h = 2; h * h <= seqLen; h += 2) {
+        if (seqLen % h != 0) {
+            continue;
+        }
+        int w = seqLen / h;
+        if ((w % 2) != 0) {
+            continue;
+        }
+        int diff = std::abs(h - w);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestH = h;
+            bestW = w;
+        }
+    }
+    if (bestH == 0 || bestW == 0) {
+        return false;
+    }
+    gridH = bestH;
+    gridW = bestW;
+    return true;
+}
+
+static std::vector<VARP> buildQwen3VlPreInputs(int seqLen, int patchDim, int numGridPerSide,
+                                               std::string& err) {
+    constexpr int mergeSize = 2;
+    int gridH = 0, gridW = 0;
+    if (!pickEvenGrid(seqLen, gridH, gridW)) {
+        err = "failed to find even grid_h/grid_w for seq_len=" + std::to_string(seqLen);
+        return {};
+    }
+
+    std::vector<float> patchesData(seqLen * patchDim);
+    for (int i = 0; i < (int)patchesData.size(); ++i) {
+        patchesData[i] = (float)((i % 29) - 14) * 0.01f;
+    }
+    auto patches = _Input({seqLen, patchDim}, NCHW);
+    ::memcpy(patches->writeMap<float>(), patchesData.data(), patchesData.size() * sizeof(float));
+
+    VARP positionIds = _Input({2, seqLen}, NCHW, halide_type_of<int>());
+    auto hpos = positionIds->writeMap<int>();
+    auto wpos = hpos + seqLen;
+    const int wblockSize = mergeSize * mergeSize;
+    const int hblockSize = wblockSize * (gridW / mergeSize);
+    for (int i = 0; i < gridH; ++i) {
+        int hIdx = i / mergeSize;
+        int hOff = i % mergeSize;
+        for (int j = 0; j < gridW; ++j) {
+            int wIdx = j / mergeSize;
+            int wOff = j % mergeSize;
+            int index = hIdx * hblockSize + wIdx * wblockSize + hOff * 2 + wOff;
+            hpos[index] = i;
+            wpos[index] = j;
+        }
+    }
+
+    std::vector<float> hIdxs(gridH);
+    std::vector<float> wIdxs(gridW);
+    for (int i = 0; i < gridH; ++i) {
+        hIdxs[i] = (gridH > 1)
+            ? static_cast<float>(i) * (numGridPerSide - 1) / (gridH - 1)
+            : 0.0f;
+    }
+    for (int i = 0; i < gridW; ++i) {
+        wIdxs[i] = (gridW > 1)
+            ? static_cast<float>(i) * (numGridPerSide - 1) / (gridW - 1)
+            : 0.0f;
+    }
+
+    VARP idxTensor = _Input({4, seqLen}, NCHW, halide_type_of<int>());
+    VARP weightTensor = _Input({4, seqLen}, NCHW, halide_type_of<float>());
+    auto idxPtr = idxTensor->writeMap<int>();
+    auto weightPtr = weightTensor->writeMap<float>();
+    for (int i = 0; i < gridH; ++i) {
+        int hFloor = static_cast<int>(hIdxs[i]);
+        int hCeil = std::min(hFloor + 1, numGridPerSide - 1);
+        float dh = hIdxs[i] - hFloor;
+        for (int j = 0; j < gridW; ++j) {
+            int wFloor = static_cast<int>(wIdxs[j]);
+            int wCeil = std::min(wFloor + 1, numGridPerSide - 1);
+            float dw = wIdxs[j] - wFloor;
+            int idx = i * gridW + j;
+            idxPtr[0 * seqLen + idx] = hFloor * numGridPerSide + wFloor;
+            idxPtr[1 * seqLen + idx] = hFloor * numGridPerSide + wCeil;
+            idxPtr[2 * seqLen + idx] = hCeil * numGridPerSide + wFloor;
+            // Keep the same index layout used in omni.cpp so the chunk test
+            // matches the current Harmony app deployment path exactly.
+            idxPtr[3 * seqLen + idx] = hCeil * numGridPerSide + wFloor;
+            weightPtr[0 * seqLen + idx] = (1.0f - dh) * (1.0f - dw);
+            weightPtr[1 * seqLen + idx] = (1.0f - dh) * dw;
+            weightPtr[2 * seqLen + idx] = dh * (1.0f - dw);
+            weightPtr[3 * seqLen + idx] = dh * dw;
+        }
+    }
+
+    idxTensor = _Reshape(idxTensor, {4, 1, gridH / mergeSize, mergeSize, gridW / mergeSize, mergeSize});
+    idxTensor = _Permute(idxTensor, {0, 1, 2, 4, 3, 5});
+    idxTensor = _Reshape(idxTensor, {4, -1});
+    weightTensor = _Reshape(weightTensor, {4, 1, gridH / mergeSize, mergeSize, gridW / mergeSize, mergeSize});
+    weightTensor = _Permute(weightTensor, {0, 1, 2, 4, 3, 5});
+    weightTensor = _Reshape(weightTensor, {4, -1});
+    return {patches, positionIds, idxTensor, weightTensor};
+}
+
+static std::string compareOutputVectors(const std::vector<float>& cpuOutput,
+                                        const std::vector<float>& npuOutput,
+                                        const std::string& label,
+                                        bool& allPass) {
+    std::ostringstream log;
+    if (cpuOutput.size() != npuOutput.size()) {
+        allPass = false;
+        log << "  [" << label << "] FAIL: size mismatch CPU=" << cpuOutput.size()
+            << " NPU=" << npuOutput.size() << "\n";
+        return log.str();
+    }
+    float maxRef = 0.0f;
+    float maxDiff = 0.0f;
+    double sumSq = 0.0;
+    int maxDiffIdx = 0;
+    int failCount = 0;
+    for (size_t i = 0; i < cpuOutput.size(); ++i) {
+        maxRef = std::max(maxRef, std::fabs(cpuOutput[i]));
+        float diff = std::fabs(cpuOutput[i] - npuOutput[i]);
+        sumSq += (double)diff * (double)diff;
+        if (diff > maxDiff) {
+            maxDiff = diff;
+            maxDiffIdx = (int)i;
+        }
+    }
+    if (maxRef < 1e-6f) {
+        maxRef = 1e-6f;
+    }
+    for (size_t i = 0; i < cpuOutput.size(); ++i) {
+        float diff = std::fabs(cpuOutput[i] - npuOutput[i]);
+        if (diff / maxRef > 0.02f) {
+            failCount++;
+        }
+    }
+    const float relError = maxDiff / maxRef;
+    const double rms = std::sqrt(sumSq / std::max<size_t>(1, cpuOutput.size()));
+    log << "  [" << label << "] max|ref|=" << maxRef
+        << " maxDiff=" << maxDiff
+        << " relErr=" << (relError * 100.0f) << "%"
+        << " rmsDiff=" << rms
+        << " @idx=" << maxDiffIdx
+        << " fail=" << failCount << "/" << cpuOutput.size();
+    if (relError < 0.02f) {
+        log << " PASS\n";
+    } else if (relError < 0.05f) {
+        allPass = false;
+        log << " WARN\n";
+    } else {
+        allPass = false;
+        log << " FAIL\n";
+    }
+    return log.str();
+}
+
+static bool runModuleBench(const std::string& modelPath,
+                           MNNForwardType fwdType,
+                           const MNN::BackendConfig& backendConfig,
+                           const Module::Config& moduleConfig,
+                           const std::vector<VARP>& baseInputs,
+                           int warmup,
+                           int repeat,
+                           ChunkBenchResult& result) {
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+
+    MNN::ScheduleConfig sched;
+    sched.type = fwdType;
+    sched.numThread = 1;
+    MNN::BackendConfig cfg = backendConfig;
+    sched.backendConfig = &cfg;
+
+    std::shared_ptr<Executor::RuntimeManager> rtMgr(
+        Executor::RuntimeManager::createRuntimeManager(sched));
+    if (rtMgr.get() == nullptr) {
+        result.info = "createRuntimeManager failed";
+        return false;
+    }
+    std::shared_ptr<Module> module(Module::load({}, {}, modelPath.c_str(), rtMgr, &moduleConfig));
+    if (module.get() == nullptr) {
+        result.info = "Module::load returned nullptr";
+        return false;
+    }
+
+    auto t0 = Clock::now();
+    auto firstInputs = cloneInputs(baseInputs);
+    auto firstOut = module->onForward(firstInputs);
+    if (firstOut.empty()) {
+        result.info = "onForward returned empty outputs";
+        return false;
+    }
+    for (size_t i = 0; i < firstOut.size(); ++i) {
+        if (firstOut[i].get() == nullptr || firstOut[i]->readMap<void>() == nullptr) {
+            result.info = "output[" + std::to_string(i) + "] readMap returned null";
+            return false;
+        }
+        auto hostCopy = cloneToHostInput(firstOut[i]);
+        if (hostCopy.get() == nullptr) {
+            result.info = "host clone failed for output[" + std::to_string(i) + "]";
+            return false;
+        }
+        result.outputs.push_back(hostCopy);
+    }
+    result.firstMs = elapsed(t0, Clock::now());
+    if (result.outputs[0].get() != nullptr) {
+        result.info = "shape=" + varShapeStringLocal(result.outputs[0]);
+    }
+
+    result.warmupMs.clear();
+    for (int i = 0; i < warmup; ++i) {
+        auto ins = cloneInputs(baseInputs);
+        auto tw0 = Clock::now();
+        auto out = module->onForward(ins);
+        if (out.empty() || out[0].get() == nullptr || out[0]->readMap<void>() == nullptr) {
+            result.info = "warmup output null";
+            return false;
+        }
+        result.warmupMs.push_back(elapsed(tw0, Clock::now()));
+    }
+
+    auto ts0 = Clock::now();
+    for (int i = 0; i < repeat; ++i) {
+        auto ins = cloneInputs(baseInputs);
+        auto out = module->onForward(ins);
+        if (out.empty() || out[0].get() == nullptr || out[0]->readMap<void>() == nullptr) {
+            result.info = "steady output null";
+            return false;
+        }
+    }
+    result.avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+    return true;
+}
+
+static std::string runQwen3VlChunkModelTest(const std::string& modelRoot,
+                                            int seqLen = 608,
+                                            int warmup = 1,
+                                            int repeat = 2) {
+    std::ostringstream log;
+    std::string modelDir = modelRoot;
+    if (!modelDir.empty() && modelDir.size() > 12 &&
+        modelDir.substr(modelDir.size() - 12) == "/config.json") {
+        modelDir = modelDir.substr(0, modelDir.find_last_of('/'));
+    }
+    if (!isDirectory(modelDir)) {
+        log << "ERROR: model directory not found: " << modelDir << "\n";
+        return log.str();
+    }
+
+    const std::string configPath = modelDir + "/config.json";
+    const std::string configText = readTextFile(configPath);
+    const int numGridPerSide = extractJsonInt(configText, "num_grid_per_side", 1);
+    const std::string visualBackend = extractJsonString(configText, "visual_blocks_backend_type", "hiai");
+    const MNNForwardType npuType = visualBackendFromString(visualBackend);
+
+    const std::string prePath = modelDir + "/visual_pre.mnn";
+    if (!fileExists(prePath)) {
+        log << "ERROR: visual_pre.mnn not found: " << prePath << "\n";
+        return log.str();
+    }
+    auto chunkPaths = listVisualChunkModels(modelDir);
+    if (chunkPaths.empty()) {
+        log << "ERROR: no visual_blocks_npu_*.mnn found under: " << modelDir << "\n";
+        return log.str();
+    }
+
+    log << "=== Qwen3VL Visual Chunk Precision Test ===\n";
+    log << "model_dir=" << modelDir << "\n";
+    log << "chunk_count=" << chunkPaths.size() << "\n";
+    log << "seq_len=" << seqLen << "  num_grid_per_side=" << numGridPerSide
+        << "  visual_backend=" << visualBackend
+        << " (" << forwardTypeName(npuType) << ")\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+
+    MNN::ScheduleConfig preSched;
+    preSched.type = MNN_FORWARD_CPU;
+    preSched.numThread = 1;
+    preSched.backendConfig = &cpuCfg;
+    std::shared_ptr<Executor::RuntimeManager> preRt(
+        Executor::RuntimeManager::createRuntimeManager(preSched));
+    if (preRt.get() == nullptr) {
+        log << "ERROR: create CPU runtime for visual_pre failed\n";
+        return log.str();
+    }
+    std::shared_ptr<Module> preModule(Module::load({}, {}, prePath.c_str(), preRt, &cpuModuleCfg));
+    if (preModule.get() == nullptr || preModule->getInfo() == nullptr) {
+        log << "ERROR: load visual_pre.mnn failed\n";
+        return log.str();
+    }
+    const auto* preInfo = preModule->getInfo();
+    bool hasQwen3Pos = false;
+    for (const auto& name : preInfo->inputNames) {
+        if (name == "idx_tensor") {
+            hasQwen3Pos = true;
+            break;
+        }
+    }
+    if (!hasQwen3Pos) {
+        log << "ERROR: visual_pre.mnn inputs do not contain idx_tensor; "
+            << "this test currently targets Qwen3VL split-export models only.\n";
+        return log.str();
+    }
+    int patchDim = 1536;
+    if (!preInfo->inputs.empty() && preInfo->inputs[0].dim.size() >= 2 && preInfo->inputs[0].dim[1] > 0) {
+        patchDim = preInfo->inputs[0].dim[1];
+    }
+
+    std::string buildErr;
+    auto preInputs = buildQwen3VlPreInputs(seqLen, patchDim, numGridPerSide, buildErr);
+    if (!buildErr.empty()) {
+        log << "ERROR: failed to build visual_pre inputs: " << buildErr << "\n";
+        return log.str();
+    }
+    auto preOut = preModule->onForward(preInputs);
+    if (preOut.size() < 2 || preOut[0].get() == nullptr || preOut[1].get() == nullptr) {
+        log << "ERROR: visual_pre output invalid, expected at least 2 tensors\n";
+        return log.str();
+    }
+    auto hidden0 = cloneToHostInput(preOut[0], "visual_hidden_0");
+    auto rotary = cloneToHostInput(preOut[1], "visual_rotary");
+    if (hidden0.get() == nullptr || rotary.get() == nullptr) {
+        log << "ERROR: failed to materialize visual_pre outputs to host\n";
+        return log.str();
+    }
+    auto hiddenInfo = hidden0->getInfo();
+    if (hiddenInfo == nullptr || hiddenInfo->dim.empty()) {
+        log << "ERROR: hidden_states info missing after visual_pre\n";
+        return log.str();
+    }
+    const int hiddenSeqLen = hiddenInfo->dim[0];
+    auto attentionMask = _Input({1, hiddenSeqLen, hiddenSeqLen}, NCHW);
+    ::memset(attentionMask->writeMap<float>(), 0, (size_t)hiddenSeqLen * hiddenSeqLen * sizeof(float));
+    attentionMask = cloneToHostInput(attentionMask, "visual_mask");
+    if (attentionMask.get() == nullptr) {
+        log << "ERROR: failed to build attention_mask\n";
+        return log.str();
+    }
+
+    log << "visual_pre hidden_states shape=" << varShapeStringLocal(hidden0)
+        << " rotary shape=" << varShapeStringLocal(rotary)
+        << " mask shape=" << varShapeStringLocal(attentionMask) << "\n\n";
+
+    VARP currentHidden = hidden0;
+    int totalPass = 0;
+    const int totalChunks = (int)chunkPaths.size();
+    for (int i = 0; i < totalChunks; ++i) {
+        const auto& chunkPath = chunkPaths[i];
+        log << "[" << (i + 1) << "/" << totalChunks << "] " << basenameOf(chunkPath) << "\n";
+        log << "input hidden shape=" << varShapeStringLocal(currentHidden)
+            << " rotary shape=" << varShapeStringLocal(rotary)
+            << " mask shape=" << varShapeStringLocal(attentionMask) << "\n";
+
+        const std::vector<VARP> chunkInputs = {currentHidden, rotary, attentionMask};
+
+        ChunkBenchResult cpuRes;
+        if (!runModuleBench(chunkPath, MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg, chunkInputs, warmup, repeat, cpuRes)) {
+            log << "ERROR: CPU run failed: " << cpuRes.info << "\n\n";
+            continue;
+        }
+
+        MNN::BackendConfig npuCfg;
+        npuCfg.memory = MNN::BackendConfig::Memory_High;
+        Module::Config npuModuleCfg;
+        npuModuleCfg.shapeMutable = false;
+        npuModuleCfg.rearrange = false;
+        ChunkBenchResult npuRes;
+        if (!runModuleBench(chunkPath, npuType, npuCfg, npuModuleCfg, chunkInputs, warmup, repeat, npuRes)) {
+            log << "ERROR: " << forwardTypeName(npuType) << " run failed: " << npuRes.info << "\n\n";
+            continue;
+        }
+
+        log << "CPU first=" << cpuRes.firstMs << "ms";
+        for (size_t w = 0; w < cpuRes.warmupMs.size(); ++w) {
+            log << " w" << w << "=" << cpuRes.warmupMs[w] << "ms";
+        }
+        log << " steady(x" << repeat << ")=" << cpuRes.avgMs << "ms " << cpuRes.info << "\n";
+
+        log << forwardTypeName(npuType) << " first=" << npuRes.firstMs << "ms";
+        for (size_t w = 0; w < npuRes.warmupMs.size(); ++w) {
+            log << " w" << w << "=" << npuRes.warmupMs[w] << "ms";
+        }
+        log << " steady(x" << repeat << ")=" << npuRes.avgMs << "ms " << npuRes.info << "\n";
+        log << "speedup(steady) CPU/" << forwardTypeName(npuType) << "="
+            << (npuRes.avgMs > 0.0 ? cpuRes.avgMs / npuRes.avgMs : 0.0)
+            << "x\n";
+
+        bool chunkPass = true;
+        const size_t outputCount = std::min(cpuRes.outputs.size(), npuRes.outputs.size());
+        if (cpuRes.outputs.size() != npuRes.outputs.size()) {
+            chunkPass = false;
+            log << "output_count mismatch CPU=" << cpuRes.outputs.size()
+                << " NPU=" << npuRes.outputs.size() << "\n";
+        }
+        for (size_t oi = 0; oi < outputCount; ++oi) {
+            std::vector<float> cpuVec, npuVec;
+            std::string readErr;
+            if (!readVarToFloatVector(cpuRes.outputs[oi], cpuVec, readErr)) {
+                chunkPass = false;
+                log << "  [output" << oi << "] CPU read failed: " << readErr << "\n";
+                continue;
+            }
+            if (!readVarToFloatVector(npuRes.outputs[oi], npuVec, readErr)) {
+                chunkPass = false;
+                log << "  [output" << oi << "] NPU read failed: " << readErr << "\n";
+                continue;
+            }
+            const std::string label = (oi == 0) ? "hidden_states" : ("deepstack_hidden_" + std::to_string(oi - 1));
+            log << compareOutputVectors(cpuVec, npuVec, label, chunkPass);
+        }
+
+        currentHidden = cloneToHostInput(cpuRes.outputs[0], "visual_hidden_next");
+        if (currentHidden.get() == nullptr) {
+            log << "ERROR: failed to carry CPU hidden_states into next chunk\n\n";
+            break;
+        }
+        if (chunkPass) {
+            totalPass++;
+            log << "Chunk result: PASS\n\n";
+        } else {
+            log << "Chunk result: WARN/FAIL\n\n";
+        }
+    }
+    log << "=== Visual Chunk Summary: " << totalPass << "/" << totalChunks << " passed ===\n";
+    return log.str();
+}
+
+} // namespace
+
 static void OpTestExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::ostringstream result;
@@ -1771,6 +2405,19 @@ static void OpTestExecute(napi_env env, void* data) {
             result << "\n";
         }
         result << "=== Qwen3VL Attn Summary: " << pass << "/" << n << " passed ===\n";
+    } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
+        std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
+        std::string modelDir = payload;
+        int seqLen = 608;
+        auto splitPos = payload.find('|');
+        if (splitPos != std::string::npos) {
+            modelDir = payload.substr(0, splitPos);
+            auto seqStr = payload.substr(splitPos + 1);
+            if (!seqStr.empty()) {
+                seqLen = std::max(1, std::atoi(seqStr.c_str()));
+            }
+        }
+        result << runQwen3VlChunkModelTest(modelDir, seqLen, 1, 2);
     } else {
         // Custom: "N,ic,oc,ih,iw[,kh,kw,sh,sw,group]"
         int N=1, ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;

@@ -2,6 +2,7 @@ import native from 'libentry.so';
 import { router } from '@kit.ArkUI';
 import pasteboard from '@ohos.pasteboard';
 import promptAction from '@ohos.promptAction';
+import { common } from '@kit.AbilityKit';
 
 @Entry
 @Component
@@ -9,6 +10,8 @@ struct OpTest {
   @State testResult: string = 'Click a button to start testing'
   @State running: boolean = false
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
+  @State modelDir: string = ''
+  @State visualSeqLen: string = '608'
   // HiAI conv-op mode: 'auto' | 'matmul' | 'conv'
   @State convMode: string = 'auto'
   // HiAI int8 quant mode: 'auto' (on) | 'off' — use real hiai::op::QuantizedConvolution when eligible
@@ -17,6 +20,11 @@ struct OpTest {
   @State cpuPrecision: string = 'normal'
   // CPU memory: 'normal' | 'high' | 'low' (int8 test needs 'low')
   @State cpuMemory: string = 'normal'
+
+  aboutToAppear() {
+    let ctx = getContext(this) as common.UIAbilityContext
+    this.modelDir = ctx.filesDir + '/model'
+  }
 
   private runWithMode(cfg: string, banner: string) {
     this.running = true
@@ -163,6 +171,36 @@ struct OpTest {
       .justifyContent(FlexAlign.SpaceBetween)
       .margin({ bottom: 12 })
 
+      Text('Visual chunk model dir:')
+        .fontSize(12)
+        .fontColor('#666666')
+        .alignSelf(ItemAlign.Start)
+        .margin({ left: '5%', bottom: 4 })
+      TextInput({ placeholder: '/data/storage/el2/base/files/model', text: this.modelDir })
+        .width('90%')
+        .height(40)
+        .borderRadius(8)
+        .backgroundColor('#F0F0F0')
+        .margin({ bottom: 8 })
+        .onChange((value: string) => { this.modelDir = value })
+
+      Row() {
+        Text('Visual seq len:')
+          .fontSize(12)
+          .fontColor('#666666')
+        TextInput({ placeholder: '608', text: this.visualSeqLen })
+          .width('35%')
+          .height(36)
+          .margin({ left: 10 })
+          .borderRadius(8)
+          .backgroundColor('#F0F0F0')
+          .type(InputType.Number)
+          .onChange((value: string) => { this.visualSeqLen = value })
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.Start)
+      .margin({ bottom: 12 })
+
       // Preset test button
       Button(this.running ? 'Running...' : 'Run Preset Tests')
         .width('90%')
@@ -216,6 +254,22 @@ struct OpTest {
         .onClick(() => {
           this.runWithMode('qwen3vl_attn',
             'Running Qwen3VL visual encoder attention (fp32, B=1 S=608 H=16 D=64, with/without mask)...\n')
+        })
+
+      Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
+        .width('90%')
+        .height(52)
+        .backgroundColor(this.running ? '#BBBBBB' : '#4DB6AC')
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          let seq = this.visualSeqLen.trim().length > 0 ? this.visualSeqLen.trim() : '608'
+          this.runWithMode(
+            'qwen3vl_chunks|' + this.modelDir + '|' + seq,
+            'Running real Qwen3VL visual chunk models from: ' + this.modelDir + '\nseq_len=' + seq + '\n'
+          )
         })
 
       // Custom test section
