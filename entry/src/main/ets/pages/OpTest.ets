@@ -269,6 +269,19 @@ struct OpTest {
             'Running Qwen3VL RoPE Gather/Mul/Add test (q=[1,608,16,64], rotary=[2,1,608,1,64])...\n')
         })
 
+      Button(this.running ? 'Running...' : 'Run Qwen3VL LayerNorm A/B (CPU ref axis=-1 vs HiAI)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#7CB342')
+        .borderRadius(10)
+        .fontSize(13)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_ln_ab',
+            'Running LayerNorm A/B test: same input [1,608,1024], CPU ref(axis=-1) vs HiAI LayerNorm...\n')
+        })
+
       Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
         .width('90%')
         .height(52)

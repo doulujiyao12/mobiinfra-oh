@@ -2299,6 +2299,182 @@ static std::string runQwen3VlRopeTest(int seqLen = 608,
     return log.str();
 }
 
+static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
+                                             int hiddenDim = 1024,
+                                             int warmup = 1,
+                                             int repeat = 2) {
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+    std::ostringstream log;
+    if (seqLen <= 0 || hiddenDim <= 0) {
+        log << "ERROR: invalid args seqLen=" << seqLen << " hiddenDim=" << hiddenDim << "\n";
+        return log.str();
+    }
+
+    const int batch = 1;
+    const int elem = batch * seqLen * hiddenDim;
+    std::vector<float> xData(elem), gammaData(hiddenDim), betaData(hiddenDim);
+    for (int i = 0; i < elem; ++i) {
+        xData[i] = (float)((i % 53) - 26) * 0.03f;
+    }
+    for (int i = 0; i < hiddenDim; ++i) {
+        gammaData[i] = 0.9f + 0.2f * std::sin(0.01f * i);
+        betaData[i] = 0.1f * std::cos(0.013f * i);
+    }
+
+    // CPU reference: explicit per-token LayerNorm over last dim.
+    std::vector<float> cpuRef(elem);
+    const float eps = 1e-6f;
+    for (int s = 0; s < seqLen; ++s) {
+        const float* src = xData.data() + s * hiddenDim;
+        float mean = 0.0f;
+        for (int d = 0; d < hiddenDim; ++d) mean += src[d];
+        mean /= hiddenDim;
+        float var = 0.0f;
+        for (int d = 0; d < hiddenDim; ++d) {
+            float dv = src[d] - mean;
+            var += dv * dv;
+        }
+        var /= hiddenDim;
+        float invStd = 1.0f / std::sqrt(var + eps);
+        float* dst = cpuRef.data() + s * hiddenDim;
+        for (int d = 0; d < hiddenDim; ++d) {
+            dst[d] = (src[d] - mean) * invStd * gammaData[d] + betaData[d];
+        }
+    }
+
+    std::vector<int8_t> graphBuffer;
+    {
+        auto x = _Input({batch, seqLen, hiddenDim}, NCHW);
+        auto gamma = _Input({hiddenDim}, NCHW);
+        auto beta = _Input({hiddenDim}, NCHW);
+        x->setName("ln_x");
+        gamma->setName("ln_gamma");
+        beta->setName("ln_beta");
+
+        std::unique_ptr<OpT> op(new OpT);
+        op->main.type = OpParameter_LayerNorm;
+        op->type = OpType_LayerNorm;
+        op->main.value = new LayerNormT;
+        op->main.AsLayerNorm()->axis = {-1};
+        op->main.AsLayerNorm()->epsilon = eps;
+        op->main.AsLayerNorm()->group = 1;
+        op->main.AsLayerNorm()->useRMSNorm = false;
+
+        auto y = Variable::create(Expr::create(std::move(op), {x, gamma, beta}));
+        y->setName("ln_out");
+        graphBuffer = Variable::save({y});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save LayerNorm graph failed\n";
+            return log.str();
+        }
+    }
+
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        auto x = _Input({batch, seqLen, hiddenDim}, NCHW);
+        auto gamma = _Input({hiddenDim}, NCHW);
+        auto beta = _Input({hiddenDim}, NCHW);
+        ::memcpy(x->writeMap<float>(), xData.data(), xData.size() * sizeof(float));
+        ::memcpy(gamma->writeMap<float>(), gammaData.data(), gammaData.size() * sizeof(float));
+        ::memcpy(beta->writeMap<float>(), betaData.data(), betaData.size() * sizeof(float));
+        return {x, gamma, beta};
+    };
+
+    auto runNpu = [&](std::vector<float>& npuOut,
+                      double& firstMs,
+                      std::vector<double>& warmupMs,
+                      double& avgMs,
+                      std::string& shapeStr,
+                      std::string& err) -> bool {
+        MNN::BackendConfig cfg;
+        cfg.memory = MNN::BackendConfig::Memory_High;
+        MNN::ScheduleConfig sched;
+        sched.type = MNN_FORWARD_USER_0;
+        sched.numThread = 1;
+        sched.backendConfig = &cfg;
+
+        std::shared_ptr<Executor::RuntimeManager> rtMgr(
+            Executor::RuntimeManager::createRuntimeManager(sched));
+        if (rtMgr.get() == nullptr) {
+            err = "createRuntimeManager failed";
+            return false;
+        }
+        Module::Config mcfg;
+        mcfg.shapeMutable = false;
+        mcfg.rearrange = false;
+        std::shared_ptr<Module> module(Module::load(
+            {}, {}, reinterpret_cast<const uint8_t*>(graphBuffer.data()), graphBuffer.size(), rtMgr, &mcfg));
+        if (module.get() == nullptr) {
+            err = "Module::load returned nullptr";
+            return false;
+        }
+
+        auto t0 = Clock::now();
+        auto ins = makeInputs();
+        auto outs = module->onForward(ins);
+        firstMs = elapsed(t0, Clock::now());
+        if (outs.empty() || outs[0].get() == nullptr) {
+            err = "onForward output empty";
+            return false;
+        }
+        std::string readErr;
+        if (!readVarToFloatVector(outs[0], npuOut, readErr)) {
+            err = readErr;
+            return false;
+        }
+        shapeStr = varShapeStringLocal(outs[0]);
+
+        warmupMs.clear();
+        for (int i = 0; i < warmup; ++i) {
+            auto wi = makeInputs();
+            auto tw0 = Clock::now();
+            auto o = module->onForward(wi);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                err = "warmup output invalid";
+                return false;
+            }
+            warmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; ++i) {
+            auto si = makeInputs();
+            auto o = module->onForward(si);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                err = "steady output invalid";
+                return false;
+            }
+        }
+        avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+        return true;
+    };
+
+    std::vector<float> npuOut;
+    std::vector<double> npuWarmupMs;
+    double npuFirstMs = -1.0, npuAvgMs = -1.0;
+    std::string npuShape, err;
+    if (!runNpu(npuOut, npuFirstMs, npuWarmupMs, npuAvgMs, npuShape, err)) {
+        log << "ERROR: HiAI LN run failed: " << err << "\n";
+        return log.str();
+    }
+
+    log << "=== Qwen3VL LayerNorm A/B Test ===\n";
+    log << "input shape=1x" << seqLen << "x" << hiddenDim << " axis=-1 epsilon=" << eps << "\n";
+    log << "CPU(ref) output elems=" << cpuRef.size() << "\n";
+    log << "HiAI output elems=" << npuOut.size() << " shape=" << npuShape << "\n";
+    log << "HiAI first=" << npuFirstMs << "ms";
+    for (size_t i = 0; i < npuWarmupMs.size(); ++i) log << " w" << i << "=" << npuWarmupMs[i] << "ms";
+    log << " steady(x" << repeat << ")=" << npuAvgMs << "ms\n";
+
+    bool pass = true;
+    log << compareOutputVectors(cpuRef, npuOut, "layernorm_out", pass);
+    log << (pass ? "PASS\n" : "WARN/FAIL\n");
+    return log.str();
+}
+
 static bool runModuleBench(const std::string& modelPath,
                            MNNForwardType fwdType,
                            const MNN::BackendConfig& backendConfig,
@@ -2673,6 +2849,8 @@ static void OpTestExecute(napi_env env, void* data) {
         result << "=== Qwen3VL Attn Summary: " << pass << "/" << n << " passed ===\n";
     } else if (cfg == "qwen3vl_rope") {
         result << runQwen3VlRopeTest(608, 16, 64, 1, 2);
+    } else if (cfg == "qwen3vl_ln_ab") {
+        result << runQwen3VlLayerNormABTest(608, 1024, 1, 2);
     } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
         std::string modelDir = payload;
