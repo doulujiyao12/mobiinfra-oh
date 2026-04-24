@@ -278,8 +278,10 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          this.runWithMode('qwen3vl_ln_ab',
-            'Running LayerNorm A/B test: same input [1,608,1024], CPU ref(axis=-1) vs HiAI LayerNorm...\n')
+          const seqLen = Math.max(1, parseInt(this.visualSeqLen || '608') || 608)
+          const cfg = 'qwen3vl_ln_ab|' + this.modelDir + '|' + seqLen
+          this.runWithMode(cfg,
+            'Running LayerNorm A/B test from real chunk internal output (model=' + this.modelDir + ', seq_len=' + seqLen + ')...\n')
         })
 
       Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
