@@ -231,6 +231,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <algorithm>
+#include <cctype>
 #include <dirent.h>
 #include <fstream>
 #include <limits>
@@ -250,6 +251,9 @@
 #include <cmath>
 #include <chrono>
 
+#ifdef LOG_TAG
+#undef LOG_TAG
+#endif
 #define LOG_TAG "MnnLlm"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
@@ -1714,31 +1718,89 @@ static std::string readTextFile(const std::string& path) {
     return oss.str();
 }
 
-static int extractJsonInt(const std::string& jsonText, const std::string& key, int defaultValue) {
-    const std::regex r("\"" + key + "\"\\s*:\\s*(-?\\d+)");
-    std::smatch m;
-    if (std::regex_search(jsonText, m, r) && m.size() >= 2) {
-        return std::atoi(m[1].str().c_str());
+static size_t skipJsonWs(const std::string& s, size_t i) {
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+        ++i;
     }
-    return defaultValue;
+    return i;
+}
+
+static bool findJsonKeyValueStart(const std::string& jsonText,
+                                 const std::string& key,
+                                 size_t& valuePosOut) {
+    std::string needle = "\"" + key + "\"";
+    size_t kpos = jsonText.find(needle);
+    if (kpos == std::string::npos) return false;
+    size_t colon = jsonText.find(':', kpos + needle.size());
+    if (colon == std::string::npos) return false;
+    valuePosOut = skipJsonWs(jsonText, colon + 1);
+    return valuePosOut < jsonText.size();
+}
+
+static int extractJsonInt(const std::string& jsonText, const std::string& key, int defaultValue) {
+    size_t pos = 0;
+    if (!findJsonKeyValueStart(jsonText, key, pos)) return defaultValue;
+    bool neg = false;
+    if (jsonText[pos] == '-') {
+        neg = true;
+        ++pos;
+    }
+    if (pos >= jsonText.size() || !std::isdigit((unsigned char)jsonText[pos])) return defaultValue;
+    long long v = 0;
+    while (pos < jsonText.size() && std::isdigit((unsigned char)jsonText[pos])) {
+        v = v * 10 + (jsonText[pos] - '0');
+        ++pos;
+    }
+    if (neg) v = -v;
+    if (v > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
+    if (v < std::numeric_limits<int>::min()) return std::numeric_limits<int>::min();
+    return (int)v;
 }
 
 static std::string extractJsonString(const std::string& jsonText, const std::string& key,
                                      const std::string& defaultValue) {
-    const std::regex r("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
-    std::smatch m;
-    if (std::regex_search(jsonText, m, r) && m.size() >= 2) {
-        return m[1].str();
+    size_t pos = 0;
+    if (!findJsonKeyValueStart(jsonText, key, pos)) return defaultValue;
+    if (jsonText[pos] != '"') return defaultValue;
+    ++pos;
+    std::string out;
+    while (pos < jsonText.size()) {
+        char c = jsonText[pos++];
+        if (c == '"') break;
+        if (c == '\\' && pos < jsonText.size()) {
+            char esc = jsonText[pos++];
+            if (esc == '"' || esc == '\\' || esc == '/') out.push_back(esc);
+            else if (esc == 'b') out.push_back('\b');
+            else if (esc == 'f') out.push_back('\f');
+            else if (esc == 'n') out.push_back('\n');
+            else if (esc == 'r') out.push_back('\r');
+            else if (esc == 't') out.push_back('\t');
+            else out.push_back(esc);
+            continue;
+        }
+        out.push_back(c);
     }
-    return defaultValue;
+    if (out.empty()) return defaultValue;
+    return out;
 }
 
-static int extractChunkIndex(const std::string& path) {
-    std::smatch m;
-    if (std::regex_search(path, m, std::regex(R"(visual_blocks_npu_(\d+)\.mnn$)")) && m.size() >= 2) {
-        return std::atoi(m[1].str().c_str());
+static int extractChunkIndexFromName(const std::string& name) {
+    const std::string prefix = "visual_blocks_npu_";
+    const std::string suffix = ".mnn";
+    if (name.size() <= prefix.size() + suffix.size()) return std::numeric_limits<int>::max();
+    if (name.compare(0, prefix.size(), prefix) != 0) return std::numeric_limits<int>::max();
+    if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) return std::numeric_limits<int>::max();
+    size_t p = prefix.size();
+    if (!std::isdigit((unsigned char)name[p])) return std::numeric_limits<int>::max();
+    int v = 0;
+    while (p < name.size() - suffix.size() && std::isdigit((unsigned char)name[p])) {
+        v = v * 10 + (name[p] - '0');
+        ++p;
     }
-    return std::numeric_limits<int>::max();
+    if (p != name.size() - suffix.size()) return std::numeric_limits<int>::max();
+    return v;
 }
 
 static std::string basenameOf(const std::string& path) {
@@ -1757,18 +1819,15 @@ static std::vector<std::string> listVisualChunkModels(const std::string& modelDi
     }
     struct dirent* ent = nullptr;
     while ((ent = ::readdir(dir)) != nullptr) {
-        if (ent->d_name == nullptr) {
-            continue;
-        }
         std::string name = ent->d_name;
-        if (std::regex_match(name, std::regex(R"(visual_blocks_npu_\d+\.mnn)"))) {
+        if (extractChunkIndexFromName(name) != std::numeric_limits<int>::max()) {
             out.push_back(modelDir + "/" + name);
         }
     }
     ::closedir(dir);
     std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
-        int ia = extractChunkIndex(a);
-        int ib = extractChunkIndex(b);
+        int ia = extractChunkIndexFromName(basenameOf(a));
+        int ib = extractChunkIndexFromName(basenameOf(b));
         if (ia != ib) {
             return ia < ib;
         }
