@@ -256,6 +256,19 @@ struct OpTest {
             'Running Qwen3VL visual encoder attention (fp32, B=1 S=608 H=16 D=64, with/without mask)...\n')
         })
 
+      Button(this.running ? 'Running...' : 'Run Qwen3VL RoPE Gather Test (CPU vs HiAI)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#26A69A')
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_rope',
+            'Running Qwen3VL RoPE Gather/Mul/Add test (q=[1,608,16,64], rotary=[2,1,608,1,64])...\n')
+        })
+
       Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
         .width('90%')
         .height(52)

@@ -2092,6 +2092,213 @@ static std::string compareOutputVectors(const std::vector<float>& cpuOutput,
     return log.str();
 }
 
+static std::string runQwen3VlRopeTest(int seqLen = 608,
+                                      int numHead = 16,
+                                      int headDim = 64,
+                                      int warmup = 1,
+                                      int repeat = 2) {
+    std::ostringstream log;
+    const int batch = 1;
+    if (seqLen <= 0 || numHead <= 0 || headDim <= 0) {
+        log << "ERROR: invalid shape args seqLen=" << seqLen
+            << " numHead=" << numHead << " headDim=" << headDim << "\n";
+        return log.str();
+    }
+
+    const int qElem = batch * seqLen * numHead * headDim;
+    const int rotaryElem = 2 * 1 * seqLen * 1 * headDim;
+    std::vector<float> qData(qElem);
+    std::vector<float> rotaryData(rotaryElem);
+    for (int i = 0; i < qElem; ++i) {
+        qData[i] = (float)((i % 41) - 20) * 0.01f;
+    }
+    for (int i = 0; i < rotaryElem; ++i) {
+        rotaryData[i] = (float)((i % 37) - 18) * 0.02f;
+    }
+
+    std::vector<int8_t> graphBuffer;
+    {
+        auto q = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        auto rotary = _Input({2, 1, seqLen, 1, headDim}, NCHW);
+        q->setName("rope_q");
+        rotary->setName("rotary_pos_emb");
+
+        auto idx0 = _Scalar<int>(0);
+        auto idx1 = _Scalar<int>(1);
+        auto axis0 = _Scalar<int>(0);
+        auto gatherCos = _GatherV2(rotary, idx0, axis0);
+        auto gatherSin = _GatherV2(rotary, idx1, axis0);
+        gatherCos->setName("rope_gather_cos");
+        gatherSin->setName("rope_gather_sin");
+
+        auto mulCos = _Multiply(q, gatherCos);
+        auto mulSin = _Multiply(q, gatherSin);
+        auto ropeOut = _Add(mulCos, mulSin);
+        mulCos->setName("rope_mul_cos");
+        mulSin->setName("rope_mul_sin");
+        ropeOut->setName("rope_out");
+        graphBuffer = Variable::save({gatherCos, gatherSin, mulCos, mulSin, ropeOut});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save for rope graph returned empty\n";
+            return log.str();
+        }
+    }
+
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        auto q = _Input({batch, seqLen, numHead, headDim}, NCHW);
+        ::memcpy(q->writeMap<float>(), qData.data(), qData.size() * sizeof(float));
+        auto rotary = _Input({2, 1, seqLen, 1, headDim}, NCHW);
+        ::memcpy(rotary->writeMap<float>(), rotaryData.data(), rotaryData.size() * sizeof(float));
+        return {q, rotary};
+    };
+
+    auto runOnBackend = [&](MNNForwardType fwdType,
+                            const MNN::BackendConfig& backendCfg,
+                            const Module::Config& moduleCfg,
+                            std::vector<std::vector<float>>& outTensors,
+                            std::vector<std::string>& outShapes,
+                            double& firstMs,
+                            std::vector<double>& warmupMs,
+                            double& avgMs,
+                            std::string& errOut) -> bool {
+        using Clock = std::chrono::high_resolution_clock;
+        using Ms = std::chrono::duration<double, std::milli>;
+        auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+            return Ms(b - a).count();
+        };
+
+        MNN::ScheduleConfig sched;
+        sched.type = fwdType;
+        sched.numThread = 1;
+        MNN::BackendConfig cfg = backendCfg;
+        sched.backendConfig = &cfg;
+        std::shared_ptr<Executor::RuntimeManager> rtMgr(
+            Executor::RuntimeManager::createRuntimeManager(sched));
+        if (rtMgr.get() == nullptr) {
+            errOut = "createRuntimeManager failed";
+            return false;
+        }
+        std::shared_ptr<Module> module(Module::load(
+            {}, {}, reinterpret_cast<const uint8_t*>(graphBuffer.data()), graphBuffer.size(), rtMgr, &moduleCfg));
+        if (module.get() == nullptr) {
+            errOut = "Module::load returned nullptr";
+            return false;
+        }
+
+        auto t0 = Clock::now();
+        auto ins = makeInputs();
+        auto outs = module->onForward(ins);
+        firstMs = elapsed(t0, Clock::now());
+        if (outs.empty()) {
+            errOut = "onForward returned empty outputs";
+            return false;
+        }
+        outTensors.clear();
+        outShapes.clear();
+        outTensors.resize(outs.size());
+        outShapes.resize(outs.size());
+        for (size_t i = 0; i < outs.size(); ++i) {
+            std::string readErr;
+            if (!readVarToFloatVector(outs[i], outTensors[i], readErr)) {
+                errOut = "read output[" + std::to_string(i) + "] failed: " + readErr;
+                return false;
+            }
+            outShapes[i] = varShapeStringLocal(outs[i]);
+        }
+
+        warmupMs.clear();
+        for (int i = 0; i < warmup; ++i) {
+            auto wi = makeInputs();
+            auto tw0 = Clock::now();
+            auto o = module->onForward(wi);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "warmup output invalid";
+                return false;
+            }
+            warmupMs.push_back(elapsed(tw0, Clock::now()));
+        }
+
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; ++i) {
+            auto si = makeInputs();
+            auto o = module->onForward(si);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "steady output invalid";
+                return false;
+            }
+        }
+        avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+        return true;
+    };
+
+    log << "=== Qwen3VL RoPE Gather Test ===\n";
+    log << "shape: q=" << batch << "x" << seqLen << "x" << numHead << "x" << headDim
+        << " rotary=2x1x" << seqLen << "x1x" << headDim << "\n";
+    log << "goal: verify Gather(axis=0, idx=0/1) + broadcast Mul/Add on HiAI vs CPU\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+
+    std::vector<std::vector<float>> cpuOuts;
+    std::vector<std::string> cpuShapes;
+    std::vector<double> cpuWarmupMs;
+    double cpuFirstMs = -1.0, cpuAvgMs = -1.0;
+    std::string err;
+    if (!runOnBackend(MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg,
+                      cpuOuts, cpuShapes, cpuFirstMs, cpuWarmupMs, cpuAvgMs, err)) {
+        log << "ERROR: CPU rope run failed: " << err << "\n";
+        return log.str();
+    }
+
+    MNN::BackendConfig npuCfg;
+    npuCfg.memory = MNN::BackendConfig::Memory_High;
+    Module::Config npuModuleCfg;
+    npuModuleCfg.shapeMutable = false;
+    npuModuleCfg.rearrange = false;
+    std::vector<std::vector<float>> npuOuts;
+    std::vector<std::string> npuShapes;
+    std::vector<double> npuWarmupMs;
+    double npuFirstMs = -1.0, npuAvgMs = -1.0;
+    if (!runOnBackend(MNN_FORWARD_USER_0, npuCfg, npuModuleCfg,
+                      npuOuts, npuShapes, npuFirstMs, npuWarmupMs, npuAvgMs, err)) {
+        log << "ERROR: HiAI rope run failed: " << err << "\n";
+        return log.str();
+    }
+
+    log << "CPU outputs=" << cpuOuts.size() << " shapes:";
+    for (const auto& s : cpuShapes) log << " " << s;
+    log << "\n";
+    log << "HiAI outputs=" << npuOuts.size() << " shapes:";
+    for (const auto& s : npuShapes) log << " " << s;
+    log << "\n";
+
+    log << "CPU first=" << cpuFirstMs << "ms";
+    for (size_t i = 0; i < cpuWarmupMs.size(); ++i) log << " w" << i << "=" << cpuWarmupMs[i] << "ms";
+    log << " steady(x" << repeat << ")=" << cpuAvgMs << "ms\n";
+    log << "HiAI first=" << npuFirstMs << "ms";
+    for (size_t i = 0; i < npuWarmupMs.size(); ++i) log << " w" << i << "=" << npuWarmupMs[i] << "ms";
+    log << " steady(x" << repeat << ")=" << npuAvgMs << "ms\n";
+
+    const std::vector<std::string> names = {
+        "gather_cos", "gather_sin", "mul_cos", "mul_sin", "rope_add"
+    };
+    bool allPass = true;
+    if (cpuOuts.size() != npuOuts.size()) {
+        allPass = false;
+        log << "FAIL: output count mismatch CPU=" << cpuOuts.size()
+            << " HiAI=" << npuOuts.size() << "\n";
+    }
+    const size_t cnt = std::min(cpuOuts.size(), npuOuts.size());
+    for (size_t i = 0; i < cnt; ++i) {
+        const std::string label = (i < names.size()) ? names[i] : ("out_" + std::to_string(i));
+        log << compareOutputVectors(cpuOuts[i], npuOuts[i], label, allPass);
+    }
+    log << (allPass ? "PASS\n" : "WARN/FAIL\n");
+    return log.str();
+}
+
 static bool runModuleBench(const std::string& modelPath,
                            MNNForwardType fwdType,
                            const MNN::BackendConfig& backendConfig,
@@ -2464,6 +2671,8 @@ static void OpTestExecute(napi_env env, void* data) {
             result << "\n";
         }
         result << "=== Qwen3VL Attn Summary: " << pass << "/" << n << " passed ===\n";
+    } else if (cfg == "qwen3vl_rope") {
+        result << runQwen3VlRopeTest(608, 16, 64, 1, 2);
     } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
         std::string modelDir = payload;
