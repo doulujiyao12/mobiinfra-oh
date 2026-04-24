@@ -163,6 +163,13 @@ MNN_PUBLIC VARP _HybridInt8Conv(std::vector<float>&& weightFloat, std::vector<fl
 // (the default) this is plain cross-/self-attention without KV reuse.
 MNN_PUBLIC VARP _Attention(VARP query, VARP key, VARP value, VARP mask = nullptr,
                            bool kv_cache = false);
+// Fused LayerNorm op (OpType_LayerNorm). Normalises x along the trailing
+// contiguous axes given by `axis` (negative values allowed, follows ONNX
+// convention). `gamma`/`beta` may be empty for pure normalisation with no
+// affine step. Set `useRMSNorm=true` for RMSNorm semantics.
+MNN_PUBLIC VARP _LayerNorm(VARP x, std::vector<int32_t> axis, float epsilon,
+                           std::vector<float> gamma = {}, std::vector<float> beta = {},
+                           int group = 1, bool useRMSNorm = false);
 MNN_PUBLIC VARP _CosineSimilarity(VARP input0, VARP input1, VARP inputDim);
 
 enum GridSamplePaddingMode {GRID_SAMPLE_PADDING_ZEROS, GRID_SAMPLE_PADDING_BORDER, GRID_SAMPLE_PADDING_REFLECTION};

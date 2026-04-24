@@ -2299,8 +2299,18 @@ static std::string runQwen3VlRopeTest(int seqLen = 608,
     return log.str();
 }
 
-static std::string runQwen3VlLayerNormABTest(const std::string& modelRoot,
-                                             int seqLen = 608,
+// Synthetic LayerNorm A/B test. Builds a single-op VARP graph
+//   x[1, S, H] -> _LayerNorm(axis=[-1], epsilon=1e-6, gamma, beta)
+// via the public Express helper _LayerNorm (added to libMNN), serialises
+// it once with Variable::save, then Module::load's the buffer twice — once
+// on CPU and once on HiAI NPU — so both backends hit their native
+// OpType_LayerNorm kernel (NPULayerNorm.cpp vs CPULayerNorm.cpp).
+// Weights are synthetic (we only care about CPU-vs-NPU numerical agreement
+// and throughput, not real Qwen3VL semantics). Default shape [1, 608, 1024]
+// matches the hidden tensor of /blocks.0/input_layernorm in the exported
+// Qwen3VL visual encoder (see test_qwen3vl_op.txt).
+static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
+                                             int hiddenDim = 1024,
                                              int warmup = 1,
                                              int repeat = 2) {
     using Clock = std::chrono::high_resolution_clock;
@@ -2309,106 +2319,61 @@ static std::string runQwen3VlLayerNormABTest(const std::string& modelRoot,
         return Ms(b - a).count();
     };
     std::ostringstream log;
-    std::string modelDir = modelRoot;
-    if (!modelDir.empty() && modelDir.size() > 12 &&
-        modelDir.substr(modelDir.size() - 12) == "/config.json") {
-        modelDir = modelDir.substr(0, modelDir.find_last_of('/'));
-    }
-    if (!isDirectory(modelDir)) {
-        log << "ERROR: model directory not found: " << modelDir << "\n";
+    if (seqLen <= 0 || hiddenDim <= 0) {
+        log << "ERROR: invalid shape seqLen=" << seqLen << " hiddenDim=" << hiddenDim << "\n";
         return log.str();
     }
 
-    const std::string configText = readTextFile(modelDir + "/config.json");
-    const int numGridPerSide = extractJsonInt(configText, "num_grid_per_side", 48);
-    const std::string visualBackend = extractJsonString(configText, "visual_blocks_backend_type", "hiai");
-    const MNNForwardType npuType = visualBackendFromString(visualBackend);
+    const int batch = 1;
+    const size_t totalElem = (size_t)batch * seqLen * hiddenDim;
+    const float eps = 1e-6f;
 
-    const std::string prePath = modelDir + "/visual_pre.mnn";
-    if (!fileExists(prePath)) {
-        log << "ERROR: visual_pre.mnn not found: " << prePath << "\n";
-        return log.str();
+    std::vector<float> xData(totalElem);
+    std::vector<float> gamma(hiddenDim);
+    std::vector<float> beta(hiddenDim);
+    for (size_t i = 0; i < totalElem; ++i) {
+        xData[i] = (float)((i % 29) - 14) * 0.05f;
     }
-    std::string chunk0Path = modelDir + "/visual_blocks_npu_0.mnn";
-    if (!fileExists(chunk0Path)) {
-        auto chunks = listVisualChunkModels(modelDir);
-        if (chunks.empty()) {
-            log << "ERROR: visual_blocks_npu_*.mnn not found under: " << modelDir << "\n";
+    for (int i = 0; i < hiddenDim; ++i) {
+        gamma[i] = 1.0f + (float)((i % 17) - 8) * 0.01f;
+        beta[i]  = (float)((i % 13) - 6) * 0.01f;
+    }
+
+    // Build VARP graph once under default CPU executor scope, serialize.
+    // Variable::save populates inputIndexes/outputIndexes that NPU kernels
+    // dereference — same reason _Attention test goes through Module.
+    std::vector<int8_t> graphBuffer;
+    {
+        auto x = _Input({batch, seqLen, hiddenDim}, NCHW);
+        x->setName("ln_in");
+        auto y = _LayerNorm(x, {-1}, eps, gamma, beta, /*group=*/1, /*useRMS=*/false);
+        if (y.get() == nullptr) {
+            log << "ERROR: _LayerNorm returned null (libMNN.so too old?)\n";
             return log.str();
         }
-        chunk0Path = chunks.front();
+        y->setName("ln_out");
+        graphBuffer = Variable::save({y});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save returned empty buffer\n";
+            return log.str();
+        }
     }
 
-    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
-    Module::Config cpuModuleCfg;
-    cpuModuleCfg.shapeMutable = true;
-    cpuModuleCfg.rearrange = true;
-    MNN::ScheduleConfig preSched;
-    preSched.type = MNN_FORWARD_CPU;
-    preSched.numThread = 1;
-    preSched.backendConfig = &cpuCfg;
-    std::shared_ptr<Executor::RuntimeManager> preRt(
-        Executor::RuntimeManager::createRuntimeManager(preSched));
-    if (preRt.get() == nullptr) {
-        log << "ERROR: create CPU runtime for visual_pre failed\n";
-        return log.str();
-    }
-    std::shared_ptr<Module> preModule(Module::load({}, {}, prePath.c_str(), preRt, &cpuModuleCfg));
-    if (preModule.get() == nullptr || preModule->getInfo() == nullptr) {
-        log << "ERROR: load visual_pre.mnn failed\n";
-        return log.str();
-    }
-    const auto* preInfo = preModule->getInfo();
-    int patchDim = 1536;
-    if (!preInfo->inputs.empty() && preInfo->inputs[0].dim.size() >= 2 && preInfo->inputs[0].dim[1] > 0) {
-        patchDim = preInfo->inputs[0].dim[1];
-    }
-    std::string buildErr;
-    auto preInputs = buildQwen3VlPreInputs(seqLen, patchDim, numGridPerSide, buildErr);
-    if (!buildErr.empty()) {
-        log << "ERROR: build visual_pre inputs failed: " << buildErr << "\n";
-        return log.str();
-    }
-    auto preOut = preModule->onForward(preInputs);
-    if (preOut.size() < 2 || preOut[0].get() == nullptr || preOut[1].get() == nullptr) {
-        log << "ERROR: visual_pre outputs invalid\n";
-        return log.str();
-    }
-    auto hidden0 = cloneToHostInput(preOut[0], "visual_hidden_0");
-    auto rotary = cloneToHostInput(preOut[1], "visual_rotary");
-    if (hidden0.get() == nullptr || rotary.get() == nullptr) {
-        log << "ERROR: clone visual_pre outputs failed\n";
-        return log.str();
-    }
-    auto hiddenInfo = hidden0->getInfo();
-    if (hiddenInfo == nullptr || hiddenInfo->dim.empty()) {
-        log << "ERROR: hidden_states info missing\n";
-        return log.str();
-    }
-    const int hiddenSeqLen = hiddenInfo->dim[0];
-    auto attentionMask = _Input({1, hiddenSeqLen, hiddenSeqLen}, NCHW);
-    ::memset(attentionMask->writeMap<float>(), 0, (size_t)hiddenSeqLen * hiddenSeqLen * sizeof(float));
-    attentionMask = cloneToHostInput(attentionMask, "visual_mask");
-    if (attentionMask.get() == nullptr) {
-        log << "ERROR: attention_mask build failed\n";
-        return log.str();
-    }
-    const std::vector<VARP> baseInputs = {hidden0, rotary, attentionMask};
-
-    struct OneRun {
-        std::vector<float> out;
-        std::string shape;
-        double firstMs = -1.0;
-        std::vector<double> warmupMs;
-        double avgMs = -1.0;
-        std::string err;
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        auto x = _Input({batch, seqLen, hiddenDim}, NCHW);
+        ::memcpy(x->writeMap<float>(), xData.data(), totalElem * sizeof(float));
+        return {x};
     };
 
-    auto runOne = [&](const std::string& outputName,
-                      MNNForwardType fwdType,
-                      const MNN::BackendConfig& backendCfg,
-                      const Module::Config& moduleCfg,
-                      OneRun& outRun) -> bool {
+    auto runOnBackend = [&](MNNForwardType fwdType,
+                            const MNN::BackendConfig& backendCfg,
+                            const Module::Config& moduleCfg,
+                            std::vector<float>& outVec,
+                            std::string& outShape,
+                            double& firstMs,
+                            std::vector<double>& warmupLog,
+                            double& avgMs,
+                            std::string& errOut) -> bool {
         MNN::ScheduleConfig sched;
         sched.type = fwdType;
         sched.numThread = 1;
@@ -2417,112 +2382,110 @@ static std::string runQwen3VlLayerNormABTest(const std::string& modelRoot,
         std::shared_ptr<Executor::RuntimeManager> rtMgr(
             Executor::RuntimeManager::createRuntimeManager(sched));
         if (rtMgr.get() == nullptr) {
-            outRun.err = "createRuntimeManager failed";
+            errOut = "createRuntimeManager failed";
             return false;
         }
-        std::shared_ptr<Module> module(Module::load({}, {outputName}, chunk0Path.c_str(), rtMgr, &moduleCfg));
+        std::shared_ptr<Module> module(Module::load(
+            {}, {}, reinterpret_cast<const uint8_t*>(graphBuffer.data()),
+            graphBuffer.size(), rtMgr, &moduleCfg));
         if (module.get() == nullptr) {
-            outRun.err = "Module::load failed for outputName=" + outputName;
+            errOut = "Module::load returned nullptr";
             return false;
         }
 
         auto t0 = Clock::now();
-        auto firstInputs = cloneInputs(baseInputs);
-        auto firstOut = module->onForward(firstInputs);
-        outRun.firstMs = elapsed(t0, Clock::now());
-        if (firstOut.empty() || firstOut[0].get() == nullptr) {
-            outRun.err = "onForward returned empty output";
+        auto ins = makeInputs();
+        auto outs = module->onForward(ins);
+        firstMs = elapsed(t0, Clock::now());
+        if (outs.empty() || outs[0].get() == nullptr) {
+            errOut = "onForward returned empty output";
             return false;
         }
         std::string readErr;
-        if (!readVarToFloatVector(firstOut[0], outRun.out, readErr)) {
-            outRun.err = "read output failed: " + readErr;
+        if (!readVarToFloatVector(outs[0], outVec, readErr)) {
+            errOut = "read output failed: " + readErr;
             return false;
         }
-        outRun.shape = varShapeStringLocal(firstOut[0]);
+        outShape = varShapeStringLocal(outs[0]);
 
-        outRun.warmupMs.clear();
+        warmupLog.clear();
         for (int i = 0; i < warmup; ++i) {
-            auto wi = cloneInputs(baseInputs);
+            auto wi = makeInputs();
             auto tw0 = Clock::now();
-            auto wo = module->onForward(wi);
-            if (wo.empty() || wo[0].get() == nullptr || wo[0]->readMap<void>() == nullptr) {
-                outRun.err = "warmup output invalid";
+            auto o = module->onForward(wi);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "warmup output invalid";
                 return false;
             }
-            outRun.warmupMs.push_back(elapsed(tw0, Clock::now()));
+            warmupLog.push_back(elapsed(tw0, Clock::now()));
         }
-
         auto ts0 = Clock::now();
         for (int i = 0; i < repeat; ++i) {
-            auto si = cloneInputs(baseInputs);
-            auto so = module->onForward(si);
-            if (so.empty() || so[0].get() == nullptr || so[0]->readMap<void>() == nullptr) {
-                outRun.err = "steady output invalid";
+            auto si = makeInputs();
+            auto o = module->onForward(si);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "steady output invalid";
                 return false;
             }
         }
-        outRun.avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+        avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
         return true;
     };
+
+    log << "=== Qwen3VL LayerNorm A/B Test (synthetic, axis=-1) ===\n";
+    log << "shape: x=" << batch << "x" << seqLen << "x" << hiddenDim
+        << "  gamma=beta=" << hiddenDim
+        << "  epsilon=" << eps << "\n";
+    log << "goal: compare CPULayerNorm vs NPULayerNorm (HiAI) precision & perf\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+    std::vector<float> cpuOut;
+    std::string cpuShape;
+    std::vector<double> cpuWarmupMs;
+    double cpuFirstMs = -1.0, cpuAvgMs = -1.0;
+    std::string err;
+    if (!runOnBackend(MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg,
+                      cpuOut, cpuShape, cpuFirstMs, cpuWarmupMs, cpuAvgMs, err)) {
+        log << "ERROR: CPU layernorm run failed: " << err << "\n";
+        return log.str();
+    }
 
     MNN::BackendConfig npuCfg;
     npuCfg.memory = MNN::BackendConfig::Memory_High;
     Module::Config npuModuleCfg;
+    // HiAI compiles the OM graph at load time against fixed shapes; making the
+    // shape mutable would trigger rebuild on every forward. Mirrors
+    // omni.cpp::loadVisual for MNN_FORWARD_USER_0.
     npuModuleCfg.shapeMutable = false;
     npuModuleCfg.rearrange = false;
-
-    const std::vector<std::string> outputCandidates = {
-        "/blocks.0/input_layernorm/Add_1_output_0",
-        "blocks.0/input_layernorm/Add_1_output_0",
-        "/blocks.0/input_layernorm/Add_output_0",
-        "Add_1_output_0",
-        "input_layernorm/Add_1_output_0"
-    };
-
-    log << "=== Qwen3VL LayerNorm A/B Test (Real Chunk Internal Output) ===\n";
-    log << "model_dir=" << modelDir << "\n";
-    log << "chunk_model=" << chunk0Path << "\n";
-    log << "seq_len=" << seqLen << " num_grid_per_side=" << numGridPerSide
-        << " visual_backend=" << visualBackend << " (" << forwardTypeName(npuType) << ")\n";
-    log << "inputs: hidden=" << varShapeStringLocal(hidden0)
-        << " rotary=" << varShapeStringLocal(rotary)
-        << " mask=" << varShapeStringLocal(attentionMask) << "\n";
-
-    OneRun cpuRun, npuRun;
-    std::string selectedOutput;
-    bool found = false;
-    for (const auto& outName : outputCandidates) {
-        OneRun cpuTry, npuTry;
-        bool okCpu = runOne(outName, MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg, cpuTry);
-        bool okNpu = runOne(outName, npuType, npuCfg, npuModuleCfg, npuTry);
-        log << "try outputName=\"" << outName << "\" "
-            << "CPU=" << (okCpu ? "ok" : ("fail(" + cpuTry.err + ")")) << " "
-            << "NPU=" << (okNpu ? "ok" : ("fail(" + npuTry.err + ")")) << "\n";
-        if (okCpu && okNpu) {
-            selectedOutput = outName;
-            cpuRun = std::move(cpuTry);
-            npuRun = std::move(npuTry);
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        log << "ERROR: cannot fetch LayerNorm internal output from chunk model; "
-            << "please check internal tensor name in visual_blocks_npu_0.json\n";
+    std::vector<float> npuOut;
+    std::string npuShape;
+    std::vector<double> npuWarmupMs;
+    double npuFirstMs = -1.0, npuAvgMs = -1.0;
+    if (!runOnBackend(MNN_FORWARD_USER_0, npuCfg, npuModuleCfg,
+                      npuOut, npuShape, npuFirstMs, npuWarmupMs, npuAvgMs, err)) {
+        log << "ERROR: HiAI layernorm run failed: " << err << "\n";
         return log.str();
     }
 
-    log << "selected_output=" << selectedOutput << "\n";
-    log << "CPU first=" << cpuRun.firstMs << "ms";
-    for (size_t i = 0; i < cpuRun.warmupMs.size(); ++i) log << " w" << i << "=" << cpuRun.warmupMs[i] << "ms";
-    log << " steady(x" << repeat << ")=" << cpuRun.avgMs << "ms shape=" << cpuRun.shape << "\n";
-    log << "HiAI first=" << npuRun.firstMs << "ms";
-    for (size_t i = 0; i < npuRun.warmupMs.size(); ++i) log << " w" << i << "=" << npuRun.warmupMs[i] << "ms";
-    log << " steady(x" << repeat << ")=" << npuRun.avgMs << "ms shape=" << npuRun.shape << "\n";
+    log << "CPU  shape=" << cpuShape << " first=" << cpuFirstMs << "ms";
+    for (size_t i = 0; i < cpuWarmupMs.size(); ++i) log << " w" << i << "=" << cpuWarmupMs[i] << "ms";
+    log << " steady(x" << repeat << ")=" << cpuAvgMs << "ms\n";
+    log << "HiAI shape=" << npuShape << " first=" << npuFirstMs << "ms(load+compile+infer)";
+    for (size_t i = 0; i < npuWarmupMs.size(); ++i) log << " w" << i << "=" << npuWarmupMs[i] << "ms";
+    log << " steady(x" << repeat << ")=" << npuAvgMs << "ms\n";
+    if (npuAvgMs > 0) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "speedup(steady) CPU/HiAI=%.2fx (>1 = NPU faster)\n",
+                 cpuAvgMs / npuAvgMs);
+        log << buf;
+    }
 
     bool pass = true;
-    log << compareOutputVectors(cpuRun.out, npuRun.out, "layernorm_internal_out", pass);
+    log << compareOutputVectors(cpuOut, npuOut, "layernorm_out", pass);
     log << (pass ? "PASS\n" : "WARN/FAIL\n");
     return log.str();
 }
@@ -2902,21 +2865,40 @@ static void OpTestExecute(napi_env env, void* data) {
     } else if (cfg == "qwen3vl_rope") {
         result << runQwen3VlRopeTest(608, 16, 64, 1, 2);
     } else if (cfg == "qwen3vl_ln_ab" || cfg.rfind("qwen3vl_ln_ab|", 0) == 0) {
-        std::string modelDir = "/data/storage/el2/base/haps/entry/files/model";
+        // Accepted payload shapes (modelDir is ignored — the new test uses
+        // synthetic weights, but we keep the positional parse so existing UI
+        // trigger `qwen3vl_ln_ab|<modelDir>|<seqLen>` still works):
+        //   qwen3vl_ln_ab
+        //   qwen3vl_ln_ab|<seqLen>
+        //   qwen3vl_ln_ab|<modelDir>|<seqLen>
+        //   qwen3vl_ln_ab|<modelDir>|<seqLen>|<hiddenDim>
         int seqLen = 608;
+        int hiddenDim = 1024;
         if (cfg.rfind("qwen3vl_ln_ab|", 0) == 0) {
             std::string payload = cfg.substr(std::string("qwen3vl_ln_ab|").size());
-            modelDir = payload;
-            auto splitPos = payload.find('|');
-            if (splitPos != std::string::npos) {
-                modelDir = payload.substr(0, splitPos);
-                auto seqStr = payload.substr(splitPos + 1);
-                if (!seqStr.empty()) {
-                    seqLen = std::max(1, std::atoi(seqStr.c_str()));
+            std::vector<std::string> tokens;
+            size_t pos = 0;
+            while (pos <= payload.size()) {
+                size_t nxt = payload.find('|', pos);
+                if (nxt == std::string::npos) {
+                    tokens.push_back(payload.substr(pos));
+                    break;
                 }
+                tokens.push_back(payload.substr(pos, nxt - pos));
+                pos = nxt + 1;
+            }
+            // Drop a leading path-like token (anything starting with '/')
+            if (!tokens.empty() && !tokens.front().empty() && tokens.front()[0] == '/') {
+                tokens.erase(tokens.begin());
+            }
+            if (!tokens.empty() && !tokens[0].empty()) {
+                seqLen = std::max(1, std::atoi(tokens[0].c_str()));
+            }
+            if (tokens.size() >= 2 && !tokens[1].empty()) {
+                hiddenDim = std::max(1, std::atoi(tokens[1].c_str()));
             }
         }
-        result << runQwen3VlLayerNormABTest(modelDir, seqLen, 1, 2);
+        result << runQwen3VlLayerNormABTest(seqLen, hiddenDim, 1, 2);
     } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
         std::string modelDir = payload;
