@@ -2484,6 +2484,49 @@ static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
         log << buf;
     }
 
+    auto vecStats = [](const std::vector<float>& v) {
+        if (v.empty()) return std::string("empty");
+        float mn = v[0], mx = v[0];
+        double sumsq = 0.0, sumabs = 0.0;
+        for (float x : v) {
+            mn = std::min(mn, x);
+            mx = std::max(mx, x);
+            sumsq += (double)x * x;
+            sumabs += std::fabs(x);
+        }
+        char buf[160];
+        snprintf(buf, sizeof(buf), "min=%g max=%g mean|.|=%g rms=%g n=%zu",
+                 mn, mx, sumabs / v.size(),
+                 std::sqrt(sumsq / v.size()), v.size());
+        return std::string(buf);
+    };
+    auto headDump = [](const std::vector<float>& v, int n) {
+        std::ostringstream os;
+        int k = std::min<int>(n, (int)v.size());
+        for (int i = 0; i < k; ++i) {
+            if (i) os << " ";
+            os << v[i];
+        }
+        return os.str();
+    };
+    log << "cpu  stats: " << vecStats(cpuOut) << "\n";
+    log << "npu  stats: " << vecStats(npuOut) << "\n";
+    log << "cpu[0..15]: " << headDump(cpuOut, 16) << "\n";
+    log << "npu[0..15]: " << headDump(npuOut, 16) << "\n";
+    // Peek at a mid-tensor row start so we can tell per-row LN vs whole-tensor LN.
+    if (cpuOut.size() >= (size_t)hiddenDim * 2) {
+        size_t r1 = (size_t)hiddenDim;          // row 1 head
+        size_t r2 = cpuOut.size() - (size_t)hiddenDim; // last row head
+        log << "cpu[row1 h=0..7]: " << headDump(
+                std::vector<float>(cpuOut.begin() + r1, cpuOut.begin() + r1 + 8), 8) << "\n";
+        log << "npu[row1 h=0..7]: " << headDump(
+                std::vector<float>(npuOut.begin() + r1, npuOut.begin() + r1 + 8), 8) << "\n";
+        log << "cpu[lastRow h=0..7]: " << headDump(
+                std::vector<float>(cpuOut.begin() + r2, cpuOut.begin() + r2 + 8), 8) << "\n";
+        log << "npu[lastRow h=0..7]: " << headDump(
+                std::vector<float>(npuOut.begin() + r2, npuOut.begin() + r2 + 8), 8) << "\n";
+    }
+
     bool pass = true;
     log << compareOutputVectors(cpuOut, npuOut, "layernorm_out", pass);
     log << (pass ? "PASS\n" : "WARN/FAIL\n");
