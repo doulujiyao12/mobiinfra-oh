@@ -2312,7 +2312,8 @@ static std::string runQwen3VlRopeTest(int seqLen = 608,
 static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
                                              int hiddenDim = 1024,
                                              int warmup = 1,
-                                             int repeat = 2) {
+                                             int repeat = 2,
+                                             bool gammaZero = false) {
     using Clock = std::chrono::high_resolution_clock;
     using Ms = std::chrono::duration<double, std::milli>;
     auto elapsed = [](Clock::time_point a, Clock::time_point b) {
@@ -2337,6 +2338,14 @@ static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
     for (int i = 0; i < hiddenDim; ++i) {
         gamma[i] = 1.0f + (float)((i % 17) - 8) * 0.01f;
         beta[i]  = (float)((i % 13) - 6) * 0.01f;
+    }
+    // Diagnostic mode: zero gamma to detect whether HiAI's hiai::op::LayerNorm
+    // silently ignores gamma. With gamma=0 and beta=real, math says output = beta
+    // identically. If NPU output also equals beta in this mode AND in real-gamma
+    // mode, gamma is being eaten. If outputs differ between the two modes, gamma
+    // is at least partially applied.
+    if (gammaZero) {
+        std::fill(gamma.begin(), gamma.end(), 0.0f);
     }
 
     // Build VARP graph once under default CPU executor scope, serialize.
@@ -2435,7 +2444,8 @@ static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
     log << "=== Qwen3VL LayerNorm A/B Test (synthetic, axis=-1) ===\n";
     log << "shape: x=" << batch << "x" << seqLen << "x" << hiddenDim
         << "  gamma=beta=" << hiddenDim
-        << "  epsilon=" << eps << "\n";
+        << "  epsilon=" << eps
+        << "  gammaMode=" << (gammaZero ? "ZERO" : "REAL") << "\n";
     log << "goal: compare CPULayerNorm vs NPULayerNorm (HiAI) precision & perf\n";
 
     MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
@@ -2942,6 +2952,11 @@ static void OpTestExecute(napi_env env, void* data) {
             }
         }
         result << runQwen3VlLayerNormABTest(seqLen, hiddenDim, 1, 2);
+    } else if (cfg == "qwen3vl_ln_ab_g0") {
+        // Diagnostic variant: gamma=0, beta=real. Math says output ≡ beta.
+        // If NPU output ALSO equals beta in real-gamma mode, the gamma input
+        // is being ignored by hiai::op::LayerNorm.
+        result << runQwen3VlLayerNormABTest(608, 1024, 1, 2, /*gammaZero=*/true);
     } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
         std::string modelDir = payload;
