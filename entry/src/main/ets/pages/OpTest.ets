@@ -284,6 +284,19 @@ struct OpTest {
             'Running LayerNorm A/B test from real chunk internal output (model=' + this.modelDir + ', seq_len=' + seqLen + ')...\n')
         })
 
+      Button(this.running ? 'Running...' : 'Run LN A/B  gamma=0 (diagnose: HiAI eats gamma?)')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#FFA726')
+        .borderRadius(10)
+        .fontSize(13)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_ln_ab_g0',
+            'Running LayerNorm A/B with gamma=0 / beta=real. If NPU output ≡ beta in BOTH this and the normal A/B, HiAI LayerNorm is ignoring gamma.\n')
+        })
+
       Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
         .width('90%')
         .height(52)
