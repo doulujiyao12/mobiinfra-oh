@@ -2952,11 +2952,37 @@ static void OpTestExecute(napi_env env, void* data) {
             }
         }
         result << runQwen3VlLayerNormABTest(seqLen, hiddenDim, 1, 2);
-    } else if (cfg == "qwen3vl_ln_ab_g0") {
+    } else if (cfg == "qwen3vl_ln_ab_g0" || cfg.rfind("qwen3vl_ln_ab_g0|", 0) == 0) {
         // Diagnostic variant: gamma=0, beta=real. Math says output ≡ beta.
         // If NPU output ALSO equals beta in real-gamma mode, the gamma input
         // is being ignored by hiai::op::LayerNorm.
-        result << runQwen3VlLayerNormABTest(608, 1024, 1, 2, /*gammaZero=*/true);
+        // Payload: qwen3vl_ln_ab_g0[|<seqLen>[|<hiddenDim>]]
+        int seqLen = 608;
+        int hiddenDim = 1024;
+        if (cfg.rfind("qwen3vl_ln_ab_g0|", 0) == 0) {
+            std::string payload = cfg.substr(std::string("qwen3vl_ln_ab_g0|").size());
+            std::vector<std::string> tokens;
+            size_t pos = 0;
+            while (pos <= payload.size()) {
+                size_t nxt = payload.find('|', pos);
+                if (nxt == std::string::npos) {
+                    tokens.push_back(payload.substr(pos));
+                    break;
+                }
+                tokens.push_back(payload.substr(pos, nxt - pos));
+                pos = nxt + 1;
+            }
+            if (!tokens.empty() && !tokens.front().empty() && tokens.front()[0] == '/') {
+                tokens.erase(tokens.begin());
+            }
+            if (!tokens.empty() && !tokens[0].empty()) {
+                seqLen = std::max(1, std::atoi(tokens[0].c_str()));
+            }
+            if (tokens.size() >= 2 && !tokens[1].empty()) {
+                hiddenDim = std::max(1, std::atoi(tokens[1].c_str()));
+            }
+        }
+        result << runQwen3VlLayerNormABTest(seqLen, hiddenDim, 1, 2, /*gammaZero=*/true);
     } else if (cfg.rfind("qwen3vl_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("qwen3vl_chunks|").size());
         std::string modelDir = payload;

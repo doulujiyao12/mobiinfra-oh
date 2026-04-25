@@ -12,6 +12,10 @@ struct OpTest {
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
   @State modelDir: string = ''
   @State visualSeqLen: string = '608'
+  // LayerNorm A/B test custom shape (independent of visualSeqLen so the LN
+  // can be debugged at smaller sizes without affecting the chunk test).
+  @State lnSeqLen: string = '608'
+  @State lnHiddenDim: string = '1024'
   // HiAI conv-op mode: 'auto' | 'matmul' | 'conv'
   @State convMode: string = 'auto'
   // HiAI int8 quant mode: 'auto' (on) | 'off' — use real hiai::op::QuantizedConvolution when eligible
@@ -269,6 +273,36 @@ struct OpTest {
             'Running Qwen3VL RoPE Gather/Mul/Add test (q=[1,608,16,64], rotary=[2,1,608,1,64])...\n')
         })
 
+      // ===== LayerNorm A/B custom shape inputs =====
+      Row() {
+        Text('LN seqLen:')
+          .fontSize(12)
+          .fontColor('#666666')
+        TextInput({ placeholder: '608', text: this.lnSeqLen })
+          .width('22%')
+          .height(36)
+          .margin({ left: 6 })
+          .borderRadius(8)
+          .backgroundColor('#F0F0F0')
+          .type(InputType.Number)
+          .onChange((value: string) => { this.lnSeqLen = value })
+        Text('hiddenDim:')
+          .fontSize(12)
+          .fontColor('#666666')
+          .margin({ left: 12 })
+        TextInput({ placeholder: '1024', text: this.lnHiddenDim })
+          .width('22%')
+          .height(36)
+          .margin({ left: 6 })
+          .borderRadius(8)
+          .backgroundColor('#F0F0F0')
+          .type(InputType.Number)
+          .onChange((value: string) => { this.lnHiddenDim = value })
+      }
+      .width('90%')
+      .justifyContent(FlexAlign.Start)
+      .margin({ bottom: 8 })
+
       Button(this.running ? 'Running...' : 'Run Qwen3VL LayerNorm A/B (CPU ref axis=-1 vs HiAI)')
         .width('90%')
         .height(48)
@@ -278,10 +312,14 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          const seqLen = Math.max(1, parseInt(this.visualSeqLen || '608') || 608)
-          const cfg = 'qwen3vl_ln_ab|' + this.modelDir + '|' + seqLen
+          const seqLen = Math.max(1, parseInt(this.lnSeqLen || '608') || 608)
+          const hiddenDim = Math.max(1, parseInt(this.lnHiddenDim || '1024') || 1024)
+          // Payload format: qwen3vl_ln_ab|<modelDir>|<seqLen>|<hiddenDim>
+          // (modelDir is ignored by the synthetic test but kept for back-compat
+          // with the existing parser in napi_init.cpp.)
+          const cfg = 'qwen3vl_ln_ab|' + this.modelDir + '|' + seqLen + '|' + hiddenDim
           this.runWithMode(cfg,
-            'Running LayerNorm A/B test from real chunk internal output (model=' + this.modelDir + ', seq_len=' + seqLen + ')...\n')
+            'Running LayerNorm A/B test (synthetic, x=[1,' + seqLen + ',' + hiddenDim + '])...\n')
         })
 
       Button(this.running ? 'Running...' : 'Run LN A/B  gamma=0 (diagnose: HiAI eats gamma?)')
@@ -293,8 +331,12 @@ struct OpTest {
         .enabled(!this.running)
         .margin({ bottom: 10 })
         .onClick(() => {
-          this.runWithMode('qwen3vl_ln_ab_g0',
-            'Running LayerNorm A/B with gamma=0 / beta=real. If NPU output ≡ beta in BOTH this and the normal A/B, HiAI LayerNorm is ignoring gamma.\n')
+          const seqLen = Math.max(1, parseInt(this.lnSeqLen || '608') || 608)
+          const hiddenDim = Math.max(1, parseInt(this.lnHiddenDim || '1024') || 1024)
+          const cfg = 'qwen3vl_ln_ab_g0|' + seqLen + '|' + hiddenDim
+          this.runWithMode(cfg,
+            'Running LayerNorm A/B with gamma=0 / beta=real, x=[1,' + seqLen + ',' + hiddenDim + ']. ' +
+            'If NPU output ≡ beta in BOTH this and the normal A/B, HiAI LayerNorm is ignoring gamma.\n')
         })
 
       Button(this.running ? 'Running...' : 'Run Qwen3VL Visual Chunks (real .mnn, CPU vs NPU)')
