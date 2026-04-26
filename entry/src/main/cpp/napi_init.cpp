@@ -237,8 +237,12 @@
 #include <limits>
 #include <sys/stat.h>
 #include <vector>
+#include <errno.h>
 
 #include "llm/llm.hpp"
+#include "rawfile/raw_dir.h"
+#include "rawfile/raw_file.h"
+#include "rawfile/raw_file_manager.h"
 
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/ExprCreator.hpp>
@@ -263,6 +267,7 @@ using namespace MNN::Transformer;
 static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
+static std::string g_runtimeSandboxDir;
 
 // ==================== Runtime log capture ====================
 namespace {
@@ -436,6 +441,230 @@ struct AsyncData {
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
 };
 
+static std::string joinPath(const std::string& lhs, const std::string& rhs) {
+    if (lhs.empty()) return rhs;
+    if (rhs.empty()) return lhs;
+    if (lhs.back() == '/') return lhs + rhs;
+    return lhs + "/" + rhs;
+}
+
+static std::string parentDir(const std::string& path) {
+    size_t pos = path.find_last_of('/');
+    if (pos == std::string::npos) return "";
+    if (pos == 0) return "/";
+    return path.substr(0, pos);
+}
+
+static bool ensureDirectoryRecursive(const std::string& path) {
+    if (path.empty() || path == "/") return true;
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    std::string parent = parentDir(path);
+    if (!parent.empty() && !ensureDirectoryRecursive(parent)) {
+        return false;
+    }
+    if (::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST) {
+        return true;
+    }
+    return false;
+}
+
+static bool pathExistsLocal(const std::string& path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0;
+}
+
+static void prependEnvPath(const char* key, const std::string& path) {
+    const char* current = ::getenv(key);
+    if (current == nullptr || std::string(current).empty()) {
+        ::setenv(key, path.c_str(), 1);
+        return;
+    }
+    std::string currentStr(current);
+    if (currentStr == path || currentStr.find(path + ":") == 0 ||
+        currentStr.find(":" + path) != std::string::npos) {
+        return;
+    }
+    std::string merged = path + ":" + currentStr;
+    ::setenv(key, merged.c_str(), 1);
+}
+
+static bool writeFileBytes(const std::string& path, const uint8_t* data, size_t len, std::string& err) {
+    std::string dir = parentDir(path);
+    if (!ensureDirectoryRecursive(dir)) {
+        err = "create directory failed: " + dir;
+        return false;
+    }
+    FILE* fp = ::fopen(path.c_str(), "wb");
+    if (fp == nullptr) {
+        err = "open file failed: " + path;
+        return false;
+    }
+    size_t written = len == 0 ? 0 : ::fwrite(data, 1, len, fp);
+    ::fclose(fp);
+    if (written != len) {
+        err = "write file failed: " + path;
+        return false;
+    }
+    return true;
+}
+
+static bool copyRawFileToSandbox(NativeResourceManager* mgr,
+                                 const std::string& rawPath,
+                                 const std::string& dstPath,
+                                 std::string& err) {
+    RawFile* rawFile = OH_ResourceManager_OpenRawFile(mgr, rawPath.c_str());
+    if (rawFile == nullptr) {
+        err = "open raw file failed: " + rawPath;
+        return false;
+    }
+    long len = OH_ResourceManager_GetRawFileSize(rawFile);
+    if (len < 0) {
+        OH_ResourceManager_CloseRawFile(rawFile);
+        err = "invalid raw file size: " + rawPath;
+        return false;
+    }
+    std::vector<uint8_t> buffer(static_cast<size_t>(len));
+    int readLen = len == 0 ? 0 : OH_ResourceManager_ReadRawFile(rawFile, buffer.data(), buffer.size());
+    OH_ResourceManager_CloseRawFile(rawFile);
+    if (readLen < 0 || static_cast<size_t>(readLen) != buffer.size()) {
+        err = "read raw file failed: " + rawPath;
+        return false;
+    }
+    return writeFileBytes(dstPath, buffer.data(), buffer.size(), err);
+}
+
+static bool copyRawDirRecursive(NativeResourceManager* mgr,
+                                const std::string& rawDirPath,
+                                const std::string& dstDirPath,
+                                std::string& err) {
+    if (!ensureDirectoryRecursive(dstDirPath)) {
+        err = "create destination directory failed: " + dstDirPath;
+        return false;
+    }
+    RawDir* rawDir = OH_ResourceManager_OpenRawDir(mgr, rawDirPath.c_str());
+    if (rawDir == nullptr) {
+        err = "open raw directory failed: " + rawDirPath;
+        return false;
+    }
+    int count = OH_ResourceManager_GetRawFileCount(rawDir);
+    for (int i = 0; i < count; ++i) {
+        const char* name = OH_ResourceManager_GetRawFileName(rawDir, i);
+        if (name == nullptr || name[0] == '\0') {
+            continue;
+        }
+        std::string childName(name);
+        if (childName == "." || childName == "..") {
+            continue;
+        }
+        std::string childRawPath = joinPath(rawDirPath, childName);
+        std::string childDstPath = joinPath(dstDirPath, childName);
+        if (OH_ResourceManager_IsRawDir(mgr, childRawPath.c_str())) {
+            if (!copyRawDirRecursive(mgr, childRawPath, childDstPath, err)) {
+                OH_ResourceManager_CloseRawDir(rawDir);
+                return false;
+            }
+            continue;
+        }
+        if (!copyRawFileToSandbox(mgr, childRawPath, childDstPath, err)) {
+            OH_ResourceManager_CloseRawDir(rawDir);
+            return false;
+        }
+    }
+    OH_ResourceManager_CloseRawDir(rawDir);
+    return true;
+}
+
+static bool configureCustomOppRuntime(const std::string& sandboxRoot, std::string& err) {
+    const std::string customRoot = joinPath(sandboxRoot, "vendors/customize");
+    const std::string libDir = joinPath(customRoot, "lib");
+    const std::string markerSo = joinPath(libDir, "libcustom_op.so");
+    const std::string markerJson =
+        joinPath(customRoot, "op_impl/ai_core/tbe/config/kirin9030/aic-kirin9030-ops-info.json");
+    const std::string tmpDir = joinPath(sandboxRoot, "tmp");
+    if (!pathExistsLocal(markerSo)) {
+        err = "custom op library missing: " + markerSo;
+        return false;
+    }
+    if (!pathExistsLocal(markerJson)) {
+        err = "custom op config missing: " + markerJson;
+        return false;
+    }
+    if (!ensureDirectoryRecursive(tmpDir)) {
+        err = "create runtime tmp failed: " + tmpDir;
+        return false;
+    }
+    ::setenv("ASCEND_CUSTOM_OPP_PATH", customRoot.c_str(), 1);
+    prependEnvPath("LD_LIBRARY_PATH", libDir);
+    g_runtimeSandboxDir = sandboxRoot;
+    LOGI("Prepared custom OPP in sandbox: %{public}s", customRoot.c_str());
+    return true;
+}
+
+static bool customOppSandboxReady(const std::string& sandboxRoot) {
+    const std::string customRoot = joinPath(sandboxRoot, "vendors/customize");
+    const std::string libSo = joinPath(customRoot, "lib/libcustom_op.so");
+    const std::string kernelSo = joinPath(customRoot, "lib/libascendc_custom_kernels.so");
+    const std::string infoJson =
+        joinPath(customRoot, "op_impl/ai_core/tbe/config/kirin9030/aic-kirin9030-ops-info.json");
+    return pathExistsLocal(libSo) && pathExistsLocal(kernelSo) && pathExistsLocal(infoJson);
+}
+
+static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string err;
+    if (argc < 2) {
+        err = "prepareCustomOpp needs resourceManager and sandbox path";
+    }
+
+    char sandboxPath[1024] = {0};
+    size_t len = 0;
+    if (err.empty()) {
+        napi_get_value_string_utf8(env, args[1], sandboxPath, sizeof(sandboxPath), &len);
+    }
+    std::string sandboxRoot(sandboxPath, len);
+    if (err.empty() && sandboxRoot.empty()) {
+        err = "sandbox path is empty";
+    }
+
+    NativeResourceManager* mgr = nullptr;
+    if (err.empty()) {
+        mgr = OH_ResourceManager_InitNativeResourceManager(env, args[0]);
+        if (mgr == nullptr) {
+            err = "init native resource manager failed";
+        }
+    }
+
+    if (err.empty() && customOppSandboxReady(sandboxRoot)) {
+        LOGI("Reuse existing custom OPP from sandbox: %{public}s", sandboxRoot.c_str());
+    } else if (err.empty()) {
+        if (!copyRawDirRecursive(mgr, "custom_opp", sandboxRoot, err)) {
+            LOGE("Copy custom OPP rawfile failed: %{public}s", err.c_str());
+        }
+    }
+    if (mgr != nullptr) {
+        OH_ResourceManager_ReleaseNativeResourceManager(mgr);
+    }
+
+    if (err.empty() && !configureCustomOppRuntime(sandboxRoot, err)) {
+        LOGE("Configure custom OPP runtime failed: %{public}s", err.c_str());
+    }
+
+    napi_value ret;
+    if (err.empty()) {
+        napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &ret);
+    } else {
+        std::string msg = "error: " + err;
+        napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &ret);
+    }
+    return ret;
+}
+
 // ======================= Token streaming via TSFN =======================
 
 // Called on JS main thread for each token
@@ -520,7 +749,14 @@ static void LoadModelExecute(napi_env env, void* data) {
     }
 
     std::string modelDir = asyncData->inputStr.substr(0, asyncData->inputStr.rfind('/'));
-    std::string tmpPath = modelDir + "/tmp";
+    std::string tmpPath = g_runtimeSandboxDir.empty() ? modelDir + "/tmp" : joinPath(g_runtimeSandboxDir, "tmp");
+    if (!ensureDirectoryRecursive(tmpPath)) {
+        g_llm.reset();
+        asyncData->success = false;
+        asyncData->outputStr = "error: create runtime tmp failed";
+        LOGE("Create runtime tmp failed: %{public}s", tmpPath.c_str());
+        return;
+    }
     std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
     g_llm->set_config(tmpConfig);
 
@@ -3047,6 +3283,7 @@ static napi_value OpTestAsync(napi_env env, napi_callback_info info) {
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
+        {"prepareCustomOpp", nullptr, PrepareCustomOpp,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"copyModel",    nullptr, CopyModel,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},

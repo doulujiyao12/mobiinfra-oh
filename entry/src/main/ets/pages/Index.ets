@@ -327,6 +327,7 @@ struct Index {
   @State autoConfirm: boolean = false;
   @State debugImagePath: string = '';
   @State isModelV2: boolean = false;
+  @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
   @State mllmBackendTypeInput: string = 'cpu';
@@ -352,6 +353,23 @@ struct Index {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
       console.error('initLogFile failed: ' + JSON.stringify(e));
+    }
+    this.prepareCustomOpp();
+  }
+
+  private prepareCustomOpp(): boolean {
+    let ctx = getContext(this) as common.UIAbilityContext;
+    try {
+      let res = mnnllm.prepareCustomOpp(ctx.resourceManager, this.filesDir + '/custom_opp');
+      this.customOppReady = (res === 'ok');
+      if (!this.customOppReady) {
+        this.output = '自定义算子准备失败: ' + res;
+      }
+      return this.customOppReady;
+    } catch (e) {
+      this.customOppReady = false;
+      this.output = '自定义算子准备异常: ' + JSON.stringify(e);
+      return false;
     }
   }
 
@@ -979,6 +997,9 @@ struct Index {
               Button('加载大模型')
                 .onClick(async () => {
                   let cfg = this.modelDir + '/config.json';
+                  if (!this.prepareCustomOpp()) {
+                    return;
+                  }
                   this.output = '加载中，请稍候...';
                   try {
                     this.output = await mnnllm.loadModel(cfg);

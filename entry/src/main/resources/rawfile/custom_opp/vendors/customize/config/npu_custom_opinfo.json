@@ -1,0 +1,69 @@
+{
+  "LayerNormCustom": {
+    "input0": {
+      "name": "x",
+      "dtype": "float16",
+      "format": "ND",
+      "shape": "all",
+      "paramType": "required"
+    },
+    "input1": {
+      "name": "gamma",
+      "dtype": "float16",
+      "format": "ND",
+      "shape": "all",
+      "paramType": "required"
+    },
+    "input2": {
+      "name": "beta",
+      "dtype": "float16",
+      "format": "ND",
+      "shape": "all",
+      "paramType": "required"
+    },
+    "output0": {
+      "name": "y",
+      "dtype": "float16",
+      "format": "ND",
+      "shape": "all",
+      "paramType": "required"
+    },
+    "attr": {
+      "list": "epsilon,norm_size"
+    },
+    "attr_epsilon": {
+      "type": "float",
+      "value": "all",
+      "paramType": "required"
+    },
+    "attr_norm_size": {
+      "type": "int",
+      "value": "all",
+      "paramType": "required"
+    },
+    "dynamicCompileStatic": {
+      "flag": "true"
+    },
+    "dynamicFormat": {
+      "flag": "false"
+    },
+    "dynamicRankSupport": {
+      "flag": "true"
+    },
+    "dynamicShapeSupport": {
+      "flag": "true"
+    },
+    "needCheckSupport": {
+      "flag": "false"
+    },
+    "precision_reduce": {
+      "flag": "true"
+    },
+    "opFile": {
+      "value": "layer_norm_custom"
+    },
+    "opInterface": {
+      "value": "layer_norm_custom"
+    }
+  }
+}

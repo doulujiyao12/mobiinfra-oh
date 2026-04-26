@@ -3,6 +3,7 @@ export const generate: (prompt: string) => string;
 export const chat: (userMessage: string) => string;
 export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
+export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
 // Agent mode (prefix KV cache reuse)
 export const agentPrefill: (prefix: string) => Promise<string>;
@@ -57,4 +58,3 @@ export const setCpuMemory:    (mode: string) => string;
 export const initLogFile: (path: string) => string;
 export const getLogs: () => string;
 export const clearLogs: () => string;
-

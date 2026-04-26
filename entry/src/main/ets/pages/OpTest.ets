@@ -28,6 +28,14 @@ struct OpTest {
   aboutToAppear() {
     let ctx = getContext(this) as common.UIAbilityContext
     this.modelDir = ctx.filesDir + '/model'
+    try {
+      const res = native.prepareCustomOpp(ctx.resourceManager, ctx.filesDir + '/custom_opp')
+      if (res !== 'ok') {
+        this.testResult = 'prepare custom opp failed: ' + res
+      }
+    } catch (e) {
+      this.testResult = 'prepare custom opp exception: ' + JSON.stringify(e)
+    }
   }
 
   private runWithMode(cfg: string, banner: string) {
