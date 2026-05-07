@@ -116,7 +116,9 @@ def capture_screen():
     match = re.search(r'(?i)write to\s+(/\S+\.jpeg)', output)
     
     if match:
+        
         device_path = match.group(1)
+        print(f">> 获取到截图文件: {device_path}")
     else:
         # Fallback 尝试捕捉任意带路径的 .jpeg 输出
         match_fallback = re.search(r'(/\S+\.jpeg)', output)
@@ -125,7 +127,7 @@ def capture_screen():
         else:
             device_path = "/data/local/tmp/screen.jpeg"
             os.system(f"hdc shell snapshot_display {device_path}")
-            
+    print(f">> 使用截图路径: {device_path}")     
     # 先删除电脑端旧文件，防止拉取失败时继续读取旧图片
     if os.path.exists(local_path):
         os.remove(local_path)
@@ -548,7 +550,7 @@ def run_task_in_app_agent(task):
     history_list = []
 
     # 1. Build and send prefix (fixed across all steps)
-    prefix_template = load_prompt("e2e_v2_agent_prefix.md")
+    prefix_template = load_prompt("e2e_v2_agent_prefix_noreason.md")
     if not prefix_template:
         print(">> [Agent] 找不到 prefix 模板，回退到普通模式")
         return run_task_in_app(task)
@@ -558,7 +560,7 @@ def run_task_in_app_agent(task):
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
     print(f">> [Agent] Prefill result: {prefill_res}")
 
-    variable_template = load_prompt("e2e_v2_agent_variable.md")
+    variable_template = load_prompt("e2e_v2_agent_variable_noreason.md")
     if not variable_template:
         print(">> [Agent] 找不到 variable 模板，回退到普通模式")
         send_request({"type": "agent_reset"})

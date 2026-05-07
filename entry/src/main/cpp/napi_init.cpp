@@ -2569,7 +2569,8 @@ static std::string runQwen3VlLayerNormABTest(int seqLen = 608,
     std::vector<float> gamma(hiddenDim);
     std::vector<float> beta(hiddenDim);
     for (size_t i = 0; i < totalElem; ++i) {
-        xData[i] = (float)((i % 29) - 14) * 0.05f;
+        const int signedMod = static_cast<int>(i % 29);
+        xData[i] = static_cast<float>(signedMod - 14) * 0.05f;
     }
     for (int i = 0; i < hiddenDim; ++i) {
         gamma[i] = 1.0f + (float)((i % 17) - 8) * 0.01f;
