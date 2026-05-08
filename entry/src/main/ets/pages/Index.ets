@@ -326,7 +326,7 @@ struct Index {
   @State connected: boolean = false;
   @State autoConfirm: boolean = false;
   @State debugImagePath: string = '';
-  @State isModelV2: boolean = false;
+  @State selectedModelVariant: string = '';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -348,7 +348,7 @@ struct Index {
   aboutToAppear() {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
-    this.modelDir = this.filesDir + '/model';
+    this.syncModelDir();
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
@@ -371,6 +371,28 @@ struct Index {
       this.output = '自定义算子准备异常: ' + JSON.stringify(e);
       return false;
     }
+  }
+
+  private getCurrentModelFolderName(): string {
+    return this.selectedModelVariant.length > 0 ? this.selectedModelVariant : 'model';
+  }
+
+  private syncModelDir(): void {
+    this.modelDir = `${this.filesDir}/${this.getCurrentModelFolderName()}`;
+  }
+
+  private switchModelVariant(variant: string): void {
+    let nextVariant = '';
+    if (variant === 'modelv2' || variant === 'modelv3' || variant === 'modelv4') {
+      nextVariant = variant;
+    }
+    if (this.selectedModelVariant === nextVariant) {
+      return;
+    }
+    this.selectedModelVariant = nextVariant;
+    this.syncModelDir();
+    this.modelLoaded = false;
+    this.output = `模型路径已切换至: ${this.getCurrentModelFolderName()}`;
   }
 
   formatSize(bytes: number): string {
@@ -443,7 +465,7 @@ struct Index {
       }
       fs.unlinkSync(cfgPath);
       this.modelLoaded = false;
-      this.output = `已删除 ${this.isModelV2 ? 'modelv2' : 'model'}/config.json。\n其他模型文件保留，可重新下载仅补 config.json。`;
+      this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载仅补 config.json。`;
     } catch (e) {
       this.output = `删除 config.json 失败: ${e}`;
     }
@@ -497,7 +519,7 @@ struct Index {
       }
       let lines: string[] = [];
       this.buildFileTree(this.modelDir, 0, lines);
-      this.output = `====== ${this.isModelV2 ? 'modelv2' : 'model'} 文件树 ======\n` +
+      this.output = `====== ${this.getCurrentModelFolderName()} 文件树 ======\n` +
         `根目录: ${this.modelDir}\n` +
         lines.join('\n');
     } catch (e) {
@@ -536,7 +558,7 @@ struct Index {
         return;
       }
       let count = this.deleteChunkVisionOmUnder(this.modelDir);
-      this.output = `已在 ${this.isModelV2 ? 'modelv2' : 'model'} 下删除 ${count} 个 chunk_*/vision.om`;
+      this.output = `已在 ${this.getCurrentModelFolderName()} 下删除 ${count} 个 chunk_*/vision.om`;
     } catch (e) {
       this.output = `删除 chunk_*/vision.om 失败: ${e}`;
     }
@@ -556,7 +578,7 @@ struct Index {
       fs.closeSync(file);
       let textDecoder = util.TextDecoder.create('utf-8');
       let content = textDecoder.decodeWithStream(new Uint8Array(buf));
-      this.output = `====== ${this.isModelV2 ? 'modelv2' : 'model'}/config.json ======\n${content}`;
+      this.output = `====== ${this.getCurrentModelFolderName()}/config.json ======\n${content}`;
     } catch (e) {
       this.output = `读取 config.json 失败: ${e}`;
     }
@@ -1175,17 +1197,40 @@ struct Index {
 
             Column() {
               Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-                Checkbox({ name: 'modelV2', group: 'modelVersion' })
-                  .select(this.isModelV2)
+                Checkbox({ name: 'modelV2' })
+                  .select(this.selectedModelVariant === 'modelv2')
                   .selectedColor('#0A59F7')
                   .onChange((value: boolean) => {
-                    this.isModelV2 = value;
-                    this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
-                    this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
-                    this.modelLoaded = false;
+                    this.switchModelVariant(value ? 'modelv2' : '');
                   })
                 Text('使用 modelv2 文件夹隔离模型').fontSize(15).fontColor('#333')
-              }.width('100%').margin({ bottom: 15 })
+              }.width('100%').margin({ bottom: 10 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'modelV3' })
+                  .select(this.selectedModelVariant === 'modelv3')
+                  .selectedColor('#0A59F7')
+                  .onChange((value: boolean) => {
+                    this.switchModelVariant(value ? 'modelv3' : '');
+                  })
+                Text('使用 modelv3 文件夹隔离模型').fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 10 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'modelV4' })
+                  .select(this.selectedModelVariant === 'modelv4')
+                  .selectedColor('#0A59F7')
+                  .onChange((value: boolean) => {
+                    this.switchModelVariant(value ? 'modelv4' : '');
+                  })
+                Text('使用 modelv4 文件夹隔离模型').fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 8 })
+
+              Text('modelv2 / modelv3 / modelv4 只能选一个；都不选时使用默认 model 目录')
+                .fontSize(13)
+                .fontColor('#666')
+                .width('100%')
+                .margin({ bottom: 15 })
 
               Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
                 Text('模型下载 IP:').fontSize(14).fontColor('#666').width(95)
