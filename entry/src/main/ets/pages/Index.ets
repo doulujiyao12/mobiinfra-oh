@@ -1,301 +1,6 @@
 import entry from 'libentry.so';
 import { router } from '@kit.ArkUI';
 
-// @Entry
-// @Component
-// struct Index {
-//   @State status: string = '未加载模型'
-//   @State output: string = ''
-//   @State userInput: string = ''
-//   @State loading: boolean = false
-//   private modelPath: string = ''
-//
-//   aboutToAppear() {
-//     // 获取应用沙箱 files 目录
-//     let filesDir = getContext(this).filesDir
-//     this.modelPath = filesDir + '/model/config.json'
-//     this.output = '沙箱路径: ' + filesDir
-//   }
-//
-//   build() {
-//     Column() {
-//       Text(this.status)
-//         .fontSize(16)
-//         .fontColor(this.status.startsWith('error') ? Color.Red : Color.Green)
-//         .margin(10)
-//
-//       Button('拷贝模型到沙箱')
-//         .onClick(() => {
-//           let filesDir = getContext(this).filesDir
-//           let res = entry.copyModel('/data/local/tmp/MNN/model', filesDir + '/model')
-//           this.output = '拷贝结果: ' + res + '\n路径: ' + filesDir + '/model'
-//         })
-//         .margin(10)
-//
-//       Button('加载模型')
-//         .onClick(() => {
-//           this.status = '加载中...'
-//           this.loading = true
-//           let res = entry.loadModel(this.modelPath)
-//           this.status = res === 'ok' ? '模型已加载' : res
-//           this.loading = false
-//         })
-//         .margin(10)
-//         .enabled(!this.loading)
-//
-//       TextInput({ placeholder: '输入问题...', text: this.userInput })
-//         .onChange((value: string) => { this.userInput = value })
-//         .margin(10)
-//         .width('90%')
-//
-//       Row() {
-//         Button('单轮推理')
-//           .onClick(() => {
-//             if (!this.userInput) return
-//             this.output = '推理中...'
-//             this.output = entry.generate(this.userInput)
-//           })
-//           .margin(5)
-//
-//         Button('对话')
-//           .onClick(() => {
-//             if (!this.userInput) return
-//             this.output = '思考中...'
-//             let reply = entry.chat(this.userInput)
-//             this.output = '> ' + this.userInput + '\n\n' + reply
-//             this.userInput = ''
-//           })
-//           .margin(5)
-//
-//         Button('重置')
-//           .onClick(() => {
-//             entry.reset()
-//             this.output = '对话已重置'
-//           })
-//           .margin(5)
-//       }
-//
-//       Scroll() {
-//         Text(this.output)
-//           .fontSize(14)
-//           .margin(10)
-//           .width('90%')
-//       }
-//       .height('50%')
-//       .width('100%')
-//     }
-//     .width('100%')
-//     .height('100%')
-//     .padding(10)
-//   }
-// }
-
-// import mnnllm from 'libentry.so';
-// import request from '@ohos.request';
-// import fs from '@ohos.file.fs';
-// import common from '@ohos.app.ability.common';
-//
-// const MODEL_ID: string = 'doulujiyao/mnn_mobi_gptq_new_sym_e2e_2B_w8a8_half_rl_n64_s512_visual';
-//
-// const MODEL_FILES: string[] = [
-//   'config.json',
-//   'llm_config.json',
-//   'export_args.json',
-//   'tokenizer.mtok',
-//   'llm.mnn',
-//   'llm.mnn.json',
-//   'llm.mnn.weight',
-//   'embeddings_bf16.bin',
-//   'visual.mnn',
-//   'visual.mnn.json',
-//   'visual.mnn.weight'
-// ];
-//
-// @Entry
-// @Component
-// struct Index {
-//   @State output: string = '准备就绪';
-//   @State chatHistory: string = '';
-//   @State userInput: string = '';
-//   @State downloading: boolean = false;
-//   @State modelLoaded: boolean = false;
-//
-//   private filesDir: string = '';
-//   private modelDir: string = '';
-//
-//   aboutToAppear() {
-//     let ctx = getContext(this) as common.UIAbilityContext;
-//     this.filesDir = ctx.filesDir;
-//     this.modelDir = this.filesDir + '/model';
-//   }
-//
-//   private getDownloadUrl(filename: string): string {
-//     return `https://modelscope.cn/models/${MODEL_ID}/resolve/master/${filename}`;
-//   }
-//
-//   private downloadOneFile(filename: string, index: number, fileCount: number): Promise<boolean> {
-//     const url = this.getDownloadUrl(filename);
-//     const savePath = `${this.modelDir}/${filename}`;
-//
-//     // Skip if already downloaded
-//     try {
-//       let st = fs.statSync(savePath);
-//       if (st.size > 0) {
-//         this.output = `[${index + 1}/${fileCount}] ${filename} 已存在(${(st.size /
-//           1048576).toFixed(1)}MB)，跳过`;
-//         return Promise.resolve(true);
-//       }
-//     } catch (e) {
-//       // file doesn't exist, proceed
-//     }
-//
-//     this.output = `[${index + 1}/${fileCount}] 开始下载: ${filename}`;
-//
-//     let ctx = getContext(this) as common.UIAbilityContext;
-//     let self = this;
-//
-//     return new Promise<boolean>((resolve) => {
-//       request.downloadFile(ctx, {
-//         url: url,
-//         filePath: savePath,
-//         enableMetered: true,
-//         enableRoaming: true,
-//       }).then((task: request.DownloadTask) => {
-//         task.on('progress', (receivedSize: number, totalSize: number) => {
-//           let pct = totalSize > 0 ? Math.floor(receivedSize * 100 / totalSize) : 0;
-//           let recvMB = (receivedSize / 1048576).toFixed(1);
-//           let totMB = (totalSize / 1048576).toFixed(1);
-//           self.output = `[${index + 1}/${fileCount}] ${filename}\n${recvMB}MB / ${totMB}MB  ${pct}%`;
-//         });
-//         task.on('complete', () => {
-//           self.output = `[${index + 1}/${fileCount}] ${filename} done`;
-//           resolve(true);
-//         });
-//         task.on('fail', (err: number) => {
-//           self.output = `[${index + 1}/${fileCount}] ${filename} 失败(err=${err})`;
-//           resolve(false);
-//         });
-//       }).catch((err: Error) => {
-//         self.output = `创建下载任务失败: ${filename}\n${err.message}`;
-//         resolve(false);
-//       });
-//     });
-//   }
-//
-//   async downloadModel() {
-//     this.downloading = true;
-//     this.output = '准备下载...';
-//
-//     // Create model directory
-//     try {
-//       fs.mkdirSync(this.modelDir);
-//     } catch (e) {
-//       // already exists
-//     }
-//
-//     let failed: string[] = [];
-//     for (let i = 0; i < MODEL_FILES.length; i++) {
-//       let ok = await this.downloadOneFile(MODEL_FILES[i], i, MODEL_FILES.length);
-//       if (!ok) {
-//         failed.push(MODEL_FILES[i]);
-//       }
-//     }
-//
-//     if (failed.length === 0) {
-//       this.output = '全部下载完成! 可以加载模型了';
-//     } else {
-//       this.output = `完成，${failed.length}个失败: ${failed.join(', ')}\n可重新点击下载(已有文件会跳过)`;
-//     }
-//     this.downloading = false;
-//   }
-//
-//   build() {
-//     Column() {
-//       Text('MNN LLM').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
-//
-//       Scroll() {
-//         Text(this.output)
-//           .fontSize(13)
-//           .fontFamily('monospace')
-//           .width('100%')
-//           .padding(10)
-//       }
-//       .height('30%')
-//       .width('95%')
-//       .backgroundColor('#f5f5f5')
-//       .borderRadius(8)
-//       .margin(5)
-//
-//       // Download & Load
-//       Row() {
-//         Button('下载模型')
-//           .onClick(() => { this.downloadModel(); })
-//           .enabled(!this.downloading)
-//           .margin(5)
-//         Button('加载模型')
-//           .onClick(() => {
-//             let configPath = this.modelDir + '/config.json';
-//             this.output = '加载中...';
-//             this.output = mnnllm.loadModel(configPath);
-//             if (this.output.indexOf('success') >= 0) {
-//               this.modelLoaded = true;
-//             }
-//           })
-//           .enabled(!this.downloading)
-//           .margin(5)
-//       }.margin(5)
-//
-//       // Chat area
-//       Scroll() {
-//         Text(this.chatHistory)
-//           .fontSize(14)
-//           .width('100%')
-//           .padding(10)
-//       }
-//       .height('30%')
-//       .width('95%')
-//       .backgroundColor('#fafafa')
-//       .borderRadius(8)
-//       .margin(5)
-//
-//       Row() {
-//         TextInput({ placeholder: '输入消息...', text: this.userInput })
-//           .onChange((val: string) => { this.userInput = val; })
-//           .layoutWeight(1)
-//           .margin(5)
-//         Button('发送')
-//           .onClick(() => {
-//             if (!this.modelLoaded || this.userInput.length === 0) return;
-//             let msg = this.userInput;
-//             this.userInput = '';
-//             this.chatHistory += `\nUser: ${msg}\n`;
-//             let reply = mnnllm.chat(msg);
-//             this.chatHistory += `Assistant: ${reply}\n`;
-//           })
-//           .margin(5)
-//       }.width('95%')
-//
-//       Row() {
-//         Button('单轮推理')
-//           .onClick(() => {
-//             if (!this.modelLoaded) return;
-//             this.output = mnnllm.generate('你好');
-//           })
-//           .margin(5)
-//         Button('重置')
-//           .onClick(() => {
-//             this.output = mnnllm.reset();
-//             this.chatHistory = '';
-//           })
-//           .margin(5)
-//       }.margin(5)
-//
-//     }
-//     .width('100%')
-//     .height('100%')
-//     .padding(10)
-//   }
-// }
 
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -561,6 +266,40 @@ struct Index {
       this.output = `已在 ${this.getCurrentModelFolderName()} 下删除 ${count} 个 chunk_*/vision.om`;
     } catch (e) {
       this.output = `删除 chunk_*/vision.om 失败: ${e}`;
+    }
+  }
+
+  deleteDebugOutputs() {
+    let variants = ['model', 'modelv2', 'modelv3', 'modelv4'];
+    let totalDeleted = 0;
+    let results: string[] = [];
+    for (let variant of variants) {
+      let debugDir = `${this.filesDir}/${variant}/debug_outputs`;
+      try {
+        if (!fs.accessSync(debugDir)) {
+          continue;
+        }
+        let files = fs.listFileSync(debugDir);
+        let count = 0;
+        for (let f of files) {
+          try {
+            fs.unlinkSync(`${debugDir}/${f}`);
+            count++;
+          } catch (e) {}
+        }
+        try {
+          fs.rmdirSync(debugDir);
+        } catch (e) {}
+        totalDeleted += count;
+        results.push(`${variant}/debug_outputs: ${count} files`);
+      } catch (e) {
+        // directory doesn't exist, skip
+      }
+    }
+    if (totalDeleted === 0) {
+      this.output = '所有 model 目录下均无 debug_outputs';
+    } else {
+      this.output = `已删除 ${totalDeleted} 个调试输出文件:\n${results.join('\n')}`;
     }
   }
 
@@ -1362,6 +1101,15 @@ struct Index {
                   .backgroundColor('#8D6E63')
                   .borderRadius(8)
               }.width('100%').margin({ bottom: 15 })
+
+              Button('清理 debug_outputs')
+                .onClick(() => { this.deleteDebugOutputs(); })
+                .enabled(!this.downloading)
+                .height(40)
+                .width('100%')
+                .backgroundColor('#795548')
+                .borderRadius(8)
+                .margin({ bottom: 15 })
 
               Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
                 Button('列出沙箱图片')

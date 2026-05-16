@@ -281,6 +281,30 @@ struct OpTest {
             'Running Qwen3VL RoPE Gather/Mul/Add test (q=[1,608,16,64], rotary=[2,1,608,1,64])...\n')
         })
 
+      Button('Qwen3VL Tanh Precision')
+        .width('88%')
+        .height(42)
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_tanh',
+            'Running Tanh precision test (x in [-30,30] + edges, CPU vs NPU)...\n')
+        })
+
+      Button('Qwen3VL GELU Precision (fused, mode=15)')
+        .width('88%')
+        .height(42)
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runWithMode('qwen3vl_gelu',
+            'Running GELU precision test (fused, x in [-30,30] + edges, CPU vs NPU)...\n')
+        })
+
       // ===== LayerNorm A/B custom shape inputs =====
       Row() {
         Text('LN seqLen:')

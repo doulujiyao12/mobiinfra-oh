@@ -1,221 +1,4 @@
-//#include <napi/native_api.h>
-//  #include <hilog/log.h>
-//  #include <string>
-//  #include <sstream>
-//  #include <mutex>
-//  #include <cstdlib>
-//
-//  #include "llm/llm.hpp"
-//
-//  #define LOG_TAG "MnnLlm"
-//  #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
-//  #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
-//
-//  using namespace MNN::Transformer;
-//
-//  static std::unique_ptr<Llm> g_llm = nullptr;
-//  static std::mutex g_mutex;
-//  static ChatMessages g_messages;
-//
-//  // ========== 1. 拷贝模型到沙箱 ==========
-//  // copyModel(src: string, dst: string): string
-//  static napi_value CopyModel(napi_env env, napi_callback_info info) {
-//      size_t argc = 2;
-//      napi_value args[2];
-//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-//
-//      char src[1024], dst[1024];
-//      size_t len;
-//      napi_get_value_string_utf8(env, args[0], src, sizeof(src), &len);
-//      napi_get_value_string_utf8(env, args[1], dst, sizeof(dst), &len);
-//
-//      LOGI("CopyModel: %{public}s -> %{public}s", src, dst);
-//
-//      std::string cmd = "cp -r ";
-//      cmd += src;
-//      cmd += " ";
-//      cmd += dst;
-//      int ret = system(cmd.c_str());
-//
-//      LOGI("CopyModel result: %{public}d", ret);
-//
-//      napi_value result;
-//      napi_create_string_utf8(env, ret == 0 ? "ok" : "copy failed", NAPI_AUTO_LENGTH, &result);
-//      return result;
-//  }
-//
-//  // ========== 2. 加载模型 ==========
-//  // loadModel(configPath: string): string
-//  static napi_value LoadModel(napi_env env, napi_callback_info info) {
-//      size_t argc = 1;
-//      napi_value args[1];
-//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-//
-//      char configPath[1024];
-//      size_t len;
-//      napi_get_value_string_utf8(env, args[0], configPath, sizeof(configPath), &len);
-//
-//      LOGI("Loading model from: %{public}s", configPath);
-//
-//      std::lock_guard<std::mutex> lock(g_mutex);
-//      g_llm.reset(Llm::createLLM(configPath));
-//      if (!g_llm) {
-//          LOGE("createLLM failed");
-//          napi_value result;
-//          napi_create_string_utf8(env, "error: create LLM failed", NAPI_AUTO_LENGTH, &result);
-//          return result;
-//      }
-//
-//      // tmp_path 设置为模型所在目录的 tmp 子目录
-//      std::string configStr(configPath);
-//      std::string modelDir = configStr.substr(0, configStr.rfind('/'));
-//      std::string tmpPath = modelDir + "/tmp";
-//      std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
-//      g_llm->set_config(tmpConfig);
-//
-//      bool res = g_llm->load();
-//
-//      napi_value result;
-//      if (res) {
-//          LOGI("Model loaded successfully");
-//          napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
-//      } else {
-//          LOGE("Model load failed");
-//          g_llm.reset();
-//          napi_create_string_utf8(env, "error: load failed", NAPI_AUTO_LENGTH, &result);
-//      }
-//      return result;
-//  }
-//
-//  // ========== 3. 单轮推理 ==========
-//  // generate(prompt: string): string
-//  static napi_value Generate(napi_env env, napi_callback_info info) {
-//      size_t argc = 1;
-//      napi_value args[1];
-//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-//
-//      char prompt[4096];
-//      size_t len;
-//      napi_get_value_string_utf8(env, args[0], prompt, sizeof(prompt), &len);
-//
-//      LOGI("Prompt: %{public}s", prompt);
-//
-//      std::lock_guard<std::mutex> lock(g_mutex);
-//      if (!g_llm) {
-//          napi_value result;
-//          napi_create_string_utf8(env, "error: model not loaded", NAPI_AUTO_LENGTH, &result);
-//          return result;
-//      }
-//
-//      std::ostringstream oss;
-//      g_llm->response(std::string(prompt), &oss);
-//      std::string output = oss.str();
-//
-//      auto context = g_llm->getContext();
-//      float prefill_s = context->prefill_us / 1e6;
-//      float decode_s = context->decode_us / 1e6;
-//      char perf[512];
-//      snprintf(perf, sizeof(perf),
-//          "\n\n--- perf ---\nprompt tokens: %d\ndecode tokens: %d\nprefill: %.2f tok/s\ndecode:%.2f tok/s",
-//          context->prompt_len, context->gen_seq_len,
-//          prefill_s > 0 ? context->prompt_len / prefill_s : 0,
-//          decode_s > 0 ? context->gen_seq_len / decode_s : 0);
-//      output += perf;
-//
-//      LOGI("Response length: %{public}zu", output.size());
-//
-//      napi_value result;
-//      napi_create_string_utf8(env, output.c_str(), output.size(), &result);
-//      return result;
-//  }
-//
-//  // ========== 4. 多轮对话 ==========
-//  // chat(userMessage: string): string
-//  static napi_value Chat(napi_env env, napi_callback_info info) {
-//      size_t argc = 1;
-//      napi_value args[1];
-//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-//
-//      char userMsg[4096];
-//      size_t len;
-//      napi_get_value_string_utf8(env, args[0], userMsg, sizeof(userMsg), &len);
-//
-//      std::lock_guard<std::mutex> lock(g_mutex);
-//      if (!g_llm) {
-//          napi_value result;
-//          napi_create_string_utf8(env, "error: model not loaded", NAPI_AUTO_LENGTH, &result);
-//          return result;
-//      }
-//
-//      std::string user_str(userMsg);
-//
-//      if (user_str == "/reset") {
-//          g_llm->reset();
-//          g_messages.clear();
-//          g_messages.emplace_back("system", "You are a helpful assistant.");
-//          napi_value result;
-//          napi_create_string_utf8(env, "reset done", NAPI_AUTO_LENGTH, &result);
-//          return result;
-//      }
-//
-//      if (g_messages.empty()) {
-//          g_messages.emplace_back("system", "You are a helpful assistant.");
-//      }
-//      g_messages.emplace_back("user", user_str);
-//
-//      g_llm->response(g_messages);
-//      auto context = g_llm->getContext();
-//      std::string assistant_str = context->generate_str;
-//      g_messages.emplace_back("assistant", assistant_str);
-//
-//      napi_value result;
-//      napi_create_string_utf8(env, assistant_str.c_str(), assistant_str.size(), &result);
-//      return result;
-//  }
-//
-//  // ========== 5. 重置对话 ==========
-//  // reset(): string
-//  static napi_value Reset(napi_env env, napi_callback_info info) {
-//      std::lock_guard<std::mutex> lock(g_mutex);
-//      if (g_llm) {
-//          g_llm->reset();
-//      }
-//      g_messages.clear();
-//      g_messages.emplace_back("system", "You are a helpful assistant.");
-//
-//      napi_value result;
-//      napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
-//      return result;
-//  }
-//
-//  // ========== N-API 模块注册 ==========
-//  EXTERN_C_START
-//  static napi_value Init(napi_env env, napi_value exports) {
-//      napi_property_descriptor desc[] = {
-//          {"copyModel", nullptr, CopyModel, nullptr, nullptr, nullptr, napi_default, nullptr},
-//          {"loadModel", nullptr, LoadModel, nullptr, nullptr, nullptr, napi_default, nullptr},
-//          {"generate",  nullptr, Generate,  nullptr, nullptr, nullptr, napi_default, nullptr},
-//          {"chat",      nullptr, Chat,      nullptr, nullptr, nullptr, napi_default, nullptr},
-//          {"reset",     nullptr, Reset,     nullptr, nullptr, nullptr, napi_default, nullptr},
-//      };
-//      napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
-//      return exports;
-//  }
-//  EXTERN_C_END
-//
-//  static napi_module mnnModule = {
-//      .nm_version = 1,
-//      .nm_flags = 0,
-//      .nm_filename = nullptr,
-//      .nm_register_func = Init,
-//      .nm_modname = "entry",
-//      .nm_priv = nullptr,
-//      .reserved = {0},
-//  };
-//
-//  extern "C" __attribute__((constructor)) void RegisterModule(void) {
-//      napi_module_register(&mnnModule);
-//  }
+
 
 
 #include <napi/native_api.h>
@@ -895,11 +678,19 @@ static void ChatExecute(napi_env env, void* data) {
         g_messages.emplace_back("system", "You are a helpful assistant.");
     }
     g_messages.emplace_back("user", asyncData->inputStr);
-
-    g_llm->response(g_messages);
     auto context = g_llm->getContext();
+    std::ostringstream oss;
+    g_llm->response(g_messages, &oss);
+    
     if (context) {
-        std::string assistant_str = context->generate_str;
+        std::string assistant_str = oss.str();
+        // printf("Assistant: %s\n", context->generate_str.c_str());
+        if (assistant_str.empty()) {
+            assistant_str = context->generate_str;
+        } else {
+            // context->generate_str = assistant_str;
+            printf("Assistant: %s\n", context->generate_str.c_str());
+        }
         g_messages.emplace_back("assistant", assistant_str);
         asyncData->outputStr = assistant_str;
     }
@@ -2158,6 +1949,75 @@ static bool readVarToFloatVector(const VARP& src, std::vector<float>& out, std::
     return true;
 }
 
+// ---- save outputs for offline Python analysis ----
+
+static bool saveVectorToBin(const std::string& path, const std::vector<float>& data, std::string& err) {
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data.data());
+    size_t byteLen = data.size() * sizeof(float);
+    if (!writeFileBytes(path, bytes, byteLen, err)) return false;
+    return true;
+}
+
+static void saveChunkOutputs(const std::string& outDir, int chunkIdx,
+                             const std::string& chunkName,
+                             const std::vector<VARP>& cpuOutputs,
+                             const std::vector<VARP>& npuOutputs) {
+    for (size_t oi = 0; oi < cpuOutputs.size() && oi < npuOutputs.size(); ++oi) {
+        std::vector<float> cpuVec, npuVec;
+        std::string readErr;
+        if (!readVarToFloatVector(cpuOutputs[oi], cpuVec, readErr)) continue;
+        if (!readVarToFloatVector(npuOutputs[oi], npuVec, readErr)) continue;
+
+        const std::string label = (oi == 0) ? "hidden_states"
+            : ("deepstack_hidden_" + std::to_string(oi - 1));
+
+        std::string shapeStr = "unknown";
+        if (cpuOutputs[oi]->getInfo() && !cpuOutputs[oi]->getInfo()->dim.empty()) {
+            std::ostringstream ss;
+            auto& dim = cpuOutputs[oi]->getInfo()->dim;
+            for (size_t d = 0; d < dim.size(); ++d) {
+                if (d) ss << "x";
+                ss << dim[d];
+            }
+            shapeStr = ss.str();
+        }
+
+        std::string cpuPath = outDir + "/chunk" + std::to_string(chunkIdx + 1)
+                            + "_out" + std::to_string(oi) + "_" + shapeStr + "_cpu.bin";
+        std::string npuPath = outDir + "/chunk" + std::to_string(chunkIdx + 1)
+                            + "_out" + std::to_string(oi) + "_" + shapeStr + "_npu.bin";
+
+        std::string saveErr;
+        saveVectorToBin(cpuPath, cpuVec, saveErr);
+        saveVectorToBin(npuPath, npuVec, saveErr);
+    }
+
+    std::string metaPath = outDir + "/chunk" + std::to_string(chunkIdx + 1) + "_meta.txt";
+    std::ostringstream meta;
+    meta << "chunk=" << chunkName << "\n";
+    for (size_t oi = 0; oi < cpuOutputs.size() && oi < npuOutputs.size(); ++oi) {
+        const std::string label = (oi == 0) ? "hidden_states"
+            : ("deepstack_hidden_" + std::to_string(oi - 1));
+        std::string shapeStr = "unknown";
+        if (cpuOutputs[oi]->getInfo() && !cpuOutputs[oi]->getInfo()->dim.empty()) {
+            std::ostringstream ss;
+            auto& dim = cpuOutputs[oi]->getInfo()->dim;
+            for (size_t d = 0; d < dim.size(); ++d) {
+                if (d) ss << "x";
+                ss << dim[d];
+            }
+            shapeStr = ss.str();
+        }
+        meta << "out" << oi << "=" << label << " shape=" << shapeStr << "\n";
+    }
+    std::string metaStr = meta.str();
+    std::vector<uint8_t> metaBytes(metaStr.begin(), metaStr.end());
+    std::string metaErr;
+    writeFileBytes(metaPath, metaBytes.data(), metaBytes.size(), metaErr);
+}
+
+// ---- end save helpers ----
+
 static std::vector<VARP> cloneInputs(const std::vector<VARP>& srcs) {
     std::vector<VARP> out;
     out.reserve(srcs.size());
@@ -2257,7 +2117,7 @@ static std::vector<VARP> buildQwen3VlPreInputs(int seqLen, int patchDim, int num
             idxPtr[2 * seqLen + idx] = hCeil * numGridPerSide + wFloor;
             // Keep the same index layout used in omni.cpp so the chunk test
             // matches the current Harmony app deployment path exactly.
-            idxPtr[3 * seqLen + idx] = hCeil * numGridPerSide + wFloor;
+            idxPtr[3 * seqLen + idx] = hCeil * numGridPerSide + wCeil;
             weightPtr[0 * seqLen + idx] = (1.0f - dh) * (1.0f - dw);
             weightPtr[1 * seqLen + idx] = (1.0f - dh) * dw;
             weightPtr[2 * seqLen + idx] = dh * (1.0f - dw);
@@ -2861,6 +2721,346 @@ static bool runModuleBench(const std::string& modelPath,
     return true;
 }
 
+static std::string runTanhTest(int warmup = 1, int repeat = 2) {
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+    std::ostringstream log;
+
+    // Input: wide range [-30, +30] to exercise fp16 tanh saturation
+    const int N = 2048;
+    std::vector<float> xData(N);
+    for (int i = 0; i < N; ++i) {
+        // sweep from -30 to +30, plus some edge values
+        float t = -30.0f + 60.0f * (float)i / (float)(N - 1);
+        xData[i] = t;
+    }
+    // Append specific test points
+    std::vector<float> extraVals = {-100.0f, -50.0f, -20.0f, -10.0f, -5.0f, -1.0f,
+                                     0.0f, 1.0f, 5.0f, 10.0f, 20.0f, 50.0f, 100.0f};
+    xData.insert(xData.end(), extraVals.begin(), extraVals.end());
+    const int totalN = (int)xData.size();
+
+    // Build VARP graph: y = tanh(x)
+    std::vector<int8_t> graphBuffer;
+    {
+        auto x = _Input({totalN}, NCHW);
+        x->setName("tanh_in");
+        auto y = _Tanh(x);
+        if (y.get() == nullptr) {
+            log << "ERROR: _Tanh returned null\n";
+            return log.str();
+        }
+        y->setName("tanh_out");
+        graphBuffer = Variable::save({y});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save returned empty\n";
+            return log.str();
+        }
+    }
+
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        auto x = _Input({totalN}, NCHW);
+        ::memcpy(x->writeMap<float>(), xData.data(), totalN * sizeof(float));
+        return {x};
+    };
+
+    auto runOnBackend = [&](MNNForwardType fwdType,
+                            const MNN::BackendConfig& backendCfg,
+                            const Module::Config& moduleCfg,
+                            std::vector<float>& outVec,
+                            std::string& outShape,
+                            double& firstMs,
+                            std::vector<double>& warmupList,
+                            double& avgMs,
+                            std::string& errOut) -> bool {
+        MNN::ScheduleConfig sched;
+        sched.type = fwdType;
+        sched.numThread = 1;
+        MNN::BackendConfig cfg = backendCfg;
+        sched.backendConfig = &cfg;
+        std::shared_ptr<Executor::RuntimeManager> rtMgr(
+            Executor::RuntimeManager::createRuntimeManager(sched));
+        if (rtMgr.get() == nullptr) {
+            errOut = "createRuntimeManager failed";
+            return false;
+        }
+        std::shared_ptr<Module> module(Module::load(
+            {}, {}, reinterpret_cast<const uint8_t*>(graphBuffer.data()),
+            graphBuffer.size(), rtMgr, &moduleCfg));
+        if (module.get() == nullptr) {
+            errOut = "Module::load returned nullptr";
+            return false;
+        }
+
+        auto t0 = Clock::now();
+        auto ins = makeInputs();
+        auto outs = module->onForward(ins);
+        firstMs = elapsed(t0, Clock::now());
+        if (outs.empty() || outs[0].get() == nullptr) {
+            errOut = "onForward returned empty output";
+            return false;
+        }
+        std::string readErr;
+        if (!readVarToFloatVector(outs[0], outVec, readErr)) {
+            errOut = "read output failed: " + readErr;
+            return false;
+        }
+        outShape = varShapeStringLocal(outs[0]);
+
+        warmupList.clear();
+        for (int i = 0; i < warmup; ++i) {
+            auto wi = makeInputs();
+            auto tw0 = Clock::now();
+            auto o = module->onForward(wi);
+            double t = elapsed(tw0, Clock::now());
+            warmupList.push_back(t);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "warmup output invalid";
+                return false;
+            }
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; ++i) {
+            auto si = makeInputs();
+            auto o = module->onForward(si);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "steady output invalid";
+                return false;
+            }
+        }
+        avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+        return true;
+    };
+
+    log << "=== Tanh Precision Test (x in [-30,30] + edge points) ===\n";
+    log << "N=" << totalN << "  warmup=" << warmup << "  repeat=" << repeat << "\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+    std::vector<float> cpuOut;
+    std::string cpuShape;
+    double cpuFirst = -1, cpuAvg = -1;
+    std::vector<double> cpuWarm;
+    std::string err;
+    if (!runOnBackend(MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg, cpuOut, cpuShape, cpuFirst, cpuWarm, cpuAvg, err)) {
+        log << "ERROR: CPU run failed: " << err << "\n";
+        return log.str();
+    }
+    log << "CPU first=" << cpuFirst << "ms";
+    for (size_t w = 0; w < cpuWarm.size(); ++w) log << " w" << w << "=" << cpuWarm[w] << "ms";
+    log << " steady(avg)=" << cpuAvg << "ms  shape=" << cpuShape << "\n";
+
+    MNN::BackendConfig npuCfg;
+    npuCfg.memory = MNN::BackendConfig::Memory_High;
+    Module::Config npuModuleCfg;
+    npuModuleCfg.shapeMutable = false;
+    npuModuleCfg.rearrange = false;
+    std::vector<float> npuOut;
+    std::string npuShape;
+    double npuFirst = -1, npuAvg = -1;
+    std::vector<double> npuWarm;
+    if (!runOnBackend(MNN_FORWARD_USER_0, npuCfg, npuModuleCfg, npuOut, npuShape, npuFirst, npuWarm, npuAvg, err)) {
+        log << "ERROR: HiAI run failed: " << err << "\n";
+        return log.str();
+    }
+    log << "HiAI first=" << npuFirst << "ms steady(avg)=" << npuAvg << "ms  shape=" << npuShape << "\n";
+
+    bool pass = true;
+    log << compareOutputVectors(cpuOut, npuOut, "tanh", pass);
+
+    // Detailed per-point breakdown for key values
+    log << "\n--- Pointwise comparison (first 10 and edge values) ---\n";
+    log << "idx     input          CPU(tanh)      NPU(tanh)      diff\n";
+    auto printPoint = [&](int idx) {
+        if (idx < 0 || idx >= totalN) return;
+        float diff = std::fabs(cpuOut[idx] - npuOut[idx]);
+        log << std::setw(5) << idx << "  "
+            << std::setw(12) << std::setprecision(6) << xData[idx] << "  "
+            << std::setw(12) << std::setprecision(6) << cpuOut[idx] << "  "
+            << std::setw(12) << std::setprecision(6) << npuOut[idx] << "  "
+            << std::setw(10) << std::setprecision(6) << diff << "\n";
+    };
+    for (int i = 0; i < 10; ++i) printPoint(i);
+    for (int i = N; i < totalN; ++i) printPoint(i);  // edge values
+
+    if (pass) log << "\nTanh result: PASS\n";
+    else      log << "\nTanh result: FAIL\n";
+    return log.str();
+}
+
+static std::string runGeluTest(int warmup = 1, int repeat = 2) {
+    using Clock = std::chrono::high_resolution_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+        return Ms(b - a).count();
+    };
+    std::ostringstream log;
+
+    // Same input as tanh test: wide range + edge values
+    const int N = 2048;
+    std::vector<float> xData(N);
+    for (int i = 0; i < N; ++i) {
+        xData[i] = -30.0f + 60.0f * (float)i / (float)(N - 1);
+    }
+    std::vector<float> extraVals = {-100.0f, -50.0f, -20.0f, -10.0f, -5.0f, -1.0f,
+                                     0.0f, 1.0f, 5.0f, 10.0f, 20.0f, 50.0f, 100.0f};
+    xData.insert(xData.end(), extraVals.begin(), extraVals.end());
+    const int totalN = (int)xData.size();
+
+    // Build VARP graph: y = GELU(x) using fused GELU op
+    std::vector<int8_t> graphBuffer;
+    {
+        auto x = _Input({totalN}, NCHW);
+        x->setName("gelu_in");
+        auto y = _Gelu(x);
+        if (y.get() == nullptr) {
+            log << "ERROR: _Gelu returned null\n";
+            return log.str();
+        }
+        y->setName("gelu_out");
+        graphBuffer = Variable::save({y});
+        if (graphBuffer.empty()) {
+            log << "ERROR: Variable::save returned empty\n";
+            return log.str();
+        }
+    }
+
+    auto makeInputs = [&]() -> std::vector<VARP> {
+        auto x = _Input({totalN}, NCHW);
+        ::memcpy(x->writeMap<float>(), xData.data(), totalN * sizeof(float));
+        return {x};
+    };
+
+    auto runOnBackend = [&](MNNForwardType fwdType,
+                            const MNN::BackendConfig& backendCfg,
+                            const Module::Config& moduleCfg,
+                            std::vector<float>& outVec,
+                            std::string& outShape,
+                            double& firstMs,
+                            std::vector<double>& warmupList,
+                            double& avgMs,
+                            std::string& errOut) -> bool {
+        MNN::ScheduleConfig sched;
+        sched.type = fwdType;
+        sched.numThread = 1;
+        MNN::BackendConfig cfg = backendCfg;
+        sched.backendConfig = &cfg;
+        std::shared_ptr<Executor::RuntimeManager> rtMgr(
+            Executor::RuntimeManager::createRuntimeManager(sched));
+        if (rtMgr.get() == nullptr) {
+            errOut = "createRuntimeManager failed";
+            return false;
+        }
+        std::shared_ptr<Module> module(Module::load(
+            {}, {}, reinterpret_cast<const uint8_t*>(graphBuffer.data()),
+            graphBuffer.size(), rtMgr, &moduleCfg));
+        if (module.get() == nullptr) {
+            errOut = "Module::load returned nullptr";
+            return false;
+        }
+
+        auto t0 = Clock::now();
+        auto ins = makeInputs();
+        auto outs = module->onForward(ins);
+        firstMs = elapsed(t0, Clock::now());
+        if (outs.empty() || outs[0].get() == nullptr) {
+            errOut = "onForward returned empty output";
+            return false;
+        }
+        std::string readErr;
+        if (!readVarToFloatVector(outs[0], outVec, readErr)) {
+            errOut = "read output failed: " + readErr;
+            return false;
+        }
+        outShape = varShapeStringLocal(outs[0]);
+
+        warmupList.clear();
+        for (int i = 0; i < warmup; ++i) {
+            auto wi = makeInputs();
+            auto tw0 = Clock::now();
+            auto o = module->onForward(wi);
+            double t = elapsed(tw0, Clock::now());
+            warmupList.push_back(t);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "warmup output invalid";
+                return false;
+            }
+        }
+        auto ts0 = Clock::now();
+        for (int i = 0; i < repeat; ++i) {
+            auto si = makeInputs();
+            auto o = module->onForward(si);
+            if (o.empty() || o[0].get() == nullptr || o[0]->readMap<void>() == nullptr) {
+                errOut = "steady output invalid";
+                return false;
+            }
+        }
+        avgMs = elapsed(ts0, Clock::now()) / std::max(1, repeat);
+        return true;
+    };
+
+    log << "=== GELU Precision Test (fused, x in [-30,30] + edges) ===\n";
+    log << "N=" << totalN << "  warmup=" << warmup << "  repeat=" << repeat << "\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+    std::vector<float> cpuOut;
+    std::string cpuShape;
+    double cpuFirst = -1, cpuAvg = -1;
+    std::vector<double> cpuWarm;
+    std::string err;
+    if (!runOnBackend(MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg, cpuOut, cpuShape, cpuFirst, cpuWarm, cpuAvg, err)) {
+        log << "ERROR: CPU run failed: " << err << "\n";
+        return log.str();
+    }
+    log << "CPU first=" << cpuFirst << "ms";
+    for (size_t w = 0; w < cpuWarm.size(); ++w) log << " w" << w << "=" << cpuWarm[w] << "ms";
+    log << " steady(avg)=" << cpuAvg << "ms  shape=" << cpuShape << "\n";
+
+    MNN::BackendConfig npuCfg;
+    npuCfg.memory = MNN::BackendConfig::Memory_High;
+    Module::Config npuModuleCfg;
+    npuModuleCfg.shapeMutable = false;
+    npuModuleCfg.rearrange = false;
+    std::vector<float> npuOut;
+    std::string npuShape;
+    double npuFirst = -1, npuAvg = -1;
+    std::vector<double> npuWarm;
+    if (!runOnBackend(MNN_FORWARD_USER_0, npuCfg, npuModuleCfg, npuOut, npuShape, npuFirst, npuWarm, npuAvg, err)) {
+        log << "ERROR: HiAI run failed: " << err << "\n";
+        return log.str();
+    }
+    log << "HiAI first=" << npuFirst << "ms steady(avg)=" << npuAvg << "ms  shape=" << npuShape << "\n";
+
+    bool pass = true;
+    log << compareOutputVectors(cpuOut, npuOut, "gelu", pass);
+
+    log << "\n--- Pointwise (first 10 + edges) ---\n";
+    log << "idx     input          CPU(gelu)      NPU(gelu)      diff\n";
+    auto printPoint = [&](int idx) {
+        if (idx < 0 || idx >= totalN) return;
+        float diff = std::fabs(cpuOut[idx] - npuOut[idx]);
+        log << std::setw(5) << idx << "  "
+            << std::setw(12) << std::setprecision(6) << xData[idx] << "  "
+            << std::setw(12) << std::setprecision(6) << cpuOut[idx] << "  "
+            << std::setw(12) << std::setprecision(6) << npuOut[idx] << "  "
+            << std::setw(10) << std::setprecision(6) << diff << "\n";
+    };
+    for (int i = 0; i < 10; ++i) printPoint(i);
+    for (int i = N; i < totalN; ++i) printPoint(i);
+
+    if (pass) log << "\nGELU result: PASS\n";
+    else      log << "\nGELU result: FAIL\n";
+    return log.str();
+}
+
 static std::string runQwen3VlChunkModelTest(const std::string& modelRoot,
                                             int seqLen = 608,
                                             int warmup = 1,
@@ -3041,6 +3241,14 @@ static std::string runQwen3VlChunkModelTest(const std::string& modelRoot,
             log << compareOutputVectors(cpuVec, npuVec, label, chunkPass);
         }
 
+        // Save CPU/NPU outputs for offline Python analysis
+        {
+            std::string outDir = modelDir + "/debug_outputs";
+            ensureDirectoryRecursive(outDir);
+            saveChunkOutputs(outDir, i, basenameOf(chunkPath),
+                             cpuRes.outputs, npuRes.outputs);
+        }
+
         currentHidden = cloneToHostInput(cpuRes.outputs[0], "visual_hidden_next");
         if (currentHidden.get() == nullptr) {
             log << "ERROR: failed to carry CPU hidden_states into next chunk\n\n";
@@ -3154,6 +3362,10 @@ static void OpTestExecute(napi_env env, void* data) {
         result << "=== Qwen3VL Attn Summary: " << pass << "/" << n << " passed ===\n";
     } else if (cfg == "qwen3vl_rope") {
         result << runQwen3VlRopeTest(608, 16, 64, 1, 2);
+    } else if (cfg == "qwen3vl_tanh") {
+        result << runTanhTest(1, 2);
+    } else if (cfg == "qwen3vl_gelu") {
+        result << runGeluTest(1, 2);
     } else if (cfg == "qwen3vl_ln_ab" || cfg.rfind("qwen3vl_ln_ab|", 0) == 0) {
         // Accepted payload shapes (modelDir is ignored — the new test uses
         // synthetic weights, but we keep the positional parse so existing UI

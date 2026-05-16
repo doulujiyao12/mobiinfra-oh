@@ -15,6 +15,8 @@
    - **HDC 服务端**：提供局域网内的 HDC 代理和前置状态检测 (`hdc_server.py`)。
    - **Agent 引擎**：负责获取手机截图、运行大模型规划、通过 `hmdriver2` 模拟点击滑动等自动化操作 (`harmony_agent.py`)。
 
+   > **注意**： 每次需要更新mobiinfra-oh/entry/src/main/cpp/include 下面两个头文件，以及mobiinfra-oh/entry/libs/arm64-v8a/libMNN.so 动态链接库
+
 ---
 
 ## 🛠 一、准备与安装
