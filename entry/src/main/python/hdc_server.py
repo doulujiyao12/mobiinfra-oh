@@ -3,6 +3,9 @@ import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
 import sys
+import argparse
+
+NO_REASON_MODE = False
 
 class HDCServerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -71,8 +74,12 @@ def start_harmony_agent():
     try:
         # 使用当前运行 hdc_server 的 python 环境，避免装包问题。
         # 共享 stdout 和 stderr，使得它的输出直接打印在这个控制台里
+        cmd = [sys.executable, agent_script]
+        if NO_REASON_MODE:
+            cmd.append("--no_reason")
+
         agent_process = subprocess.Popen(
-            [sys.executable, agent_script],
+            cmd,
             stdout=sys.stdout,
             stderr=sys.stderr
         )
@@ -87,6 +94,13 @@ def cleanup():
         agent_process.wait()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
+    args = parser.parse_args()
+    
+    if args.no_reason:
+        NO_REASON_MODE = True
+
     # 启动代理 (如果 HDC 已经挂载)
     if is_hdc_connected():
         start_harmony_agent()

@@ -9,6 +9,7 @@ import io
 import re
 import sys
 import logging
+import argparse
 
 try:
     from hmdriver2.driver import Driver
@@ -24,6 +25,7 @@ PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
 # Agent mode toggle: True = prefix KV cache reuse, False = original chat-based flow
 USE_AGENT_MODE = True
+NO_REASON_MODE = False
 
 # 常数定义
 MAX_STEPS = 15
@@ -550,7 +552,8 @@ def run_task_in_app_agent(task):
     history_list = []
 
     # 1. Build and send prefix (fixed across all steps)
-    prefix_template = load_prompt("e2e_v2_agent_prefix_noreason.md")
+    prefix_file = "e2e_v2_agent_prefix_noreason.md" if NO_REASON_MODE else "e2e_v2_agent_prefix.md"
+    prefix_template = load_prompt(prefix_file)
     if not prefix_template:
         print(">> [Agent] 找不到 prefix 模板，回退到普通模式")
         return run_task_in_app(task)
@@ -560,7 +563,8 @@ def run_task_in_app_agent(task):
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
     print(f">> [Agent] Prefill result: {prefill_res}")
 
-    variable_template = load_prompt("e2e_v2_agent_variable_noreason.md")
+    variable_file = "e2e_v2_agent_variable_noreason.md" if NO_REASON_MODE else "e2e_v2_agent_variable.md"
+    variable_template = load_prompt(variable_file)
     if not variable_template:
         print(">> [Agent] 找不到 variable 模板，回退到普通模式")
         send_request({"type": "agent_reset"})
@@ -600,7 +604,16 @@ def run_task_in_app_agent(task):
             print(">> [Agent] Parse error, aborting.")
             break
 
-        history_list.append(f"Step {step_idx+1}: Action={action}")
+        # 把解析到的 JSON 内容也追加到历史，便于后续推理使用
+        parsed_data = extract_json_payload(res)
+        try:
+            data_str = json.dumps(parsed_data, ensure_ascii=False)
+        except Exception:
+            data_str = str(parsed_data)
+        # history_list.append(f"{step_idx+1}. {data_str}\n")
+        history_list.append(f"{step_idx+1}: Action={action}")
+
+        print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
         time.sleep(0.7)
 
     # 3. Cleanup agent mode
@@ -655,8 +668,15 @@ def run_task_in_app(task):
             print(">> [Task in App] 解析出错，终止。")
             break
             
-        # 将本次操作追加到历史记录中，供下一步使用
-        history_list.append(f"Step {step_idx+1}: Action={action}")
+        # 将本次操作追加到历史记录中，供下一步使用；同时记录解析到的 JSON
+        parsed_data = extract_json_payload(res)
+        try:
+            data_str = json.dumps(parsed_data, ensure_ascii=False)
+        except Exception:
+            data_str = str(parsed_data)
+        # history_list.append(f"{step_idx+1}. {data_str}\n")
+        
+        history_list.append(f"{step_idx+1}: Action={action}")
 
         # history_list.append(f"Step {step_idx+1}: Action={action}, Params={params}")
         
@@ -664,6 +684,12 @@ def run_task_in_app(task):
 
 # ===================== Main Loop =====================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
+    args = parser.parse_args()
+    if args.no_reason:
+        NO_REASON_MODE = True
+
     print("初始化 HDC 端口转发...")
     # 由于该脚本可能被多次重启或前置 HDC 挂载占用，先强制清理端口再映射，防止冲突
     os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")

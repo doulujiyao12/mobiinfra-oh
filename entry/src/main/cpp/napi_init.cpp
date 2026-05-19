@@ -423,6 +423,18 @@ static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
         }
     }
 
+    if (err.empty()) {
+        RawDir* probe = OH_ResourceManager_OpenRawDir(mgr, "custom_opp");
+        if (probe == nullptr) {
+            LOGI("No custom_opp rawfile resources, skip custom OPP setup");
+            OH_ResourceManager_ReleaseNativeResourceManager(mgr);
+            napi_value ret;
+            napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &ret);
+            return ret;
+        }
+        OH_ResourceManager_CloseRawDir(probe);
+    }
+
     if (err.empty() && customOppSandboxReady(sandboxRoot)) {
         LOGI("Reuse existing custom OPP from sandbox: %{public}s", sandboxRoot.c_str());
     } else if (err.empty()) {

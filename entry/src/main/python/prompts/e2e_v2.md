@@ -11,7 +11,7 @@ Your action space includes:
   
 ### Response Format
 Your output should be a JSON object with the following format:
-{{"reasoning": "Your reasoning here", "action": "The next action (one of click, click_input, input, swipe, wait, done)", "parameters": {{"param1": "value1","param2": "value2", ...}}}}
+{"reasoning": "Your reasoning here", "action": "The next action (one of click, click_input, input, swipe, wait, done)", "parameters": {"param1": "value1","param2": "value2", ...}}
   
 ### Current Task
 {task}
