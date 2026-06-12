@@ -18,6 +18,7 @@ import {
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
+import { APP_BACKUP_MIN_PASSWORD_LENGTH } from '../../utils/AppBackupTypes';
 import {
   isSettingsSectionSelected,
   normalizeSettingsSectionId,
@@ -47,6 +48,8 @@ export struct SettingsCenterPage {
   @Prop hdcAutoConnecting: boolean = false;
   @Prop hdcManualPairing: boolean = false;
   @Prop selectedModelVariant: string = '';
+  @Prop backupBusy: boolean = false;
+  @Prop backupStatus: string = '尚未执行备份操作';
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -75,6 +78,11 @@ export struct SettingsCenterPage {
   @StorageLink('galleryImageScale') galleryImageScale: string = DEFAULT_GALLERY_IMAGE_SCALE;
   @StorageLink('galleryAmapWebKey') galleryAmapWebKey: string = DEFAULT_GALLERY_AMAP_WEB_KEY;
   @State selectedSectionId: number = SETTINGS_SECTION_NONE;
+  @State backupIncludeSensitiveSettings: boolean = false;
+  @State backupExportPassword: string = '';
+  @State backupExportPasswordConfirm: string = '';
+  @State backupImportPassword: string = '';
+  @State backupLocalMessage: string = '';
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
@@ -94,6 +102,9 @@ export struct SettingsCenterPage {
   onListModelFilesTree: () => void = () => {};
   onDeleteChunkVisionOmFiles: () => void = () => {};
   onUpdateConfigBackendType: (target: string) => void = (target: string) => {};
+  onExportEncryptedBackup: (password: string, includeSensitiveSettings: boolean) => Promise<void> =
+    async (password: string, includeSensitiveSettings: boolean) => {};
+  onImportEncryptedBackup: (password: string) => Promise<void> = async (password: string) => {};
 
   private hdcInputEditable(): boolean {
     return this.hdcManualPairing || !this.hdcAutoConnected;
@@ -160,6 +171,55 @@ export struct SettingsCenterPage {
     return '';
   }
 
+  // 备份密码只在当前设置页状态中短暂保存，提交后立即清空，避免长期留存在 UI 状态。
+  private async submitExportBackup(): Promise<void> {
+    if (this.backupBusy) {
+      this.backupLocalMessage = '已有备份任务正在执行';
+      return;
+    }
+    if (this.backupExportPassword.length < APP_BACKUP_MIN_PASSWORD_LENGTH) {
+      this.backupLocalMessage = '导出密码至少需要 ' + String(APP_BACKUP_MIN_PASSWORD_LENGTH) + ' 位';
+      return;
+    }
+    if (this.backupExportPassword !== this.backupExportPasswordConfirm) {
+      this.backupLocalMessage = '两次输入的导出密码不一致';
+      return;
+    }
+    let password = this.backupExportPassword;
+    let includeSensitive = this.backupIncludeSensitiveSettings;
+    this.backupLocalMessage = '';
+    try {
+      await this.onExportEncryptedBackup(password, includeSensitive);
+      this.backupExportPassword = '';
+      this.backupExportPasswordConfirm = '';
+      this.backupLocalMessage = '';
+    } catch (e) {
+      let err = e as Error;
+      this.backupLocalMessage = err.message;
+    }
+  }
+
+  private async submitImportBackup(): Promise<void> {
+    if (this.backupBusy) {
+      this.backupLocalMessage = '已有备份任务正在执行';
+      return;
+    }
+    if (this.backupImportPassword.length < APP_BACKUP_MIN_PASSWORD_LENGTH) {
+      this.backupLocalMessage = '导入密码至少需要 ' + String(APP_BACKUP_MIN_PASSWORD_LENGTH) + ' 位';
+      return;
+    }
+    let password = this.backupImportPassword;
+    this.backupLocalMessage = '';
+    try {
+      await this.onImportEncryptedBackup(password);
+      this.backupImportPassword = '';
+      this.backupLocalMessage = '';
+    } catch (e) {
+      let err = e as Error;
+      this.backupLocalMessage = err.message;
+    }
+  }
+
   @Builder SectionTitle(id: SettingsSectionId) {
     Column() {
       Text(settingsSectionTitle(id))
@@ -189,6 +249,19 @@ export struct SettingsCenterPage {
   @Builder SettingInput(label: string, value: string, placeholder: string, onValueChange: (value: string) => void) {
     this.FieldLabel(label)
     TextInput({ placeholder: placeholder, text: value })
+      .height(42)
+      .width('100%')
+      .fontSize(13)
+      .backgroundColor('#F2F5FC')
+      .borderRadius(12)
+      .padding({ left: 12, right: 12 })
+      .onChange((val: string) => { onValueChange(val); })
+  }
+
+  @Builder SettingPasswordInput(label: string, value: string, placeholder: string, onValueChange: (value: string) => void) {
+    this.FieldLabel(label)
+    TextInput({ placeholder: placeholder, text: value })
+      .type(InputType.Password)
       .height(42)
       .width('100%')
       .fontSize(13)
@@ -667,6 +740,56 @@ export struct SettingsCenterPage {
   @Builder StorageAboutSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.StorageAbout)
+      Text('本地加密备份')
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#11182F')
+        .width('100%')
+      Text('导出文件只保留可识别外壳元数据，业务数据会使用密码加密。导入会覆盖当前 Workflow、图库分析、聊天会话和已选择的设置项。')
+        .fontSize(12)
+        .fontColor('#7B8290')
+        .width('100%')
+        .maxLines(4)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ top: 6, bottom: 8 })
+      this.SettingToggle('包含敏感配置', '关闭时不会导出 API Key、HDC 地址、云端服务密钥等敏感设置',
+        this.backupIncludeSensitiveSettings,
+        (value: boolean) => { this.backupIncludeSensitiveSettings = value; })
+      this.SettingPasswordInput('导出密码', this.backupExportPassword,
+        '至少 ' + String(APP_BACKUP_MIN_PASSWORD_LENGTH) + ' 位，用于加密备份',
+        (value: string) => { this.backupExportPassword = value; })
+      this.SettingPasswordInput('确认导出密码', this.backupExportPasswordConfirm, '再次输入导出密码',
+        (value: string) => { this.backupExportPasswordConfirm = value; })
+      Button(this.backupBusy ? '处理中' : '导出加密备份')
+        .height(42)
+        .width('100%')
+        .fontSize(13)
+        .backgroundColor('#4F68FF')
+        .borderRadius(12)
+        .enabled(!this.backupBusy)
+        .margin({ top: 10 })
+        .onClick(async () => { await this.submitExportBackup(); })
+      this.SettingPasswordInput('导入密码', this.backupImportPassword, '输入备份文件密码',
+        (value: string) => { this.backupImportPassword = value; })
+      Button(this.backupBusy ? '处理中' : '导入恢复')
+        .height(42)
+        .width('100%')
+        .fontSize(13)
+        .backgroundColor('#38BE8B')
+        .borderRadius(12)
+        .enabled(!this.backupBusy)
+        .margin({ top: 10 })
+        .onClick(async () => { await this.submitImportBackup(); })
+      Text(this.backupLocalMessage.length > 0 ? this.backupLocalMessage : this.backupStatus)
+        .fontSize(12)
+        .fontColor(this.backupLocalMessage.length > 0 ? '#D26B31' : '#5F6673')
+        .width('100%')
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .padding(10)
+        .backgroundColor('#F2F5FC')
+        .borderRadius(12)
+        .margin({ top: 10, bottom: 14 })
       Row() {
         Button('清理截图')
           .height(40)

@@ -4,11 +4,16 @@ export function encodeUtf8Compat(value: string): Uint8Array {
 
 export function decodeUtf8Compat(bytes: Uint8Array): string {
   let output: string[] = [];
+  let segment: string[] = [];
   let index = 0;
   while (index < bytes.length) {
     let first = bytes[index];
     if (first <= 0x7F) {
-      output.push(String.fromCharCode(first));
+      segment.push(String.fromCharCode(first));
+      if (segment.length >= 8192) {
+        output.push(segment.join(''));
+        segment = [];
+      }
       index++;
       continue;
     }
@@ -45,13 +50,21 @@ export function decodeUtf8Compat(bytes: Uint8Array): string {
       index++;
     }
 
-    appendDecodedCodePoint(output, codePoint);
+    appendDecodedCodePoint(segment, codePoint);
+    if (segment.length >= 8192) {
+      output.push(segment.join(''));
+      segment = [];
+    }
+  }
+  if (segment.length > 0) {
+    output.push(segment.join(''));
   }
   return output.join('');
 }
 
 function encodeUtf8Manually(value: string): Uint8Array {
-  let bytes: number[] = [];
+  let bytes = new Uint8Array(utf8ByteLength(value));
+  let offset = 0;
   for (let index = 0; index < value.length; index++) {
     let codePoint = value.charCodeAt(index);
     if (codePoint >= 0xD800 && codePoint <= 0xDBFF && index + 1 < value.length) {
@@ -61,27 +74,61 @@ function encodeUtf8Manually(value: string): Uint8Array {
         index++;
       }
     }
-    appendUtf8CodePoint(bytes, codePoint);
+    offset = writeUtf8CodePoint(bytes, offset, codePoint);
   }
-  return new Uint8Array(bytes);
+  return bytes;
 }
 
-function appendUtf8CodePoint(bytes: number[], codePoint: number): void {
-  if (codePoint <= 0x7F) {
-    bytes.push(codePoint);
-  } else if (codePoint <= 0x7FF) {
-    bytes.push(0xC0 | (codePoint >> 6));
-    bytes.push(0x80 | (codePoint & 0x3F));
-  } else if (codePoint <= 0xFFFF) {
-    bytes.push(0xE0 | (codePoint >> 12));
-    bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
-    bytes.push(0x80 | (codePoint & 0x3F));
-  } else {
-    bytes.push(0xF0 | (codePoint >> 18));
-    bytes.push(0x80 | ((codePoint >> 12) & 0x3F));
-    bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
-    bytes.push(0x80 | (codePoint & 0x3F));
+function utf8ByteLength(value: string): number {
+  let length = 0;
+  for (let index = 0; index < value.length; index++) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xD800 && codePoint <= 0xDBFF && index + 1 < value.length) {
+      let next = value.charCodeAt(index + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        codePoint = 0x10000 + ((codePoint - 0xD800) * 0x400) + (next - 0xDC00);
+        index++;
+      }
+    }
+    length += utf8CodePointLength(codePoint);
   }
+  return length;
+}
+
+function utf8CodePointLength(codePoint: number): number {
+  if (codePoint <= 0x7F) {
+    return 1;
+  }
+  if (codePoint <= 0x7FF) {
+    return 2;
+  }
+  if (codePoint <= 0xFFFF) {
+    return 3;
+  }
+  return 4;
+}
+
+function writeUtf8CodePoint(bytes: Uint8Array, offset: number, codePoint: number): number {
+  if (codePoint <= 0x7F) {
+    bytes[offset] = codePoint;
+    return offset + 1;
+  }
+  if (codePoint <= 0x7FF) {
+    bytes[offset] = 0xC0 | (codePoint >> 6);
+    bytes[offset + 1] = 0x80 | (codePoint & 0x3F);
+    return offset + 2;
+  }
+  if (codePoint <= 0xFFFF) {
+    bytes[offset] = 0xE0 | (codePoint >> 12);
+    bytes[offset + 1] = 0x80 | ((codePoint >> 6) & 0x3F);
+    bytes[offset + 2] = 0x80 | (codePoint & 0x3F);
+    return offset + 3;
+  }
+  bytes[offset] = 0xF0 | (codePoint >> 18);
+  bytes[offset + 1] = 0x80 | ((codePoint >> 12) & 0x3F);
+  bytes[offset + 2] = 0x80 | ((codePoint >> 6) & 0x3F);
+  bytes[offset + 3] = 0x80 | (codePoint & 0x3F);
+  return offset + 4;
 }
 
 function isContinuationByte(value: number): boolean {

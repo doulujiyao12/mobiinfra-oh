@@ -24,6 +24,7 @@ import {
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { SettingsBackupController } from './settings/SettingsBackupController';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
@@ -208,6 +209,8 @@ struct Index {
   @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
   @State avatarVersions: AvatarVersionViewModel[] = [];
+  @State backupBusy: boolean = false;
+  @State backupStatus: string = '尚未执行备份操作';
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -1281,6 +1284,66 @@ struct Index {
       this.output = '所有 model 目录下均无 debug_outputs';
     } else {
       this.output = `已删除 ${totalDeleted} 个调试输出文件\n${results.join('\n')}`;
+    }
+  }
+
+  private async exportEncryptedBackup(password: string, includeSensitiveSettings: boolean): Promise<void> {
+    this.backupBusy = true;
+    AppLogger.info('Backup.UI', 'export requested includeSensitive=' + String(includeSensitiveSettings));
+    try {
+      let context = this.backupAbilityContext();
+      await SettingsBackupController.exportEncryptedBackup({
+        context: context,
+        filesDir: this.filesDir,
+        password: password,
+        includeSensitiveSettings: includeSensitiveSettings,
+        onStatusChange: (status: string) => { this.backupStatus = status; }
+      });
+      AppLogger.info('Backup.UI', 'export flow finished');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.errorCause('Backup.UI', 'export flow failed', err);
+      throw err;
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private async importEncryptedBackup(password: string): Promise<void> {
+    this.backupBusy = true;
+    AppLogger.info('Backup.UI', 'import requested');
+    try {
+      let context = this.backupAbilityContext();
+      await SettingsBackupController.importEncryptedBackup({
+        context: context,
+        filesDir: this.filesDir,
+        password: password,
+        onStatusChange: (status: string) => { this.backupStatus = status; },
+        onRestored: () => {
+          this.initDataManager();
+          this.initChatSessions();
+        }
+      });
+      AppLogger.info('Backup.UI', 'import flow finished');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.errorCause('Backup.UI', 'import flow failed', err);
+      throw err;
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private backupAbilityContext(): common.UIAbilityContext {
+    try {
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('host context is undefined');
+      }
+      return hostContext as common.UIAbilityContext;
+    } catch (e) {
+      AppLogger.errorCause('Backup.UI', 'get host context failed', e as Error);
+      throw new Error('无法获取页面上下文，请返回设置页后重试');
     }
   }
 
@@ -2656,6 +2719,8 @@ struct Index {
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
             selectedModelVariant: this.selectedModelVariant,
+            backupBusy: this.backupBusy,
+            backupStatus: this.backupStatus,
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
@@ -2677,7 +2742,13 @@ struct Index {
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },
             onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
-            onUpdateConfigBackendType: (target: string) => { this.updateConfigBackendType(target); }
+            onUpdateConfigBackendType: (target: string) => { this.updateConfigBackendType(target); },
+            onExportEncryptedBackup: async (password: string, includeSensitiveSettings: boolean) => {
+              await this.exportEncryptedBackup(password, includeSensitiveSettings);
+            },
+            onImportEncryptedBackup: async (password: string) => {
+              await this.importEncryptedBackup(password);
+            }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }
