@@ -98,12 +98,12 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
     }
 
     // Set OM profiling options (standard practice from CANNKit demo)
-    {
-        const char *out_path = "/data/storage/el2/base/haps/entry/files";
-        HiAI_OmType omType = HIAI_OM_TYPE_PROFILING;
-        ret = HMS_HiAIOptions_SetOmOptions(compilation, omType, out_path);
-        OH_LOG_INFO(LOG_APP, "SetOmOptions ret=%{public}d", ret);
-    }
+    // {
+    //     const char *out_path = "/data/storage/el2/base/haps/entry/files";
+    //     HiAI_OmType omType = HIAI_OM_TYPE_PROFILING;
+    //     ret = HMS_HiAIOptions_SetOmOptions(compilation, omType, out_path);
+    //     OH_LOG_INFO(LOG_APP, "SetOmOptions ret=%{public}d", ret);
+    // }
 
     ret = OH_NNCompilation_Build(compilation);
     if (ret != OH_NN_SUCCESS) {
