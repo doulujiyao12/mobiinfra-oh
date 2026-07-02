@@ -403,6 +403,24 @@ struct OpTest {
           )
         })
 
+      Button(this.running ? 'Running...' : 'Run OM vs MNN REAL-Calib Precision (real npz inputs)')
+        .width('90%')
+        .height(52)
+        .backgroundColor(this.running ? '#BBBBBB' : '#FF8A65')
+        .borderRadius(10)
+        .fontSize(14)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          // calib bin 放在 <modelDir>/calib/ 下 (unpack_calib_npz.py 产物).
+          // 每个chunk读自己的 chunk_XX_sample_000, 验证 OM(量化) vs MNN-CPU(fp32) 精度.
+          this.runWithMode(
+            'om_vs_mnn_real_calib|' + this.modelDir,
+            'Running OM vs MNN REAL-calib precision from: ' + this.modelDir +
+            '\ncalib dir: ' + this.modelDir + '/calib/\n'
+          )
+        })
+
       // Custom test section
       Row() {
         TextInput({ placeholder: 'N,ic,oc,ih,iw,kh,kw,sh,sw,group', text: this.customConfig })

@@ -3800,7 +3800,305 @@ static std::string findOmChunkFile(const std::string& modelDir, int chunkIndex) 
     return found;
 }
 
-// ---- OM vs MNN visual chunk cross-validation test ----
+// ---- Real-calib sample loader: reads bare float32 bin (unpacked from npz
+// by unpack_calib_npz.py) + flat calib_meta.json. app has no zip/npz support,
+// so host pre-unpacks npz -> bin. meta keys are flat: chunk{i}_<tag>_shape /
+// _file / _numel, read with existing extractJsonString/Int.
+
+static bool readBinaryFileToFloat(const std::string& path, std::vector<float>& out,
+                                  size_t expectNumel, std::string& err) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { err = "cannot open: " + path; return false; }
+    size_t sz = (size_t)f.tellg();
+    f.seekg(0, std::ios::beg);
+    if (sz % sizeof(float) != 0) {
+        err = "file size not multiple of float32: " + path;
+        return false;
+    }
+    size_t numel = sz / sizeof(float);
+    if (expectNumel > 0 && numel != expectNumel) {
+        err = "numel mismatch: got " + std::to_string(numel) + " expect " +
+              std::to_string(expectNumel) + " @ " + path;
+        return false;
+    }
+    out.resize(numel);
+    if (!f.read(reinterpret_cast<char*>(out.data()), sz)) {
+        err = "read failed: " + path;
+        return false;
+    }
+    return true;
+}
+
+static std::vector<int> parseShapeCsv(const std::string& csv) {
+    std::vector<int> dims;
+    size_t start = 0;
+    while (start < csv.size()) {
+        size_t comma = csv.find(',', start);
+        std::string tok = (comma == std::string::npos)
+            ? csv.substr(start) : csv.substr(start, comma - start);
+        if (!tok.empty()) {
+            // trim whitespace
+            size_t a = tok.find_first_not_of(" \t");
+            size_t b = tok.find_last_not_of(" \t");
+            if (a != std::string::npos) {
+                dims.push_back(std::atoi(tok.substr(a, b - a + 1).c_str()));
+            }
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return dims;
+}
+
+struct RealCalibSample {
+    VARP hidden;     // [1, S, 1024]
+    VARP rotary;     // [2, S, 1, 64]
+    VARP mask;       // [1, S, S]
+    std::vector<int> hiddenShape, rotaryShape, maskShape;
+};
+
+static bool loadRealCalibSample(const std::string& calibDir, int chunkIndex,
+                                RealCalibSample& out, std::string& err) {
+    const std::string metaPath = calibDir + "/calib_meta.json";
+    if (!fileExists(metaPath)) {
+        err = "calib_meta.json not found: " + metaPath;
+        return false;
+    }
+    const std::string meta = readTextFile(metaPath);
+    const std::string prefix = "chunk" + std::to_string(chunkIndex);
+
+    const std::string hFile = extractJsonString(meta, prefix + "_hidden_file", "");
+    const std::string rFile = extractJsonString(meta, prefix + "_rotary_file", "");
+    const std::string mFile = extractJsonString(meta, prefix + "_mask_file", "");
+    if (hFile.empty() || rFile.empty() || mFile.empty()) {
+        err = "calib_meta missing file entries for chunk " + std::to_string(chunkIndex);
+        return false;
+    }
+    const std::string hShapeStr = extractJsonString(meta, prefix + "_hidden_shape", "");
+    const std::string rShapeStr = extractJsonString(meta, prefix + "_rotary_shape", "");
+    const std::string mShapeStr = extractJsonString(meta, prefix + "_mask_shape", "");
+    const int hNumel = extractJsonInt(meta, prefix + "_hidden_numel", 0);
+    const int rNumel = extractJsonInt(meta, prefix + "_rotary_numel", 0);
+    const int mNumel = extractJsonInt(meta, prefix + "_mask_numel", 0);
+
+    out.hiddenShape = parseShapeCsv(hShapeStr);
+    out.rotaryShape = parseShapeCsv(rShapeStr);
+    out.maskShape   = parseShapeCsv(mShapeStr);
+    if (out.hiddenShape.empty() || out.rotaryShape.empty() || out.maskShape.empty()) {
+        err = "calib_meta shape parse failed for chunk " + std::to_string(chunkIndex);
+        return false;
+    }
+
+    std::vector<float> hVec, rVec, mVec;
+    if (!readBinaryFileToFloat(calibDir + "/" + hFile, hVec, (size_t)hNumel, err)) return false;
+    if (!readBinaryFileToFloat(calibDir + "/" + rFile, rVec, (size_t)rNumel, err)) return false;
+    if (!readBinaryFileToFloat(calibDir + "/" + mFile, mVec, (size_t)mNumel, err)) return false;
+
+    out.hidden = _Input(out.hiddenShape, NCHW, halide_type_of<float>());
+    ::memcpy(out.hidden->writeMap<float>(), hVec.data(), hVec.size() * sizeof(float));
+    out.rotary = _Input(out.rotaryShape, NCHW, halide_type_of<float>());
+    ::memcpy(out.rotary->writeMap<float>(), rVec.data(), rVec.size() * sizeof(float));
+    out.mask = _Input(out.maskShape, NCHW, halide_type_of<float>());
+    ::memcpy(out.mask->writeMap<float>(), mVec.data(), mVec.size() * sizeof(float));
+    return true;
+}
+
+// ---- OM vs MNN visual chunk cross-validation with REAL calib inputs ----
+// Each chunk reads its own npz-unpacked bin (from <modelDir>/calib/), instead
+// of synthetic visual_pre output. Verifies OM(quantized) vs MNN-CPU(fp32)
+// precision on real-image activations.
+static std::string runOmVsMnnRealCalibTest(const std::string& modelRoot,
+                                           int warmup = 1,
+                                           int repeat = 2) {
+    std::ostringstream log;
+    std::string modelDir = modelRoot;
+    if (!modelDir.empty() && modelDir.size() > 12 &&
+        modelDir.substr(modelDir.size() - 12) == "/config.json") {
+        modelDir = modelDir.substr(0, modelDir.find_last_of('/'));
+    }
+    if (!isDirectory(modelDir)) {
+        log << "ERROR: model directory not found: " << modelDir << "\n";
+        return log.str();
+    }
+    const std::string calibDir = modelDir + "/calib";
+    if (!isDirectory(calibDir)) {
+        log << "ERROR: calib directory not found: " << calibDir
+            << " (push unpack_calib_npz.py output here)\n";
+        return log.str();
+    }
+
+    auto chunkPaths = listVisualChunkModels(modelDir);
+    if (chunkPaths.empty()) {
+        log << "ERROR: no visual_blocks_npu_*.mnn found under: " << modelDir << "\n";
+        return log.str();
+    }
+
+    log << "=== OM vs MNN Visual Chunk REAL-Calib Precision Test ===\n";
+    log << "model_dir=" << modelDir << "\n";
+    log << "calib_dir=" << calibDir << "\n";
+    log << "chunk_count=" << chunkPaths.size() << "\n\n";
+
+    MNN::BackendConfig cpuCfg = makeCpuBackendConfig();
+    Module::Config cpuModuleCfg;
+    cpuModuleCfg.shapeMutable = true;
+    cpuModuleCfg.rearrange = true;
+
+    MNN::BackendConfig npuCfg;
+    npuCfg.memory = MNN::BackendConfig::Memory_High;
+    Module::Config npuModuleCfg;
+    npuModuleCfg.shapeMutable = false;
+    npuModuleCfg.rearrange = false;
+    const std::string configText = readTextFile(modelDir + "/config.json");
+    const std::string visualBackend = extractJsonString(configText, "visual_blocks_backend_type", "hiai");
+    const MNNForwardType npuType = visualBackendFromString(visualBackend);
+
+    int totalOmPass = 0;
+    int totalMnnPass = 0;
+    int totalChunksWithOm = 0;
+    int totalComparisons = 0;
+    const int totalChunks = (int)chunkPaths.size();
+
+    for (int i = 0; i < totalChunks; ++i) {
+        const auto& chunkPath = chunkPaths[i];
+        const std::string chunkName = basenameOf(chunkPath);
+
+        log << "[" << (i + 1) << "/" << totalChunks << "] " << chunkName << "\n";
+
+        // --- Load real calib sample for this chunk ---
+        RealCalibSample sample;
+        std::string loadErr;
+        if (!loadRealCalibSample(calibDir, i, sample, loadErr)) {
+            log << "ERROR: load calib sample failed for chunk " << i << ": " << loadErr << "\n\n";
+            break;
+        }
+        log << "input hidden shape=" << varShapeStringLocal(sample.hidden)
+            << " rotary shape=" << varShapeStringLocal(sample.rotary)
+            << " mask shape=" << varShapeStringLocal(sample.mask) << "\n";
+
+        // --- Extract float data for OM input ---
+        std::vector<float> hiddenVec, rotaryVec, maskVec;
+        std::string readErr;
+        if (!readVarToFloatVector(sample.hidden, hiddenVec, readErr) ||
+            !readVarToFloatVector(sample.rotary, rotaryVec, readErr) ||
+            !readVarToFloatVector(sample.mask, maskVec, readErr)) {
+            log << "ERROR: read calib tensor failed: " << readErr << "\n\n";
+            break;
+        }
+
+        // --- MNN CPU baseline (fp32 golden reference) ---
+        const std::vector<VARP> chunkInputs = {sample.hidden, sample.rotary, sample.mask};
+        ChunkBenchResult cpuRes;
+        if (!runModuleBench(chunkPath, MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg,
+                            chunkInputs, warmup, repeat, cpuRes)) {
+            log << "ERROR: MNN CPU run failed: " << cpuRes.info << "\n\n";
+            break;
+        }
+        log << "MNN-CPU  steady(x" << repeat << ")=" << cpuRes.avgMs << "ms " << cpuRes.info << "\n";
+
+        // --- MNN NPU (if available) ---
+        ChunkBenchResult mnnNpuRes;
+        bool mnnNpuOk = runModuleBench(chunkPath, npuType, npuCfg, npuModuleCfg,
+                                       chunkInputs, warmup, repeat, mnnNpuRes);
+        if (mnnNpuOk) {
+            log << "MNN-NPU  steady(x" << repeat << ")=" << mnnNpuRes.avgMs << "ms "
+                << mnnNpuRes.info << "\n";
+        } else {
+            log << "MNN-NPU  run failed: " << mnnNpuRes.info << "\n";
+        }
+
+        // --- OM offline model (quantized) ---
+        std::string omPath = findOmChunkFile(modelDir, i);
+        std::vector<std::vector<float>> omOutputs;
+        double omLatencyMs = -1.0;
+        bool omOk = false;
+        std::string omErr;
+        if (omPath.empty()) {
+            log << "OM       SKIP: no .om file found for chunk " << i << "\n";
+        } else {
+            log << "OM       file=" << basenameOf(omPath) << "\n";
+            omOk = runOmChunkOnce(omPath, hiddenVec, rotaryVec, maskVec,
+                                  omLatencyMs, omOutputs, omErr);
+            if (omOk) {
+                log << "OM       latency=" << omLatencyMs << "ms"
+                    << "  outputs=" << omOutputs.size() << "\n";
+                totalChunksWithOm++;
+            } else {
+                log << "OM       run failed: " << omErr << "\n";
+            }
+        }
+
+        // --- Cross-validation: OM(quantized) vs MNN-CPU(fp32) ---
+        bool chunkOmPass = true;
+        if (omOk) {
+            log << "  --- OM vs MNN-CPU (real calib) ---\n";
+            size_t nCmp = std::min(omOutputs.size(), cpuRes.outputs.size());
+            for (size_t oi = 0; oi < nCmp; ++oi) {
+                std::vector<float> cpuVec;
+                std::string cpuReadErr;
+                if (!readVarToFloatVector(cpuRes.outputs[oi], cpuVec, cpuReadErr)) {
+                    log << "  [output" << oi << "] MNN-CPU read failed: " << cpuReadErr << "\n";
+                    chunkOmPass = false;
+                    continue;
+                }
+                const std::string label = (oi == 0) ? "hidden_states"
+                    : ("deepstack_hidden_" + std::to_string(oi - 1));
+                if (nCmp == 1) {
+                    log << compareOutputVectors(cpuVec, omOutputs[oi], "om_vs_cpu/" + label, chunkOmPass);
+                } else {
+                    log << compareOutputVectors(cpuVec, omOutputs[nCmp - 1 - oi], "om_vs_cpu/" + label, chunkOmPass);
+                }
+            }
+            if (omOutputs.size() != cpuRes.outputs.size()) {
+                chunkOmPass = false;
+                log << "  output_count mismatch OM=" << omOutputs.size()
+                    << " MNN-CPU=" << cpuRes.outputs.size() << "\n";
+            }
+            if (chunkOmPass) totalOmPass++;
+            totalComparisons++;
+        }
+
+        // --- MNN-CPU vs MNN-NPU (same real input) ---
+        bool chunkMnnPass = true;
+        if (mnnNpuOk) {
+            log << "  --- MNN-CPU vs MNN-NPU (real calib) ---\n";
+            size_t nCmp = std::min(mnnNpuRes.outputs.size(), cpuRes.outputs.size());
+            for (size_t oi = 0; oi < nCmp; ++oi) {
+                std::vector<float> cpuVec, npuVec;
+                std::string cpuReadErr, npuReadErr;
+                if (!readVarToFloatVector(cpuRes.outputs[oi], cpuVec, cpuReadErr)) {
+                    log << "  [output" << oi << "] MNN-CPU read failed: " << cpuReadErr << "\n";
+                    chunkMnnPass = false;
+                    continue;
+                }
+                if (!readVarToFloatVector(mnnNpuRes.outputs[oi], npuVec, npuReadErr)) {
+                    log << "  [output" << oi << "] MNN-NPU read failed: " << npuReadErr << "\n";
+                    chunkMnnPass = false;
+                    continue;
+                }
+                const std::string label = (oi == 0) ? "hidden_states"
+                    : ("deepstack_hidden_" + std::to_string(oi - 1));
+                if (nCmp == 1) {
+                    log << compareOutputVectors(cpuVec, npuVec, "mnn_cpu_vs_npu/" + label, chunkMnnPass);
+                } else {
+                    log << compareOutputVectors(cpuVec, npuVec, "mnn_cpu_vs_npu/" + label, chunkMnnPass);
+                }
+            }
+            if (chunkMnnPass) totalMnnPass++;
+        }
+
+        log << "\n";
+    }
+
+    log << "======================================\n";
+    log << "REAL-Calib Test Complete!\n";
+    log << "======================================\n";
+    log << "  chunks_with_om=" << totalChunksWithOm << "\n";
+    log << "  om_vs_cpu_pass=" << totalOmPass << "/" << totalComparisons << "\n";
+    log << "  mnn_cpu_vs_npu_pass=" << totalMnnPass << "/" << (int)chunkPaths.size() << "\n";
+    return log.str();
+}
+
+
 
 static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
                                        int seqLen = 608,
@@ -4322,6 +4620,25 @@ static void OpTestExecute(napi_env env, void* data) {
             }
         }
         result << runOmVsMnnChunkTest(modelDir, seqLen, 1, 2);
+    } else if (cfg.rfind("om_vs_mnn_real_calib|", 0) == 0) {
+        std::string payload = cfg.substr(std::string("om_vs_mnn_real_calib|").size());
+        std::string modelDir = payload;
+        // calib bin 放在 <modelDir>/calib/ 下 (不分子目录).
+        // 支持 om_vs_mnn_real_calib|<modelDir> 或带 |warmup|repeat.
+        int warmup = 1, repeat = 2;
+        auto splitPos = payload.find('|');
+        if (splitPos != std::string::npos) {
+            modelDir = payload.substr(0, splitPos);
+            auto rest = payload.substr(splitPos + 1);
+            auto split2 = rest.find('|');
+            if (split2 != std::string::npos) {
+                warmup = std::max(1, std::atoi(rest.substr(0, split2).c_str()));
+                repeat = std::max(1, std::atoi(rest.substr(split2 + 1).c_str()));
+            } else if (!rest.empty()) {
+                warmup = std::max(1, std::atoi(rest.c_str()));
+            }
+        }
+        result << runOmVsMnnRealCalibTest(modelDir, warmup, repeat);
     } else {
         // Custom: "N,ic,oc,ih,iw[,kh,kw,sh,sw,group]"
         int N=1, ic=0, oc=0, ih=0, iw=0, kh=1, kw=1, sh=1, sw=1, g=1;
