@@ -10,6 +10,7 @@ import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { LlmServer } from '../utils/LlmServer';
 import { promptAction } from '@kit.ArkUI';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
 
 interface ServerFile {
   name: string;
@@ -31,6 +32,7 @@ struct Index {
   @State connected: boolean = false;
   @State autoConfirm: boolean = false;
   @State debugImagePath: string = '';
+  @State pickedImagePath: string = '';
   @State selectedModelVariant: string = '';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
@@ -135,6 +137,53 @@ struct Index {
       }
     } catch (e) {
       this.output = `列出截图失败: ${e}`;
+    }
+  }
+
+  // 从系统相册（含截屏录屏相册）挑选一张图片，复制到当前模型目录下并保存路径
+  async pickImageFromAlbum() {
+    try {
+      // 1. 调起系统图库选择器，仅图片、单选（截图/录屏分类天然可选）
+      const pickerOptions: photoAccessHelper.PhotoSelectOptions = new photoAccessHelper.PhotoSelectOptions();
+      pickerOptions.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
+      pickerOptions.maxSelectNumber = 1;
+      const picker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
+      const result: photoAccessHelper.PhotoSelectResult = await picker.select(pickerOptions);
+
+      if (!result.photoUris || result.photoUris.length === 0) {
+        this.output = '未选择图片';
+        return;
+      }
+      const srcUri: string = result.photoUris[0];
+
+      // 2. 目标路径：当前模型目录 / user_pick.jpg（固定文件名，每次覆盖）
+      try { fs.mkdirSync(this.modelDir); } catch (e) {}
+      const dstPath: string = `${this.modelDir}/user_pick.jpg`;
+
+      // 3. 通过 fd 流式拷贝（picker 返回的 uri 由系统临时授权，可直接 open）
+      const srcFile: fs.File = fs.openSync(srcUri, fs.OpenMode.READ_ONLY);
+      try {
+        if (!fs.accessSync(this.modelDir)) fs.mkdirSync(this.modelDir);
+        const dstFile: fs.File = fs.openSync(dstPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        try {
+          const buf: ArrayBuffer = new ArrayBuffer(256 * 1024);
+          let readLen: number = fs.readSync(srcFile.fd, buf);
+          while (readLen > 0) {
+            fs.writeSync(dstFile.fd, buf);
+            readLen = fs.readSync(srcFile.fd, buf);
+          }
+        } finally {
+          try { fs.closeSync(dstFile); } catch (e) {}
+        }
+      } finally {
+        try { fs.closeSync(srcFile); } catch (e) {}
+      }
+
+      this.pickedImagePath = dstPath;
+      this.debugImagePath = 'file://' + dstPath;   // 复用已有的预览块
+      this.output = `已从相册选取并保存图片到:\n${dstPath}\n下次发送将附加 <img> 标签`;
+    } catch (e) {
+      this.output = `选取图片失败: ${e}`;
     }
   }
 
@@ -738,6 +787,13 @@ struct Index {
                   if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) return;
                   let msg = this.userInput;
                   this.userInput = '';
+
+                  // 若已从相册挑选图片，则在文字后追加 <img> 标签一并发送；h/w 固定 600/270
+                  // 拼接放在写 chatHistory 之前，这样 User 行也能看到带图片标签的完整内容
+                  if (this.pickedImagePath !== '') {
+                    msg = `${msg}<img>${this.pickedImagePath}<hw>600,270</hw></img>`;
+                  }
+
                   this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
                   this.isThinking = true;
 
@@ -753,6 +809,33 @@ struct Index {
             }
             .width('95%')
             .margin({ bottom: 20 })
+
+            Row() {
+              Button('从相册选图')
+                .onClick(() => { this.pickImageFromAlbum(); })
+                .height(45)
+                .backgroundColor('#7E57C2')
+                .borderRadius(22)
+                .layoutWeight(1)
+                .margin({ right: 10 })
+
+              if (this.pickedImagePath !== '') {
+                Button('取消图片')
+                  .onClick(() => {
+                    this.pickedImagePath = '';
+                    this.debugImagePath = '';
+                    this.output = '已取消附加图片，下次发送仅文字';
+                  })
+                  .height(45)
+                  .width(100)
+                  .backgroundColor('#9575CD')
+                  .borderRadius(22)
+              } else {
+                Blank().height(0)
+              }
+            }
+            .width('95%')
+            .margin({ bottom: 10 })
 
             Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
               Button('加载大模型')
@@ -797,6 +880,8 @@ struct Index {
                 .onClick(() => {
                   this.output = mnnllm.reset();
                   this.chatHistory = '';
+                  this.pickedImagePath = '';
+                  this.debugImagePath = '';
                 })
                 .height(40)
                 .width('30%')
