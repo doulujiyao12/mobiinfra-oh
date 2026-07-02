@@ -3742,6 +3742,32 @@ static bool runOmChunkOnce(const std::string& omPath,
         return false;
     }
 
+    // --- Diagnose OM input idx -> size: print each OM input idx's expected
+    // numel (GetInputSize/sizeof(float)) alongside the numel of the data we are
+    // about to feed (hidden/rotary/mask), so a size mismatch is obvious.
+    {
+        auto absmax = [](const std::vector<float>& v) -> float {
+            float m = 0.0f;
+            for (float x : v) m = std::max(m, std::fabs(x));
+            return m;
+        };
+        struct FeedInfo { int idx; const char* tag; const std::vector<float>& data; };
+        FeedInfo feeds[3] = {
+            {0, "hidden", hiddenData},
+            {1, "rotary", rotaryData},
+            {2, "mask",   maskData},
+        };
+        for (int k = 0; k < 3; ++k) {
+            size_t inSize = HIAIModelManager::GetInstance().GetInputSize(feeds[k].idx);
+            size_t inNumel = inSize / sizeof(float);
+            OH_LOG_INFO(LOG_APP,
+                "[OM input] idx=%{public}d (feeding %{public}s): OM expects numel=%{public}zu bytes=%{public}zu; "
+                "data numel=%{public}zu absmax=%{public}.4f",
+                feeds[k].idx, feeds[k].tag, inNumel, inSize,
+                feeds[k].data.size(), absmax(feeds[k].data));
+        }
+    }
+
     // Feed real visual_pre outputs into OM model
     ret = HIAIModelManager::GetInstance().SetInputData(0, hiddenData.data(), hiddenData.size());
     if (ret != OH_NN_SUCCESS) {
@@ -4093,6 +4119,20 @@ static std::string runOmVsMnnRealCalibTest(const std::string& modelRoot,
 
         // --- MNN CPU baseline (fp32 golden reference) ---
         const std::vector<VARP> chunkInputs = {sample.hidden, sample.rotary, sample.mask};
+        {
+            const char* tags[3] = {"hidden", "rotary", "mask"};
+            for (size_t k = 0; k < chunkInputs.size() && k < 3; ++k) {
+                auto info = chunkInputs[k]->getInfo();
+                size_t numel = info ? (size_t)info->size : 0;
+                std::vector<float> v; std::string e;
+                float am = 0.0f;
+                if (readVarToFloatVector(chunkInputs[k], v, e)) {
+                    for (float x : v) am = std::max(am, std::fabs(x));
+                }
+                OH_LOG_INFO(LOG_APP,
+                    "[MNN input] chunk=%d %s: numel=%zu absmax=%.4f", i, tags[k], numel, am);
+            }
+        }
         ChunkBenchResult cpuRes;
         if (!runModuleBench(chunkPath, MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg,
                             chunkInputs, warmup, repeat, cpuRes)) {
@@ -4372,6 +4412,20 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
 
         // --- MNN CPU baseline (golden reference) ---
         const std::vector<VARP> chunkInputs = {currentHidden, rotary, attentionMask};
+        {
+            const char* tags[3] = {"hidden", "rotary", "mask"};
+            for (size_t k = 0; k < chunkInputs.size() && k < 3; ++k) {
+                auto info = chunkInputs[k]->getInfo();
+                size_t numel = info ? (size_t)info->size : 0;
+                std::vector<float> v; std::string e;
+                float am = 0.0f;
+                if (readVarToFloatVector(chunkInputs[k], v, e)) {
+                    for (float x : v) am = std::max(am, std::fabs(x));
+                }
+                OH_LOG_INFO(LOG_APP,
+                    "[MNN input] chunk=%d %s: numel=%zu absmax=%.4f", i, tags[k], numel, am);
+            }
+        }
         ChunkBenchResult cpuRes;
         bool cpuOk = runModuleBench(chunkPath, MNN_FORWARD_CPU, cpuCfg, cpuModuleCfg,
                                      chunkInputs, warmup, repeat, cpuRes);
