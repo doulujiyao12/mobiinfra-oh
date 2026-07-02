@@ -672,14 +672,14 @@ public:
 
         // Only SetInput + Run — model stays loaded across chunks
         auto t0 = Clock::now();
-        OH_NN_ReturnCode ret = mgr->SetInputData(1, hidden.data(), hidden.size());
-        if (ret != OH_NN_SUCCESS) {
-            LOGE("OM runChunk[%{public}d]: SetInputData[1] failed", chunkIdx);
-            return false;
-        }
-        ret = mgr->SetInputData(0, rotary.data(), rotary.size());
+        OH_NN_ReturnCode ret = mgr->SetInputData(0, hidden.data(), hidden.size());
         if (ret != OH_NN_SUCCESS) {
             LOGE("OM runChunk[%{public}d]: SetInputData[0] failed", chunkIdx);
+            return false;
+        }
+        ret = mgr->SetInputData(1, rotary.data(), rotary.size());
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM runChunk[%{public}d]: SetInputData[1] failed", chunkIdx);
             return false;
         }
         ret = mgr->SetInputData(2, mask.data(), mask.size());
@@ -3743,13 +3743,13 @@ static bool runOmChunkOnce(const std::string& omPath,
     }
 
     // Feed real visual_pre outputs into OM model
-    ret = HIAIModelManager::GetInstance().SetInputData(1, hiddenData.data(), hiddenData.size());
+    ret = HIAIModelManager::GetInstance().SetInputData(0, hiddenData.data(), hiddenData.size());
     if (ret != OH_NN_SUCCESS) {
         error = "SetInputData[0] failed, ret=" + std::to_string((int)ret);
         HIAIModelManager::GetInstance().UnloadModel();
         return false;
     }
-    ret = HIAIModelManager::GetInstance().SetInputData(0, rotaryData.data(), rotaryData.size());
+    ret = HIAIModelManager::GetInstance().SetInputData(1, rotaryData.data(), rotaryData.size());
     if (ret != OH_NN_SUCCESS) {
         error = "SetInputData[1] failed, ret=" + std::to_string((int)ret);
         HIAIModelManager::GetInstance().UnloadModel();
@@ -3901,6 +3901,112 @@ static bool loadRealCalibSample(const std::string& calibDir, int chunkIndex,
     out.mask = _Input(out.maskShape, NCHW, halide_type_of<float>());
     ::memcpy(out.mask->writeMap<float>(), mVec.data(), mVec.size() * sizeof(float));
     return true;
+}
+
+// Save per-chunk OM/MNN-CPU/MNN-NPU outputs to <modelDir>/debug_outputs/ for
+// offline Python comparison + plotting. Files per chunk i, output j:
+//   chunk{i}_out{j}_{label}_{src}.bin   raw float32 (src = mnn_cpu / mnn_npu / om)
+//   chunk{i}_meta.json                  shape + numel + label per output
+// OM outputs (vector<vector<float>>) carry no shape; reuse MNN-CPU output shape
+// (OM and MNN outputs share the same shape per output).
+static void saveRealCalibChunkOutputs(const std::string& outDir, int chunkIdx,
+                                      const std::string& chunkName,
+                                      const std::vector<VARP>& cpuOutputs,
+                                      const std::vector<VARP>& npuOutputs,
+                                      const std::vector<std::vector<float>>& omOutputs) {
+    ensureDirectoryRecursive(outDir);
+    auto labelOf = [](size_t oi) {
+        return (oi == 0) ? "hidden_states"
+                         : ("deepstack_" + std::to_string(oi - 1));
+    };
+    auto shapeStrOf = [](const VARP& v) -> std::string {
+        if (v.get() == nullptr || v->getInfo() == nullptr || v->getInfo()->dim.empty())
+            return "";
+        std::ostringstream ss;
+        auto& dim = v->getInfo()->dim;
+        for (size_t d = 0; d < dim.size(); ++d) {
+            if (d) ss << "x";
+            ss << dim[d];
+        }
+        return ss.str();
+    };
+
+    // dump each (src, output) as raw fp32 bin
+    auto dumpVarp = [&](const VARP& v, const std::string& path) {
+        std::vector<float> vec; std::string err;
+        if (!readVarToFloatVector(v, vec, err)) return;
+        saveVectorToBin(path, vec, err);
+    };
+    auto dumpVec = [&](const std::vector<float>& vec, const std::string& path) {
+        std::string err;
+        saveVectorToBin(path, vec, err);
+    };
+
+    const size_t nCpu = cpuOutputs.size();
+    const size_t nNpu = npuOutputs.size();
+    const size_t nOm  = omOutputs.size();
+    const size_t nMax = std::max({nCpu, nNpu, nOm});
+    for (size_t oi = 0; oi < nMax; ++oi) {
+        const std::string label = labelOf(oi);
+        if (oi < nCpu) {
+            dumpVarp(cpuOutputs[oi], outDir + "/chunk" + std::to_string(chunkIdx) +
+                     "_out" + std::to_string(oi) + "_" + label + "_mnn_cpu.bin");
+        }
+        if (oi < nNpu) {
+            dumpVarp(npuOutputs[oi], outDir + "/chunk" + std::to_string(chunkIdx) +
+                     "_out" + std::to_string(oi) + "_" + label + "_mnn_npu.bin");
+        }
+        if (oi < nOm) {
+            dumpVec(omOutputs[oi], outDir + "/chunk" + std::to_string(chunkIdx) +
+                    "_out" + std::to_string(oi) + "_" + label + "_om.bin");
+        }
+    }
+
+    // meta json (flat-ish, easy to parse on host)
+    std::ostringstream m;
+    m << "{\n  \"chunk\": " << chunkIdx << ",\n";
+    m << "  \"chunk_name\": \"" << chunkName << "\",\n";
+    m << "  \"outputs\": [\n";
+    for (size_t oi = 0; oi < nMax; ++oi) {
+        const std::string label = labelOf(oi);
+        std::string shapeStr;
+        if (oi < nCpu) shapeStr = shapeStrOf(cpuOutputs[oi]);
+        else if (oi < nNpu) shapeStr = shapeStrOf(npuOutputs[oi]);
+        // numel from shape if available, else from om vector
+        size_t numel = 0;
+        if (!shapeStr.empty()) {
+            // parse axbxc...
+            std::string s = shapeStr;
+            size_t p = 0; numel = 1; bool any = false;
+            while (p < s.size()) {
+                size_t x = s.find('x', p);
+                std::string tok = (x == std::string::npos) ? s.substr(p) : s.substr(p, x - p);
+                if (!tok.empty()) { numel *= (size_t)std::atoi(tok.c_str()); any = true; }
+                if (x == std::string::npos) break;
+                p = x + 1;
+            }
+            if (!any) numel = 0;
+        } else if (oi < nOm) {
+            numel = omOutputs[oi].size();
+        }
+        m << "    {\"out\": " << oi << ", \"label\": \"" << label
+          << "\", \"shape\": \"" << shapeStr << "\", \"numel\": " << numel
+          << ", \"sources\": [";
+        std::vector<std::string> srcs;
+        if (oi < nCpu) srcs.push_back("\"mnn_cpu\"");
+        if (oi < nNpu) srcs.push_back("\"mnn_npu\"");
+        if (oi < nOm)  srcs.push_back("\"om\"");
+        for (size_t k = 0; k < srcs.size(); ++k) { if (k) m << ", "; m << srcs[k]; }
+        m << "]}";
+        if (oi + 1 < nMax) m << ",";
+        m << "\n";
+    }
+    m << "  ]\n}\n";
+    std::string metaStr = m.str();
+    std::vector<uint8_t> metaBytes(metaStr.begin(), metaStr.end());
+    std::string metaErr;
+    writeFileBytes(outDir + "/chunk" + std::to_string(chunkIdx) + "_meta.json",
+                   metaBytes.data(), metaBytes.size(), metaErr);
 }
 
 // ---- OM vs MNN visual chunk cross-validation with REAL calib inputs ----
@@ -4084,6 +4190,20 @@ static std::string runOmVsMnnRealCalibTest(const std::string& modelRoot,
                 }
             }
             if (chunkMnnPass) totalMnnPass++;
+        }
+
+        // --- Save outputs for offline Python comparison + plotting ---
+        // -> <modelDir>/debug_outputs/chunk{i}_out{j}_{label}_{mnn_cpu,mnn_npu,om}.bin
+        //    + chunk{i}_meta.json (shape/numel/label per output)
+        {
+            const std::string outDir = modelDir + "/debug_outputs";
+            const std::vector<VARP> emptyV;
+            saveRealCalibChunkOutputs(
+                outDir, i, chunkName,
+                cpuRes.outputs,
+                mnnNpuOk ? mnnNpuRes.outputs : emptyV,
+                omOk ? omOutputs : std::vector<std::vector<float>>());
+            log << "  saved outputs -> " << outDir << "/chunk" << i << "_*\n";
         }
 
         log << "\n";
