@@ -794,14 +794,22 @@ struct Index {
                     msg = `${msg}<img>${this.pickedImagePath}<hw>600,270</hw></img>`;
                   }
 
-                  this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+                  // 记住写入 User 行之前的 chatHistory 快照，流式时基于快照重建，避免 replace 失配
+                  let snapshot = this.chatHistory + `\nUser: ${msg}\nAssistant: `;
+                  this.chatHistory = snapshot + '思考中...';
                   this.isThinking = true;
 
                   try {
-                    let reply = await mnnllm.chat(msg);
-                    this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+                    // 流式：每生成一个 token chunk 就基于快照重建 Assistant 行（不用 replace，避免一次替换后找不到占位符）
+                    let streaming = '';
+                    let reply = await mnnllm.chatStream(msg, (token: string) => {
+                      streaming += token;
+                      this.chatHistory = snapshot + streaming;
+                    });
+                    // 最终用完整结果收尾（回调可能漏掉末尾片段，以 reply 为准）
+                    this.chatHistory = snapshot + reply + '\n';
                   } catch(err) {
-                    this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${err}\n`);
+                    this.chatHistory = snapshot + `[错误] ${err}\n`;
                   } finally {
                     this.isThinking = false;
                   }

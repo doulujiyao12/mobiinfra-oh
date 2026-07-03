@@ -980,6 +980,92 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
     return promise;
 }
 
+// ========== 4b. 异步多轮对话 (流式 token) ==========
+static void ChatStreamExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    if (asyncData->inputStr == "/reset") {
+        g_llm->reset();
+        g_messages.clear();
+        g_messages.emplace_back("system", "You are a helpful assistant.");
+        asyncData->success = true;
+        asyncData->outputStr = "reset done";
+        return;
+    }
+
+    if (g_messages.empty()) {
+        g_messages.emplace_back("system", "You are a helpful assistant.");
+    }
+    g_messages.emplace_back("user", asyncData->inputStr);
+
+    std::string assistant_str;
+    if (asyncData->tsfn) {
+        // 流式：每个 token chunk 通过 TSFN 回调 JS
+        TsfnStreambuf buf(asyncData->tsfn);
+        std::ostream tokenStream(&buf);
+        g_llm->response(g_messages, &tokenStream, nullptr, -1);
+        assistant_str = buf.str();
+    } else {
+        std::ostringstream oss;
+        g_llm->response(g_messages, &oss);
+        assistant_str = oss.str();
+    }
+
+    auto context = g_llm->getContext();
+    if (context) {
+        if (assistant_str.empty()) {
+            assistant_str = context->generate_str;
+        }
+        g_messages.emplace_back("assistant", assistant_str);
+        asyncData->outputStr = assistant_str;
+    }
+    asyncData->success = true;
+}
+
+static napi_value ChatStreamAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    // 动态长度字符串提取，支持长 prompt（含图片标签路径）
+    size_t strLen = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+    std::string userMsg(strLen, '\0');
+    napi_get_value_string_utf8(env, args[0], &userMsg[0], strLen + 1, &strLen);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(userMsg);
+
+    // 可选第 2 个参数：onToken 回调，用于逐字流式显示
+    if (argc >= 2) {
+        napi_valuetype argType;
+        napi_typeof(env, args[1], &argType);
+        if (argType == napi_function) {
+            napi_value tsfnName;
+            napi_create_string_utf8(env, "ChatStreamTokenCb", NAPI_AUTO_LENGTH, &tsfnName);
+            napi_create_threadsafe_function(env, args[1], nullptr, tsfnName,
+                0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &asyncData->tsfn);
+        }
+    }
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "ChatStreamAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, ChatStreamExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
 // ========== 5. Agent Prefill (prefix KV cache reuse) ==========
 static void AgentPrefillExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
@@ -4869,6 +4955,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"chatStream",   nullptr, ChatStreamAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},

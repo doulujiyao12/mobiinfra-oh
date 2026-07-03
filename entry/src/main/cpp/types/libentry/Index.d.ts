@@ -1,6 +1,7 @@
 export const loadModel: (configPath: string) => string;
 export const generate: (prompt: string) => string;
 export const chat: (userMessage: string) => string;
+export const chatStream: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
 export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
 export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
