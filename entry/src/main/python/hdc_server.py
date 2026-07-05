@@ -1914,16 +1914,20 @@ def handle_workflow_action(action, payload):
         factor = float(payload.get('factor', 0.5))
         style = str(payload.get('style', 'mobiagent')).lower()
         manage_overlay = payload_bool(payload, 'manage_overlay', False)
+        target_width = payload.get('target_width')
+        target_height = payload.get('target_height')
+        target_width = int(target_width) if target_width else None
+        target_height = int(target_height) if target_height else None
         if manage_overlay:
             if style == 'local' or factor <= 0.25:
-                image_b64, width, height = harmony_agent.capture_screen(factor)
+                image_b64, width, height = harmony_agent.capture_screen(factor, target_width, target_height)
             else:
                 image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(factor)
         else:
             if style == 'local' or factor <= 0.25:
                 image_b64, width, height = harmony_agent.run_with_device_control(
                     'workflow capture_screen direct',
-                    lambda: harmony_agent._capture_screen_impl(factor)
+                    lambda: harmony_agent._capture_screen_impl(factor, target_width, target_height)
                 )
             else:
                 image_b64, width, height = harmony_agent.run_with_device_control(

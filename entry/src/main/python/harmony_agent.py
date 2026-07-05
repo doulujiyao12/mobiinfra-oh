@@ -545,17 +545,20 @@ def _cleanup_device_file_async(prefix, device_path):
         daemon=True
     ).start()
 
-def _encode_resized_screenshot(local_path, factor):
+def _encode_resized_screenshot(local_path, factor, target_width=None, target_height=None):
     with Image.open(local_path) as img:
         w, h = img.size
-        new_w, new_h = int(w * factor), int(h * factor)
+        if target_width and target_height:
+            new_w, new_h = int(target_width), int(target_height)
+        else:
+            new_w, new_h = int(w * factor), int(h * factor)
         img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         buffered = io.BytesIO()
         img.save(buffered, format="JPEG")
     b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
     return b64, new_w, new_h
 
-def _capture_screen_file(local_path, factor, label):
+def _capture_screen_file(local_path, factor, label, target_width=None, target_height=None):
     prefix = hdc_prefix()
     device_path = f"/data/local/tmp/_tmp_{uuid.uuid4().hex}.jpeg"
     snapshot_created = False
@@ -577,7 +580,7 @@ def _capture_screen_file(local_path, factor, label):
             raise FileNotFoundError(f"local screenshot not found after recv: {local_path}; device path: {device_path}")
 
         started = time.perf_counter()
-        result = _encode_resized_screenshot(local_path, factor)
+        result = _encode_resized_screenshot(local_path, factor, target_width, target_height)
         print(f">> [HDC Timing] {label} resize+base64: {time.perf_counter() - started:.3f}s")
         return result
     finally:
@@ -606,21 +609,24 @@ def _capture_overlay_restore_best_effort(hidden):
     except Exception as exc:
         print(f">> [Capture Overlay] restore skipped: {exc}")
 
-def capture_screen(factor=0.25):
+def capture_screen(factor=0.25, target_width=None, target_height=None):
     hidden = _capture_overlay_hide_best_effort()
     try:
         if hidden:
             # 等待 HarmonyOS 浮窗销毁提交到合成层，避免截图仍捕获上一帧的控制面板。
             time.sleep(0.12)
-        return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+        return run_with_device_control(
+            "capture_screen",
+            lambda: _capture_screen_impl(factor, target_width, target_height)
+        )
     finally:
         _capture_overlay_restore_best_effort(hidden)
 
-def _capture_screen_impl(factor=0.25):
+def _capture_screen_impl(factor=0.25, target_width=None, target_height=None):
     # 使用 hdc snapshot_display 截图并拉回 PC，再压缩为 base64 发送给 App/云端模型。
     print(">> Capturing screen via hdc...")
     local_path = os.path.join(os.path.dirname(__file__), "screen.jpeg")
-    return _capture_screen_file(local_path, factor, "screenshot")
+    return _capture_screen_file(local_path, factor, "screenshot", target_width, target_height)
 
 def capture_screen_mobiagent_style(factor=0.5, manage_overlay=True):
     hidden = _capture_overlay_hide_best_effort() if manage_overlay else False
