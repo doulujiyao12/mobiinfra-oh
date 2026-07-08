@@ -206,10 +206,18 @@ const HDC_REVERSE_CONNECT_TIMEOUT_MS: number = 1500;
 const HDC_REVERSE_READ_TIMEOUT_MS: number = 3000;
 const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
 const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
+const LOCAL_MNN_CHAT_IMAGE_TARGET_WIDTH: number = 270;
+const LOCAL_MNN_CHAT_IMAGE_TARGET_HEIGHT: number = 600;
 
 interface ServerFile {
   name: string;
   size: number;
+}
+
+interface LocalMnnImagePromptPart {
+  path: string;
+  width: number;
+  height: number;
 }
 
 interface ModelScopeFileTask {
@@ -1324,7 +1332,9 @@ struct Index {
       for (let i = 0; i < session.messages.length; i++) {
         let message = session.messages[i];
         if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          await mnnllm.chat(message.content);
+          let modelMessage = await this.localMnnModelMessage(message.content, chatMessageImagePaths(message),
+            session.id, message.id);
+          await mnnllm.chat(modelMessage);
         }
       }
     } catch (e) {
@@ -1644,6 +1654,111 @@ struct Index {
         }
       }
     }
+  }
+
+  private async imageUriToLocalMnnPromptPart(uri: string, sessionId: string, messageId: string,
+    index: number): Promise<LocalMnnImagePromptPart> {
+    if (this.filesDir.length === 0) {
+      throw new Error('文件目录未初始化');
+    }
+    let imageFile: fileIo.File | null = null;
+    let imageSource: image.ImageSource | null = null;
+    let pixelMap: image.PixelMap | null = null;
+    let packer: image.ImagePacker | null = null;
+    try {
+      imageFile = await fileIo.open(this.fileIoOpenTarget(uri), fileIo.OpenMode.READ_ONLY);
+      imageSource = image.createImageSource(imageFile.fd);
+      pixelMap = await imageSource.createPixelMap();
+      await this.scaleLocalMnnPromptImage(pixelMap);
+      let info: image.ImageInfo = await pixelMap.getImageInfo();
+      let width = info.size.width;
+      let height = info.size.height;
+      if (width <= 0 || height <= 0) {
+        throw new Error('图片尺寸无效');
+      }
+      packer = image.createImagePacker();
+      let data = await packer.packToData(pixelMap, {
+        format: 'image/jpeg',
+        quality: 90
+      });
+      let path = this.localMnnPromptImagePath(sessionId, messageId, index);
+      let outFile = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(outFile.fd, data);
+      } finally {
+        fs.closeSync(outFile);
+      }
+      return {
+        path: path,
+        width: width,
+        height: height
+      };
+    } finally {
+      if (packer !== null) {
+        try {
+          await packer.release();
+        } catch (e) {
+        }
+      }
+      if (pixelMap !== null) {
+        try {
+          await pixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (imageSource !== null) {
+        try {
+          await imageSource.release();
+        } catch (e) {
+        }
+      }
+      if (imageFile !== null) {
+        try {
+          await fileIo.close(imageFile);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  private localMnnPromptImagePath(sessionId: string, messageId: string, index: number): string {
+    ChatSessionStorage.ensureSessionAssetsDir(this.filesDir, sessionId);
+    return ChatSessionStorage.sessionAssetPath(this.filesDir, sessionId,
+      'local-vlm-' + messageId + '-' + index.toString() + '.jpg');
+  }
+
+  private async scaleLocalMnnPromptImage(pixelMap: image.PixelMap): Promise<void> {
+    let info: image.ImageInfo = await pixelMap.getImageInfo();
+    let width = info.size.width;
+    let height = info.size.height;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    let widthScale = LOCAL_MNN_CHAT_IMAGE_TARGET_WIDTH / width;
+    let heightScale = LOCAL_MNN_CHAT_IMAGE_TARGET_HEIGHT / height;
+    if (Math.abs(widthScale - 1) < 0.001 && Math.abs(heightScale - 1) < 0.001) {
+      return;
+    }
+    await pixelMap.scale(widthScale, heightScale);
+  }
+
+  private async localMnnImagePromptTags(imageUris: string[], sessionId: string, messageId: string): Promise<string> {
+    let normalized = normalizeChatImageAttachments(imageUris);
+    if (normalized.length === 0) {
+      return '';
+    }
+    let tags: string[] = [];
+    for (let i = 0; i < normalized.length; i++) {
+      let part = await this.imageUriToLocalMnnPromptPart(normalized[i], sessionId, messageId, i);
+      tags.push('<img>' + part.path + '<hw>' + part.height.toString() + ',' + part.width.toString() + '</hw></img>');
+    }
+    return tags.join('');
+  }
+
+  private async localMnnModelMessage(content: string, imageUris: string[], sessionId: string,
+    messageId: string): Promise<string> {
+    let tags = await this.localMnnImagePromptTags(imageUris, sessionId, messageId);
+    return tags.length > 0 ? content + tags : content;
   }
 
   private fileIoOpenTarget(uri: string): string {
@@ -5388,21 +5503,20 @@ struct Index {
     if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
       return;
     }
-    if (hasChatImageAttachments(pendingImageUris)) {
-      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
-      return;
-    }
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       return;
     }
     let chatSessionId = activeSession.id;
     let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
+    let adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, pendingImageUris);
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
+    let userMessageId = this.nextChatMessageId('user');
     let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.localPendingChatImageUris = [];
-    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
-      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(userMessageId, 'user',
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris));
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
       CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
@@ -5446,7 +5560,8 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(msg, (token: string) => {
+      let modelMessage = await this.localMnnModelMessage(msg, adoptedImageUris, chatSessionId, userMessageId);
+      let reply: string = await mnnllm.chat(modelMessage, (token: string) => {
         streamedReply += token;
         scheduleStreamReplyUpdate();
       });
