@@ -23,6 +23,7 @@
 #include <MNN/expr/MathOp.hpp>
 #include <MNN/expr/NeuralNetWorkOp.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
+#include "llm/npu_chunk_executor.hpp"
 
 namespace MNN {
 struct KVMeta;
@@ -138,6 +139,11 @@ public:
     Llm(std::shared_ptr<LlmConfig> config);
     virtual ~Llm();
     virtual bool load();
+    // Inject an external NPU chunk executor (HarmonyOS OM path).
+    // No-op in the base class; Omni overrides to route chunk inference
+    // through pre-compiled .om files instead of MNN Module::onForward.
+    virtual void setNpuChunkExecutor(std::shared_ptr<INpuChunkExecutor> /*executor*/,
+                                     const std::vector<std::string>& /*omPaths*/) {}
     virtual Express::VARP gen_attention_mask(int seq_len);
     virtual Express::VARP gen_position_ids(int seq_len);
     virtual Express::VARP embedding(const std::vector<int>& input_ids);

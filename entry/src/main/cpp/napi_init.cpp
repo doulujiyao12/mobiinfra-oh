@@ -19,6 +19,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <iomanip>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -27,6 +28,7 @@
 #include <errno.h>
 
 #include "llm/llm.hpp"
+#include "llm/npu_chunk_executor.hpp"
 #include "rawfile/raw_dir.h"
 #include "rawfile/raw_file.h"
 #include "rawfile/raw_file_manager.h"
@@ -691,6 +693,196 @@ static napi_value CopyModel(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ========== 1b. HarmonyOS OM Executor (INpuChunkExecutor for omni.cpp) ==========
+
+namespace {
+
+static std::vector<std::string> listOmChunkFiles(const std::string& omDir) {
+    auto extractIdx = [](const std::string& name) -> int {
+        const std::string pfx = "visual_blocks_npu_";
+        size_t p = pfx.size();
+        int v = 0;
+        while (p < name.size() && std::isdigit((unsigned char)name[p])) {
+            v = v * 10 + (name[p] - '0');
+            ++p;
+        }
+        return v;
+    };
+
+    std::map<int, std::string> found;
+    printf("[OM] scanning dir: %s\n", omDir.c_str());
+    fflush(stdout);
+    DIR* dir = ::opendir(omDir.c_str());
+    if (dir == nullptr) {
+        printf("[OM] opendir FAILED for: %s (errno=%d)\n", omDir.c_str(), errno);
+        fflush(stdout);
+        return {};
+    }
+    printf("[OM] opendir OK\n");
+    fflush(stdout);
+
+    struct dirent* ent = nullptr;
+    const std::string prefix = "visual_blocks_npu_";
+    while ((ent = ::readdir(dir)) != nullptr) {
+        std::string name(ent->d_name);
+        printf("[OM]   readdir: '%s'\n", name.c_str());
+        fflush(stdout);
+        if (name.size() < prefix.size() + 4) continue;
+        if (name.compare(0, prefix.size(), prefix) != 0) continue;
+        if (name.find(".om") == std::string::npos) continue;
+        size_t p = prefix.size();
+        if (!std::isdigit((unsigned char)name[p])) continue;
+        int idx = extractIdx(name);
+        printf("[OM]   MATCHED: '%s'  idx=%d\n", name.c_str(), idx);
+        fflush(stdout);
+        found[idx] = omDir + "/" + name;
+    }
+    ::closedir(dir);
+
+    if (found.empty()) {
+        printf("[OM] total matched: 0 file(s)\n");
+        fflush(stdout);
+        return {};
+    }
+
+    int maxIdx = found.rbegin()->first;
+    std::vector<std::string> out(maxIdx + 1, "");
+    for (auto& kv : found) {
+        out[kv.first] = kv.second;
+    }
+    printf("[OM] total matched: %zu file(s), maxIdx=%d\n", found.size(), maxIdx);
+    fflush(stdout);
+    return out;
+}
+
+class HiaiNpuChunkExecutor : public INpuChunkExecutor {
+public:
+    explicit HiaiNpuChunkExecutor(const std::string& modelDir) : mModelDir(modelDir) {}
+
+    bool loadChunk(int chunkIdx, const std::string& omPath) override {
+        using Clock = std::chrono::high_resolution_clock;
+        using Ms = std::chrono::duration<double, std::milli>;
+
+        if (chunkIdx < 0) return false;
+        if (chunkIdx >= (int)mChunks.size()) {
+            mChunks.resize(chunkIdx + 1);
+        }
+
+        auto t0 = Clock::now();
+        std::ifstream file(omPath, std::ios::binary | std::ios::ate);
+        if (!file) {
+            LOGE("OM loadChunk[%{public}d]: cannot open %{public}s", chunkIdx, omPath.c_str());
+            return false;
+        }
+        size_t modelSize = static_cast<size_t>(file.tellg());
+        file.seekg(0);
+
+        auto& chunk = mChunks[chunkIdx];
+        chunk.modelPath = omPath;
+        chunk.modelBuf.resize(modelSize);
+        file.read(reinterpret_cast<char*>(chunk.modelBuf.data()), modelSize);
+        file.close();
+        double readMs = Ms(Clock::now() - t0).count();
+
+        auto t1 = Clock::now();
+        chunk.mgr.reset(new HIAIModelManager());
+        OH_NN_ReturnCode ret = chunk.mgr->LoadModelFromBuffer(chunk.modelBuf.data(), modelSize);
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM loadChunk[%{public}d]: LoadModelFromBuffer failed ret=%{public}d", chunkIdx, (int)ret);
+            chunk.mgr.reset();
+            return false;
+        }
+        ret = chunk.mgr->InitIOTensors();
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM loadChunk[%{public}d]: InitIOTensors failed ret=%{public}d", chunkIdx, (int)ret);
+            chunk.mgr.reset();
+            return false;
+        }
+        double loadMs = Ms(Clock::now() - t1).count();
+
+        chunk.loaded = true;
+        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  file=%s\n",
+               chunkIdx, readMs, loadMs, modelSize / 1024,
+               omPath.c_str() + std::min(mModelDir.size() + 1, omPath.size()));
+        fflush(stdout);
+        LOGI("OM loadChunk[%{public}d] = %{public}s", chunkIdx, omPath.c_str());
+        return true;
+    }
+
+    bool runChunk(int chunkIdx,
+                  const std::vector<float>& hidden,
+                  const std::vector<float>& rotary,
+                  const std::vector<float>& mask,
+                  std::vector<std::vector<float>>& outputs) override {
+        using Clock = std::chrono::high_resolution_clock;
+        using Ms = std::chrono::duration<double, std::milli>;
+
+        if (chunkIdx < 0 || chunkIdx >= (int)mChunks.size() || !mChunks[chunkIdx].loaded) {
+            LOGE("OM runChunk[%{public}d]: not loaded", chunkIdx);
+            return false;
+        }
+
+        auto& chunk = mChunks[chunkIdx];
+        auto* mgr = chunk.mgr.get();
+
+        auto t0 = Clock::now();
+        OH_NN_ReturnCode ret = mgr->SetInputData(0, hidden.data(), hidden.size());
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM runChunk[%{public}d]: SetInputData[0] failed", chunkIdx);
+            return false;
+        }
+        ret = mgr->SetInputData(1, rotary.data(), rotary.size());
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM runChunk[%{public}d]: SetInputData[1] failed", chunkIdx);
+            return false;
+        }
+        ret = mgr->SetInputData(2, mask.data(), mask.size());
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM runChunk[%{public}d]: SetInputData[2] failed", chunkIdx);
+            return false;
+        }
+        double setInputMs = Ms(Clock::now() - t0).count();
+
+        ret = mgr->RunModel();
+        auto tRunDone = Clock::now();
+        double runMs = Ms(tRunDone - t0).count();
+        if (ret != OH_NN_SUCCESS) {
+            LOGE("OM runChunk[%{public}d]: RunModel failed ret=%{public}d", chunkIdx, (int)ret);
+            return false;
+        }
+
+        int nOut = mgr->GetOutputCount();
+        outputs.clear();
+        outputs.resize(nOut);
+        for (int oi = 0; oi < nOut; oi++) {
+            outputs[oi] = mgr->GetOutputData(oi);
+        }
+
+        printf("[OM] chunk %d/%zu OK  out=%d  set=%.1fms  run=%.1fms  file=%s\n",
+               chunkIdx, mChunks.size(), nOut, setInputMs, runMs - setInputMs,
+               chunk.modelPath.c_str() + std::min(mModelDir.size() + 1, chunk.modelPath.size()));
+        fflush(stdout);
+        return true;
+    }
+
+    void unload() override {
+        mChunks.clear();
+    }
+
+private:
+    struct ChunkModel {
+        std::unique_ptr<HIAIModelManager> mgr;
+        std::vector<uint8_t> modelBuf;
+        std::string modelPath;
+        bool loaded = false;
+    };
+
+    std::string mModelDir;
+    std::vector<ChunkModel> mChunks;
+};
+
+} // anonymous namespace
+
 // ========== 2. 异步加载模型 ==========
 static void LoadModelExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
@@ -716,6 +908,56 @@ static void LoadModelExecute(napi_env env, void* data) {
     }
     std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
     g_llm->set_config(tmpConfig);
+
+    // OM path: if precompiled visual chunk models are present, route visual
+    // chunk inference through HarmonyOS NNRT/HiAI. If absent, CPU/MNN keeps
+    // the original behavior.
+    {
+        const std::string configPath = asyncData->inputStr;
+        std::string configText;
+        {
+            std::ifstream ifs(configPath);
+            if (ifs.good()) {
+                std::ostringstream oss;
+                oss << ifs.rdbuf();
+                configText = oss.str();
+            }
+        }
+
+        std::string omCfgDir;
+        const std::string needle = "\"visual_blocks_om_dir\"";
+        auto kpos = configText.find(needle);
+        if (kpos != std::string::npos) {
+            auto col = configText.find(':', kpos + needle.size());
+            if (col != std::string::npos) {
+                auto q1 = configText.find('"', col + 1);
+                if (q1 != std::string::npos) {
+                    auto q2 = configText.find('"', q1 + 1);
+                    if (q2 != std::string::npos) {
+                        omCfgDir = configText.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+        }
+
+        std::vector<std::string> omPaths;
+        if (!omCfgDir.empty()) {
+            omPaths = listOmChunkFiles(joinPath(modelDir, omCfgDir));
+        } else {
+            omPaths = listOmChunkFiles(modelDir);
+        }
+
+        if (!omPaths.empty()) {
+            LOGI("OM executor enabled: %{public}zu chunks", omPaths.size());
+            printf("[OM] Load: %zu .om chunk(s) detected -> OM path enabled\n", omPaths.size());
+            fflush(stdout);
+            auto executor = std::make_shared<HiaiNpuChunkExecutor>(modelDir);
+            g_llm->setNpuChunkExecutor(std::move(executor), omPaths);
+        } else {
+            printf("[OM] Load: no .om files found -> fallback to MNN path\n");
+            fflush(stdout);
+        }
+    }
 
     bool res = g_llm->load();
     if (res) {

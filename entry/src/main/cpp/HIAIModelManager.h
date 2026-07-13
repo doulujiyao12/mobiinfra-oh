@@ -14,6 +14,7 @@
 class HIAIModelManager {
 public:
     HIAIModelManager() = default;
+    ~HIAIModelManager() { if (executor_ != nullptr) UnloadModel(); }
     // 单例封装 OH_NN executor，供 op/OMC A-B 测试复用同一套加载与推理流程。
     static HIAIModelManager &GetInstance();
 
