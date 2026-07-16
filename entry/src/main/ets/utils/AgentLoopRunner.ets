@@ -26,7 +26,7 @@ interface PlannerTarget {
 }
 
 const MAX_AGENT_STEPS: number = 15;
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
+const HOST_APP_BUNDLE_NAME: string = 'com.clawmate.app';
 
 export class AgentLoopRunner {
   private filesDir: string;

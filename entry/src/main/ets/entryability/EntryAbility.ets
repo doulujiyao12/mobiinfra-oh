@@ -72,7 +72,7 @@ export default class EntryAbility extends UIAbility {
     });
     AgentExecutionController.setReturnToAppHandler(async () => {
       let wantInfo: Want = {
-        bundleName: 'com.example.mnnllmchat',
+        bundleName: 'com.clawmate.app',
         abilityName: 'EntryAbility'
       };
       try {
@@ -162,7 +162,7 @@ export default class EntryAbility extends UIAbility {
       let wantAgentInfo: wantAgent.WantAgentInfo = {
         wants: [
           {
-            bundleName: "com.example.mnnllmchat",
+            bundleName: "com.clawmate.app",
             abilityName: "EntryAbility"
           }
         ],
@@ -308,7 +308,7 @@ export default class EntryAbility extends UIAbility {
       return;
     }
     let config: window.Configuration = {
-      name: 'MnnLlmChatEdgeFlowWindow',
+      name: 'ClawMateEdgeFlowWindow',
       windowType: window.WindowType.TYPE_FLOAT,
       ctx: this.context
     };
@@ -359,7 +359,7 @@ export default class EntryAbility extends UIAbility {
       return;
     }
     let config: window.Configuration = {
-      name: 'MnnLlmChatFloatWindow',
+      name: 'ClawMateFloatWindow',
       windowType: window.WindowType.TYPE_FLOAT,
       ctx: this.context
     };

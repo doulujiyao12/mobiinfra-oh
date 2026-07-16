@@ -145,8 +145,8 @@ export default function workflowStorageUnitTest() {
 
     it('workflowScreenshotRelativePathUsesConcreteImageFile', 0, () => {
       let relative = WorkflowStorage.workflowRunRelativePath(
-        '/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files',
-        '/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/workflows/runs/20260608-103333-basic-gui-task/steps/3/screenshot.jpg'
+        '/data/app/el2/100/base/com.clawmate.app/haps/entry/files',
+        '/data/app/el2/100/base/com.clawmate.app/haps/entry/files/workflows/runs/20260608-103333-basic-gui-task/steps/3/screenshot.jpg'
       );
       expect(relative).assertEqual('workflows/runs/20260608-103333-basic-gui-task/steps/3/screenshot.jpg');
       expect(relative.endsWith('/steps/3')).assertFalse();
@@ -471,7 +471,7 @@ export default function workflowStorageUnitTest() {
     });
 
     it('runSummaryDeleteTargetUsesWholeRunDirectory', 0, () => {
-      let filesDir = '/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files';
+      let filesDir = '/data/app/el2/100/base/com.clawmate.app/haps/entry/files';
       let file: WorkflowManagedFile = {
         name: '20260609-104256-basic-gui-task/run_summary.json',
         path: filesDir + '/workflows/runs/20260609-104256-basic-gui-task/run_summary.json',
@@ -484,7 +484,7 @@ export default function workflowStorageUnitTest() {
     });
 
     it('rootConfigDeleteTargetKeepsSingleConfigFile', 0, () => {
-      let filesDir = '/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files';
+      let filesDir = '/data/app/el2/100/base/com.clawmate.app/haps/entry/files';
       let file: WorkflowManagedFile = {
         name: 'default_ele_order.json',
         path: filesDir + '/workflows/configs/default_ele_order.json',

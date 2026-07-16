@@ -18,7 +18,7 @@ type AgentChatHandler = (userMessage: string) => Promise<string>;
 type NativeResetHandler = () => string;
 type HdcServerUrlProvider = () => string;
 
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
+const HOST_APP_BUNDLE_NAME: string = 'com.clawmate.app';
 
 type RequestKey =
   'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |

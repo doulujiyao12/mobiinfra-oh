@@ -2691,8 +2691,8 @@ struct Index {
     return {
       schemaVersion: 1,
       typeId: PROFILE_KNOCK_SHARE_UTD,
-      appId: 'com.example.mnnllmchat',
-      appName: 'MobiInfer LLM Chat',
+      appId: 'com.clawmate.app',
+      appName: 'ClawMate',
       generatedAt: new Date().toISOString(),
       profileText: this.buildProfileShareText(snapshot),
       profile: snapshot
@@ -2736,7 +2736,7 @@ struct Index {
 
   private buildProfileShareText(snapshot: ProfileShareSnapshot): string {
     let lines: string[] = [];
-    lines.push('应用：MobiInfer LLM Chat');
+    lines.push('应用：ClawMate');
     lines.push('生成时间：' + new Date().toLocaleString());
     lines.push('画像更新时间：' + (snapshot.updatedLabel.length > 0 ? snapshot.updatedLabel : '未知'));
     lines.push('画像完整度：' + String(snapshot.completeness) + '%');

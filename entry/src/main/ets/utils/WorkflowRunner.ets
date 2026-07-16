@@ -368,7 +368,7 @@ export function resolveWorkflowJsonForRun(filesDir: string, task: WorkflowTask,
 }
 
 export class WorkflowRunner {
-  private static readonly APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
+  private static readonly APP_BUNDLE_NAME: string = 'com.clawmate.app';
 
   private filesDir: string;
   private cloudClient: CloudModelClient;

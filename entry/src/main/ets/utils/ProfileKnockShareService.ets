@@ -20,7 +20,7 @@ const PROFILE_SHARE_INBOX_DIR: string = 'inbox';
 const MAX_RECEIVED_PROFILE_BYTES: number = 512 * 1024;
 const MAX_INBOX_SCAN_FILES: number = 20;
 const PROFILE_SHARE_SCHEMA_VERSION: number = 1;
-const PROFILE_SHARE_APP_ID: string = 'com.example.mnnllmchat';
+const PROFILE_SHARE_APP_ID: string = 'com.clawmate.app';
 const PROFILE_FILE_OPEN_FALLBACK_MIME_TYPES: string[] = [
   'application/octet-stream',
   'application/json',

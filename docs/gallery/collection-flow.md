@@ -107,7 +107,7 @@ code=1002600004, message=The Map permission is not enabled.
 
 待完善事项：
 
-- 在 AGC 中为当前包名 `com.example.mnnllmchat` 开通 Map Kit / 地图服务。
+- 在 AGC 中为当前包名 `com.clawmate.app` 开通 Map Kit / 地图服务。
 - 配置当前调试签名证书指纹。
 - 下载匹配应用的 `agconnect-services.json` 并放入应用级目录。
 - 重新构建安装后确认 HiLog 中不再出现 `1002600004`。

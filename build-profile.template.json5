@@ -1,0 +1,60 @@
+{
+  "app": {
+    // Copy this file to build-profile.json5 for local builds, then fill in
+    // signing material with DevEco Studio or your local HarmonyOS certificate.
+    // Do not commit the generated build-profile.json5.
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile": "<path-to-your-debug-or-release.p12>",
+          "storePassword": "<store-password>",
+          "keyAlias": "<key-alias>",
+          "keyPassword": "<key-password>",
+          "signAlg": "SHA256withECDSA",
+          "profile": "<path-to-your-profile.p7b>",
+          "certpath": "<path-to-your-certificate.cer>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.0.2(22)",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -97,7 +97,7 @@ SWIPE_H_START = 0.3
 SWIPE_H_END = 0.7
 
 # LLM Agent 包名
-LLM_APP_BUNDLE = "com.example.mnnllmchat"
+LLM_APP_BUNDLE = "com.clawmate.app"
 LLM_APP_ABILITY = "EntryAbility"
 
 def quiet_system(cmd):

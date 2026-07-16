@@ -4,7 +4,7 @@
 
 ## Directory
 
-应用内实际根目录为 `filesDir/gallery-log`。当前调试包在真机上的参考路径为 `/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/gallery-log/`。
+应用内实际根目录为 `filesDir/gallery-log`。当前调试包在真机上的参考路径为 `/data/app/el2/100/base/com.clawmate.app/haps/entry/files/gallery-log/`。
 
 ```text
 gallery-log/

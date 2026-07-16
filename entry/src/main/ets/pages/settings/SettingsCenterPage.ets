@@ -1476,7 +1476,7 @@ export struct SettingsCenterPage {
   }
 
   @Builder AboutSettingsGroup() {
-    Text('MobiInfer LLM Chat')
+    Text('ClawMate')
       .fontSize(13)
       .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
       .width('100%')
