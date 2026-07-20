@@ -313,6 +313,14 @@ export function chatMessageThinkingCollapsed(message: ChatMessage): boolean {
   return message.thinkingCollapsed === undefined ? true : message.thinkingCollapsed;
 }
 
+/**
+ * 返回用于“复制整条消息”的可见正文。助手思考内容已在消息创建或流式解析时拆分，
+ * 因而不能将其与工具轨迹一并复制给用户。
+ */
+export function chatMessageCopyContent(message: ChatMessage): string {
+  return message.content;
+}
+
 function isCompactPreviewWhitespace(ch: string): boolean {
   return ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\f' || ch === '\v';
 }

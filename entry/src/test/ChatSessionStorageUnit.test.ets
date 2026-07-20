@@ -8,6 +8,7 @@ import {
   ChatMessage,
   ChatSessionSummary,
   buildCloudContextMessages,
+  chatMessageCopyContent,
   chatMessageRenderKey,
   chatMessageImagePaths,
   chatMessageStableRenderKey,
@@ -117,6 +118,14 @@ export default function chatSessionStorageUnitTest() {
 
       expect(chatMessageStableRenderKey(initial)).assertEqual(chatMessageStableRenderKey(streamed));
       expect(chatMessageRenderKey(initial) === chatMessageRenderKey(streamed)).assertFalse();
+    });
+
+    // 整条复制仅暴露用户可见正文，不能把模型思考区或工具轨迹写入系统剪贴板。
+    it('buildsCopyContentFromVisibleMessageBodyOnly', 0, () => {
+      let message = createChatMessage('assistant-copy-1', 'assistant', 'chat',
+        '<think>内部推理。</think>最终回答正文。', 1000, ['工具执行轨迹']);
+
+      expect(chatMessageCopyContent(message)).assertEqual('最终回答正文。');
     });
 
     it('updatesRenderKeyWhenSameLengthContentChangesWithoutAutoScroll', 0, () => {

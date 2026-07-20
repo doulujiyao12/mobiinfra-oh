@@ -1,3 +1,5 @@
+import { promptAction } from '@kit.ArkUI';
+import { pasteboard } from '@kit.BasicServicesKit';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -6,6 +8,7 @@ import {
   ChatMessage,
   ChatMessageKind,
   ChatMessageRole,
+  chatMessageCopyContent,
   chatMessageVoiceMetadata,
   compactChatPreviewText
 } from './ChatSessionTypes';
@@ -177,6 +180,26 @@ function chatToolCallCount(role: ChatMessageRole, kind: ChatMessageKind, detail:
 
 function chatHasVisibleContent(detail: ChatMessageDetailUiModel): boolean {
   return detail.content.trim().length > 0;
+}
+
+/**
+ * 将整条气泡的可见正文写入系统剪贴板。局部 Markdown 文本仍由 Text 组件的选择菜单处理，
+ * 此入口用于一次复制完整原文，避免跨 Markdown 分块时只能复制局部内容。
+ */
+async function copyFullChatMessage(message: ChatMessage): Promise<void> {
+  let content = chatMessageCopyContent(message).trim();
+  if (content.length === 0) {
+    promptAction.showToast({ message: '暂无可复制内容', duration: 1200 });
+    return;
+  }
+  try {
+    let systemPasteboard = pasteboard.getSystemPasteboard();
+    await systemPasteboard.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, content));
+    promptAction.showToast({ message: '已复制消息', duration: 1200 });
+  } catch (e) {
+    AppLogger.warnCause('ChatMessageList', 'copy chat message failed', e as Error);
+    promptAction.showToast({ message: '复制失败', duration: 1200 });
+  }
 }
 
 function chatFormatMessageTime(time: number): string {
@@ -469,6 +492,8 @@ struct ChatThinkingModuleView {
             .fontSize(12)
             .fontColor('#4B5563')
             .lineHeight(18)
+            .copyOption(CopyOptions.LocalDevice)
+            .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
             .width('100%')
             .margin({ top: 8 })
         }
@@ -498,6 +523,8 @@ struct ChatMarkdownContentView {
           .fontSize(15)
           .fontColor(chatContentTextColorFor(this.role))
           .lineHeight(22)
+          .copyOption(CopyOptions.LocalDevice)
+          .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
           .width('100%')
           .margin({ top: 6 })
       } else {
@@ -552,6 +579,14 @@ struct ChatBubbleView {
   @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   @Prop voiceReplayGloballyBlocked: boolean = false;
 
+  private canCopyFullMessage(): boolean {
+    return chatHasVisibleContent(this.message.detail) && !this.message.detail.streamingActive;
+  }
+
+  private async copyFullMessage(): Promise<void> {
+    await copyFullChatMessage(this.message.toChatMessage());
+  }
+
   build() {
     Column() {
       Row() {
@@ -566,6 +601,23 @@ struct ChatBubbleView {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ left: 8 })
+        Blank()
+          .layoutWeight(1)
+        if (this.canCopyFullMessage()) {
+          Button('复制')
+            .fontSize(11)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(chatIsUserRole(this.role) ? '#DBEAFE' : '#5968FF')
+            .height(26)
+            .padding({ left: 8, right: 8 })
+            .backgroundColor(chatIsUserRole(this.role) ? '#273449' : '#EEF2FF')
+            .border({ width: 1, color: chatIsUserRole(this.role) ? '#41516A' : '#DCE4FF' })
+            .borderRadius(13)
+            .margin({ left: 8 })
+            .onClick(async () => {
+              await this.copyFullMessage();
+            })
+        }
       }
       .width('100%')
 

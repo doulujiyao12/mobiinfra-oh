@@ -153,7 +153,7 @@ export default function settingsCenterConfigUnitTest() {
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat).assertEqual('url');
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl).assertEqual('https://api.xiaomimimo.com/v1');
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey.length > 0).assertTrue();
-      expect(DEFAULT_GALLERY_API_BASE_URL).assertEqual('https://api.modelbest.cn/v1');
+      expect(DEFAULT_GALLERY_API_BASE_URL).assertEqual('https://api.modelbest.co/v1');
       expect(DEFAULT_GALLERY_API_KEY.length > 0).assertTrue();
       expect(DEFAULT_GALLERY_MODEL).assertEqual('MiniCPM-V-4.6-Instruct');
       expect(DEFAULT_GALLERY_EMBEDDING_BASE_URL).assertEqual('https://api.siliconflow.cn/v1');
