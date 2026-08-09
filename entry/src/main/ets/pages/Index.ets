@@ -22,6 +22,12 @@ import {
   normalizeChatImageAttachments
 } from './chat/ChatAttachmentPolicy';
 import {
+  LOCAL_CHAT_IMAGE_MAX_COUNT,
+  buildLocalChatMultimodalPrompt,
+  cleanupLocalChatPreparedImages,
+  prepareLocalChatImages
+} from './chat/LocalChatImagePrompt';
+import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
@@ -161,7 +167,10 @@ import {
   configuredEndpointSecretOrDefault,
   configuredEndpointValueOrDefault
 } from '../config/DefaultEndpointConfig';
-import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
+import {
+  DEFAULT_MODELSCOPE_MNN_REPO,
+  LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS
+} from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
   PROFILE_KNOCK_SHARE_UTD,
@@ -357,6 +366,7 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
@@ -437,6 +447,8 @@ struct Index {
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
+  @State localChatImagePreparing: boolean = false;
+  @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -517,6 +529,7 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
+  private localChatCancelRequested: boolean = false;
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
@@ -1342,7 +1355,7 @@ struct Index {
       for (let i = 0; i < session.messages.length; i++) {
         let message = session.messages[i];
         if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          await mnnllm.chat(message.content);
+          await mnnllm.chat(buildLocalChatMultimodalPrompt(message.content, chatMessageImagePaths(message)));
         }
       }
     } catch (e) {
@@ -1684,7 +1697,7 @@ struct Index {
   private setActivePendingChatImageUris(uris: string[]): void {
     let normalized = normalizeChatImageAttachments(uris);
     if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
-      this.localPendingChatImageUris = normalized;
+      this.localPendingChatImageUris = normalized.slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
       return;
     }
     this.cloudPendingChatImageUris = normalized;
@@ -1694,8 +1707,13 @@ struct Index {
     this.setActivePendingChatImageUris([]);
   }
 
+  private activeChatImageAttachmentLimit(): number {
+    return this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? LOCAL_CHAT_IMAGE_MAX_COUNT :
+      CHAT_IMAGE_ATTACHMENT_MAX_COUNT;
+  }
+
   private remainingChatImageAttachmentCount(): number {
-    return CHAT_IMAGE_ATTACHMENT_MAX_COUNT - this.activePendingChatImageUris().length;
+    return this.activeChatImageAttachmentLimit() - this.activePendingChatImageUris().length;
   }
 
   private appendPickedChatImageAttachments(uris: string[], sourceLabel: string): void {
@@ -1704,14 +1722,15 @@ struct Index {
       return;
     }
     let current = this.activePendingChatImageUris();
-    let combined = normalizeChatImageAttachments(current.concat(picked));
+    let attachmentLimit = this.activeChatImageAttachmentLimit();
+    let combined = normalizeChatImageAttachments(current.concat(picked)).slice(0, attachmentLimit);
     let addedCount = combined.length - current.length;
     if (addedCount <= 0) {
-      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      showToastSafely('最多支持 ' + String(attachmentLimit) + ' 张图片附件', 1600);
       return;
     }
     this.setActivePendingChatImageUris(combined);
-    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张' : '';
+    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(attachmentLimit) + ' 张' : '';
     showToastSafely('已添加' + String(addedCount) + '张' + sourceLabel + '图片，将随下一条消息发送' + limitHint, 1800);
   }
 
@@ -1748,7 +1767,7 @@ struct Index {
   // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
   private async takeChatImageAttachment(): Promise<void> {
     if (this.remainingChatImageAttachmentCount() <= 0) {
-      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      showToastSafely('最多支持 ' + String(this.activeChatImageAttachmentLimit()) + ' 张图片附件', 1600);
       return;
     }
     let savePath = '';
@@ -1787,7 +1806,7 @@ struct Index {
     try {
       let remainingCount = this.remainingChatImageAttachmentCount();
       if (remainingCount <= 0) {
-        showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+        showToastSafely('最多支持 ' + String(this.activeChatImageAttachmentLimit()) + ' 张图片附件', 1600);
         return;
       }
       let picker = new GalleryPhotoPicker();
@@ -2922,6 +2941,8 @@ struct Index {
 
   private migrateDefaultEndpointValues(): void {
     // 兼容历史版本写入 PersistentStorage 的默认地址，并跟踪上一次应用的默认值。
+    this.modelScopeMnnRepo = this.migrateEndpointValue(this.modelScopeMnnRepo, DEFAULT_MODELSCOPE_MNN_REPO,
+      LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS, 'modelScopeDefault.mnnRepo');
     this.serverIp = this.migrateEndpointValue(this.serverIp, DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
       LEGACY_ENDPOINT_CONFIG.modelDownloadServerUrls, 'endpointDefault.serverIp');
     this.hdcServerIp = this.migrateEndpointValue(this.hdcServerIp, DEFAULT_ENDPOINT_CONFIG.hdcServerUrl,
@@ -5627,13 +5648,32 @@ struct Index {
     }
   }
 
-  private async sendLocalChatMessage(): Promise<void> {
-    let pendingImageUris = this.localPendingChatImageUris;
-    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
+  private cancelCurrentLocalChatInference(): void {
+    if (!this.localChatInferenceRunning || this.localChatCancelRequested) {
       return;
     }
-    if (hasChatImageAttachments(pendingImageUris)) {
-      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
+    this.localChatCancelRequested = true;
+    try {
+      mnnllm.cancelChat();
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.Cancel', 'request native chat cancellation failed', err);
+    }
+    showToastSafely('正在终止本地推理…', 1400);
+  }
+
+  private cancelledLocalChatReply(partialReply: string): string {
+    if (partialReply.trim().length === 0) {
+      return '推理已终止';
+    }
+    return partialReply.replace(/\s+$/, '') + '\n\n[推理已终止]';
+  }
+
+  private async sendLocalChatMessage(): Promise<void> {
+    let pendingImageUris = normalizeChatImageAttachments(this.localPendingChatImageUris)
+      .slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
+    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking ||
+      this.localChatImagePreparing) {
       return;
     }
     if (!await this.ensureLocalChatModelIsAvailable()) {
@@ -5645,13 +5685,41 @@ struct Index {
     }
     let chatSessionId = activeSession.id;
     let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
+    let adoptedImageUris: string[] = [];
+    let nativePrompt = msg;
+    let preparedImagePaths: string[] = [];
+    this.localChatImagePreparing = hasChatImageAttachments(pendingImageUris);
+    try {
+      if (hasChatImageAttachments(pendingImageUris)) {
+        preparedImagePaths = await prepareLocalChatImages(this.filesDir, pendingImageUris);
+        adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, preparedImagePaths);
+        for (let i = 0; i < preparedImagePaths.length; i++) {
+          if (i >= adoptedImageUris.length ||
+            this.fileIoOpenTarget(adoptedImageUris[i]) === preparedImagePaths[i]) {
+            throw new Error('无法把预处理图片保存到会话目录');
+          }
+        }
+        nativePrompt = buildLocalChatMultimodalPrompt(msg, adoptedImageUris);
+      }
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.Image', 'prepare local chat image failed', err);
+      showToastSafely(err.message, 2200);
+      return;
+    } finally {
+      cleanupLocalChatPreparedImages(preparedImagePaths);
+      this.localChatImagePreparing = false;
+    }
     let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.localPendingChatImageUris = [];
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
-      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris));
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
       CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    this.localChatCancelRequested = false;
+    this.localChatInferenceRunning = true;
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     let streamedReply = '';
@@ -5686,6 +5754,12 @@ struct Index {
     try {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
+        if (this.localChatCancelRequested) {
+          let cancelledReply = this.cancelledLocalChatReply(streamedReply);
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+          return;
+        }
         if (!loaded) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
@@ -5693,7 +5767,10 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(msg, (token: string) => {
+      let reply: string = await mnnllm.chat(nativePrompt, (token: string) => {
+        if (this.localChatCancelRequested) {
+          return;
+        }
         streamedReply += token;
         scheduleStreamReplyUpdate();
       });
@@ -5701,16 +5778,31 @@ struct Index {
         clearTimeout(streamUpdateTimerId);
         streamUpdateTimerId = -1;
       }
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+      if (this.localChatCancelRequested) {
+        let partialReply = streamedReply.length > 0 ? streamedReply : reply;
+        let cancelledReply = this.cancelledLocalChatReply(partialReply);
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+      } else {
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+      }
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+      if (this.localChatCancelRequested) {
+        let cancelledReply = this.cancelledLocalChatReply(streamedReply);
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+      } else {
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+      }
     } finally {
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
       }
+      this.localChatInferenceRunning = false;
+      this.localChatCancelRequested = false;
       this.isThinking = false;
     }
   }
@@ -6016,7 +6108,8 @@ struct Index {
             localOutput: this.output,
             localDebugImagePath: this.debugImagePath,
             chatHistory: this.chatHistory,
-            localThinking: this.isThinking || this.localAgentCleaningUp,
+            localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
+            localChatCancelable: this.localChatInferenceRunning,
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
@@ -6045,6 +6138,7 @@ struct Index {
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
             onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
+            onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },

@@ -18,6 +18,7 @@ import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test';
 import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
+import localChatImagePromptUnitTest from './LocalChatImagePromptUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 import voiceInteractionUnitTest from './VoiceInteractionUnit.test';
@@ -52,6 +53,7 @@ export default function testsuite() {
   chatMessageScrollPolicyUnitTest();
   chatStreamDisplayPacerUnitTest();
   chatAttachmentPolicyUnitTest();
+  localChatImagePromptUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
   voiceInteractionUnitTest();
