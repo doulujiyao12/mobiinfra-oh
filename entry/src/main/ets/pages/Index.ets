@@ -349,6 +349,12 @@ interface DownloadedModelItem {
   ready: boolean;
 }
 
+interface ChunkOmCacheFile {
+  path: string;
+  relativePath: string;
+  size: number;
+}
+
 const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
 const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
 const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
@@ -444,6 +450,7 @@ PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT
 @Component
 struct Index {
   @State output: string = '';
+  @State chunkOmCacheOutput: string = '尚未扫描当前模型的 chunk OM 缓存。';
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
@@ -3152,6 +3159,7 @@ struct Index {
     this.modelDir = target.path;
     this.syncProfileModelConfigPath();
     this.modelLoaded = false;
+    this.chunkOmCacheOutput = '已切换模型，请点击“查看 chunk OM”重新扫描。';
     this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
   }
 
@@ -3659,44 +3667,113 @@ struct Index {
     }
   }
 
-  private deleteChunkVisionOmUnder(path: string): number {
-    let deleted = 0;
-    let children: string[] = [];
+  private collectChunkOmCacheFiles(path: string, insideChunk: boolean, out: ChunkOmCacheFile[]): void {
+    let baseName = path.substring(path.lastIndexOf('/') + 1);
+    let currentInsideChunk = insideChunk || baseName.startsWith('chunk_');
     try {
-      children = fs.listFileSync(path);
-    } catch {
-      return 0;
-    }
-    for (let name of children) {
-      let childPath = `${path}/${name}`;
-      if (name.startsWith('chunk_')) {
-        let visionPath = `${childPath}/vision.om`;
-        try {
-          if (fs.accessSync(visionPath)) {
-            fs.unlinkSync(visionPath);
-            deleted++;
-          }
-        } catch {}
+      let children = fs.listFileSync(path);
+      children.sort();
+      for (let name of children) {
+        this.collectChunkOmCacheFiles(`${path}/${name}`, currentInsideChunk, out);
       }
-      deleted += this.deleteChunkVisionOmUnder(childPath);
+      return;
+    } catch {
     }
-    return deleted;
+    let normalizedName = baseName.toLowerCase();
+    if (!currentInsideChunk || (normalizedName !== 'vision.om' && normalizedName !== 'vision.om.tmp')) {
+      return;
+    }
+    let fileSize = 0;
+    try {
+      fileSize = fs.statSync(path).size;
+    } catch {
+      return;
+    }
+    let relativePath = path;
+    let modelPrefix = this.modelDir + '/';
+    if (path.startsWith(modelPrefix)) {
+      relativePath = path.substring(modelPrefix.length);
+    }
+    out.push({ path: path, relativePath: relativePath, size: fileSize });
   }
 
-  deleteChunkVisionOmFiles() {
-    if (this.blockModelFileMutationIfBusy('删除 vision.om')) {
+  private scanChunkOmCacheFiles(): ChunkOmCacheFile[] {
+    let files: ChunkOmCacheFile[] = [];
+    this.collectChunkOmCacheFiles(this.modelDir, false, files);
+    files.sort((left: ChunkOmCacheFile, right: ChunkOmCacheFile): number => {
+      if (left.relativePath < right.relativePath) {
+        return -1;
+      }
+      return left.relativePath > right.relativePath ? 1 : 0;
+    });
+    return files;
+  }
+
+  listChunkVisionOmFiles(): void {
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.chunkOmCacheOutput = `模型目录不存在: ${this.modelDir}`;
+        return;
+      }
+      let files = this.scanChunkOmCacheFiles();
+      let totalSize = 0;
+      let lines: string[] = [];
+      for (let file of files) {
+        totalSize += file.size;
+        lines.push(`${file.relativePath} (${this.formatSize(file.size)})`);
+      }
+      if (files.length === 0) {
+        this.chunkOmCacheOutput = `当前模型尚无 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
+          `目录: ${this.modelDir}`;
+        return;
+      }
+      this.chunkOmCacheOutput = `模型: ${this.getCurrentModelFolderName()}\n` +
+        `缓存文件: ${files.length} 个，共 ${this.formatSize(totalSize)}\n` + lines.join('\n');
+    } catch (e) {
+      let err = e as Error;
+      this.chunkOmCacheOutput = `查看 chunk OM 缓存失败: ${err.message}`;
+    }
+  }
+
+  deleteChunkVisionOmFiles(): void {
+    if (this.blockModelFileMutationIfBusy('删除 chunk OM 缓存')) {
+      this.chunkOmCacheOutput = this.output;
       return;
     }
     try {
-      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
-        this.output = `模型目录不存在: ${this.modelDir}`;
+        this.chunkOmCacheOutput = `模型目录不存在: ${this.modelDir}`;
+        this.output = this.chunkOmCacheOutput;
         return;
       }
-      let count = this.deleteChunkVisionOmUnder(this.modelDir);
-      this.output = `已在 ${this.getCurrentModelFolderName()} 下删除 ${count} 个 chunk_*/vision.om`;
+      let files = this.scanChunkOmCacheFiles();
+      if (files.length === 0) {
+        this.chunkOmCacheOutput = `当前模型没有可删除的 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}`;
+        this.output = this.chunkOmCacheOutput;
+        return;
+      }
+      this.unloadLocalModelForFileMutation();
+      let deletedCount = 0;
+      let deletedSize = 0;
+      let failedPaths: string[] = [];
+      for (let file of files) {
+        try {
+          fs.unlinkSync(file.path);
+          deletedCount++;
+          deletedSize += file.size;
+        } catch {
+          failedPaths.push(file.relativePath);
+        }
+      }
+      this.chunkOmCacheOutput = `已删除 ${deletedCount} 个 chunk OM 缓存，共 ${this.formatSize(deletedSize)}。`;
+      if (failedPaths.length > 0) {
+        this.chunkOmCacheOutput += `\n删除失败 ${failedPaths.length} 个:\n${failedPaths.join('\n')}`;
+      }
+      this.output = this.chunkOmCacheOutput;
     } catch (e) {
-      this.output = `删除 chunk_*/vision.om 失败: ${e}`;
+      let err = e as Error;
+      this.chunkOmCacheOutput = `删除 chunk OM 缓存失败: ${err.message}`;
+      this.output = this.chunkOmCacheOutput;
     }
   }
 
@@ -4543,6 +4620,7 @@ struct Index {
     this.selectedModelId = nextModelId;
     this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
     this.syncProfileModelConfigPath();
+    this.chunkOmCacheOutput = '模型下载目录已切换，请在模型可用后扫描 chunk OM 缓存。';
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
     AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
@@ -6172,6 +6250,7 @@ struct Index {
             threadNumInput: $threadNumInput,
             selectedSectionId: $settingsSectionId,
             output: $output,
+            chunkOmCacheOutput: $chunkOmCacheOutput,
             cloudOutput: $cloudOutput,
             modelDownloadProgressVisible: $modelDownloadProgressVisible,
             modelDownloadProgressPercent: $modelDownloadProgressPercent,
@@ -6207,6 +6286,7 @@ struct Index {
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },
+            onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
             onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))

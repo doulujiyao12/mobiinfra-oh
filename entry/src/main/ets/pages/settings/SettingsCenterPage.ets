@@ -104,6 +104,7 @@ export struct SettingsCenterPage {
   @Link threadNumInput: string;
   @Link selectedSectionId: number;
   @Link output: string;
+  @Link chunkOmCacheOutput: string;
   @Link cloudOutput: string;
   @Link modelDownloadProgressVisible: boolean;
   @Link modelDownloadProgressPercent: number;
@@ -197,6 +198,7 @@ export struct SettingsCenterPage {
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
+  onListChunkVisionOmFiles: () => void = () => {};
   onDeleteChunkVisionOmFiles: () => void = () => {};
 
   aboutToAppear(): void {
@@ -373,8 +375,8 @@ export struct SettingsCenterPage {
 
   private confirmDeleteChunkVisionOmFiles(): void {
     this.confirmDanger({
-      title: '删除 vision.om',
-      message: '确认执行该操作？将删除 vision.om 相关文件，操作不可撤回。',
+      title: '删除 chunk OM 缓存',
+      message: '确认删除当前模型的全部 chunk OM 缓存？下次遇到对应图片尺寸时需要重新在线编译。',
       confirmText: '删除'
     }, () => { this.onDeleteChunkVisionOmFiles(); });
   }
@@ -1192,6 +1194,28 @@ export struct SettingsCenterPage {
 
   @Builder LocalModelGroup() {
     this.DownloadedModelList()
+    this.FieldLabel('NPU chunk OM 缓存')
+    Text('缓存保存在当前模型的 App 沙箱目录中，并按 chunk 与输入 shape 分开复用。')
+      .fontSize(12)
+      .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+      .width('100%')
+      .maxLines(2)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+    SettingsActionRow({ contentBuilder: () => { this.ChunkOmCacheActionRow() } })
+    SettingsOutputPanel({ title: '当前模型 chunk OM', content: this.chunkOmCacheOutput })
+  }
+
+  @Builder ChunkOmCacheActionRow() {
+    SettingsActionButton({
+      label: '查看 chunk OM',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { this.onListChunkVisionOmFiles(); }
+    })
+    SettingsActionButton({
+      label: '删除 chunk OM',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
+    })
   }
 
   @Builder HdcConnectionGroup() {
@@ -1452,7 +1476,7 @@ export struct SettingsCenterPage {
       onActionClick: () => { this.confirmDeleteModelConfigJson(); }
     })
     SettingsActionButton({
-      label: '删除 vision.om',
+      label: '删除 chunk OM',
       kind: SettingsActionKind.Danger,
       onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
     })
