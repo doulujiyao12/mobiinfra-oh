@@ -4,6 +4,7 @@ import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
+import { LocalPlannerFastPath, LocalPlannerFastPathMatch } from './LocalPlannerFastPath';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
 import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
 import {
@@ -178,6 +179,21 @@ export class AgentLoopRunner {
     }
     if (template.trim().length === 0) {
       throw new Error('Planner prompt template is missing');
+    }
+
+    if (mode === 'local') {
+      let fastPathMatch: LocalPlannerFastPathMatch | null = LocalPlannerFastPath.match(task, template);
+      if (fastPathMatch !== null) {
+        this.log(mode, '>> [Planner Fast Path] matched ' + fastPathMatch.matchedBy + '="' +
+          fastPathMatch.matchedText + '": app=' + fastPathMatch.appName + ', package=' + fastPathMatch.packageName +
+          '; skip local model Planner.');
+        let fastPathTarget: PlannerTarget = {
+          appName: fastPathMatch.appName,
+          packageName: fastPathMatch.packageName
+        };
+        return fastPathTarget;
+      }
+      this.log(mode, '>> [Planner Fast Path] no App name or package match; use local model Planner.');
     }
 
     let prompt = template.replace('{task_description}', task).replace('<task_description>', task);
