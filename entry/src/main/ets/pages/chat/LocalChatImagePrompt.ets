@@ -1,20 +1,25 @@
 import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import fs from '@ohos.file.fs';
+import {
+  LOCAL_VISION_LANDSCAPE_HEIGHT,
+  LOCAL_VISION_LANDSCAPE_WIDTH,
+  LOCAL_VISION_PORTRAIT_HEIGHT,
+  LOCAL_VISION_PORTRAIT_WIDTH,
+  LocalVisionImageSize,
+  localVisionImageTargetSize
+} from '../../utils/LocalVisionImageShape';
 
 export const LOCAL_CHAT_IMAGE_MAX_COUNT: number = 1;
 // MobiInfer 当前 Qwen3-VL 视觉块使用固定的长短边组合。横图只交换高宽，
 // MNN 对 600/270 按视觉 patch 对齐后得到相同的 token shape，可复用同一套 NPU 视觉图。
-export const LOCAL_CHAT_IMAGE_TARGET_WIDTH: number = 270;
-export const LOCAL_CHAT_IMAGE_TARGET_HEIGHT: number = 600;
-export const LOCAL_CHAT_IMAGE_LANDSCAPE_WIDTH: number = 600;
-export const LOCAL_CHAT_IMAGE_LANDSCAPE_HEIGHT: number = 270;
+export const LOCAL_CHAT_IMAGE_TARGET_WIDTH: number = LOCAL_VISION_PORTRAIT_WIDTH;
+export const LOCAL_CHAT_IMAGE_TARGET_HEIGHT: number = LOCAL_VISION_PORTRAIT_HEIGHT;
+export const LOCAL_CHAT_IMAGE_LANDSCAPE_WIDTH: number = LOCAL_VISION_LANDSCAPE_WIDTH;
+export const LOCAL_CHAT_IMAGE_LANDSCAPE_HEIGHT: number = LOCAL_VISION_LANDSCAPE_HEIGHT;
 let localChatImageFileSequence: number = 0;
 
-export interface LocalChatImageSize {
-  width: number;
-  height: number;
-}
+export type LocalChatImageSize = LocalVisionImageSize;
 
 function fileIoOpenTarget(uri: string): string {
   let normalized = uri.trim();
@@ -33,19 +38,7 @@ function localFilePath(uri: string): string {
 }
 
 export function localChatImageTargetSize(sourceWidth: number, sourceHeight: number): LocalChatImageSize {
-  if (sourceWidth <= 0 || sourceHeight <= 0) {
-    throw new Error('图片尺寸无效');
-  }
-  if (sourceWidth > sourceHeight) {
-    return {
-      width: LOCAL_CHAT_IMAGE_LANDSCAPE_WIDTH,
-      height: LOCAL_CHAT_IMAGE_LANDSCAPE_HEIGHT
-    };
-  }
-  return {
-    width: LOCAL_CHAT_IMAGE_TARGET_WIDTH,
-    height: LOCAL_CHAT_IMAGE_TARGET_HEIGHT
-  };
+  return localVisionImageTargetSize(sourceWidth, sourceHeight);
 }
 
 // App 侧只把原图等比缩小到目标边界，不再补黑边。最终固定 shape 的 resize

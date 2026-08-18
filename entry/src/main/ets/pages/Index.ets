@@ -365,6 +365,7 @@ const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
+type LocalNpuExecutionMode = 'online' | 'offline';
 
 const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
 const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
@@ -372,6 +373,7 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp('localNpuExecutionMode', 'online');
 PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
@@ -479,6 +481,7 @@ struct Index {
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
+  @StorageLink('localNpuExecutionMode') localNpuExecutionMode: string = 'online';
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('pcServerUrl') pcServerUrl: string = PC_SERVER_DEFAULT_URL;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -715,6 +718,25 @@ struct Index {
       }
     }
     this.modelLoaded = false;
+  }
+
+  private normalizedLocalNpuExecutionMode(): LocalNpuExecutionMode {
+    return this.localNpuExecutionMode === 'offline' ? 'offline' : 'online';
+  }
+
+  private switchLocalNpuExecutionMode(mode: string): void {
+    let normalized: LocalNpuExecutionMode = mode === 'offline' ? 'offline' : 'online';
+    if (normalized === this.normalizedLocalNpuExecutionMode()) {
+      return;
+    }
+    if (this.blockModelFileMutationIfBusy('切换 NPU 图模式')) {
+      return;
+    }
+    this.unloadLocalModelForFileMutation();
+    this.localNpuExecutionMode = normalized;
+    this.output = normalized === 'offline' ?
+      '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。' :
+      '已切换为在线编译。下次加载模型时会使用 MNN HiAI 在线编译与 chunk OM 缓存。';
   }
 
   private initChatSessions(): void {
@@ -5546,7 +5568,7 @@ struct Index {
     this.reportLocalAgentStartupStatus('正在加载本地模型，首次加载可能需要较长时间，请稍候...', true, true);
     await this.sleep(80);
     try {
-      let loadResult: string = await mnnllm.loadModel(cfg);
+      let loadResult: string = await mnnllm.loadModel(cfg, this.normalizedLocalNpuExecutionMode());
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
@@ -6248,6 +6270,7 @@ struct Index {
             autoConfirm: $autoConfirm,
             cloudAutoConfirm: $cloudAutoConfirm,
             threadNumInput: $threadNumInput,
+            localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
             selectedSectionId: $settingsSectionId,
             output: $output,
             chunkOmCacheOutput: $chunkOmCacheOutput,
@@ -6287,7 +6310,8 @@ struct Index {
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },
             onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
-            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); }
+            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+            onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }

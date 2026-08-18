@@ -14,6 +14,7 @@ import {
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
 import { AgentLoopNativeApi } from 'libentry.so';
+import { localVisionPromptHw } from './LocalVisionImageShape';
 
 type AgentLoopMode = 'local' | 'cloud';
 export type AgentPromptMode = 'local' | 'cloud';
@@ -454,8 +455,12 @@ export class AgentLoopRunner {
     let finalPrompt = prompt;
     if (imageBase64 !== undefined && imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + String(height || 0) + ',' + String(width || 0) + '</hw></img>';
-      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(width || 0) + 'x' + String(height || 0) + ')');
+      let sourceWidth = width || 0;
+      let sourceHeight = height || 0;
+      let modelHw = localVisionPromptHw(sourceWidth, sourceHeight);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(sourceWidth) + 'x' +
+        String(sourceHeight) + ', model_hw=' + modelHw + ')');
       finalPrompt = finalPrompt.indexOf('<image_placeholder>') >= 0 ?
         finalPrompt.replace('<image_placeholder>', imgTag) :
         imgTag + '\n' + finalPrompt;
@@ -496,8 +501,10 @@ export class AgentLoopRunner {
     let finalVariable = variable;
     if (imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + height + ',' + width + '</hw></img>';
-      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height + ')');
+      let modelHw = localVisionPromptHw(width, height);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height +
+        ', model_hw=' + modelHw + ')');
       finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
         finalVariable.replace('<image_placeholder>', imgTag) :
         imgTag + finalVariable;

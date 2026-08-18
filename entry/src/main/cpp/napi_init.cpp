@@ -45,7 +45,7 @@
 
 // NNRT header for OMC test (HarmonyOS SDK)
 #include "HIAIModelManager.h"
-#include <fstream>
+#include "OfflineNpuChunkExecutor.h"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -115,6 +115,120 @@ static std::vector<std::string> extractJsonStringValues(const std::string& jsonT
         searchPos = end + 1;
     }
     return values;
+}
+
+static size_t skipJsonWhitespace(const std::string& text, size_t offset) {
+    while (offset < text.size() && std::isspace(static_cast<unsigned char>(text[offset]))) ++offset;
+    return offset;
+}
+
+enum class JsonFieldStatus {
+    MISSING,
+    VALID,
+    INVALID,
+};
+
+static bool hasJsonValueTerminator(const std::string& jsonText, size_t offset) {
+    offset = skipJsonWhitespace(jsonText, offset);
+    return offset >= jsonText.size() || jsonText[offset] == ',' ||
+           jsonText[offset] == '}' || jsonText[offset] == ']';
+}
+
+// The App native target does not bundle a JSON library. These helpers only read
+// the small set of typed top-level fields needed to resolve offline OM files.
+static JsonFieldStatus findJsonFieldValueOffset(const std::string& jsonText,
+                                                const std::string& key,
+                                                size_t& valueOffset) {
+    const std::string needle = "\"" + key + "\"";
+    const size_t keyPos = jsonText.find(needle);
+    if (keyPos == std::string::npos) return JsonFieldStatus::MISSING;
+    const size_t colon = jsonText.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) return JsonFieldStatus::INVALID;
+    valueOffset = skipJsonWhitespace(jsonText, colon + 1);
+    return valueOffset < jsonText.size() ? JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+}
+
+static bool parseJsonStringAt(const std::string& text, size_t& offset, std::string& value) {
+    offset = skipJsonWhitespace(text, offset);
+    if (offset >= text.size() || text[offset] != '"') return false;
+    ++offset;
+    value.clear();
+    while (offset < text.size()) {
+        char ch = text[offset++];
+        if (ch == '"') return true;
+        if (ch == '\\' && offset < text.size()) {
+            char escaped = text[offset++];
+            if (escaped == '"' || escaped == '\\' || escaped == '/') value.push_back(escaped);
+            else if (escaped == 'b') value.push_back('\b');
+            else if (escaped == 'f') value.push_back('\f');
+            else if (escaped == 'n') value.push_back('\n');
+            else if (escaped == 'r') value.push_back('\r');
+            else if (escaped == 't') value.push_back('\t');
+            else return false;
+        } else if (static_cast<unsigned char>(ch) < 0x20) {
+            return false;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return false;
+}
+
+static JsonFieldStatus extractJsonStringArrayValue(const std::string& jsonText, const std::string& key,
+                                                   std::vector<std::string>& values) {
+    values.clear();
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (jsonText[offset] != '[') return JsonFieldStatus::INVALID;
+    ++offset;
+    offset = skipJsonWhitespace(jsonText, offset);
+    if (offset < jsonText.size() && jsonText[offset] == ']') {
+        return hasJsonValueTerminator(jsonText, offset + 1) ?
+            JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+    }
+    while (offset < jsonText.size()) {
+        std::string value;
+        if (!parseJsonStringAt(jsonText, offset, value)) return JsonFieldStatus::INVALID;
+        values.push_back(value);
+        offset = skipJsonWhitespace(jsonText, offset);
+        if (offset < jsonText.size() && jsonText[offset] == ']') {
+            return hasJsonValueTerminator(jsonText, offset + 1) ?
+                JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+        }
+        if (offset >= jsonText.size() || jsonText[offset] != ',') return JsonFieldStatus::INVALID;
+        offset = skipJsonWhitespace(jsonText, offset + 1);
+        if (offset >= jsonText.size() || jsonText[offset] == ']') return JsonFieldStatus::INVALID;
+    }
+    return JsonFieldStatus::INVALID;
+}
+
+static JsonFieldStatus extractJsonStringValue(const std::string& jsonText, const std::string& key,
+                                              std::string& value) {
+    value.clear();
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (!parseJsonStringAt(jsonText, offset, value) || !hasJsonValueTerminator(jsonText, offset)) {
+        return JsonFieldStatus::INVALID;
+    }
+    return JsonFieldStatus::VALID;
+}
+
+static JsonFieldStatus extractJsonBoolFieldValue(const std::string& jsonText, const std::string& key,
+                                                 bool& value) {
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (jsonText.compare(offset, 4, "true") == 0 && hasJsonValueTerminator(jsonText, offset + 4)) {
+        value = true;
+        return JsonFieldStatus::VALID;
+    }
+    if (jsonText.compare(offset, 5, "false") == 0 && hasJsonValueTerminator(jsonText, offset + 5)) {
+        value = false;
+        return JsonFieldStatus::VALID;
+    }
+    return JsonFieldStatus::INVALID;
 }
 
 static bool extractJsonBoolValue(const std::string& jsonText, const std::string& key,
@@ -238,7 +352,14 @@ static std::string resetNpuRuntimeDiagnostics(const std::string& requestedBacken
 
 static std::string observeNpuRuntimeLine(const std::string& line) {
     const std::string lower = lowerAscii(line);
-    bool graphReady = lower.find("buildirmodel ok") != std::string::npos ||
+    bool offlineReady = lower.find("[offline_npu]") != std::string::npos &&
+                        lower.find("level=ready") != std::string::npos;
+    bool offlineExecuteSuccess = lower.find("[offline_npu]") != std::string::npos &&
+                                 lower.find("level=exec_ok") != std::string::npos;
+    bool offlineError = lower.find("[offline_npu]") != std::string::npos &&
+                        lower.find("level=error") != std::string::npos;
+    bool graphReady = offlineReady ||
+                      lower.find("buildirmodel ok") != std::string::npos ||
                       lower.find("loadmodelsync ok") != std::string::npos ||
                       lower.find("onresizeend: ok") != std::string::npos ||
                       lower.find("[hiai conv]") != std::string::npos;
@@ -247,7 +368,8 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
                         lower.find("oncreate fail:") != std::string::npos) ||
                        (lower.find("[hiai delegate]") != std::string::npos &&
                         lower.find("falling back") != std::string::npos);
-    bool npuError = lower.find("aimodelmngerclient unavailable") != std::string::npos ||
+    bool npuError = offlineError ||
+                    lower.find("aimodelmngerclient unavailable") != std::string::npos ||
                     lower.find("aimodelmngerclient init failed") != std::string::npos ||
                     lower.find("buildirmodel failed") != std::string::npos ||
                     (lower.find("loadmodelsync failed") != std::string::npos &&
@@ -258,7 +380,7 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
                       lower.find("unavailable") != std::string::npos ||
                       lower.find("make_shared error") != std::string::npos ||
                       lower.find("model not compiled") != std::string::npos));
-    bool npuExecuteSuccess = false;
+    bool npuExecuteSuccess = offlineExecuteSuccess;
     const std::string processToken = "onexecuteend: process ret=";
     size_t processPos = lower.find(processToken);
     if (processPos != std::string::npos) {
@@ -286,7 +408,8 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
     if (npuError) ++g_npuDiagnostics.npuErrorSignals;
 
     if (npuExecuteSuccess) {
-        g_npuDiagnostics.lastEvidence = "HiAI process returned 0";
+        g_npuDiagnostics.lastEvidence = offlineExecuteSuccess ?
+            "offline NNRT RunSync returned success" : "HiAI process returned 0";
     } else if (cpuFallback) {
         g_npuDiagnostics.lastEvidence = "HiAI backend reported CPU fallback";
     } else if (npuError) {
@@ -598,6 +721,7 @@ struct AsyncData {
     napi_async_work work;
     napi_deferred deferred;
     std::string inputStr;
+    std::string npuMode = "online";
     std::string outputStr;
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
@@ -619,7 +743,7 @@ static std::string formatRuntimeCapabilities() {
     out << "libMNN contains OH_LOG_Print + MNNJNI, so MNN_PRINT/MNN_ERROR logs are expected in system HiLog.\n"
         << "Search HiLog tag/text: MNNJNI, The device supports, KleidiAI is running.\n"
         << "App Runtime Logs -> Native captures stdout/stderr and this app's native LOGI/LOGE, but not MNN direct HiLog.\n"
-        << "Search [NPU_STATUS] for the normalized HiAI verdict. NPU_ACTIVE requires an actual HiAI process ret=0 event.\n"
+        << "Search [NPU_STATUS] for the normalized HiAI verdict. NPU_ACTIVE requires a HiAI process ret=0 or offline NNRT RunSync success event.\n"
         << "NPU_ACTIVE_WITH_CPU_FALLBACK means NPU executed successfully but one or more unsupported ops used CPU.\n"
         << "Expected MNN CPU feature line:\n"
         << "The device supports: i8sdot:<n>, fp16:<n>, i8mm:<n>, sve2:<n>, sme2:<n>\n"
@@ -640,6 +764,114 @@ static std::string parentDir(const std::string& path) {
     if (pos == std::string::npos) return "";
     if (pos == 0) return "/";
     return path.substr(0, pos);
+}
+
+static bool pathExistsLocal(const std::string& path);
+
+static std::string readTextFileLocal(const std::string& path) {
+    std::ifstream input(path);
+    if (!input.good()) return "";
+    std::ostringstream content;
+    content << input.rdbuf();
+    return content.str();
+}
+
+static bool resolveOfflineNpuChunks(const std::string& configPath,
+                                    std::vector<std::string>& omPaths,
+                                    std::string& error) {
+    const std::string configText = readTextFileLocal(configPath);
+    if (configText.empty()) {
+        error = "cannot read model config: " + configPath;
+        return false;
+    }
+    bool visualSplit = false;
+    if (extractJsonBoolFieldValue(configText, "visual_split", visualSplit) != JsonFieldStatus::VALID ||
+        !visualSplit) {
+        error = "offline NPU mode requires visual_split=true";
+        return false;
+    }
+    std::vector<std::string> chunkModels;
+    std::vector<std::string> chunkBackends;
+    if (extractJsonStringArrayValue(configText, "visual_blocks_chunks", chunkModels) != JsonFieldStatus::VALID ||
+        chunkModels.empty()) {
+        error = "offline NPU mode requires non-empty visual_blocks_chunks";
+        return false;
+    }
+    if (extractJsonStringArrayValue(configText, "visual_blocks_chunk_backends", chunkBackends) !=
+          JsonFieldStatus::VALID ||
+        chunkBackends.size() != chunkModels.size()) {
+        error = "visual_blocks_chunk_backends must match visual_blocks_chunks in offline mode";
+        return false;
+    }
+    std::vector<std::string> explicitOmPaths;
+    const JsonFieldStatus explicitOmStatus =
+        extractJsonStringArrayValue(configText, "visual_blocks_offline_om", explicitOmPaths);
+    if (explicitOmStatus == JsonFieldStatus::INVALID) {
+        error = "visual_blocks_offline_om must be an array of strings";
+        return false;
+    }
+    const bool hasExplicitOmPaths = explicitOmStatus == JsonFieldStatus::VALID;
+    if (hasExplicitOmPaths && explicitOmPaths.size() != chunkModels.size()) {
+        error = "visual_blocks_offline_om must match visual_blocks_chunks";
+        return false;
+    }
+
+    const std::string modelDir = parentDir(configPath);
+    std::string configuredNpuModelDir;
+    const JsonFieldStatus npuModelDirStatus =
+        extractJsonStringValue(configText, "npu_model_dir", configuredNpuModelDir);
+    if (npuModelDirStatus == JsonFieldStatus::INVALID) {
+        error = "npu_model_dir must be a string";
+        return false;
+    }
+    if (npuModelDirStatus == JsonFieldStatus::MISSING) configuredNpuModelDir = "om";
+    if (configuredNpuModelDir.empty()) {
+        error = "npu_model_dir must not be empty in offline mode";
+        return false;
+    }
+    std::string npuModelDir = configuredNpuModelDir;
+    if (npuModelDir.front() != '/') npuModelDir = joinPath(modelDir, npuModelDir);
+    omPaths.assign(chunkModels.size(), "");
+    size_t requiredOmCount = 0;
+    for (size_t i = 0; i < chunkModels.size(); ++i) {
+        const std::string backend = lowerAscii(chunkBackends[i]);
+        if (backend == "cpu") continue;
+        if (!isNpuBackendName(backend)) {
+            error = "invalid visual_blocks_chunk_backends[" + std::to_string(i) + "]: " + chunkBackends[i];
+            return false;
+        }
+        ++requiredOmCount;
+        const bool useExplicitOmPath = hasExplicitOmPaths && !explicitOmPaths[i].empty();
+        std::string relativeOm;
+        if (useExplicitOmPath) {
+            relativeOm = explicitOmPaths[i];
+        } else {
+            const std::string& chunkModel = chunkModels[i];
+            size_t slash = chunkModel.find_last_of('/');
+            std::string fileName = slash == std::string::npos ? chunkModel : chunkModel.substr(slash + 1);
+            size_t extension = fileName.rfind(".mnn");
+            if (extension != std::string::npos && extension + 4 == fileName.size()) fileName.erase(extension);
+            relativeOm = fileName + ".om";
+        }
+        std::string candidate = relativeOm;
+        if (candidate.empty() || candidate.front() != '/') {
+            if (useExplicitOmPath) {
+                candidate = joinPath(modelDir, candidate);
+            } else {
+                candidate = joinPath(npuModelDir, candidate);
+            }
+        }
+        if (!pathExistsLocal(candidate)) {
+            error = "missing offline OM for NPU chunk[" + std::to_string(i) + "]: " + candidate;
+            return false;
+        }
+        omPaths[i] = candidate;
+    }
+    if (requiredOmCount == 0) {
+        error = "offline NPU mode selected but no chunk is configured for NPU";
+        return false;
+    }
+    return true;
 }
 
 static bool ensureDirectoryRecursive(const std::string& path) {
@@ -1001,6 +1233,29 @@ static void LoadModelExecute(napi_env env, void* data) {
         return;
     }
 
+    if (asyncData->npuMode == "offline") {
+        std::vector<std::string> omPaths;
+        std::string offlineError;
+        if (!resolveOfflineNpuChunks(asyncData->inputStr, omPaths, offlineError)) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: offline NPU setup failed: " + offlineError;
+            LOGE("%{public}s", asyncData->outputStr.c_str());
+            return;
+        }
+        std::shared_ptr<OfflineNpuChunkExecutor> executor(new OfflineNpuChunkExecutor());
+        if (!g_llm->setNpuChunkExecutor(executor, omPaths)) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: selected model does not support offline visual NPU chunks";
+            LOGE("%{public}s", asyncData->outputStr.c_str());
+            return;
+        }
+        LOGI("NPU execution mode=offline, strict precompiled OM loading enabled");
+    } else {
+        LOGI("NPU execution mode=online, MNN HiAI compile/cache path enabled");
+    }
+
     // tmp_path 指向模型目录或 custom_opp 沙箱，供 MNN/HiAI 运行时写临时编译产物。
     std::string modelDir = asyncData->inputStr.substr(0, asyncData->inputStr.rfind('/'));
     std::string tmpPath = g_runtimeSandboxDir.empty() ? modelDir + "/tmp" : joinPath(g_runtimeSandboxDir, "tmp");
@@ -1017,7 +1272,8 @@ static void LoadModelExecute(napi_env env, void* data) {
     const std::string effectiveConfig = g_llm->dump_config();
     bool npuRequested = false;
     const std::string backendSummary = summarizeRequestedBackends(effectiveConfig, npuRequested);
-    std::string configStatus = resetNpuRuntimeDiagnostics(backendSummary, npuRequested);
+    std::string configStatus = resetNpuRuntimeDiagnostics(
+        backendSummary + ", npu_execution_mode=" + asyncData->npuMode, npuRequested);
     LOGI("%{public}s", configStatus.c_str());
 
     bool res = g_llm->load();
@@ -1058,8 +1314,8 @@ static void AsyncComplete(napi_env env, napi_status status, void* data) {
 }
 
 static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     char configPath[1024] = {0};
@@ -1068,6 +1324,19 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = configPath;
+    if (argc >= 2) {
+        napi_valuetype modeType = napi_undefined;
+        napi_typeof(env, args[1], &modeType);
+        if (modeType == napi_string) {
+            char mode[32] = {0};
+            size_t modeLength = 0;
+            napi_get_value_string_utf8(env, args[1], mode, sizeof(mode), &modeLength);
+            asyncData->npuMode = lowerAscii(std::string(mode, modeLength));
+        }
+    }
+    if (asyncData->npuMode != "online" && asyncData->npuMode != "offline") {
+        asyncData->npuMode = "online";
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);
