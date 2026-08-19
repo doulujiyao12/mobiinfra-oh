@@ -102,7 +102,7 @@ export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
-  @Prop localNpuExecutionMode: string = 'online';
+  @Prop localNpuExecutionMode: string = 'cpu';
   @Link selectedSectionId: number;
   @Link output: string;
   @Link chunkOmCacheOutput: string;
@@ -1196,16 +1196,19 @@ export struct SettingsCenterPage {
 
   @Builder LocalModelGroup() {
     this.DownloadedModelList()
-    this.FieldLabel('NPU 图运行方式')
-    Row() {
-      this.NpuExecutionModeButton('在线编译', 'online')
+    this.FieldLabel('本地推理运行方式')
+    Row({ space: 8 }) {
+      this.NpuExecutionModeButton('全 CPU', 'cpu')
+      this.NpuExecutionModeButton('在线 NPU', 'online')
       this.NpuExecutionModeButton('离线 OM', 'offline')
     }
     .width('100%')
     .justifyContent(FlexAlign.SpaceBetween)
-    Text(this.localNpuExecutionMode === 'offline' ?
-      '离线 OM：严格加载模型目录 om/ 下与 NPU chunk 同名的预编译图；缺失、shape 或设备不兼容时直接报错。' :
-      '在线编译：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。')
+    Text(this.localNpuExecutionMode === 'cpu' ?
+      '全 CPU：LLM、VIT、视觉分块及其他本地模型模块统一使用 CPU，不会加载 HiAI/NPU 图。' :
+      (this.localNpuExecutionMode === 'offline' ?
+        '离线 OM：严格加载模型目录 om/ 下与 NPU chunk 同名的预编译图；缺失、shape 或设备不兼容时直接报错。' :
+        '在线 NPU：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。'))
       .fontSize(12)
       .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
       .width('100%')
@@ -1226,8 +1229,8 @@ export struct SettingsCenterPage {
   @Builder NpuExecutionModeButton(label: string, mode: string) {
     Button(label)
       .height(SETTINGS_BUTTON_HEIGHT)
-      .width('48%')
-      .fontSize(13)
+      .width('31%')
+      .fontSize(12)
       .fontColor(this.localNpuExecutionMode === mode ? Color.White : settingsActionColor(SettingsActionKind.Primary))
       .backgroundColor(this.localNpuExecutionMode === mode ?
         settingsActionColor(SettingsActionKind.Primary) : SETTINGS_INPUT_BACKGROUND_COLOR)

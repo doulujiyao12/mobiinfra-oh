@@ -295,6 +295,27 @@ static std::string summarizeRequestedBackends(const std::string& effectiveConfig
     return out.str();
 }
 
+static std::string buildAllCpuBackendOverride(const std::string& effectiveConfig) {
+    std::vector<std::string> visualChunks;
+    const JsonFieldStatus chunkStatus =
+        extractJsonStringArrayValue(effectiveConfig, "visual_blocks_chunks", visualChunks);
+
+    std::ostringstream out;
+    out << "{\"backend_type\":\"cpu\","
+        << "\"visual_blocks_backend_type\":\"cpu\","
+        << "\"mllm\":{\"backend_type\":\"cpu\"}";
+    if (chunkStatus == JsonFieldStatus::VALID) {
+        out << ",\"visual_blocks_chunk_backends\":[";
+        for (size_t i = 0; i < visualChunks.size(); ++i) {
+            if (i > 0) out << ',';
+            out << "\"cpu\"";
+        }
+        out << ']';
+    }
+    out << '}';
+    return out.str();
+}
+
 static const char* npuVerdictLocked(const NpuRuntimeDiagnostics& state) {
     if (!state.configParsed) return "UNKNOWN_NO_MODEL_CONFIG";
     if (state.npuExecuteSuccess > 0 && state.cpuFallbackSignals > 0 && state.npuErrorSignals > 0) {
@@ -721,7 +742,7 @@ struct AsyncData {
     napi_async_work work;
     napi_deferred deferred;
     std::string inputStr;
-    std::string npuMode = "online";
+    std::string npuMode = "cpu";
     std::string outputStr;
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
@@ -1233,7 +1254,17 @@ static void LoadModelExecute(napi_env env, void* data) {
         return;
     }
 
-    if (asyncData->npuMode == "offline") {
+    if (asyncData->npuMode == "cpu") {
+        const std::string cpuOverride = buildAllCpuBackendOverride(g_llm->dump_config());
+        if (!g_llm->set_config(cpuOverride)) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: apply all-CPU runtime config failed";
+            LOGE("%{public}s", asyncData->outputStr.c_str());
+            return;
+        }
+        LOGI("Local execution mode=cpu, LLM and multimodal backends forced to CPU");
+    } else if (asyncData->npuMode == "offline") {
         std::vector<std::string> omPaths;
         std::string offlineError;
         if (!resolveOfflineNpuChunks(asyncData->inputStr, omPaths, offlineError)) {
@@ -1334,8 +1365,9 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
             asyncData->npuMode = lowerAscii(std::string(mode, modeLength));
         }
     }
-    if (asyncData->npuMode != "online" && asyncData->npuMode != "offline") {
-        asyncData->npuMode = "online";
+    if (asyncData->npuMode != "cpu" && asyncData->npuMode != "online" &&
+        asyncData->npuMode != "offline") {
+        asyncData->npuMode = "cpu";
     }
 
     napi_value promise;

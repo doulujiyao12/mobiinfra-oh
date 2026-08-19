@@ -365,7 +365,7 @@ const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
-type LocalNpuExecutionMode = 'online' | 'offline';
+type LocalNpuExecutionMode = 'cpu' | 'online' | 'offline';
 
 const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
 const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
@@ -373,7 +373,8 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
-PersistentStorage.persistProp('localNpuExecutionMode', 'online');
+PersistentStorage.persistProp('localNpuExecutionMode', 'cpu');
+PersistentStorage.persistProp('localInferenceModeCpuDefaultMigrated', false);
 PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
@@ -481,7 +482,8 @@ struct Index {
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
-  @StorageLink('localNpuExecutionMode') localNpuExecutionMode: string = 'online';
+  @StorageLink('localNpuExecutionMode') localNpuExecutionMode: string = 'cpu';
+  @StorageLink('localInferenceModeCpuDefaultMigrated') localInferenceModeCpuDefaultMigrated: boolean = false;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('pcServerUrl') pcServerUrl: string = PC_SERVER_DEFAULT_URL;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -721,22 +723,90 @@ struct Index {
   }
 
   private normalizedLocalNpuExecutionMode(): LocalNpuExecutionMode {
-    return this.localNpuExecutionMode === 'offline' ? 'offline' : 'online';
+    if (this.localNpuExecutionMode === 'online' || this.localNpuExecutionMode === 'offline') {
+      return this.localNpuExecutionMode;
+    }
+    return 'cpu';
+  }
+
+  private migrateLocalInferenceCpuDefault(): void {
+    if (this.localInferenceModeCpuDefaultMigrated) {
+      return;
+    }
+    if (this.localNpuExecutionMode === 'online') {
+      this.localNpuExecutionMode = 'cpu';
+    }
+    this.localInferenceModeCpuDefaultMigrated = true;
   }
 
   private switchLocalNpuExecutionMode(mode: string): void {
-    let normalized: LocalNpuExecutionMode = mode === 'offline' ? 'offline' : 'online';
+    let normalized: LocalNpuExecutionMode = mode === 'online' || mode === 'offline' ? mode : 'cpu';
     if (normalized === this.normalizedLocalNpuExecutionMode()) {
       return;
     }
-    if (this.blockModelFileMutationIfBusy('切换 NPU 图模式')) {
+    if (this.blockModelFileMutationIfBusy('切换本地推理模式')) {
       return;
     }
     this.unloadLocalModelForFileMutation();
     this.localNpuExecutionMode = normalized;
-    this.output = normalized === 'offline' ?
-      '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。' :
-      '已切换为在线编译。下次加载模型时会使用 MNN HiAI 在线编译与 chunk OM 缓存。';
+    if (normalized === 'cpu') {
+      this.output = '已切换为全 CPU。下次加载模型时，LLM、VIT、视觉分块及其他本地模型模块都会使用 CPU。';
+    } else if (normalized === 'offline') {
+      this.output = '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。';
+    } else {
+      this.output = '已切换为在线编译。下次加载模型时会使用 MNN HiAI 在线编译与 chunk OM 缓存。';
+    }
+  }
+
+  private prepareAllCpuRuntimeConfig(configPath: string): string {
+    let separator = configPath.lastIndexOf('/');
+    if (separator < 0) {
+      throw new Error('模型配置路径无效: ' + configPath);
+    }
+    let modelDir = configPath.substring(0, separator + 1);
+    let configFile = fs.openSync(configPath, fs.OpenMode.READ_ONLY);
+    let configText = '';
+    try {
+      let stat = fs.statSync(configPath);
+      let buffer = new ArrayBuffer(stat.size);
+      fs.readSync(configFile.fd, buffer);
+      configText = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buffer));
+    } finally {
+      fs.closeSync(configFile);
+    }
+
+    let runtimeConfig = ArkJSON.parse(configText) as JsonMap;
+    let configuredBaseDir = runtimeConfig['base_dir'];
+    if (typeof configuredBaseDir !== 'string' || configuredBaseDir.length === 0) {
+      runtimeConfig['base_dir'] = modelDir;
+    }
+    runtimeConfig['backend_type'] = 'cpu';
+    runtimeConfig['visual_blocks_backend_type'] = 'cpu';
+
+    let mllmValue = runtimeConfig['mllm'];
+    if (mllmValue !== undefined && mllmValue !== null &&
+      typeof mllmValue === 'object' && !Array.isArray(mllmValue)) {
+      let mllmConfig = mllmValue as JsonMap;
+      mllmConfig['backend_type'] = 'cpu';
+    }
+
+    let visualChunks = runtimeConfig['visual_blocks_chunks'];
+    if (Array.isArray(visualChunks)) {
+      let cpuChunkBackends: string[] = [];
+      for (let index = 0; index < visualChunks.length; index++) {
+        cpuChunkBackends.push('cpu');
+      }
+      runtimeConfig['visual_blocks_chunk_backends'] = cpuChunkBackends;
+    }
+
+    let runtimeConfigDir = this.filesDir + '/runtime_configs';
+    try {
+      fs.mkdirSync(runtimeConfigDir);
+    } catch (e) {
+    }
+    let runtimeConfigPath = runtimeConfigDir + '/local_all_cpu_config.json';
+    this.writeTextFile(runtimeConfigPath, ArkJSON.stringify(runtimeConfig, null, 2));
+    return runtimeConfigPath;
   }
 
   private initChatSessions(): void {
@@ -2502,6 +2572,7 @@ struct Index {
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     this.migrateWechatAutoSummaryDefaultValues();
+    this.migrateLocalInferenceCpuDefault();
     if (this.manualHdcServerIp.trim().length === 0 && !this.isAutoHdcUrl(this.hdcServerIp)) {
       this.manualHdcServerIp = this.hdcServerIp;
     }
@@ -5554,6 +5625,7 @@ struct Index {
     }
 
     let cfg = this.modelDir + '/config.json';
+    let executionMode = this.normalizedLocalNpuExecutionMode();
     let modelStatus = this.modelLoadableStatus(this.modelDir);
     if (modelStatus !== '下载完成' && modelStatus !== '可加载') {
       this.reportLocalAgentStartupStatus('模型暂不可加载: ' + modelStatus + '\n路径: ' + this.modelDir, true, true);
@@ -5568,7 +5640,8 @@ struct Index {
     this.reportLocalAgentStartupStatus('正在加载本地模型，首次加载可能需要较长时间，请稍候...', true, true);
     await this.sleep(80);
     try {
-      let loadResult: string = await mnnllm.loadModel(cfg, this.normalizedLocalNpuExecutionMode());
+      let loadConfigPath = executionMode === 'cpu' ? this.prepareAllCpuRuntimeConfig(cfg) : cfg;
+      let loadResult: string = await mnnllm.loadModel(loadConfigPath, executionMode);
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
