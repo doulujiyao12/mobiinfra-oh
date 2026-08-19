@@ -7,11 +7,15 @@
 #include <hilog/log.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <limits>
 
 #undef LOG_DOMAIN
 #define LOG_DOMAIN 0x0000
@@ -35,6 +39,107 @@ struct TensorMetadata {
 void traceOffline(const char* level, int chunkIdx, const std::string& message) {
     std::printf("[OFFLINE_NPU] level=%s chunk=%d %s\n", level, chunkIdx, message.c_str());
     std::fflush(stdout);
+}
+
+void traceDiagnostic(int chunkIdx, const std::string& message) {
+    OFFLINE_LOGI("chunk=%{public}d %{public}s", chunkIdx, message.c_str());
+    traceOffline("diagnostic", chunkIdx, message);
+}
+
+std::string nnReturnCodeString(OH_NN_ReturnCode ret) {
+    switch (ret) {
+        case OH_NN_SUCCESS:
+            return "OH_NN_SUCCESS(0)";
+        case OH_NN_FAILED:
+            return "OH_NN_FAILED(1)";
+        case OH_NN_INVALID_PARAMETER:
+            return "OH_NN_INVALID_PARAMETER(" + std::to_string(static_cast<int>(ret)) + ")";
+        case OH_NN_MEMORY_ERROR:
+            return "OH_NN_MEMORY_ERROR(" + std::to_string(static_cast<int>(ret)) + ")";
+        case OH_NN_OPERATION_FORBIDDEN:
+            return "OH_NN_OPERATION_FORBIDDEN(" + std::to_string(static_cast<int>(ret)) + ")";
+        case OH_NN_NULL_PTR:
+            return "OH_NN_NULL_PTR(" + std::to_string(static_cast<int>(ret)) + ")";
+        default:
+            return "OH_NN_RETURN_CODE(" + std::to_string(static_cast<int>(ret)) + ")";
+    }
+}
+
+std::string fileSizeString(const std::string& path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream.is_open()) return "unavailable";
+    const std::streampos position = stream.tellg();
+    if (position == std::streampos(-1)) return "unavailable";
+    return std::to_string(static_cast<unsigned long long>(static_cast<std::streamoff>(position)));
+}
+
+std::string readProcValues(const char* path, const std::vector<std::string>& keys) {
+    std::ifstream stream(path);
+    if (!stream.is_open()) return "unavailable";
+    std::string result;
+    std::string line;
+    while (std::getline(stream, line)) {
+        for (const std::string& key : keys) {
+            if (line.rfind(key, 0) != 0) continue;
+            if (!result.empty()) result += ',';
+            result += line;
+            break;
+        }
+    }
+    return result.empty() ? "unavailable" : result;
+}
+
+std::string resourceSnapshotString(const char* stage) {
+    return "resource_snapshot stage=" + std::string(stage) +
+        " self={" + readProcValues("/proc/self/status", {"VmSize:", "VmRSS:", "VmData:", "VmSwap:"}) +
+        "} system={" + readProcValues("/proc/meminfo", {"MemAvailable:", "SwapFree:", "CmaFree:"}) + "}";
+}
+
+std::string floatVectorSummary(const char* role, const TensorMetadata& metadata,
+                               const std::vector<float>& values) {
+    size_t finiteCount = 0;
+    size_t nanCount = 0;
+    size_t positiveInfinityCount = 0;
+    size_t negativeInfinityCount = 0;
+    float minimum = std::numeric_limits<float>::infinity();
+    float maximum = -std::numeric_limits<float>::infinity();
+    uint64_t hash = 1469598103934665603ULL;
+    for (float value : values) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        hash ^= static_cast<uint64_t>(bits);
+        hash *= 1099511628211ULL;
+        if (std::isnan(value)) {
+            ++nanCount;
+        } else if (std::isinf(value)) {
+            if (value > 0.0f) {
+                ++positiveInfinityCount;
+            } else {
+                ++negativeInfinityCount;
+            }
+        } else {
+            ++finiteCount;
+            minimum = std::min(minimum, value);
+            maximum = std::max(maximum, value);
+        }
+    }
+    char minimumText[32] = "unavailable";
+    char maximumText[32] = "unavailable";
+    if (finiteCount > 0) {
+        std::snprintf(minimumText, sizeof(minimumText), "%.9g", static_cast<double>(minimum));
+        std::snprintf(maximumText, sizeof(maximumText), "%.9g", static_cast<double>(maximum));
+    }
+    char hashText[24] = {};
+    std::snprintf(hashText, sizeof(hashText), "%016llx", static_cast<unsigned long long>(hash));
+    return "input_values role=" + std::string(role) +
+        " name=" + (metadata.name.empty() ? "<empty>" : metadata.name) +
+        " actual_elements=" + std::to_string(values.size()) +
+        " expected_elements=" + std::to_string(metadata.elementCount) +
+        " finite=" + std::to_string(finiteCount) +
+        " nan=" + std::to_string(nanCount) +
+        " pos_inf=" + std::to_string(positiveInfinityCount) +
+        " neg_inf=" + std::to_string(negativeInfinityCount) +
+        " min=" + minimumText + " max=" + maximumText + " fnv64=" + hashText;
 }
 
 std::string normalizeTensorName(std::string name) {
@@ -151,6 +256,12 @@ std::string tensorMetadataString(const char* ioKind, size_t index,
     size_t tensorByteSize = 0;
     const bool tensorByteSizeAvailable = tensor != nullptr &&
         OH_NNTensor_GetSize(tensor, &tensorByteSize) == OH_NN_SUCCESS;
+    int tensorFd = -1;
+    const bool tensorFdAvailable = tensor != nullptr &&
+        OH_NNTensor_GetFd(tensor, &tensorFd) == OH_NN_SUCCESS;
+    size_t tensorOffset = 0;
+    const bool tensorOffsetAvailable = tensor != nullptr &&
+        OH_NNTensor_GetOffset(tensor, &tensorOffset) == OH_NN_SUCCESS;
     const std::string displayName = metadata.name.empty() ? "<empty>" : metadata.name;
     return "tensor_desc io=" + std::string(ioKind) +
            " index=" + std::to_string(index) +
@@ -161,7 +272,9 @@ std::string tensorMetadataString(const char* ioKind, size_t index,
            " shape=" + shapeString(metadata.shape) +
            " elements=" + std::to_string(metadata.elementCount) +
            " desc_bytes=" + std::to_string(metadata.byteSize) +
-           " tensor_bytes=" + (tensorByteSizeAvailable ? std::to_string(tensorByteSize) : "unavailable");
+           " tensor_bytes=" + (tensorByteSizeAvailable ? std::to_string(tensorByteSize) : "unavailable") +
+           " tensor_fd=" + (tensorFdAvailable ? std::to_string(tensorFd) : "unavailable") +
+           " tensor_offset=" + (tensorOffsetAvailable ? std::to_string(tensorOffset) : "unavailable");
 }
 
 void traceTensorMetadata(int chunkIdx, const char* ioKind, size_t index,
@@ -378,7 +491,12 @@ bool OfflineNpuChunkExecutor::loadChunk(int chunkIdx, const std::string& omPath)
         traceOffline("error", chunkIdx, "chunk is already loaded");
         return false;
     }
-    if (HMS_HiAICompatibility_CheckFromFile(omPath.c_str()) != HIAI_COMPATIBILITY_COMPATIBLE) {
+    const HiAI_Compatibility compatibility = HMS_HiAICompatibility_CheckFromFile(omPath.c_str());
+    const char* hiaiVersion = HMS_HiAI_GetVersion();
+    traceDiagnostic(chunkIdx, "om_probe path=" + omPath + " file_bytes=" + fileSizeString(omPath) +
+                    " compatibility=" + std::to_string(static_cast<int>(compatibility)) +
+                    " hiai_version=" + (hiaiVersion == nullptr ? "unavailable" : hiaiVersion));
+    if (compatibility != HIAI_COMPATIBILITY_COMPATIBLE) {
         traceOffline("error", chunkIdx, "OM is incompatible with this device: " + omPath);
         return false;
     }
@@ -388,6 +506,7 @@ bool OfflineNpuChunkExecutor::loadChunk(int chunkIdx, const std::string& omPath)
         traceOffline("error", chunkIdx, "HIAI_F device not found");
         return false;
     }
+    traceDiagnostic(chunkIdx, "selected_device name=HIAI_F id=" + std::to_string(runtime->deviceId));
 
     OH_NNCompilation* compilation = OH_NNCompilation_ConstructWithOfflineModelFile(omPath.c_str());
     if (compilation == nullptr) {
@@ -395,16 +514,24 @@ bool OfflineNpuChunkExecutor::loadChunk(int chunkIdx, const std::string& omPath)
         return false;
     }
     OH_NN_ReturnCode ret = OH_NNCompilation_SetDevice(compilation, runtime->deviceId);
+    traceDiagnostic(chunkIdx, "compilation_step name=SetDevice ret=" + nnReturnCodeString(ret));
     if (ret == OH_NN_SUCCESS) {
         HiAI_ExecuteDevice deviceOrder[] = {HiAI_ExecuteDevice::HIAI_EXECUTE_DEVICE_NPU};
         ret = HMS_HiAIOptions_SetModelDeviceOrder(compilation, deviceOrder, 1);
+        traceDiagnostic(chunkIdx, "compilation_step name=SetModelDeviceOrder_NPU ret=" +
+                        nnReturnCodeString(ret));
     }
     if (ret == OH_NN_SUCCESS) {
         ret = HMS_HiAIOptions_SetFallbackMode(compilation, HIAI_FALLBACK_DISABLED);
+        traceDiagnostic(chunkIdx, "compilation_step name=SetFallbackMode_DISABLED ret=" +
+                        nnReturnCodeString(ret));
     }
     if (ret == OH_NN_SUCCESS) {
-        (void)HMS_HiAIOptions_SetBandMode(compilation, HIAI_BANDMODE_NORMAL);
+        const OH_NN_ReturnCode bandModeRet = HMS_HiAIOptions_SetBandMode(compilation, HIAI_BANDMODE_NORMAL);
+        traceDiagnostic(chunkIdx, "compilation_step name=SetBandMode_NORMAL ret=" +
+                        nnReturnCodeString(bandModeRet));
         ret = OH_NNCompilation_Build(compilation);
+        traceDiagnostic(chunkIdx, "compilation_step name=Build ret=" + nnReturnCodeString(ret));
     }
     if (ret != OH_NN_SUCCESS) {
         OH_NNCompilation_Destroy(&compilation);
@@ -417,6 +544,7 @@ bool OfflineNpuChunkExecutor::loadChunk(int chunkIdx, const std::string& omPath)
         traceOffline("error", chunkIdx, "OH_NNExecutor_Construct failed");
         return false;
     }
+    traceDiagnostic(chunkIdx, "executor_constructed=true");
 
     size_t inputCount = 0;
     size_t outputCount = 0;
@@ -584,6 +712,7 @@ bool OfflineNpuChunkExecutor::loadChunk(int chunkIdx, const std::string& omPath)
                           " fixed_sequence_length=" + std::to_string(hiddenSequenceLength);
     OFFLINE_LOGI("chunk=%{public}d %{public}s", chunkIdx, summary.c_str());
     traceOffline("ready", chunkIdx, summary);
+    traceDiagnostic(chunkIdx, resourceSnapshotString("after_chunk_load"));
     chunks_[chunkIdx] = std::move(runtime);
     return true;
 }
@@ -598,6 +727,18 @@ bool OfflineNpuChunkExecutor::runChunk(int chunkIdx,
         return false;
     }
     ChunkRuntime& runtime = *chunks_[chunkIdx];
+    const long long runId = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    traceDiagnostic(chunkIdx, "run_begin run_id=" + std::to_string(runId) +
+                    " inputs=" + std::to_string(runtime.inputs.size()) +
+                    " outputs=" + std::to_string(runtime.outputs.size()));
+    traceDiagnostic(chunkIdx, floatVectorSummary("hidden",
+                    runtime.inputMetadata[runtime.hiddenInputIndex], hiddenInput));
+    traceDiagnostic(chunkIdx, floatVectorSummary("rotary",
+                    runtime.inputMetadata[runtime.rotaryInputIndex], rotaryInput));
+    traceDiagnostic(chunkIdx, floatVectorSummary("mask",
+                    runtime.inputMetadata[runtime.maskInputIndex], maskInput));
+    traceDiagnostic(chunkIdx, resourceSnapshotString("before_input_copy"));
     std::string error;
     if (!writeFloatTensor(runtime.inputs[runtime.hiddenInputIndex],
                           runtime.inputMetadata[runtime.hiddenInputIndex], hiddenInput, error) ||
@@ -609,14 +750,22 @@ bool OfflineNpuChunkExecutor::runChunk(int chunkIdx,
         traceOffline("error", chunkIdx, error);
         return false;
     }
+    traceDiagnostic(chunkIdx, resourceSnapshotString("before_run_sync"));
+    const std::chrono::steady_clock::time_point runStart = std::chrono::steady_clock::now();
     OH_NN_ReturnCode ret = OH_NNExecutor_RunSync(runtime.executor, runtime.inputs.data(), runtime.inputs.size(),
                                                   runtime.outputs.data(), runtime.outputs.size());
+    const long long elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - runStart).count();
     if (ret != OH_NN_SUCCESS) {
-        error = "RunSync failed ret=" + std::to_string(ret);
+        error = "RunSync failed run_id=" + std::to_string(runId) +
+            " ret=" + nnReturnCodeString(ret) + " elapsed_ms=" + std::to_string(elapsedMs);
         OFFLINE_LOGE("chunk=%{public}d %{public}s", chunkIdx, error.c_str());
         traceOffline("error", chunkIdx, error);
+        traceDiagnostic(chunkIdx, resourceSnapshotString("after_run_sync_failure"));
         return false;
     }
+    traceDiagnostic(chunkIdx, "run_sync_complete run_id=" + std::to_string(runId) +
+                    " ret=" + nnReturnCodeString(ret) + " elapsed_ms=" + std::to_string(elapsedMs));
 
     outputs.clear();
     outputs.resize(runtime.outputs.size());
