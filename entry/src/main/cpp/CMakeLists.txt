@@ -13,7 +13,7 @@ if("${OHOS_ARCH}" STREQUAL "x86_64")
         libhilog_ndk.z.so
     )
 else()
-    add_library(entry SHARED napi_init.cpp HIAIModelManager.cpp)
+    add_library(entry SHARED napi_init.cpp HIAIModelManager.cpp OfflineNpuChunkExecutor.cpp)
     target_include_directories(entry PRIVATE ${MNN_INCLUDE_DIR})
     target_link_directories(entry PUBLIC ${MNN_LIB_DIR})
 

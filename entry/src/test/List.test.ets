@@ -18,6 +18,8 @@ import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test';
 import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
+import localChatImagePromptUnitTest from './LocalChatImagePromptUnit.test';
+import localVisionImageShapeUnitTest from './LocalVisionImageShapeUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 import voiceInteractionUnitTest from './VoiceInteractionUnit.test';
@@ -30,6 +32,7 @@ import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapter
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
 import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
+import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -52,6 +55,8 @@ export default function testsuite() {
   chatMessageScrollPolicyUnitTest();
   chatStreamDisplayPacerUnitTest();
   chatAttachmentPolicyUnitTest();
+  localChatImagePromptUnitTest();
+  localVisionImageShapeUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
   voiceInteractionUnitTest();
@@ -64,4 +69,5 @@ export default function testsuite() {
   agentActionParserUnitTest();
   captureOverlayPolicyUnitTest();
   agentLoopTimingPolicyUnitTest();
+  localPlannerFastPathUnitTest();
 }

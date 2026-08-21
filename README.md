@@ -67,6 +67,7 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
    - **HDC Server**：PC HDC 服务，如 `http://192.168.1.50:9124`。
    - **云端 Planner / Decider 配置**：填写 OpenAI-compatible 的 base URL、API Key 和模型名。
    - 本地 MNN 模型仍使用沙箱中的 `model` 或版本化模型目录。
+   - **NPU 图运行方式**：可选“在线编译”或“离线 OM”。在线模式按 chunk 和输入 shape 复用 App 沙箱缓存；离线模式严格加载模型目录 `om/` 中与 NPU chunk 同名的 Kirin 预编译图，缺失、shape 不匹配或芯片不兼容时直接报错，不回退在线编译。
 2. **任务与自动化**
    - 配置 Agent 执行确认策略、Workflow 运行相关选项和运行日志入口。
    - 点击 HDC/Agent 后端相关按钮前，请确认 PC 端已启动 `hdc_server.py`。
@@ -76,6 +77,8 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
    - 管理模型文件、调试产物、截图缓存和应用说明。
 
 本地模型文件请使用 `mobiinfer llmexport` 导出。需要通过局域网下载时，将 `entry/src/main/python/serve_model.py` 放在导出后的模型目录下并启动服务，再回到 App 内执行模型下载。
+
+离线 NPU 模型仍需保留完整的 MNN 权重、视觉 pre/post、CPU chunk、tokenizer 与配置文件；`.om` 只替代配置为 `npu` 的视觉 chunk。当前 Kirin 9030 离线图固定为 `seq_len=608`，App 会把相册图片和本地 Agent 截图统一映射到 `600×270`（横屏交换）的视觉提示尺寸。其他视觉 token shape 需要重新生成并编译对应 OM。
 
 ### 🎙 聊天、会话与 Agent 控制（聊天页）
 切换到 **“聊天”** 页后，可以使用顶部模式切换：

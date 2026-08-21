@@ -10,9 +10,10 @@ export interface AgentLoopNativeApi {
 
 // ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
 export interface LibEntryNative extends AgentLoopNativeApi {
-  loadModel: (configPath: string) => Promise<string>;
+  loadModel: (configPath: string, npuMode?: 'online' | 'offline') => Promise<string>;
   generate: (prompt: string) => Promise<string>;
   profileGenerate: (prompt: string, topK?: number) => Promise<string>;
+  cancelChat: () => string;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
@@ -34,10 +35,11 @@ export interface LibEntryNative extends AgentLoopNativeApi {
 declare const native: LibEntryNative;
 export default native;
 
-export const loadModel: (configPath: string) => Promise<string>;
+export const loadModel: (configPath: string, npuMode?: 'online' | 'offline') => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
 export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
 export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
+export const cancelChat: () => string;
 export const reset: () => string;
 export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;

@@ -5,6 +5,7 @@ import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AppLogger } from './AppLogger';
+import { localVisionPromptHw } from './LocalVisionImageShape';
 
 type RequestValue = Object | string | number | boolean | null;
 type AgentRouteMode = 'local' | 'cloud';
@@ -442,8 +443,10 @@ export class AgentRouterServer {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
         let w = this.getScalarText(req, 'width');
         let h = this.getScalarText(req, 'height');
-        let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
-        this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+        let modelHw = localVisionPromptHw(Number(w), Number(h));
+        let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+        this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h +
+          ', model_hw=' + modelHw + ')');
         if (variable.indexOf('<image_placeholder>') !== -1) {
           variable = variable.replace('<image_placeholder>', imgTag);
         } else {
@@ -524,8 +527,10 @@ export class AgentRouterServer {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
         let w = this.getScalarText(req, 'width');
         let h = this.getScalarText(req, 'height');
-        let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
-        this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+        let modelHw = localVisionPromptHw(Number(w), Number(h));
+        let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+        this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h +
+          ', model_hw=' + modelHw + ')');
         if (prompt.indexOf('<image_placeholder>') !== -1) {
           prompt = prompt.replace('<image_placeholder>', imgTag);
         } else {

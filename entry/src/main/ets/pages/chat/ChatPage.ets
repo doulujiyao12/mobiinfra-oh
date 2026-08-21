@@ -54,6 +54,7 @@ export struct ChatPage {
   @Prop localDebugImagePath: string = '';
   @Prop chatHistory: string = '';
   @Prop localThinking: boolean = false;
+  @Prop localChatCancelable: boolean = false;
   @Prop modelLoaded: boolean = false;
   @Prop sessions: ChatSessionSummary[] = [];
   @Prop activeSessionId: string = '';
@@ -81,6 +82,7 @@ export struct ChatPage {
   onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
   onCancelCloudChat: () => void = () => {};
+  onCancelLocalChat: () => void = () => {};
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
@@ -172,7 +174,15 @@ export struct ChatPage {
     if (this.isCloudMode() && this.cloudThinking) {
       return '停止';
     }
+    if (!this.isCloudMode() && this.localChatCancelable) {
+      return '终止';
+    }
     return this.isBusy() ? '...' : '发送';
+  }
+
+  private canCancelPrimaryInference(): boolean {
+    return (this.isCloudMode() && this.cloudThinking) ||
+      (!this.isCloudMode() && this.localChatCancelable);
   }
 
   private primaryActionRole(): string {
@@ -183,10 +193,16 @@ export struct ChatPage {
     if (this.primaryActionRole() === 'voice_capture') {
       return '#5968FF';
     }
+    if (this.canCancelPrimaryInference()) {
+      return '#D14343';
+    }
     return this.isBusy() ? '#AEB7C8' : '#111827';
   }
 
   private startPrimaryButtonVoiceInput(): void {
+    if (this.isBusy()) {
+      return;
+    }
     this.onToggleVoiceInput().catch((e: Error) => {
       let err = e as Error;
       showToastSafely(err.message, 1600);
@@ -503,6 +519,8 @@ export struct ChatPage {
     if (this.isBusy()) {
       if (this.isCloudMode()) {
         this.onCancelCloudChat();
+      } else if (this.localChatCancelable) {
+        this.onCancelLocalChat();
       }
       return;
     }

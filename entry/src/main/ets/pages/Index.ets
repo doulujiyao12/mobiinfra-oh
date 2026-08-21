@@ -22,6 +22,12 @@ import {
   normalizeChatImageAttachments
 } from './chat/ChatAttachmentPolicy';
 import {
+  LOCAL_CHAT_IMAGE_MAX_COUNT,
+  buildLocalChatMultimodalPrompt,
+  cleanupLocalChatPreparedImages,
+  prepareLocalChatImages
+} from './chat/LocalChatImagePrompt';
+import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
@@ -161,7 +167,10 @@ import {
   configuredEndpointSecretOrDefault,
   configuredEndpointValueOrDefault
 } from '../config/DefaultEndpointConfig';
-import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
+import {
+  DEFAULT_MODELSCOPE_MNN_REPO,
+  LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS
+} from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
   PROFILE_KNOCK_SHARE_UTD,
@@ -340,6 +349,12 @@ interface DownloadedModelItem {
   ready: boolean;
 }
 
+interface ChunkOmCacheFile {
+  path: string;
+  relativePath: string;
+  size: number;
+}
+
 const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
 const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
 const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
@@ -350,6 +365,7 @@ const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
+type LocalNpuExecutionMode = 'online' | 'offline';
 
 const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
 const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
@@ -357,6 +373,8 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp('localNpuExecutionMode', 'online');
+PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
@@ -434,9 +452,12 @@ PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT
 @Component
 struct Index {
   @State output: string = '';
+  @State chunkOmCacheOutput: string = '尚未扫描当前模型的 chunk OM 缓存。';
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
+  @State localChatImagePreparing: boolean = false;
+  @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -460,6 +481,7 @@ struct Index {
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
+  @StorageLink('localNpuExecutionMode') localNpuExecutionMode: string = 'online';
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('pcServerUrl') pcServerUrl: string = PC_SERVER_DEFAULT_URL;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -517,6 +539,7 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
+  private localChatCancelRequested: boolean = false;
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
@@ -695,6 +718,25 @@ struct Index {
       }
     }
     this.modelLoaded = false;
+  }
+
+  private normalizedLocalNpuExecutionMode(): LocalNpuExecutionMode {
+    return this.localNpuExecutionMode === 'offline' ? 'offline' : 'online';
+  }
+
+  private switchLocalNpuExecutionMode(mode: string): void {
+    let normalized: LocalNpuExecutionMode = mode === 'offline' ? 'offline' : 'online';
+    if (normalized === this.normalizedLocalNpuExecutionMode()) {
+      return;
+    }
+    if (this.blockModelFileMutationIfBusy('切换 NPU 图模式')) {
+      return;
+    }
+    this.unloadLocalModelForFileMutation();
+    this.localNpuExecutionMode = normalized;
+    this.output = normalized === 'offline' ?
+      '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。' :
+      '已切换为在线编译。下次加载模型时会使用 MNN HiAI 在线编译与 chunk OM 缓存。';
   }
 
   private initChatSessions(): void {
@@ -1342,7 +1384,7 @@ struct Index {
       for (let i = 0; i < session.messages.length; i++) {
         let message = session.messages[i];
         if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          await mnnllm.chat(message.content);
+          await mnnllm.chat(buildLocalChatMultimodalPrompt(message.content, chatMessageImagePaths(message)));
         }
       }
     } catch (e) {
@@ -1684,7 +1726,7 @@ struct Index {
   private setActivePendingChatImageUris(uris: string[]): void {
     let normalized = normalizeChatImageAttachments(uris);
     if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
-      this.localPendingChatImageUris = normalized;
+      this.localPendingChatImageUris = normalized.slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
       return;
     }
     this.cloudPendingChatImageUris = normalized;
@@ -1694,8 +1736,13 @@ struct Index {
     this.setActivePendingChatImageUris([]);
   }
 
+  private activeChatImageAttachmentLimit(): number {
+    return this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? LOCAL_CHAT_IMAGE_MAX_COUNT :
+      CHAT_IMAGE_ATTACHMENT_MAX_COUNT;
+  }
+
   private remainingChatImageAttachmentCount(): number {
-    return CHAT_IMAGE_ATTACHMENT_MAX_COUNT - this.activePendingChatImageUris().length;
+    return this.activeChatImageAttachmentLimit() - this.activePendingChatImageUris().length;
   }
 
   private appendPickedChatImageAttachments(uris: string[], sourceLabel: string): void {
@@ -1704,14 +1751,15 @@ struct Index {
       return;
     }
     let current = this.activePendingChatImageUris();
-    let combined = normalizeChatImageAttachments(current.concat(picked));
+    let attachmentLimit = this.activeChatImageAttachmentLimit();
+    let combined = normalizeChatImageAttachments(current.concat(picked)).slice(0, attachmentLimit);
     let addedCount = combined.length - current.length;
     if (addedCount <= 0) {
-      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      showToastSafely('最多支持 ' + String(attachmentLimit) + ' 张图片附件', 1600);
       return;
     }
     this.setActivePendingChatImageUris(combined);
-    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张' : '';
+    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(attachmentLimit) + ' 张' : '';
     showToastSafely('已添加' + String(addedCount) + '张' + sourceLabel + '图片，将随下一条消息发送' + limitHint, 1800);
   }
 
@@ -1748,7 +1796,7 @@ struct Index {
   // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
   private async takeChatImageAttachment(): Promise<void> {
     if (this.remainingChatImageAttachmentCount() <= 0) {
-      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      showToastSafely('最多支持 ' + String(this.activeChatImageAttachmentLimit()) + ' 张图片附件', 1600);
       return;
     }
     let savePath = '';
@@ -1787,7 +1835,7 @@ struct Index {
     try {
       let remainingCount = this.remainingChatImageAttachmentCount();
       if (remainingCount <= 0) {
-        showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+        showToastSafely('最多支持 ' + String(this.activeChatImageAttachmentLimit()) + ' 张图片附件', 1600);
         return;
       }
       let picker = new GalleryPhotoPicker();
@@ -2922,6 +2970,8 @@ struct Index {
 
   private migrateDefaultEndpointValues(): void {
     // 兼容历史版本写入 PersistentStorage 的默认地址，并跟踪上一次应用的默认值。
+    this.modelScopeMnnRepo = this.migrateEndpointValue(this.modelScopeMnnRepo, DEFAULT_MODELSCOPE_MNN_REPO,
+      LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS, 'modelScopeDefault.mnnRepo');
     this.serverIp = this.migrateEndpointValue(this.serverIp, DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
       LEGACY_ENDPOINT_CONFIG.modelDownloadServerUrls, 'endpointDefault.serverIp');
     this.hdcServerIp = this.migrateEndpointValue(this.hdcServerIp, DEFAULT_ENDPOINT_CONFIG.hdcServerUrl,
@@ -3131,6 +3181,7 @@ struct Index {
     this.modelDir = target.path;
     this.syncProfileModelConfigPath();
     this.modelLoaded = false;
+    this.chunkOmCacheOutput = '已切换模型，请点击“查看 chunk OM”重新扫描。';
     this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
   }
 
@@ -3638,44 +3689,113 @@ struct Index {
     }
   }
 
-  private deleteChunkVisionOmUnder(path: string): number {
-    let deleted = 0;
-    let children: string[] = [];
+  private collectChunkOmCacheFiles(path: string, insideChunk: boolean, out: ChunkOmCacheFile[]): void {
+    let baseName = path.substring(path.lastIndexOf('/') + 1);
+    let currentInsideChunk = insideChunk || baseName.startsWith('chunk_');
     try {
-      children = fs.listFileSync(path);
-    } catch {
-      return 0;
-    }
-    for (let name of children) {
-      let childPath = `${path}/${name}`;
-      if (name.startsWith('chunk_')) {
-        let visionPath = `${childPath}/vision.om`;
-        try {
-          if (fs.accessSync(visionPath)) {
-            fs.unlinkSync(visionPath);
-            deleted++;
-          }
-        } catch {}
+      let children = fs.listFileSync(path);
+      children.sort();
+      for (let name of children) {
+        this.collectChunkOmCacheFiles(`${path}/${name}`, currentInsideChunk, out);
       }
-      deleted += this.deleteChunkVisionOmUnder(childPath);
+      return;
+    } catch {
     }
-    return deleted;
+    let normalizedName = baseName.toLowerCase();
+    if (!currentInsideChunk || (normalizedName !== 'vision.om' && normalizedName !== 'vision.om.tmp')) {
+      return;
+    }
+    let fileSize = 0;
+    try {
+      fileSize = fs.statSync(path).size;
+    } catch {
+      return;
+    }
+    let relativePath = path;
+    let modelPrefix = this.modelDir + '/';
+    if (path.startsWith(modelPrefix)) {
+      relativePath = path.substring(modelPrefix.length);
+    }
+    out.push({ path: path, relativePath: relativePath, size: fileSize });
   }
 
-  deleteChunkVisionOmFiles() {
-    if (this.blockModelFileMutationIfBusy('删除 vision.om')) {
+  private scanChunkOmCacheFiles(): ChunkOmCacheFile[] {
+    let files: ChunkOmCacheFile[] = [];
+    this.collectChunkOmCacheFiles(this.modelDir, false, files);
+    files.sort((left: ChunkOmCacheFile, right: ChunkOmCacheFile): number => {
+      if (left.relativePath < right.relativePath) {
+        return -1;
+      }
+      return left.relativePath > right.relativePath ? 1 : 0;
+    });
+    return files;
+  }
+
+  listChunkVisionOmFiles(): void {
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.chunkOmCacheOutput = `模型目录不存在: ${this.modelDir}`;
+        return;
+      }
+      let files = this.scanChunkOmCacheFiles();
+      let totalSize = 0;
+      let lines: string[] = [];
+      for (let file of files) {
+        totalSize += file.size;
+        lines.push(`${file.relativePath} (${this.formatSize(file.size)})`);
+      }
+      if (files.length === 0) {
+        this.chunkOmCacheOutput = `当前模型尚无 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
+          `目录: ${this.modelDir}`;
+        return;
+      }
+      this.chunkOmCacheOutput = `模型: ${this.getCurrentModelFolderName()}\n` +
+        `缓存文件: ${files.length} 个，共 ${this.formatSize(totalSize)}\n` + lines.join('\n');
+    } catch (e) {
+      let err = e as Error;
+      this.chunkOmCacheOutput = `查看 chunk OM 缓存失败: ${err.message}`;
+    }
+  }
+
+  deleteChunkVisionOmFiles(): void {
+    if (this.blockModelFileMutationIfBusy('删除 chunk OM 缓存')) {
+      this.chunkOmCacheOutput = this.output;
       return;
     }
     try {
-      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
-        this.output = `模型目录不存在: ${this.modelDir}`;
+        this.chunkOmCacheOutput = `模型目录不存在: ${this.modelDir}`;
+        this.output = this.chunkOmCacheOutput;
         return;
       }
-      let count = this.deleteChunkVisionOmUnder(this.modelDir);
-      this.output = `已在 ${this.getCurrentModelFolderName()} 下删除 ${count} 个 chunk_*/vision.om`;
+      let files = this.scanChunkOmCacheFiles();
+      if (files.length === 0) {
+        this.chunkOmCacheOutput = `当前模型没有可删除的 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}`;
+        this.output = this.chunkOmCacheOutput;
+        return;
+      }
+      this.unloadLocalModelForFileMutation();
+      let deletedCount = 0;
+      let deletedSize = 0;
+      let failedPaths: string[] = [];
+      for (let file of files) {
+        try {
+          fs.unlinkSync(file.path);
+          deletedCount++;
+          deletedSize += file.size;
+        } catch {
+          failedPaths.push(file.relativePath);
+        }
+      }
+      this.chunkOmCacheOutput = `已删除 ${deletedCount} 个 chunk OM 缓存，共 ${this.formatSize(deletedSize)}。`;
+      if (failedPaths.length > 0) {
+        this.chunkOmCacheOutput += `\n删除失败 ${failedPaths.length} 个:\n${failedPaths.join('\n')}`;
+      }
+      this.output = this.chunkOmCacheOutput;
     } catch (e) {
-      this.output = `删除 chunk_*/vision.om 失败: ${e}`;
+      let err = e as Error;
+      this.chunkOmCacheOutput = `删除 chunk OM 缓存失败: ${err.message}`;
+      this.output = this.chunkOmCacheOutput;
     }
   }
 
@@ -4522,6 +4642,7 @@ struct Index {
     this.selectedModelId = nextModelId;
     this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
     this.syncProfileModelConfigPath();
+    this.chunkOmCacheOutput = '模型下载目录已切换，请在模型可用后扫描 chunk OM 缓存。';
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
     AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
@@ -5447,7 +5568,7 @@ struct Index {
     this.reportLocalAgentStartupStatus('正在加载本地模型，首次加载可能需要较长时间，请稍候...', true, true);
     await this.sleep(80);
     try {
-      let loadResult: string = await mnnllm.loadModel(cfg);
+      let loadResult: string = await mnnllm.loadModel(cfg, this.normalizedLocalNpuExecutionMode());
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
@@ -5627,13 +5748,32 @@ struct Index {
     }
   }
 
-  private async sendLocalChatMessage(): Promise<void> {
-    let pendingImageUris = this.localPendingChatImageUris;
-    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
+  private cancelCurrentLocalChatInference(): void {
+    if (!this.localChatInferenceRunning || this.localChatCancelRequested) {
       return;
     }
-    if (hasChatImageAttachments(pendingImageUris)) {
-      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
+    this.localChatCancelRequested = true;
+    try {
+      mnnllm.cancelChat();
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.Cancel', 'request native chat cancellation failed', err);
+    }
+    showToastSafely('正在终止本地推理…', 1400);
+  }
+
+  private cancelledLocalChatReply(partialReply: string): string {
+    if (partialReply.trim().length === 0) {
+      return '推理已终止';
+    }
+    return partialReply.replace(/\s+$/, '') + '\n\n[推理已终止]';
+  }
+
+  private async sendLocalChatMessage(): Promise<void> {
+    let pendingImageUris = normalizeChatImageAttachments(this.localPendingChatImageUris)
+      .slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
+    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking ||
+      this.localChatImagePreparing) {
       return;
     }
     if (!await this.ensureLocalChatModelIsAvailable()) {
@@ -5645,13 +5785,41 @@ struct Index {
     }
     let chatSessionId = activeSession.id;
     let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
+    let adoptedImageUris: string[] = [];
+    let nativePrompt = msg;
+    let preparedImagePaths: string[] = [];
+    this.localChatImagePreparing = hasChatImageAttachments(pendingImageUris);
+    try {
+      if (hasChatImageAttachments(pendingImageUris)) {
+        preparedImagePaths = await prepareLocalChatImages(this.filesDir, pendingImageUris);
+        adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, preparedImagePaths);
+        for (let i = 0; i < preparedImagePaths.length; i++) {
+          if (i >= adoptedImageUris.length ||
+            this.fileIoOpenTarget(adoptedImageUris[i]) === preparedImagePaths[i]) {
+            throw new Error('无法把预处理图片保存到会话目录');
+          }
+        }
+        nativePrompt = buildLocalChatMultimodalPrompt(msg, adoptedImageUris);
+      }
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.Image', 'prepare local chat image failed', err);
+      showToastSafely(err.message, 2200);
+      return;
+    } finally {
+      cleanupLocalChatPreparedImages(preparedImagePaths);
+      this.localChatImagePreparing = false;
+    }
     let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.localPendingChatImageUris = [];
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
-      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris));
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
       CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    this.localChatCancelRequested = false;
+    this.localChatInferenceRunning = true;
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     let streamedReply = '';
@@ -5686,6 +5854,12 @@ struct Index {
     try {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
+        if (this.localChatCancelRequested) {
+          let cancelledReply = this.cancelledLocalChatReply(streamedReply);
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+          return;
+        }
         if (!loaded) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
@@ -5693,7 +5867,10 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(msg, (token: string) => {
+      let reply: string = await mnnllm.chat(nativePrompt, (token: string) => {
+        if (this.localChatCancelRequested) {
+          return;
+        }
         streamedReply += token;
         scheduleStreamReplyUpdate();
       });
@@ -5701,16 +5878,31 @@ struct Index {
         clearTimeout(streamUpdateTimerId);
         streamUpdateTimerId = -1;
       }
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+      if (this.localChatCancelRequested) {
+        let partialReply = streamedReply.length > 0 ? streamedReply : reply;
+        let cancelledReply = this.cancelledLocalChatReply(partialReply);
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+      } else {
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+      }
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+      if (this.localChatCancelRequested) {
+        let cancelledReply = this.cancelledLocalChatReply(streamedReply);
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
+      } else {
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
+        this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+      }
     } finally {
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
       }
+      this.localChatInferenceRunning = false;
+      this.localChatCancelRequested = false;
       this.isThinking = false;
     }
   }
@@ -6016,7 +6208,8 @@ struct Index {
             localOutput: this.output,
             localDebugImagePath: this.debugImagePath,
             chatHistory: this.chatHistory,
-            localThinking: this.isThinking || this.localAgentCleaningUp,
+            localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
+            localChatCancelable: this.localChatInferenceRunning,
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
@@ -6045,6 +6238,7 @@ struct Index {
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
             onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
+            onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
@@ -6076,8 +6270,10 @@ struct Index {
             autoConfirm: $autoConfirm,
             cloudAutoConfirm: $cloudAutoConfirm,
             threadNumInput: $threadNumInput,
+            localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
             selectedSectionId: $settingsSectionId,
             output: $output,
+            chunkOmCacheOutput: $chunkOmCacheOutput,
             cloudOutput: $cloudOutput,
             modelDownloadProgressVisible: $modelDownloadProgressVisible,
             modelDownloadProgressPercent: $modelDownloadProgressPercent,
@@ -6113,7 +6309,9 @@ struct Index {
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },
-            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); }
+            onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
+            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+            onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }

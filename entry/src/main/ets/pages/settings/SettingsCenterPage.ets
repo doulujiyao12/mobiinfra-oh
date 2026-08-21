@@ -102,8 +102,10 @@ export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
+  @Prop localNpuExecutionMode: string = 'online';
   @Link selectedSectionId: number;
   @Link output: string;
+  @Link chunkOmCacheOutput: string;
   @Link cloudOutput: string;
   @Link modelDownloadProgressVisible: boolean;
   @Link modelDownloadProgressPercent: number;
@@ -197,7 +199,9 @@ export struct SettingsCenterPage {
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
+  onListChunkVisionOmFiles: () => void = () => {};
   onDeleteChunkVisionOmFiles: () => void = () => {};
+  onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
     this.migrateGalleryDefaultValues();
@@ -373,8 +377,8 @@ export struct SettingsCenterPage {
 
   private confirmDeleteChunkVisionOmFiles(): void {
     this.confirmDanger({
-      title: '删除 vision.om',
-      message: '确认执行该操作？将删除 vision.om 相关文件，操作不可撤回。',
+      title: '删除 chunk OM 缓存',
+      message: '确认删除当前模型的全部 chunk OM 缓存？下次遇到对应图片尺寸时需要重新在线编译。',
       confirmText: '删除'
     }, () => { this.onDeleteChunkVisionOmFiles(); });
   }
@@ -1192,6 +1196,60 @@ export struct SettingsCenterPage {
 
   @Builder LocalModelGroup() {
     this.DownloadedModelList()
+    this.FieldLabel('NPU 图运行方式')
+    Row() {
+      this.NpuExecutionModeButton('在线编译', 'online')
+      this.NpuExecutionModeButton('离线 OM', 'offline')
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.SpaceBetween)
+    Text(this.localNpuExecutionMode === 'offline' ?
+      '离线 OM：严格加载模型目录 om/ 下与 NPU chunk 同名的预编译图；缺失、shape 或设备不兼容时直接报错。' :
+      '在线编译：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。')
+      .fontSize(12)
+      .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+      .width('100%')
+      .maxLines(3)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .margin({ top: 8, bottom: 4 })
+    this.FieldLabel('NPU chunk OM 缓存')
+    Text('缓存保存在当前模型的 App 沙箱目录中，并按 chunk 与输入 shape 分开复用。')
+      .fontSize(12)
+      .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+      .width('100%')
+      .maxLines(2)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+    SettingsActionRow({ contentBuilder: () => { this.ChunkOmCacheActionRow() } })
+    SettingsOutputPanel({ title: '当前模型 chunk OM', content: this.chunkOmCacheOutput })
+  }
+
+  @Builder NpuExecutionModeButton(label: string, mode: string) {
+    Button(label)
+      .height(SETTINGS_BUTTON_HEIGHT)
+      .width('48%')
+      .fontSize(13)
+      .fontColor(this.localNpuExecutionMode === mode ? Color.White : settingsActionColor(SettingsActionKind.Primary))
+      .backgroundColor(this.localNpuExecutionMode === mode ?
+        settingsActionColor(SettingsActionKind.Primary) : SETTINGS_INPUT_BACKGROUND_COLOR)
+      .borderRadius(SETTINGS_CONTROL_RADIUS)
+      .border({ width: 1, color: settingsActionColor(SettingsActionKind.Primary) })
+      .onClick(() => {
+        this.closeSensitiveInputs();
+        this.onLocalNpuExecutionModeChange(mode);
+      })
+  }
+
+  @Builder ChunkOmCacheActionRow() {
+    SettingsActionButton({
+      label: '查看 chunk OM',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { this.onListChunkVisionOmFiles(); }
+    })
+    SettingsActionButton({
+      label: '删除 chunk OM',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
+    })
   }
 
   @Builder HdcConnectionGroup() {
@@ -1452,7 +1510,7 @@ export struct SettingsCenterPage {
       onActionClick: () => { this.confirmDeleteModelConfigJson(); }
     })
     SettingsActionButton({
-      label: '删除 vision.om',
+      label: '删除 chunk OM',
       kind: SettingsActionKind.Danger,
       onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
     })

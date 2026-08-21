@@ -12,6 +12,7 @@
 #include <thread>
 #include <deque>
 #include <atomic>
+#include <cstdint>
 #include <cstdarg>
 #include <algorithm>
 #include <cctype>
@@ -44,7 +45,7 @@
 
 // NNRT header for OMC test (HarmonyOS SDK)
 #include "HIAIModelManager.h"
-#include <fstream>
+#include "OfflineNpuChunkExecutor.h"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -62,8 +63,368 @@ static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
 static std::string g_currentModelConfigPath;
+// 普通本地聊天的取消信号不能获取 g_mutex：推理线程会在整个 response() 期间持有该锁。
+// 使用请求 ID + 原子变量，让 UI 线程只发信号，再由推理线程在 token 输出边界修改 LLM 状态。
+static std::atomic<uint64_t> g_next_chat_request_id{0};
+static std::atomic<uint64_t> g_latest_chat_request_id{0};
+static std::atomic<uint64_t> g_running_chat_request_id{0};
+static std::atomic<uint64_t> g_cancelled_chat_request_id{0};
 
 static void appLog(const char* fmt, ...);
+
+// HiAI verbose logs are emitted through stdout by the MNN backend. Keep a small
+// aggregate here so Runtime Logs can show a verdict instead of requiring users
+// to interpret individual backend messages.
+struct NpuRuntimeDiagnostics {
+    std::mutex mu;
+    std::string requestedBackends = "not loaded";
+    bool configParsed = false;
+    bool npuRequested = false;
+    size_t graphReadySignals = 0;
+    size_t npuExecuteSuccess = 0;
+    size_t cpuFallbackSignals = 0;
+    size_t npuErrorSignals = 0;
+    std::string lastEvidence = "none";
+};
+
+static NpuRuntimeDiagnostics g_npuDiagnostics;
+
+static std::string lowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+static std::vector<std::string> extractJsonStringValues(const std::string& jsonText,
+                                                        const std::string& key) {
+    std::vector<std::string> values;
+    const std::string needle = "\"" + key + "\"";
+    size_t searchPos = 0;
+    while ((searchPos = jsonText.find(needle, searchPos)) != std::string::npos) {
+        size_t colon = jsonText.find(':', searchPos + needle.size());
+        if (colon == std::string::npos) break;
+        size_t quote = jsonText.find('"', colon + 1);
+        if (quote == std::string::npos) break;
+        size_t end = jsonText.find('"', quote + 1);
+        if (end == std::string::npos) break;
+        std::string value = jsonText.substr(quote + 1, end - quote - 1);
+        if (std::find(values.begin(), values.end(), value) == values.end()) {
+            values.push_back(value);
+        }
+        searchPos = end + 1;
+    }
+    return values;
+}
+
+static size_t skipJsonWhitespace(const std::string& text, size_t offset) {
+    while (offset < text.size() && std::isspace(static_cast<unsigned char>(text[offset]))) ++offset;
+    return offset;
+}
+
+enum class JsonFieldStatus {
+    MISSING,
+    VALID,
+    INVALID,
+};
+
+static bool hasJsonValueTerminator(const std::string& jsonText, size_t offset) {
+    offset = skipJsonWhitespace(jsonText, offset);
+    return offset >= jsonText.size() || jsonText[offset] == ',' ||
+           jsonText[offset] == '}' || jsonText[offset] == ']';
+}
+
+// The App native target does not bundle a JSON library. These helpers only read
+// the small set of typed top-level fields needed to resolve offline OM files.
+static JsonFieldStatus findJsonFieldValueOffset(const std::string& jsonText,
+                                                const std::string& key,
+                                                size_t& valueOffset) {
+    const std::string needle = "\"" + key + "\"";
+    const size_t keyPos = jsonText.find(needle);
+    if (keyPos == std::string::npos) return JsonFieldStatus::MISSING;
+    const size_t colon = jsonText.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) return JsonFieldStatus::INVALID;
+    valueOffset = skipJsonWhitespace(jsonText, colon + 1);
+    return valueOffset < jsonText.size() ? JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+}
+
+static bool parseJsonStringAt(const std::string& text, size_t& offset, std::string& value) {
+    offset = skipJsonWhitespace(text, offset);
+    if (offset >= text.size() || text[offset] != '"') return false;
+    ++offset;
+    value.clear();
+    while (offset < text.size()) {
+        char ch = text[offset++];
+        if (ch == '"') return true;
+        if (ch == '\\' && offset < text.size()) {
+            char escaped = text[offset++];
+            if (escaped == '"' || escaped == '\\' || escaped == '/') value.push_back(escaped);
+            else if (escaped == 'b') value.push_back('\b');
+            else if (escaped == 'f') value.push_back('\f');
+            else if (escaped == 'n') value.push_back('\n');
+            else if (escaped == 'r') value.push_back('\r');
+            else if (escaped == 't') value.push_back('\t');
+            else return false;
+        } else if (static_cast<unsigned char>(ch) < 0x20) {
+            return false;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return false;
+}
+
+static JsonFieldStatus extractJsonStringArrayValue(const std::string& jsonText, const std::string& key,
+                                                   std::vector<std::string>& values) {
+    values.clear();
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (jsonText[offset] != '[') return JsonFieldStatus::INVALID;
+    ++offset;
+    offset = skipJsonWhitespace(jsonText, offset);
+    if (offset < jsonText.size() && jsonText[offset] == ']') {
+        return hasJsonValueTerminator(jsonText, offset + 1) ?
+            JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+    }
+    while (offset < jsonText.size()) {
+        std::string value;
+        if (!parseJsonStringAt(jsonText, offset, value)) return JsonFieldStatus::INVALID;
+        values.push_back(value);
+        offset = skipJsonWhitespace(jsonText, offset);
+        if (offset < jsonText.size() && jsonText[offset] == ']') {
+            return hasJsonValueTerminator(jsonText, offset + 1) ?
+                JsonFieldStatus::VALID : JsonFieldStatus::INVALID;
+        }
+        if (offset >= jsonText.size() || jsonText[offset] != ',') return JsonFieldStatus::INVALID;
+        offset = skipJsonWhitespace(jsonText, offset + 1);
+        if (offset >= jsonText.size() || jsonText[offset] == ']') return JsonFieldStatus::INVALID;
+    }
+    return JsonFieldStatus::INVALID;
+}
+
+static JsonFieldStatus extractJsonStringValue(const std::string& jsonText, const std::string& key,
+                                              std::string& value) {
+    value.clear();
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (!parseJsonStringAt(jsonText, offset, value) || !hasJsonValueTerminator(jsonText, offset)) {
+        return JsonFieldStatus::INVALID;
+    }
+    return JsonFieldStatus::VALID;
+}
+
+static JsonFieldStatus extractJsonBoolFieldValue(const std::string& jsonText, const std::string& key,
+                                                 bool& value) {
+    size_t offset = 0;
+    const JsonFieldStatus fieldStatus = findJsonFieldValueOffset(jsonText, key, offset);
+    if (fieldStatus != JsonFieldStatus::VALID) return fieldStatus;
+    if (jsonText.compare(offset, 4, "true") == 0 && hasJsonValueTerminator(jsonText, offset + 4)) {
+        value = true;
+        return JsonFieldStatus::VALID;
+    }
+    if (jsonText.compare(offset, 5, "false") == 0 && hasJsonValueTerminator(jsonText, offset + 5)) {
+        value = false;
+        return JsonFieldStatus::VALID;
+    }
+    return JsonFieldStatus::INVALID;
+}
+
+static bool extractJsonBoolValue(const std::string& jsonText, const std::string& key,
+                                 bool defaultValue) {
+    const std::string needle = "\"" + key + "\"";
+    size_t keyPos = jsonText.find(needle);
+    if (keyPos == std::string::npos) return defaultValue;
+    size_t colon = jsonText.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) return defaultValue;
+    size_t valuePos = jsonText.find_first_not_of(" \t\r\n", colon + 1);
+    if (valuePos == std::string::npos) return defaultValue;
+    if (jsonText.compare(valuePos, 4, "true") == 0) return true;
+    if (jsonText.compare(valuePos, 5, "false") == 0) return false;
+    return defaultValue;
+}
+
+static bool isNpuBackendName(const std::string& value) {
+    std::string lower = lowerAscii(value);
+    return lower == "hiai" || lower == "hiai_delegate" || lower == "npu";
+}
+
+static std::string joinStringValues(const std::vector<std::string>& values) {
+    if (values.empty()) return "unspecified(default=cpu)";
+    std::ostringstream out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) out << ',';
+        out << values[i];
+    }
+    return out.str();
+}
+
+static std::string summarizeRequestedBackends(const std::string& effectiveConfig,
+                                              bool& npuRequested) {
+    const std::vector<std::string> backendTypes =
+        extractJsonStringValues(effectiveConfig, "backend_type");
+    const std::vector<std::string> visualBackendTypes =
+        extractJsonStringValues(effectiveConfig, "visual_blocks_backend_type");
+    const bool visualSplit = extractJsonBoolValue(effectiveConfig, "visual_split", false);
+
+    npuRequested = false;
+    for (const auto& backend : backendTypes) {
+        npuRequested = npuRequested || isNpuBackendName(backend);
+    }
+    if (visualSplit) {
+        if (visualBackendTypes.empty()) {
+            // This mobiinfer LLM build defaults split visual blocks to HiAI.
+            npuRequested = true;
+        } else {
+            for (const auto& backend : visualBackendTypes) {
+                npuRequested = npuRequested || isNpuBackendName(backend);
+            }
+        }
+    }
+
+    std::ostringstream out;
+    out << "backend_type_values=" << joinStringValues(backendTypes)
+        << ", visual_split=" << (visualSplit ? "true" : "false")
+        << ", visual_blocks_backend_type=";
+    if (visualBackendTypes.empty()) {
+        out << (visualSplit ? "hiai(default)" : "unused");
+    } else {
+        out << joinStringValues(visualBackendTypes);
+    }
+    return out.str();
+}
+
+static const char* npuVerdictLocked(const NpuRuntimeDiagnostics& state) {
+    if (!state.configParsed) return "UNKNOWN_NO_MODEL_CONFIG";
+    if (state.npuExecuteSuccess > 0 && state.cpuFallbackSignals > 0 && state.npuErrorSignals > 0) {
+        return "NPU_ACTIVE_WITH_CPU_FALLBACK_AND_ERRORS";
+    }
+    if (state.npuExecuteSuccess > 0 && state.cpuFallbackSignals > 0) {
+        return "NPU_ACTIVE_WITH_CPU_FALLBACK";
+    }
+    if (state.npuExecuteSuccess > 0 && state.npuErrorSignals > 0) {
+        return "NPU_ACTIVE_WITH_ERRORS";
+    }
+    if (state.npuExecuteSuccess > 0) return "NPU_ACTIVE";
+    if (state.cpuFallbackSignals > 0 && state.npuErrorSignals > 0) {
+        return "CPU_FALLBACK_AFTER_NPU_ERROR";
+    }
+    if (state.cpuFallbackSignals > 0) return "CPU_FALLBACK_DETECTED";
+    if (state.npuErrorSignals > 0) return "NPU_ERROR";
+    if (state.graphReadySignals > 0) return "NPU_READY_NOT_EXECUTED";
+    if (state.npuRequested) return "WAITING_FOR_NPU_EVIDENCE";
+    return "CPU_CONFIGURED_OR_NPU_NOT_REQUESTED";
+}
+
+static std::string npuStatusLineLocked(const NpuRuntimeDiagnostics& state,
+                                       const std::string& phase) {
+    std::ostringstream out;
+    out << "[NPU_STATUS] phase=" << phase
+        << " verdict=" << npuVerdictLocked(state)
+        << " requested={" << state.requestedBackends << "}"
+        << " graph_ready=" << state.graphReadySignals
+        << " npu_exec_ok=" << state.npuExecuteSuccess
+        << " cpu_fallback=" << state.cpuFallbackSignals
+        << " npu_error=" << state.npuErrorSignals
+        << " last_evidence=" << state.lastEvidence;
+    return out.str();
+}
+
+static std::string currentNpuStatusLine(const std::string& phase) {
+    std::lock_guard<std::mutex> lock(g_npuDiagnostics.mu);
+    return npuStatusLineLocked(g_npuDiagnostics, phase);
+}
+
+static std::string resetNpuRuntimeDiagnostics(const std::string& requestedBackends,
+                                              bool npuRequested) {
+    std::lock_guard<std::mutex> lock(g_npuDiagnostics.mu);
+    g_npuDiagnostics.requestedBackends = requestedBackends;
+    g_npuDiagnostics.configParsed = requestedBackends != "config unavailable";
+    g_npuDiagnostics.npuRequested = npuRequested;
+    g_npuDiagnostics.graphReadySignals = 0;
+    g_npuDiagnostics.npuExecuteSuccess = 0;
+    g_npuDiagnostics.cpuFallbackSignals = 0;
+    g_npuDiagnostics.npuErrorSignals = 0;
+    g_npuDiagnostics.lastEvidence = "configuration parsed";
+    return npuStatusLineLocked(g_npuDiagnostics, "model_config");
+}
+
+static std::string observeNpuRuntimeLine(const std::string& line) {
+    const std::string lower = lowerAscii(line);
+    bool offlineReady = lower.find("[offline_npu]") != std::string::npos &&
+                        lower.find("level=ready") != std::string::npos;
+    bool offlineExecuteSuccess = lower.find("[offline_npu]") != std::string::npos &&
+                                 lower.find("level=exec_ok") != std::string::npos;
+    bool offlineError = lower.find("[offline_npu]") != std::string::npos &&
+                        lower.find("level=error") != std::string::npos;
+    bool graphReady = offlineReady ||
+                      lower.find("buildirmodel ok") != std::string::npos ||
+                      lower.find("loadmodelsync ok") != std::string::npos ||
+                      lower.find("onresizeend: ok") != std::string::npos ||
+                      lower.find("[hiai conv]") != std::string::npos;
+    bool cpuFallback = lower.find("fallback to cpu") != std::string::npos ||
+                       (lower.find("[hiai_v]") != std::string::npos &&
+                        lower.find("oncreate fail:") != std::string::npos) ||
+                       (lower.find("[hiai delegate]") != std::string::npos &&
+                        lower.find("falling back") != std::string::npos);
+    bool npuError = offlineError ||
+                    lower.find("aimodelmngerclient unavailable") != std::string::npos ||
+                    lower.find("aimodelmngerclient init failed") != std::string::npos ||
+                    lower.find("buildirmodel failed") != std::string::npos ||
+                    (lower.find("loadmodelsync failed") != std::string::npos &&
+                     lower.find("cache loadmodelsync failed") == std::string::npos) ||
+                    lower.find("onresizeend: failed") != std::string::npos ||
+                    (lower.find("[hiai delegate]") != std::string::npos &&
+                     (lower.find("failed") != std::string::npos ||
+                      lower.find("unavailable") != std::string::npos ||
+                      lower.find("make_shared error") != std::string::npos ||
+                      lower.find("model not compiled") != std::string::npos));
+    bool npuExecuteSuccess = offlineExecuteSuccess;
+    const std::string processToken = "onexecuteend: process ret=";
+    size_t processPos = lower.find(processToken);
+    if (processPos != std::string::npos) {
+        const char* numberStart = lower.c_str() + processPos + processToken.size();
+        char* numberEnd = nullptr;
+        long ret = std::strtol(numberStart, &numberEnd, 10);
+        if (numberEnd != numberStart) {
+            npuExecuteSuccess = ret == 0;
+            npuError = npuError || ret != 0;
+        }
+    }
+
+    if (!graphReady && !cpuFallback && !npuError && !npuExecuteSuccess) return "";
+
+    std::lock_guard<std::mutex> lock(g_npuDiagnostics.mu);
+    const bool firstReady = graphReady && g_npuDiagnostics.graphReadySignals == 0;
+    const bool firstSuccess = npuExecuteSuccess && g_npuDiagnostics.npuExecuteSuccess == 0;
+    const bool firstFallback = cpuFallback && g_npuDiagnostics.cpuFallbackSignals == 0;
+    const bool firstError = npuError && g_npuDiagnostics.npuErrorSignals == 0;
+    const std::string previousVerdict = npuVerdictLocked(g_npuDiagnostics);
+
+    if (graphReady) ++g_npuDiagnostics.graphReadySignals;
+    if (npuExecuteSuccess) ++g_npuDiagnostics.npuExecuteSuccess;
+    if (cpuFallback) ++g_npuDiagnostics.cpuFallbackSignals;
+    if (npuError) ++g_npuDiagnostics.npuErrorSignals;
+
+    if (npuExecuteSuccess) {
+        g_npuDiagnostics.lastEvidence = offlineExecuteSuccess ?
+            "offline NNRT RunSync returned success" : "HiAI process returned 0";
+    } else if (cpuFallback) {
+        g_npuDiagnostics.lastEvidence = "HiAI backend reported CPU fallback";
+    } else if (npuError) {
+        g_npuDiagnostics.lastEvidence = "HiAI initialization/build/execute failure";
+    } else if (graphReady) {
+        g_npuDiagnostics.lastEvidence = "HiAI graph built/loaded; execution not proven yet";
+    }
+
+    const std::string newVerdict = npuVerdictLocked(g_npuDiagnostics);
+    if (!firstReady && !firstSuccess && !firstFallback && !firstError &&
+        previousVerdict == newVerdict) {
+        return "";
+    }
+    return npuStatusLineLocked(g_npuDiagnostics, "backend_event");
+}
 
 struct LlmPerfBaseline {
     int64_t visionUs = 0;
@@ -127,6 +488,9 @@ static void logLlmPerf(const char* label, Llm* llm, int step = -1, LlmPerfBaseli
     std::string report = out.str();
     LOGI("%{public}s", report.c_str());
     appLog("%{public}s", report.c_str());
+    std::string npuStatus = currentNpuStatusLine(label);
+    LOGI("%{public}s", npuStatus.c_str());
+    appLog("%{public}s", npuStatus.c_str());
 }
 
 // ==================== Runtime log capture ====================
@@ -168,7 +532,15 @@ static void logReader(int readFd) {
         while ((pos = pending.find('\n')) != std::string::npos) {
             std::string line = pending.substr(0, pos);
             pending.erase(0, pos + 1);
-            if (!line.empty()) gLog.append(line);
+            if (!line.empty()) {
+                gLog.append(line);
+                std::string status = observeNpuRuntimeLine(line);
+                if (!status.empty()) {
+                    gLog.append(status);
+                    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
+                                 "[MobiInfra][NativeRuntime] %{public}s", status.c_str());
+                }
+            }
         }
     }
 }
@@ -349,9 +721,11 @@ struct AsyncData {
     napi_async_work work;
     napi_deferred deferred;
     std::string inputStr;
+    std::string npuMode = "online";
     std::string outputStr;
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
+    uint64_t chatRequestId = 0;
 };
 
 struct OpProfileStat {
@@ -369,6 +743,8 @@ static std::string formatRuntimeCapabilities() {
     out << "libMNN contains OH_LOG_Print + MNNJNI, so MNN_PRINT/MNN_ERROR logs are expected in system HiLog.\n"
         << "Search HiLog tag/text: MNNJNI, The device supports, KleidiAI is running.\n"
         << "App Runtime Logs -> Native captures stdout/stderr and this app's native LOGI/LOGE, but not MNN direct HiLog.\n"
+        << "Search [NPU_STATUS] for the normalized HiAI verdict. NPU_ACTIVE requires a HiAI process ret=0 or offline NNRT RunSync success event.\n"
+        << "NPU_ACTIVE_WITH_CPU_FALLBACK means NPU executed successfully but one or more unsupported ops used CPU.\n"
         << "Expected MNN CPU feature line:\n"
         << "The device supports: i8sdot:<n>, fp16:<n>, i8mm:<n>, sve2:<n>, sme2:<n>\n"
         << "Expected KleidiAI line:\n"
@@ -388,6 +764,114 @@ static std::string parentDir(const std::string& path) {
     if (pos == std::string::npos) return "";
     if (pos == 0) return "/";
     return path.substr(0, pos);
+}
+
+static bool pathExistsLocal(const std::string& path);
+
+static std::string readTextFileLocal(const std::string& path) {
+    std::ifstream input(path);
+    if (!input.good()) return "";
+    std::ostringstream content;
+    content << input.rdbuf();
+    return content.str();
+}
+
+static bool resolveOfflineNpuChunks(const std::string& configPath,
+                                    std::vector<std::string>& omPaths,
+                                    std::string& error) {
+    const std::string configText = readTextFileLocal(configPath);
+    if (configText.empty()) {
+        error = "cannot read model config: " + configPath;
+        return false;
+    }
+    bool visualSplit = false;
+    if (extractJsonBoolFieldValue(configText, "visual_split", visualSplit) != JsonFieldStatus::VALID ||
+        !visualSplit) {
+        error = "offline NPU mode requires visual_split=true";
+        return false;
+    }
+    std::vector<std::string> chunkModels;
+    std::vector<std::string> chunkBackends;
+    if (extractJsonStringArrayValue(configText, "visual_blocks_chunks", chunkModels) != JsonFieldStatus::VALID ||
+        chunkModels.empty()) {
+        error = "offline NPU mode requires non-empty visual_blocks_chunks";
+        return false;
+    }
+    if (extractJsonStringArrayValue(configText, "visual_blocks_chunk_backends", chunkBackends) !=
+          JsonFieldStatus::VALID ||
+        chunkBackends.size() != chunkModels.size()) {
+        error = "visual_blocks_chunk_backends must match visual_blocks_chunks in offline mode";
+        return false;
+    }
+    std::vector<std::string> explicitOmPaths;
+    const JsonFieldStatus explicitOmStatus =
+        extractJsonStringArrayValue(configText, "visual_blocks_offline_om", explicitOmPaths);
+    if (explicitOmStatus == JsonFieldStatus::INVALID) {
+        error = "visual_blocks_offline_om must be an array of strings";
+        return false;
+    }
+    const bool hasExplicitOmPaths = explicitOmStatus == JsonFieldStatus::VALID;
+    if (hasExplicitOmPaths && explicitOmPaths.size() != chunkModels.size()) {
+        error = "visual_blocks_offline_om must match visual_blocks_chunks";
+        return false;
+    }
+
+    const std::string modelDir = parentDir(configPath);
+    std::string configuredNpuModelDir;
+    const JsonFieldStatus npuModelDirStatus =
+        extractJsonStringValue(configText, "npu_model_dir", configuredNpuModelDir);
+    if (npuModelDirStatus == JsonFieldStatus::INVALID) {
+        error = "npu_model_dir must be a string";
+        return false;
+    }
+    if (npuModelDirStatus == JsonFieldStatus::MISSING) configuredNpuModelDir = "om";
+    if (configuredNpuModelDir.empty()) {
+        error = "npu_model_dir must not be empty in offline mode";
+        return false;
+    }
+    std::string npuModelDir = configuredNpuModelDir;
+    if (npuModelDir.front() != '/') npuModelDir = joinPath(modelDir, npuModelDir);
+    omPaths.assign(chunkModels.size(), "");
+    size_t requiredOmCount = 0;
+    for (size_t i = 0; i < chunkModels.size(); ++i) {
+        const std::string backend = lowerAscii(chunkBackends[i]);
+        if (backend == "cpu") continue;
+        if (!isNpuBackendName(backend)) {
+            error = "invalid visual_blocks_chunk_backends[" + std::to_string(i) + "]: " + chunkBackends[i];
+            return false;
+        }
+        ++requiredOmCount;
+        const bool useExplicitOmPath = hasExplicitOmPaths && !explicitOmPaths[i].empty();
+        std::string relativeOm;
+        if (useExplicitOmPath) {
+            relativeOm = explicitOmPaths[i];
+        } else {
+            const std::string& chunkModel = chunkModels[i];
+            size_t slash = chunkModel.find_last_of('/');
+            std::string fileName = slash == std::string::npos ? chunkModel : chunkModel.substr(slash + 1);
+            size_t extension = fileName.rfind(".mnn");
+            if (extension != std::string::npos && extension + 4 == fileName.size()) fileName.erase(extension);
+            relativeOm = fileName + ".om";
+        }
+        std::string candidate = relativeOm;
+        if (candidate.empty() || candidate.front() != '/') {
+            if (useExplicitOmPath) {
+                candidate = joinPath(modelDir, candidate);
+            } else {
+                candidate = joinPath(npuModelDir, candidate);
+            }
+        }
+        if (!pathExistsLocal(candidate)) {
+            error = "missing offline OM for NPU chunk[" + std::to_string(i) + "]: " + candidate;
+            return false;
+        }
+        omPaths[i] = candidate;
+    }
+    if (requiredOmCount == 0) {
+        error = "offline NPU mode selected but no chunk is configured for NPU";
+        return false;
+    }
+    return true;
 }
 
 static bool ensureDirectoryRecursive(const std::string& path) {
@@ -636,14 +1120,39 @@ static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*cont
     delete token;
 }
 
+static bool isChatRequestCancelled(uint64_t requestId) {
+    return requestId != 0 &&
+        g_cancelled_chat_request_id.load(std::memory_order_acquire) == requestId;
+}
+
+static void clearChatRequestState(uint64_t requestId) {
+    uint64_t expectedRunning = requestId;
+    g_running_chat_request_id.compare_exchange_strong(expectedRunning, 0, std::memory_order_acq_rel);
+    uint64_t expectedLatest = requestId;
+    g_latest_chat_request_id.compare_exchange_strong(expectedLatest, 0, std::memory_order_acq_rel);
+}
+
+class ChatRequestLifetime {
+public:
+    explicit ChatRequestLifetime(uint64_t requestId) : requestId_(requestId) {}
+    ~ChatRequestLifetime() { clearChatRequestState(requestId_); }
+
+private:
+    uint64_t requestId_;
+};
+
 // 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。
 class TsfnStreambuf : public std::streambuf {
 public:
-    TsfnStreambuf(napi_threadsafe_function tsfn) : tsfn_(tsfn) {}
+    TsfnStreambuf(napi_threadsafe_function tsfn, uint64_t requestId = 0, LlmContext* context = nullptr)
+        : tsfn_(tsfn), requestId_(requestId), context_(context) {}
     std::string str() const { return accumulated_; }
 
 protected:
     std::streamsize xsputn(const char* s, std::streamsize n) override {
+        if (applyCancellationOnInferenceThread()) {
+            return n;
+        }
         accumulated_.append(s, n);
         if (tsfn_ && n > 0) {
             std::string* data = new std::string(s, n);
@@ -654,6 +1163,9 @@ protected:
 
     int_type overflow(int_type ch) override {
         if (ch != EOF) {
+            if (applyCancellationOnInferenceThread()) {
+                return ch;
+            }
             char c = static_cast<char>(ch);
             accumulated_ += c;
             if (tsfn_) {
@@ -665,7 +1177,21 @@ protected:
     }
 
 private:
+    bool applyCancellationOnInferenceThread() {
+        if (!isChatRequestCancelled(requestId_)) {
+            return false;
+        }
+        // LlmContext::status 不是原子类型，因此只能由正在执行 response() 的线程写入。
+        // MNN 会在下一次 decode/forward 边界检查 USER_CANCEL 并提前返回。
+        if (context_) {
+            context_->status = LlmStatus::USER_CANCEL;
+        }
+        return true;
+    }
+
     napi_threadsafe_function tsfn_;
+    uint64_t requestId_;
+    LlmContext* context_;
     std::string accumulated_;
 };
 
@@ -697,11 +1223,37 @@ static void LoadModelExecute(napi_env env, void* data) {
     LOGI("Loading model from: %{public}s", asyncData->inputStr.c_str());
 
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_currentModelConfigPath = asyncData->inputStr;
+    resetNpuRuntimeDiagnostics("config unavailable", false);
     g_llm.reset(Llm::createLLM(asyncData->inputStr));
     if (!g_llm) {
         asyncData->success = false;
         asyncData->outputStr = "error: create LLM failed";
+        LOGE("%{public}s", currentNpuStatusLine("model_create_failed").c_str());
         return;
+    }
+
+    if (asyncData->npuMode == "offline") {
+        std::vector<std::string> omPaths;
+        std::string offlineError;
+        if (!resolveOfflineNpuChunks(asyncData->inputStr, omPaths, offlineError)) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: offline NPU setup failed: " + offlineError;
+            LOGE("%{public}s", asyncData->outputStr.c_str());
+            return;
+        }
+        std::shared_ptr<OfflineNpuChunkExecutor> executor(new OfflineNpuChunkExecutor());
+        if (!g_llm->setNpuChunkExecutor(executor, omPaths)) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: selected model does not support offline visual NPU chunks";
+            LOGE("%{public}s", asyncData->outputStr.c_str());
+            return;
+        }
+        LOGI("NPU execution mode=offline, strict precompiled OM loading enabled");
+    } else {
+        LOGI("NPU execution mode=online, MNN HiAI compile/cache path enabled");
     }
 
     // tmp_path 指向模型目录或 custom_opp 沙箱，供 MNN/HiAI 运行时写临时编译产物。
@@ -717,16 +1269,25 @@ static void LoadModelExecute(napi_env env, void* data) {
     std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
     g_llm->set_config(tmpConfig);
 
+    const std::string effectiveConfig = g_llm->dump_config();
+    bool npuRequested = false;
+    const std::string backendSummary = summarizeRequestedBackends(effectiveConfig, npuRequested);
+    std::string configStatus = resetNpuRuntimeDiagnostics(
+        backendSummary + ", npu_execution_mode=" + asyncData->npuMode, npuRequested);
+    LOGI("%{public}s", configStatus.c_str());
+
     bool res = g_llm->load();
     if (res) {
         asyncData->success = true;
         asyncData->outputStr = "ok";
         LOGI("Model loaded OK");
+        LOGI("%{public}s", currentNpuStatusLine("model_load").c_str());
     } else {
         g_llm.reset();
         asyncData->success = false;
         asyncData->outputStr = "error: load failed";
         LOGE("Model load FAILED");
+        LOGE("%{public}s", currentNpuStatusLine("model_load_failed").c_str());
     }
 }
 
@@ -753,8 +1314,8 @@ static void AsyncComplete(napi_env env, napi_status status, void* data) {
 }
 
 static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     char configPath[1024] = {0};
@@ -763,6 +1324,19 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = configPath;
+    if (argc >= 2) {
+        napi_valuetype modeType = napi_undefined;
+        napi_typeof(env, args[1], &modeType);
+        if (modeType == napi_string) {
+            char mode[32] = {0};
+            size_t modeLength = 0;
+            napi_get_value_string_utf8(env, args[1], mode, sizeof(mode), &modeLength);
+            asyncData->npuMode = lowerAscii(std::string(mode, modeLength));
+        }
+    }
+    if (asyncData->npuMode != "online" && asyncData->npuMode != "offline") {
+        asyncData->npuMode = "online";
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);
@@ -1052,6 +1626,8 @@ static napi_value ProfileGenerateAsync(napi_env env, napi_callback_info info) {
 // ========== 4. 异步多轮对话 ==========
 static void ChatExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
+    ChatRequestLifetime requestLifetime(asyncData->chatRequestId);
+    g_running_chat_request_id.store(asyncData->chatRequestId, std::memory_order_release);
     std::lock_guard<std::mutex> lock(g_mutex);
     
     if (!g_llm) {
@@ -1069,6 +1645,14 @@ static void ChatExecute(napi_env env, void* data) {
         return;
     }
 
+    if (isChatRequestCancelled(asyncData->chatRequestId)) {
+        asyncData->success = true;
+        asyncData->outputStr.clear();
+        LOGI("Chat request %{public}llu cancelled before inference",
+             static_cast<unsigned long long>(asyncData->chatRequestId));
+        return;
+    }
+
     if (g_messages.empty()) {
         g_messages.emplace_back("system", "You are a helpful assistant.");
     }
@@ -1078,8 +1662,9 @@ static void ChatExecute(napi_env env, void* data) {
     dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     std::string assistant_str;
+    LlmContext* context = const_cast<LlmContext*>(g_llm->getContext());
     if (asyncData->tsfn) {
-        TsfnStreambuf buf(asyncData->tsfn);
+        TsfnStreambuf buf(asyncData->tsfn, asyncData->chatRequestId, context);
         std::ostream tokenStream(&buf);
         g_llm->response(g_messages, &tokenStream);
         assistant_str = buf.str();
@@ -1088,7 +1673,28 @@ static void ChatExecute(napi_env env, void* data) {
         g_llm->response(g_messages, &oss);
         assistant_str = oss.str();
     }
-    auto context = g_llm->getContext();
+    bool cancelled = isChatRequestCancelled(asyncData->chatRequestId);
+
+    if (cancelled && context) {
+        // 取消可能让下游 forward 把状态从 USER_CANCEL 改成 INTERNAL_ERROR；统一恢复为已完成，
+        // 否则下一轮 response() 入口会拒绝继续使用当前模型。
+        context->status = LlmStatus::NORMAL_FINISHED;
+    }
+
+    if (cancelled) {
+        if (assistant_str.empty()) {
+            g_messages.emplace_back("assistant", "[Generation stopped by user]");
+        } else {
+            g_messages.emplace_back("assistant", assistant_str);
+        }
+        // 丢弃被截断生成留下的 KV，下一轮会根据 g_messages 重新建立一致的上下文。
+        g_llm->reset();
+        asyncData->outputStr = assistant_str;
+        asyncData->success = true;
+        LOGI("Chat request %{public}llu cancelled after %{public}zu output bytes",
+             static_cast<unsigned long long>(asyncData->chatRequestId), assistant_str.size());
+        return;
+    }
 
     if (assistant_str.empty() && context) {
         assistant_str = context->generate_str;
@@ -1118,6 +1724,8 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = userMsg;
+    asyncData->chatRequestId = g_next_chat_request_id.fetch_add(1, std::memory_order_acq_rel) + 1;
+    g_latest_chat_request_id.store(asyncData->chatRequestId, std::memory_order_release);
 
     // Optional 2nd arg: onToken callback for local chat streaming.
     if (argc >= 2) {
@@ -1140,6 +1748,22 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
     napi_queue_async_work(env, asyncData->work);
 
     return promise;
+}
+
+static napi_value CancelChat(napi_env env, napi_callback_info info) {
+    (void)info;
+    uint64_t requestId = g_latest_chat_request_id.load(std::memory_order_acquire);
+    const char* result = "no active chat";
+    if (requestId != 0) {
+        g_cancelled_chat_request_id.store(requestId, std::memory_order_release);
+        result = "cancel requested";
+        LOGI("Chat cancellation requested for request %{public}llu (running=%{public}llu)",
+             static_cast<unsigned long long>(requestId),
+             static_cast<unsigned long long>(g_running_chat_request_id.load(std::memory_order_acquire)));
+    }
+    napi_value value;
+    napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
+    return value;
 }
 
 // ========== 5. Agent Prefill (prefix KV cache reuse) ==========
@@ -4697,6 +5321,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelChat",   nullptr, CancelChat,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
