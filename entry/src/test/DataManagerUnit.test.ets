@@ -2640,7 +2640,8 @@ export default function dataManagerUnitTest() {
     });
 
     it('seedreamTextToImageRequestBodyMatchesArkShape', 0, () => {
-      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '', createDefaultAvatarGenerationParams('2K', 'url', true));
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '',
+        createDefaultAvatarGenerationParams('2K', 'url', false));
       expect(String(body['model'])).assertEqual('doubao-seedream-4-5-251128');
       expect(String(body['prompt'])).assertEqual('生成数字分身');
       expect(String(body['sequential_image_generation'])).assertEqual('disabled');

@@ -33,6 +33,7 @@ import agentActionParserUnitTest from './AgentActionParserUnit.test';
 import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
 import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
+import aiGeneratedBadgeUnitTest from './AiGeneratedBadgeUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -70,4 +71,5 @@ export default function testsuite() {
   captureOverlayPolicyUnitTest();
   agentLoopTimingPolicyUnitTest();
   localPlannerFastPathUnitTest();
+  aiGeneratedBadgeUnitTest();
 }

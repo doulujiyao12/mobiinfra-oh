@@ -3,6 +3,8 @@ import { router } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction } from '@kit.ArkUI';
 import { AppLogger } from '../utils/AppLogger';
+import { AiGeneratedBadge } from '../components/AiGeneratedBadge';
+import { ensureAiGeneratedTextNotice } from '../utils/AiGeneratedContent';
 
 // 运行日志页：可在原生日志 ring buffer、云端 Agent 日志和图库分析日志之间切换，
 // 用于调试模型加载、推理、HDC 通信、云端 Decider 输入输出和图库入库状态。
@@ -39,6 +41,14 @@ struct LogView {
     }
   }
 
+  private containsAiGeneratedContent(): boolean {
+    return this.logSource === 1 || this.logSource === 2
+  }
+
+  private copyText(): string {
+    return this.containsAiGeneratedContent() ? ensureAiGeneratedTextNotice(this.logs) : this.logs
+  }
+
   reload() {
     // Native 日志来自 libentry.so 的 getLogs；Cloud/Gallery 日志来自 AppStorage。
     try {
@@ -70,6 +80,10 @@ struct LogView {
         Blank()
         Text(this.logTitle())
           .fontSize(18).fontWeight(FontWeight.Bold)
+        if (this.containsAiGeneratedContent()) {
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 8 })
+        }
         Blank()
         Button(this.autoRefresh ? 'Auto ON' : 'Auto OFF')
           .fontSize(12).height(36)
@@ -117,7 +131,7 @@ struct LogView {
           .backgroundColor('#FF9800')
           .onClick(() => {
             const pb = pasteboard.getSystemPasteboard()
-            pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.logs))
+            pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.copyText()))
               .then(() => { promptAction.showToast({ message: 'Copied!', duration: 1500 }) })
               .catch((e: Error) => {
                 AppLogger.warnCause('LogView', 'copy logs failed', e)

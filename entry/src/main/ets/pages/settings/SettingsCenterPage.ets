@@ -1137,7 +1137,7 @@ export struct SettingsCenterPage {
       onValueChange: (value: string) => { this.cloudDeciderModel = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
-    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput })
+    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder CloudPlannerActionRow() {
@@ -1382,7 +1382,7 @@ export struct SettingsCenterPage {
     }
     .width('100%')
     SettingsOutputPanel({ title: '本地输出', content: this.output })
-    SettingsOutputPanel({ title: '云端输出', content: this.cloudOutput })
+    SettingsOutputPanel({ title: '云端输出', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder TaskAutomationSection() {

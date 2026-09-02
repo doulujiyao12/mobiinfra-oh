@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -907,6 +908,10 @@ export struct TaskPage {
       return true;
     }
     return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  }
+
+  private fileViewerContainsAiGeneratedContent(): boolean {
+    return this.fileViewerCategory === 'daily' || this.fileViewerCategory === 'run';
   }
 
   private contextToText(context: WorkflowJsonMap | undefined): string {
@@ -4089,6 +4094,10 @@ export struct TaskPage {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.fileViewerContainsAiGeneratedContent()) {
+            AiGeneratedBadge({ compact: true })
+              .margin({ right: 8 })
+          }
           Button('关闭')
             .height(30)
             .fontSize(11)

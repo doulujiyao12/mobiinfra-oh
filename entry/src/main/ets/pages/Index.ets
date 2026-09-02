@@ -173,6 +173,10 @@ import {
 } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
+  createAiGeneratedContentMetadata,
+  ensureAiGeneratedTextNotice
+} from '../utils/AiGeneratedContent';
+import {
   PROFILE_KNOCK_SHARE_UTD,
   ProfileKnockShareService,
   ProfileShareEnvelope,
@@ -1503,7 +1507,7 @@ struct Index {
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
         title: '大模型返回确认',
-        message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+        message: ensureAiGeneratedTextNotice('模型推理结果：\n' + response + '\n\n是否同意执行？'),
         buttons: [
           { text: '拒绝', color: '#ff0000' },
           { text: '同意', color: '#00cc00' }
@@ -1525,7 +1529,7 @@ struct Index {
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
         title: '云端模型返回确认',
-        message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+        message: ensureAiGeneratedTextNotice('模型推理结果:\n' + response + '\n\n是否同意执行？'),
         buttons: [
           { text: '拒绝', color: '#ff0000' },
           { text: '同意', color: '#00cc00' }
@@ -2808,14 +2812,19 @@ struct Index {
 
   private buildProfileShareEnvelope(): ProfileShareEnvelope {
     let snapshot = this.buildProfileShareSnapshot();
+    let generationTime = new Date();
+    let generatedAt = generationTime.toISOString();
+    let contentId = 'profile-' + String(generationTime.getTime());
     return {
       schemaVersion: 1,
       typeId: PROFILE_KNOCK_SHARE_UTD,
       appId: 'com.example.mnnllmchat',
       appName: 'MobiInfer LLM Chat',
-      generatedAt: new Date().toISOString(),
-      profileText: this.buildProfileShareText(snapshot),
-      profile: snapshot
+      generatedAt: generatedAt,
+      profileText: ensureAiGeneratedTextNotice(this.buildProfileShareText(snapshot)),
+      profile: snapshot,
+      aiGenerated: true,
+      aiContentMetadata: createAiGeneratedContentMetadata(contentId, generatedAt)
     };
   }
 

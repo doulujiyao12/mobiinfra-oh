@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
 import { MarkdownView } from '../../components/MarkdownView';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -112,6 +113,10 @@ struct WorkflowFileViewer {
       return '运行文件';
     }
     return '日志文件';
+  }
+
+  private containsAiGeneratedContent(): boolean {
+    return this.category === 'daily' || this.category === 'run';
   }
 
   private emptyText(category: string): string {
@@ -528,6 +533,10 @@ struct WorkflowFileViewer {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.containsAiGeneratedContent()) {
+            AiGeneratedBadge({ compact: true })
+              .margin({ right: 8 })
+          }
           if (this.selectedName.length > 0) {
             Button('预览')
               .width(62)

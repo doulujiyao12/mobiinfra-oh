@@ -60,7 +60,8 @@ export function createSeedreamRequestBody(model: string, prompt: string, image: 
   }
   body['size'] = params.size;
   body['stream'] = params.stream;
-  body['watermark'] = params.watermark;
+  // 防御性强制开启：即使调用方传入旧配置，AI 生成图片也必须保留服务端水印。
+  body['watermark'] = true;
   let normalizedImage = image.trim();
   if (normalizedImage.length > 0) {
     body['image'] = normalizedImage;

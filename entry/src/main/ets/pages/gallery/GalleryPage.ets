@@ -1,4 +1,5 @@
 import { promptAction, router } from '@kit.ArkUI';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -1841,6 +1842,8 @@ struct GalleryPage {
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
               .margin({ right: 12 })
+              AiGeneratedBadge({ compact: true })
+                .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
                 .fontColor('#5B68FF')
@@ -2248,6 +2251,8 @@ struct GalleryPage {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 8, right: 8 })
           Text(this.categoryLabel(item.category))
             .fontSize(11)
             .fontColor(this.categoryColor(item.category))
@@ -3017,6 +3022,8 @@ struct GalleryPage {
       Column() {
         Row() {
           Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+          AiGeneratedBadge({ compact: true })
+            .margin({ right: 8 })
           Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor('#7F8592')
         }.width('100%')
         Scroll() {
@@ -3257,6 +3264,8 @@ struct GalleryPage {
       }
       if (this.galleryAnswerText.length > 0) {
         Column() {
+          AiGeneratedBadge({ compact: true })
+            .margin({ bottom: 7 })
           Text(this.galleryAnswerText)
             .fontSize(13)
             .fontColor('#303746')
@@ -3324,6 +3333,7 @@ struct GalleryPage {
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
+        AiGeneratedBadge({ compact: true })
       }.width('100%')
       Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
         ForEach(this.categoryFilterItems(), (item: GalleryCategoryFilter) => {

@@ -9,6 +9,7 @@ import {
   JsonMap
 } from '../../datamanager/DataManagerTypes';
 import { MarkdownView } from '../../components/MarkdownView';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
 @Entry
@@ -159,6 +160,8 @@ struct CollectionGroupDetailPage {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
+        AiGeneratedBadge({ compact: true })
+          .margin({ top: 6 })
         Row() {
           Text(event.time)
             .fontSize(12)
@@ -324,6 +327,8 @@ struct CollectionGroupDetailPage {
           .margin({ left: 8 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        AiGeneratedBadge({ compact: true })
+          .margin({ left: 8 })
       }
       .width('100%')
 
@@ -388,6 +393,8 @@ struct CollectionGroupDetailPage {
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
               .margin({ right: 12 })
+              AiGeneratedBadge({ compact: true })
+                .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
                 .fontColor('#5B68FF')
@@ -464,6 +471,8 @@ struct CollectionGroupDetailPage {
             .margin({ left: 12 })
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 8 })
         }
         .width('86%')
         .margin({ top: 18, bottom: 14 })

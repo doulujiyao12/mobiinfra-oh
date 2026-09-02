@@ -11,6 +11,8 @@ import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { promptAction } from '@kit.ArkUI';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { ensureAiGeneratedTextNotice } from '../../utils/AiGeneratedContent';
 
 // ClawMate 首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
@@ -96,7 +98,7 @@ export struct HomePage {
         lines.push('- ' + claim);
       });
     }
-    return lines.join('\n');
+    return ensureAiGeneratedTextNotice(lines.join('\n'));
   }
 
   private showProfileDetail(item: HomeDomainViewModel): void {
@@ -248,10 +250,18 @@ export struct HomePage {
 
   @Builder AvatarImage() {
     if (this.profile.avatarUri.length > 0) {
-      Image(this.profile.avatarUri)
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        Image(this.profile.avatarUri)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .backgroundColor('#E8F1FF')
+          .borderRadius(20)
+        AiGeneratedBadge({ tone: 'overlay' })
+          .margin({ right: 12, bottom: 12 })
+      }
         .width('92%')
         .height(270)
-        .objectFit(ImageFit.Cover)
         .backgroundColor('#E8F1FF')
         .borderRadius(20)
         .clip(true)
@@ -277,11 +287,19 @@ export struct HomePage {
   @Builder AvatarHistoryEntry(item: AvatarVersionViewModel) {
     Row() {
       if (item.imageUri.length > 0) {
-        Image(item.imageUri)
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          Image(item.imageUri)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Cover)
+            .borderRadius(12)
+          AiGeneratedBadge({ compact: true, tone: 'overlay' })
+            .margin({ right: 3, bottom: 3 })
+        }
           .width(64)
           .height(82)
-          .objectFit(ImageFit.Cover)
           .borderRadius(12)
+          .clip(true)
       } else {
         Column() {
           Text('无图').fontSize(12).fontColor('#8B93A4')
@@ -387,6 +405,8 @@ export struct HomePage {
             .fontWeight(FontWeight.Bold)
             .fontColor('#151A28')
             .layoutWeight(1)
+          AiGeneratedBadge()
+            .margin({ right: 12 })
           Text('返回')
             .fontSize(13)
             .fontColor('#7C8494')
@@ -397,10 +417,18 @@ export struct HomePage {
         Scroll() {
           Column() {
             if (item.imageUri.length > 0) {
-              Image(item.imageUri)
+              Stack({ alignContent: Alignment.BottomEnd }) {
+                Image(item.imageUri)
+                  .width('100%')
+                  .height('100%')
+                  .objectFit(ImageFit.Contain)
+                  .borderRadius(14)
+                  .backgroundColor('#F5F7FB')
+                AiGeneratedBadge({ tone: 'overlay' })
+                  .margin({ right: 10, bottom: 10 })
+              }
                 .width('100%')
                 .height(220)
-                .objectFit(ImageFit.Contain)
                 .borderRadius(14)
                 .backgroundColor('#F5F7FB')
                 .margin({ top: 14 })
@@ -1090,6 +1118,8 @@ export struct HomePage {
             .padding({ left: 9, right: 9, top: 5, bottom: 5 })
             .backgroundColor(item.color)
             .borderRadius(8)
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 8 })
           Text('关闭')
             .fontSize(13)
             .fontColor('#7C8494')
@@ -1258,6 +1288,16 @@ export struct HomePage {
         .margin({ top: 16 })
 
         Row() {
+          AiGeneratedBadge({ compact: true })
+          Text('以下画像摘要由 AI 分析生成')
+            .fontSize(11)
+            .fontColor('#727A8B')
+            .margin({ left: 7 })
+        }
+        .width('92%')
+        .margin({ top: 10 })
+
+        Row() {
           ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
             this.LifestyleItem(item)
             if (index < 3) {
@@ -1274,6 +1314,8 @@ export struct HomePage {
 
           Row() {
             Text('为你推荐').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+            AiGeneratedBadge({ compact: true })
+              .margin({ right: 8 })
             this.RecommendationFilterButton('未完成', false)
             Blank().width(8)
             this.RecommendationFilterButton('全部', true)

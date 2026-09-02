@@ -24,6 +24,8 @@ import {
   voiceReplayGlobalBlockNeeded
 } from './VoiceInteractionTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { isAiGeneratedChatMessage } from '../../utils/AiGeneratedContent';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 import { AppLogger } from '../../utils/AppLogger';
 import {
@@ -560,6 +562,10 @@ struct ChatBubbleView {
           .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (isAiGeneratedChatMessage(this.role, this.kind)) {
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 6 })
+        }
         Text(chatFormatMessageTime(this.createdAt))
           .fontSize(10)
           .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
@@ -620,6 +626,10 @@ struct ChatLightweightBubbleView {
           .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (isAiGeneratedChatMessage(this.role, this.kind)) {
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 6 })
+        }
         Text(chatFormatMessageTime(this.createdAt))
           .fontSize(10)
           .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
@@ -693,6 +703,8 @@ struct ChatTraceBubbleView {
             .margin({ top: 3 })
         }
         .layoutWeight(1)
+        AiGeneratedBadge({ compact: true })
+          .margin({ left: 6 })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)

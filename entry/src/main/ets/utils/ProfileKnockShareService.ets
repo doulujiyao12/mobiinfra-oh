@@ -7,6 +7,12 @@ import { AppLogger } from './AppLogger';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { WorkflowStorage } from './WorkflowStorage';
+import {
+  AI_GENERATED_CONTENT_PROPERTY,
+  AI_GENERATED_SERVICE_PROVIDER,
+  AI_GENERATED_TEXT_NOTICE,
+  AiGeneratedContentMetadata
+} from './AiGeneratedContent';
 
 export const PROFILE_KNOCK_SHARE_UTD: string = 'com.mobiinfra.profile-json';
 export const PROFILE_KNOCK_SHARE_FILE_EXTENSION: string = '.mobi-profile';
@@ -38,6 +44,8 @@ export interface ProfileShareEnvelope {
   generatedAt: string;
   profileText: string;
   profile: Object;
+  aiGenerated: boolean;
+  aiContentMetadata: AiGeneratedContentMetadata;
 }
 
 export interface ProfileShareReceivedEvent {
@@ -66,6 +74,8 @@ interface ParsedProfileShareEnvelope {
   generatedAt?: string;
   profileText?: string;
   profile?: Object;
+  aiGenerated?: boolean;
+  aiContentMetadata?: AiGeneratedContentMetadata;
 }
 
 interface ProfileInboxCandidate {
@@ -303,13 +313,17 @@ export class ProfileKnockShareService {
     return new systemShare.SharedData({
       utd: PROFILE_KNOCK_SHARE_UTD,
       uri: uri,
-      title: 'MobiInfer 用户画像',
-      label: '用户画像',
-      description: '用于生成同频报告的个人画像摘要',
+      title: 'MobiInfer AI 生成用户画像',
+      label: 'AI生成用户画像',
+      description: AI_GENERATED_TEXT_NOTICE + ' 用于生成同频报告的个人画像摘要',
       extraData: {
         schemaVersion: PROFILE_SHARE_SCHEMA_VERSION,
         typeId: PROFILE_KNOCK_SHARE_UTD,
-        generatedAt: envelope.generatedAt
+        generatedAt: envelope.generatedAt,
+        aiGenerated: true,
+        contentProperty: AI_GENERATED_CONTENT_PROPERTY,
+        serviceProvider: AI_GENERATED_SERVICE_PROVIDER,
+        contentId: envelope.aiContentMetadata.contentId
       }
     });
   }
