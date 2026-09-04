@@ -9,7 +9,7 @@ export default function mainTabConfigUnitTest() {
       expect(MAIN_TAB_ITEMS[1].label).assertEqual('汇总');
       expect(MAIN_TAB_ITEMS[2].label).assertEqual('聊天');
       expect(MAIN_TAB_ITEMS[3].label).assertEqual('任务');
-      expect(MAIN_TAB_ITEMS[4].label).assertEqual('设置');
+      expect(MAIN_TAB_ITEMS[4].label).assertEqual('我的');
     });
 
     it('keepsChatAsCenterTab', 0, () => {
@@ -23,7 +23,7 @@ export default function mainTabConfigUnitTest() {
       expect(mainTabIcon(MainTabIndex.Summary)).assertEqual('tab_summary');
       expect(mainTabIcon(MainTabIndex.Chat)).assertEqual('tab_chat');
       expect(mainTabIcon(MainTabIndex.Task)).assertEqual('tab_task');
-      expect(mainTabIcon(MainTabIndex.Settings)).assertEqual('tab_settings');
+      expect(mainTabIcon(MainTabIndex.Mine)).assertEqual('tab_mine');
     });
   });
 }

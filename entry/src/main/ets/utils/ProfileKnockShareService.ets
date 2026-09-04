@@ -3,6 +3,7 @@ import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { fileUri } from '@kit.CoreFileKit';
 import { harmonyShare, systemShare } from '@kit.ShareKit';
 import fs from '@ohos.file.fs';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
@@ -26,7 +27,6 @@ const PROFILE_SHARE_INBOX_DIR: string = 'inbox';
 const MAX_RECEIVED_PROFILE_BYTES: number = 512 * 1024;
 const MAX_INBOX_SCAN_FILES: number = 20;
 const PROFILE_SHARE_SCHEMA_VERSION: number = 1;
-const PROFILE_SHARE_APP_ID: string = 'com.example.mnnllmchat';
 const PROFILE_FILE_OPEN_FALLBACK_MIME_TYPES: string[] = [
   'application/octet-stream',
   'application/json',
@@ -565,7 +565,7 @@ export class ProfileKnockShareService {
     if (envelope.typeId === PROFILE_KNOCK_SHARE_UTD) {
       return true;
     }
-    if (envelope.appId === PROFILE_SHARE_APP_ID && envelope.schemaVersion === PROFILE_SHARE_SCHEMA_VERSION) {
+    if (envelope.appId === getAppBundleName() && envelope.schemaVersion === PROFILE_SHARE_SCHEMA_VERSION) {
       return true;
     }
     return false;

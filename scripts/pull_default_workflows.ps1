@@ -7,9 +7,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot "app_identity.ps1")
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$appBundleName = Get-AppBundleName -RepoRoot $repoRoot
 
 $DefaultRemoteConfigDirs = @(
-  "/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/workflows/configs",
+  "/data/app/el2/100/base/$appBundleName/haps/entry/files/workflows/configs",
   "/data/storage/el2/base/haps/entry/files/workflows/configs"
 )
 
@@ -72,7 +76,6 @@ function Receive-JsonFile {
   }
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
   $outputPath = Join-Path $repoRoot "entry\src\main\resources\rawfile\workflows\configs"
 } elseif ([System.IO.Path]::IsPathRooted($OutputDir)) {

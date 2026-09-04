@@ -25,16 +25,6 @@
         }
       },
       {
-        "name": "ohos.permission.SYSTEM_FLOAT_WINDOW",
-        "reason": "$string:EntryAbility_desc",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "always"
-        }
-      },
-      {
         "name": "ohos.permission.MEDIA_LOCATION",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {
@@ -64,8 +54,8 @@
         "value": "sharekitModel"
       },
       {
-        "name": "shareBundleName",
-        "value": "com.example.mnnllmchat"
+        "name": "client_id",
+        "value": "6917613102135452205"
       }
     ],
     "abilities": [

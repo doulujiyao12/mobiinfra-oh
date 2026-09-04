@@ -21,9 +21,11 @@ die() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+source "$script_dir/app_identity.sh"
+app_bundle_name="$(read_app_bundle_name "$repo_root")"
 
 default_remote_workflow_roots=(
-  "/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/workflows"
+  "/data/app/el2/100/base/$app_bundle_name/haps/entry/files/workflows"
   "/data/storage/el2/base/haps/entry/files/workflows"
 )
 

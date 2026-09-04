@@ -93,6 +93,7 @@ import {
   SettingsOutputPanel,
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
+import { HuaweiAccountCard } from './HuaweiAccountCard';
 
 registerGallerySettingsDefaults();
 
@@ -179,6 +180,7 @@ export struct SettingsCenterPage {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   @State private activeSensitiveInputId: string = '';
+  @State private huaweiAccountSessionActive: boolean = false;
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onDownloadModelScopeModel: () => Promise<void> = async () => {};
@@ -772,7 +774,18 @@ export struct SettingsCenterPage {
 
   @Builder SettingsSectionList() {
     Column() {
-      AppHeader({ title: '设置中心', icon: $r('app.media.header_settings') })
+      AppHeader({
+        title: '我的',
+        subtitle: '账号与应用设置',
+        icon: $r('app.media.header_mine')
+      })
+      HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
+      Text('设置与服务')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+        .width('92%')
+        .margin({ top: 22, bottom: 2 })
       ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
         this.SettingsListItem(item)
       }, (item: SettingsSectionItem) => String(item.id))
@@ -792,7 +805,7 @@ export struct SettingsCenterPage {
         .borderRadius(14)
         .onClick(() => { this.closeSection(); })
       Column() {
-        Text('设置中心')
+        Text('我的')
           .fontSize(22)
           .fontWeight(FontWeight.Bold)
           .fontColor('#11182F')
@@ -1457,7 +1470,7 @@ export struct SettingsCenterPage {
       })
       SettingsGroupCard({
         title: '关于',
-        subtitle: '当前应用与设置中心说明',
+        subtitle: '当前应用与设置说明',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AboutSettingsGroup() }
       })

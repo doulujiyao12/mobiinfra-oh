@@ -3,7 +3,7 @@ export enum MainTabIndex {
   Summary = 1,
   Chat = 2,
   Task = 3,
-  Settings = 4
+  Mine = 4
 }
 
 export interface MainTabItem {
@@ -18,7 +18,7 @@ export const MAIN_TAB_ITEMS: MainTabItem[] = [
   { index: MainTabIndex.Summary, icon: 'tab_summary', label: '汇总' },
   { index: MainTabIndex.Chat, icon: 'tab_chat', label: '聊天' },
   { index: MainTabIndex.Task, icon: 'tab_task', label: '任务' },
-  { index: MainTabIndex.Settings, icon: 'tab_settings', label: '设置' }
+  { index: MainTabIndex.Mine, icon: 'tab_mine', label: '我的' }
 ];
 
 export function centerTabIndex(): MainTabIndex {

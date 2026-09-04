@@ -1,6 +1,6 @@
 param(
   [string]$Source = "",
-  [string]$BundleName = "com.example.mnnllmchat",
+  [string]$BundleName = "",
   [string]$ModuleName = "entry",
   [string]$DeviceWorkflowsRoot = "",
   [string]$Hdc = "hdc",
@@ -8,6 +8,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app_identity.ps1")
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($BundleName)) {
+  $BundleName = Get-AppBundleName -RepoRoot $repoRoot
+}
 
 function Invoke-HdcChecked {
   param(

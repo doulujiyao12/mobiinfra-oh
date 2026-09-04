@@ -14,6 +14,7 @@ import threading
 import uuid
 import inspect
 import shlex
+from pathlib import Path
 
 # PC 侧视觉自动化 Agent：
 # 1. 轮询 App 内 9126 TCP 服务获取任务；
@@ -96,8 +97,22 @@ SWIPE_V_END = 0.7
 SWIPE_H_START = 0.3
 SWIPE_H_END = 0.7
 
-# LLM Agent 包名
-LLM_APP_BUNDLE = "com.example.mnnllmchat"
+def load_app_bundle_name() -> str:
+    """Read the host app bundle name from the repository's single app configuration."""
+
+    app_config = Path(__file__).resolve().parents[4] / "AppScope" / "app.json5"
+    try:
+        content = app_config.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read app bundle config: {app_config}") from exc
+    match = re.search(r'"bundleName"\s*:\s*"([^"]+)"', content)
+    if match is None or not match.group(1).strip():
+        raise RuntimeError(f"app.bundleName is missing in: {app_config}")
+    return match.group(1).strip()
+
+
+# LLM Agent 包名与 AppScope/app.json5 保持一致。
+LLM_APP_BUNDLE = load_app_bundle_name()
 LLM_APP_ABILITY = "EntryAbility"
 
 def quiet_system(cmd):

@@ -8,7 +8,7 @@ Usage:
 
 Options:
   --source <dir>                  Source daily-log dir or fixture root.
-  --bundle-name <name>            Debug bundle name. Default: com.example.mnnllmchat.
+  --bundle-name <name>            Debug bundle name. Default: AppScope/app.json5.
   --module-name <name>            Module name for default device path. Default: entry.
   --device-workflows-root <path>  Device workflows root.
   --hdc <path>                    hdc executable path. Defaults to $HDC or hdc in PATH.
@@ -24,6 +24,7 @@ die() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+source "$script_dir/app_identity.sh"
 
 detect_hdc() {
   if [[ -n "${HDC:-}" ]]; then
@@ -71,7 +72,7 @@ invoke_hdc_checked() {
 }
 
 source_path=""
-bundle_name="com.example.mnnllmchat"
+bundle_name="$(read_app_bundle_name "$repo_root")"
 module_name="entry"
 device_workflows_root=""
 hdc_path="$(detect_hdc)"

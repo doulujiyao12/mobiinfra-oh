@@ -13,6 +13,7 @@ import {
 } from './AgentLoopTimingPolicy';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
+import { getAppBundleName } from './AppIdentity';
 import { AgentLoopNativeApi } from 'libentry.so';
 import { localVisionPromptHw } from './LocalVisionImageShape';
 
@@ -28,7 +29,6 @@ interface PlannerTarget {
 }
 
 const MAX_AGENT_STEPS: number = 15;
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
@@ -260,7 +260,8 @@ export class AgentLoopRunner {
 
   private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await this.hdcBridge.startApp(bundleName, bundleName, false);
       this.log(mode, '>> [Agent] returned to host app via HDC bridge.');
       return true;
     } catch (e) {

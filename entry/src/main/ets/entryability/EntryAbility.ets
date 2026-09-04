@@ -3,6 +3,7 @@ import { AppLogger } from '../utils/AppLogger';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { getAppBundleName } from '../utils/AppIdentity';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 import {
   CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
@@ -72,7 +73,7 @@ export default class EntryAbility extends UIAbility {
     });
     AgentExecutionController.setReturnToAppHandler(async () => {
       let wantInfo: Want = {
-        bundleName: 'com.example.mnnllmchat',
+        bundleName: getAppBundleName(),
         abilityName: 'EntryAbility'
       };
       try {
@@ -162,7 +163,7 @@ export default class EntryAbility extends UIAbility {
       let wantAgentInfo: wantAgent.WantAgentInfo = {
         wants: [
           {
-            bundleName: "com.example.mnnllmchat",
+            bundleName: getAppBundleName(),
             abilityName: "EntryAbility"
           }
         ],

@@ -53,6 +53,12 @@
 2. 配置好自动签名。
 3. 点击 **Run** 或 **Debug** 编译打包，将 App 安装至手机。
 
+### 4. 修改应用包名
+
+应用包名只需在 `AppScope/app.json5` 的 `app.bundleName` 中修改。App 运行时的自启动/回跳、画像碰一碰分享标识、PC 侧 Agent 以及设备导入脚本都会自动读取该值；`entry/src/main/module.json5` 的 `shareBundleName` 由 Hvigor 在构建时自动注入，无需手工维护。
+
+包名改变后，HarmonyOS 会把它识别为一个新应用，因此旧包名的沙箱数据不会自动迁移；Account Kit、Map Kit 等已在 AppGallery Connect 开通的服务也需要登记新的包名并匹配相应签名。
+
 ---
 
 ## 📱 二、App 使用指南

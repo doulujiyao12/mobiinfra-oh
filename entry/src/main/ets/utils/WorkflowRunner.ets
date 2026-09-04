@@ -2,6 +2,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
@@ -368,8 +369,6 @@ export function resolveWorkflowJsonForRun(filesDir: string, task: WorkflowTask,
 }
 
 export class WorkflowRunner {
-  private static readonly APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
-
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: () => CloudModelConfig;
@@ -562,7 +561,8 @@ export class WorkflowRunner {
 
   private async returnToHostApp(): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await this.hdcBridge.startApp(bundleName, bundleName, false);
       return true;
     } catch (e) {
       let err = e as Error;

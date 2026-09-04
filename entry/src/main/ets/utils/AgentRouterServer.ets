@@ -4,6 +4,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { localVisionPromptHw } from './LocalVisionImageShape';
 
@@ -18,8 +19,6 @@ type AgentResetHandler = () => Promise<string>;
 type AgentChatHandler = (userMessage: string) => Promise<string>;
 type NativeResetHandler = () => string;
 type HdcServerUrlProvider = () => string;
-
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 type RequestKey =
   'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |
@@ -214,7 +213,8 @@ export class AgentRouterServer {
       let bridge = new HdcWorkflowBridge(hdcServerUrl, (message: string) => {
         this.log(mode, message);
       });
-      await bridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await bridge.startApp(bundleName, bundleName, false);
       this.log(mode, '>> [Cancel] returned to host app via HDC bridge before local cleanup.');
       return true;
     } catch (e) {

@@ -125,6 +125,7 @@ import {
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { getAppBundleName } from '../utils/AppIdentity';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
@@ -2818,7 +2819,7 @@ struct Index {
     return {
       schemaVersion: 1,
       typeId: PROFILE_KNOCK_SHARE_UTD,
-      appId: 'com.example.mnnllmchat',
+      appId: getAppBundleName(),
       appName: 'MobiInfer LLM Chat',
       generatedAt: generatedAt,
       profileText: ensureAiGeneratedTextNotice(this.buildProfileShareText(snapshot)),
@@ -6006,7 +6007,7 @@ struct Index {
       return false;
     }
     this.settingsSectionId = SettingsSectionId.ModelAgents;
-    this.currentTab = MainTabIndex.Settings;
+    this.currentTab = MainTabIndex.Mine;
     await this.downloadModelScopeModel();
     return false;
   }
@@ -6165,8 +6166,8 @@ struct Index {
     if (icon === 'tab_task') {
       return $r('app.media.tab_task');
     }
-    if (icon === 'tab_settings') {
-      return $r('app.media.tab_settings');
+    if (icon === 'tab_mine') {
+      return $r('app.media.tab_mine');
     }
     return $r('app.media.tab_home');
   }
@@ -6271,7 +6272,7 @@ struct Index {
             onRefresh: () => { this.refreshDataManager(); },
             onOpenDataCollectionSettings: () => {
               this.settingsSectionId = SettingsSectionId.DataCollection;
-              this.currentTab = MainTabIndex.Settings;
+              this.currentTab = MainTabIndex.Mine;
             },
             onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
               await this.runWechatAutoSummary(request);
@@ -6395,7 +6396,7 @@ struct Index {
             onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
             onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
           })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Mine), mainTabLabel(MainTabIndex.Mine), MainTabIndex.Mine))
       }
       .onChange((index: number) => { this.currentTab = index; })
       .width('100%')
