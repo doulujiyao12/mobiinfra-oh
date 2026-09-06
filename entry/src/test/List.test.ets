@@ -19,6 +19,7 @@ import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test'
 import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
 import localChatImagePromptUnitTest from './LocalChatImagePromptUnit.test';
+import localChatHistoryUnitTest from './LocalChatHistoryUnit.test';
 import localVisionImageShapeUnitTest from './LocalVisionImageShapeUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
@@ -34,6 +35,8 @@ import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
 import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
 import aiGeneratedBadgeUnitTest from './AiGeneratedBadgeUnit.test';
+import homeTaskSuggestionUnitTest from './HomeTaskSuggestionUnit.test';
+import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -57,6 +60,7 @@ export default function testsuite() {
   chatStreamDisplayPacerUnitTest();
   chatAttachmentPolicyUnitTest();
   localChatImagePromptUnitTest();
+  localChatHistoryUnitTest();
   localVisionImageShapeUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
@@ -72,4 +76,6 @@ export default function testsuite() {
   agentLoopTimingPolicyUnitTest();
   localPlannerFastPathUnitTest();
   aiGeneratedBadgeUnitTest();
+  homeTaskSuggestionUnitTest();
+  homeEmotionalSupportUnitTest();
 }

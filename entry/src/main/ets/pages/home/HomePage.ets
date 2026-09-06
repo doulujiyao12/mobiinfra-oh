@@ -13,11 +13,29 @@ import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { ensureAiGeneratedTextNotice } from '../../utils/AiGeneratedContent';
+import {
+  HomeTaskSuggestion,
+  HomeTaskSuggestionEvidence,
+  homeTaskSuggestionCategoryLabel
+} from './HomeTaskSuggestion';
+import { homeRecommendationGridHeight } from './HomeRecommendationLayout';
+import { HomeComfortChatMessage, HomeComfortConcern } from './HomeEmotionalSupport';
+import { HomeComfortSection } from './HomeComfortSection';
 
 // ClawMate 首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @Prop taskSuggestions: HomeTaskSuggestion[] = [];
+  @Prop taskSuggestionsLoading: boolean = false;
+  @Prop taskSuggestionError: string = '';
+  onRefreshTaskSuggestions: () => Promise<void> = async () => {};
+  @Prop comfortConcerns: HomeComfortConcern[] = [];
+  @Prop comfortConcernsLoading: boolean = false;
+  @Prop comfortConcernError: string = '';
+  onRefreshComfortConcerns: () => Promise<void> = async () => {};
+  onSendComfortMessage: (concern: HomeComfortConcern, history: HomeComfortChatMessage[]) => Promise<string> =
+    async (concern: HomeComfortConcern, history: HomeComfortChatMessage[]): Promise<string> => '';
   onSetRecommendationCompleted: (id: string, completed: boolean) => void = (id: string, completed: boolean) => {};
   @Prop avatarVersions: AvatarVersionViewModel[] = [];
   onExecuteAgentTask: (taskDescription: string, keepTargetAppAfterFinish: boolean) => Promise<void> =
@@ -28,6 +46,7 @@ export struct HomePage {
     async (sourceImage: string) => sourceImage;
   @State recommendationPageIndex: number = 0;
   @State selectedRecommendationId: string = '';
+  @State selectedTaskSuggestionId: string = '';
   @State selectedRecommendationCompletedOverrideId: string = '';
   @State selectedRecommendationCompletedOverrideValue: boolean = false;
   @State agentTaskDraft: string = '';
@@ -878,6 +897,10 @@ export struct HomePage {
     return items.slice(start, start + 4);
   }
 
+  private recommendationGridHeight(): number {
+    return homeRecommendationGridHeight(this.recommendationPageItems().length);
+  }
+
   private setRecommendationPage(index: number): void {
     let maxPageIndex = this.recommendationPageCount() - 1;
     let nextIndex = Math.max(0, Math.min(index, maxPageIndex));
@@ -932,6 +955,7 @@ export struct HomePage {
     try {
       await this.onExecuteAgentTask(task, keepTargetAppAfterFinish);
       this.closeRecommendationDetail();
+      this.closeTaskSuggestionDetail();
     } catch (e) {
       let err = e as Error;
       showToastSafely('任务下发失败：' + err.message, 1800);
@@ -998,6 +1022,482 @@ export struct HomePage {
       .width('92%')
       .margin({ top: 12 })
     }
+  }
+
+  private taskSuggestionAccent(category: string): string {
+    if (category === 'food') {
+      return '#FF8B52';
+    }
+    if (category === 'shopping') {
+      return '#EF6D8D';
+    }
+    if (category === 'news') {
+      return '#4B8BFF';
+    }
+    if (category === 'social') {
+      return '#45B990';
+    }
+    if (category === 'travel') {
+      return '#2EA7B8';
+    }
+    if (category === 'work') {
+      return '#846BEB';
+    }
+    return '#6D78E7';
+  }
+
+  private taskSuggestionTint(category: string): string {
+    if (category === 'food') {
+      return '#FFF1E9';
+    }
+    if (category === 'shopping') {
+      return '#FFF0F4';
+    }
+    if (category === 'news') {
+      return '#EDF4FF';
+    }
+    if (category === 'social') {
+      return '#EAF8F3';
+    }
+    if (category === 'travel') {
+      return '#EAF8FA';
+    }
+    if (category === 'work') {
+      return '#F1EEFF';
+    }
+    return '#EEF0FF';
+  }
+
+  private taskSuggestionIcon(category: string): string {
+    if (category === 'food') {
+      return '食';
+    }
+    if (category === 'shopping') {
+      return '购';
+    }
+    if (category === 'news') {
+      return '讯';
+    }
+    if (category === 'social') {
+      return '聊';
+    }
+    if (category === 'travel') {
+      return '行';
+    }
+    if (category === 'work') {
+      return '办';
+    }
+    return '荐';
+  }
+
+  private refreshTaskSuggestions(): void {
+    if (this.taskSuggestionsLoading) {
+      return;
+    }
+    this.onRefreshTaskSuggestions().catch((e: Error) => {
+      showToastSafely('推荐生成失败：' + e.message, 1800);
+    });
+  }
+
+  private executeTaskSuggestion(item: HomeTaskSuggestion): void {
+    this.submitAgentTask(item.task, false, 'guess-' + item.id);
+  }
+
+  private openTaskSuggestionDetail(item: HomeTaskSuggestion): void {
+    this.selectedTaskSuggestionId = item.id;
+  }
+
+  private closeTaskSuggestionDetail(): void {
+    this.selectedTaskSuggestionId = '';
+  }
+
+  private selectedTaskSuggestionItems(): HomeTaskSuggestion[] {
+    if (this.selectedTaskSuggestionId.length === 0) {
+      return [];
+    }
+    return this.taskSuggestions.filter((item: HomeTaskSuggestion): boolean =>
+      item.id === this.selectedTaskSuggestionId).slice(0, 1);
+  }
+
+  @Builder TaskSuggestionRow(item: HomeTaskSuggestion) {
+    Row() {
+      Row() {
+        Stack({ alignContent: Alignment.Center }) {
+          Text(this.taskSuggestionIcon(item.category))
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.taskSuggestionAccent(item.category))
+        }
+        .width(44)
+        .height(44)
+        .borderRadius(14)
+        .backgroundColor(this.taskSuggestionTint(item.category))
+
+        Column() {
+          Text(item.title)
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#171C2D')
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(homeTaskSuggestionCategoryLabel(item.category) + ' · ' + item.reason)
+            .fontSize(11)
+            .fontColor(this.taskSuggestionAccent(item.category))
+            .width('100%')
+            .margin({ top: 3 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(item.task)
+            .fontSize(12)
+            .fontColor('#7A8191')
+            .width('100%')
+            .margin({ top: 4 })
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .margin({ left: 12, right: 10 })
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.openTaskSuggestionDetail(item);
+      })
+
+      Button(this.agentTaskButtonLabel('guess-' + item.id, '执行'))
+        .width(62)
+        .height(34)
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(Color.White)
+        .backgroundColor(this.agentTaskSubmitting ? '#B6BDD0' : this.taskSuggestionAccent(item.category))
+        .borderRadius(17)
+        .enabled(!this.agentTaskSubmitting)
+        .onClick(() => {
+          this.executeTaskSuggestion(item);
+        })
+    }
+    .width('100%')
+    .height(96)
+    .padding({ left: 12, right: 12 })
+  }
+
+  @Builder TaskSuggestionEvidenceCard(item: HomeTaskSuggestionEvidence, accent: string, tint: string) {
+    Column() {
+      Row() {
+        Text(item.kind === 'record' ? '记录' : '画像')
+          .fontSize(11)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(accent)
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor(tint)
+          .borderRadius(9)
+        Text(item.title)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#303748')
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+
+      Text(item.summary)
+        .fontSize(13)
+        .lineHeight(19)
+        .fontColor('#50586A')
+        .width('100%')
+        .margin({ top: 9 })
+        .maxLines(4)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+      if (item.meta.length > 0) {
+        Text(item.meta)
+          .fontSize(11)
+          .fontColor('#8A91A0')
+          .width('100%')
+          .margin({ top: 7 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 13, bottom: 13 })
+    .backgroundColor(Color.White)
+    .borderRadius(16)
+    .border({ width: 1, color: '#E9EDF5' })
+    .margin({ top: 10 })
+  }
+
+  @Builder TaskSuggestionDetailOverlay(item: HomeTaskSuggestion) {
+    Column() {
+      Row() {
+        Stack({ alignContent: Alignment.Center }) {
+          Text('‹')
+            .fontSize(30)
+            .fontColor('#252B3B')
+            .offset({ y: -1 })
+        }
+        .width(42)
+        .height(42)
+        .backgroundColor(Color.White)
+        .borderRadius(21)
+        .onClick(() => {
+          this.closeTaskSuggestionDetail();
+        })
+        Text('推荐详情')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .layoutWeight(1)
+          .margin({ left: 12 })
+        AiGeneratedBadge({ compact: true })
+      }
+      .width('100%')
+      .height(66)
+      .padding({ left: 16, right: 18 })
+
+      Scroll() {
+        Column() {
+          Row() {
+            Text(homeTaskSuggestionCategoryLabel(item.category))
+              .fontSize(12)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.taskSuggestionAccent(item.category))
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .backgroundColor(this.taskSuggestionTint(item.category))
+              .borderRadius(10)
+            Text('基于近期记录生成')
+              .fontSize(12)
+              .fontColor('#818898')
+              .margin({ left: 10 })
+          }
+          .width('100%')
+
+          Text(item.title)
+            .fontSize(26)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+            .margin({ top: 14 })
+
+          Column() {
+            Row() {
+              Stack({ alignContent: Alignment.Center }) {
+                Text('?')
+                  .fontSize(13)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(Color.White)
+              }
+              .width(28)
+              .height(28)
+              .backgroundColor(this.taskSuggestionAccent(item.category))
+              .borderRadius(10)
+              Text('为什么猜你会这样做')
+                .fontSize(16)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#202637')
+                .margin({ left: 10 })
+            }
+            .width('100%')
+            Text(item.reason)
+              .fontSize(14)
+              .lineHeight(21)
+              .fontColor('#555D70')
+              .width('100%')
+              .margin({ top: 11 })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 16, bottom: 16 })
+          .backgroundColor(this.taskSuggestionTint(item.category))
+          .borderRadius(18)
+          .margin({ top: 18 })
+
+          Row() {
+            Text('溯源依据')
+              .fontSize(18)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#171C2D')
+              .layoutWeight(1)
+            Text(item.evidence.length + ' 条')
+              .fontSize(12)
+              .fontColor('#858C9B')
+          }
+          .width('100%')
+          .margin({ top: 24 })
+
+          if (item.evidence.length === 0) {
+            Text('该推荐未找到可核验的单条来源，请换一批重新生成。')
+              .fontSize(13)
+              .lineHeight(20)
+              .fontColor('#7A8191')
+              .width('100%')
+              .padding(14)
+              .backgroundColor(Color.White)
+              .borderRadius(16)
+              .margin({ top: 10 })
+          } else {
+            ForEach(item.evidence, (evidence: HomeTaskSuggestionEvidence) => {
+              this.TaskSuggestionEvidenceCard(evidence, this.taskSuggestionAccent(item.category),
+                this.taskSuggestionTint(item.category))
+            }, (evidence: HomeTaskSuggestionEvidence) => item.id + '-' + evidence.ref)
+          }
+
+          Text('将执行的任务')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#171C2D')
+            .width('100%')
+            .margin({ top: 24 })
+          Text(item.task)
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor('#485064')
+            .width('100%')
+            .padding({ left: 16, right: 16, top: 15, bottom: 15 })
+            .backgroundColor(Color.White)
+            .borderRadius(16)
+            .border({ width: 1, color: '#E9EDF5' })
+            .margin({ top: 10 })
+
+          Text('这是 AI 根据本机近期记录做出的推测，不代表你已经确认该意图。')
+            .fontSize(11)
+            .lineHeight(17)
+            .fontColor('#8A91A0')
+            .width('100%')
+            .margin({ top: 14, bottom: 24 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .width('100%')
+        .padding({ left: 18, right: 18 })
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+
+      Column() {
+        Button(this.agentTaskButtonLabel('guess-' + item.id, '执行这个任务'))
+          .width('100%')
+          .height(48)
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+          .backgroundColor(this.agentTaskSubmitting ? '#B6BDD0' : this.taskSuggestionAccent(item.category))
+          .borderRadius(16)
+          .enabled(!this.agentTaskSubmitting)
+          .onClick(() => {
+            this.executeTaskSuggestion(item);
+          })
+      }
+      .width('100%')
+      .padding({ left: 18, right: 18, top: 10, bottom: 16 })
+      .backgroundColor(Color.White)
+      .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: -5 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F4F8FF')
+    .zIndex(103)
+  }
+
+  @Builder TaskSuggestionEmptyState() {
+    Row() {
+      if (this.taskSuggestionsLoading) {
+        LoadingProgress()
+          .width(28)
+          .height(28)
+          .color('#7669FF')
+        Text('正在根据近期记录生成推荐')
+          .fontSize(13)
+          .fontColor('#6F7684')
+          .margin({ left: 12 })
+      } else {
+        Stack({ alignContent: Alignment.Center }) {
+          Text('荐')
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#7669FF')
+        }
+        .width(34)
+        .height(34)
+        .backgroundColor('#EEF0FF')
+        .borderRadius(12)
+        Column() {
+          Text('暂时没有新推荐')
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#343A4B')
+          Text(this.taskSuggestionError.length > 0 ? '点击“换一批”再试一次' : '正在准备你的个性化任务')
+            .fontSize(12)
+            .fontColor('#8A91A0')
+            .margin({ top: 4 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .margin({ left: 12 })
+      }
+    }
+    .justifyContent(FlexAlign.Center)
+    .width('100%')
+    .height(92)
+  }
+
+  @Builder GuessYouLikeSection() {
+    Column() {
+      Row() {
+        Text('猜你喜欢')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .layoutWeight(1)
+        AiGeneratedBadge({ compact: true })
+          .margin({ right: 10 })
+        Button(this.taskSuggestionsLoading ? '生成中' : '换一批')
+          .height(32)
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.taskSuggestionsLoading ? '#9A9FAE' : '#6658D9')
+          .padding({ left: 14, right: 14 })
+          .backgroundColor(this.taskSuggestionsLoading ? '#F0F1F5' : '#EEECFF')
+          .borderRadius(16)
+          .enabled(!this.taskSuggestionsLoading)
+          .onClick(() => {
+            this.refreshTaskSuggestions();
+          })
+      }
+      .width('100%')
+
+      Column() {
+        if (this.taskSuggestions.length === 0) {
+          this.TaskSuggestionEmptyState()
+        } else {
+          ForEach(this.taskSuggestions, (item: HomeTaskSuggestion, index: number) => {
+            this.TaskSuggestionRow(item)
+            if (index < this.taskSuggestions.length - 1) {
+              Divider()
+                .strokeWidth(1)
+                .color('#EEF0F5')
+                .margin({ left: 68, right: 12 })
+            }
+          }, (item: HomeTaskSuggestion) => item.id)
+        }
+      }
+      .width('100%')
+      .margin({ top: 14 })
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .border({ width: 1, color: '#EDF0F6' })
+      .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: 6 })
+      .clip(true)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('92%')
+    .margin({ top: 26 })
   }
 
   @Builder RecommendationDetailImage(image: CollectionImageViewModel) {
@@ -1313,7 +1813,7 @@ export struct HomePage {
         .margin({ top: 14 })
 
           Row() {
-            Text('为你推荐').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+            Text('为你提醒').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
             AiGeneratedBadge({ compact: true })
               .margin({ right: 8 })
             this.RecommendationFilterButton('未完成', false)
@@ -1335,10 +1835,25 @@ export struct HomePage {
             .columnsGap(12)
             .rowsGap(12)
             .width('92%')
-            .height(368)
+            .height(this.recommendationGridHeight())
             .margin({ top: 14 })
             this.RecommendationPagination()
           }
+
+          this.GuessYouLikeSection()
+
+          HomeComfortSection({
+            concerns: this.comfortConcerns,
+            loading: this.comfortConcernsLoading,
+            errorMessage: this.comfortConcernError,
+            onRefresh: async (): Promise<void> => {
+              await this.onRefreshComfortConcerns();
+            },
+            onSendMessage: async (concern: HomeComfortConcern,
+              history: HomeComfortChatMessage[]): Promise<string> => {
+              return await this.onSendComfortMessage(concern, history);
+            }
+          })
 
           Blank().height(88)
         }.width('100%')
@@ -1347,6 +1862,9 @@ export struct HomePage {
       ForEach(this.selectedRecommendationItems(), (item: HomeRecommendationViewModel) => {
         this.RecommendationDetailOverlay(item)
       }, (item: HomeRecommendationViewModel) => item.id)
+      ForEach(this.selectedTaskSuggestionItems(), (item: HomeTaskSuggestion) => {
+        this.TaskSuggestionDetailOverlay(item)
+      }, (item: HomeTaskSuggestion) => item.id)
       if (this.avatarGenerationOpen) {
         this.AvatarGenerationOverlay()
       }

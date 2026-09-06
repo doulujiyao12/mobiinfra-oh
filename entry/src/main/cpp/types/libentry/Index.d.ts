@@ -14,6 +14,8 @@ export interface LibEntryNative extends AgentLoopNativeApi {
   generate: (prompt: string) => Promise<string>;
   profileGenerate: (prompt: string, topK?: number) => Promise<string>;
   cancelChat: () => string;
+  isChatRunning: () => boolean;
+  restoreChatHistory: (alternatingContents: string[]) => string;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
@@ -40,6 +42,8 @@ export const generate: (prompt: string) => Promise<string>;
 export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
 export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
 export const cancelChat: () => string;
+export const isChatRunning: () => boolean;
+export const restoreChatHistory: (alternatingContents: string[]) => string;
 export const reset: () => string;
 export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;

@@ -12,7 +12,11 @@ import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { ChatVoiceOrchestrator, ChatVoiceTtsConfig } from './chat/ChatVoiceOrchestrator';
-import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_MODE_CLOUD_AGENT,
+  chatInputAfterAcceptedSend,
+  chatLocalInferenceStateIsStale
+} from './chat/ChatPageTypes';
 import {
   CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
   chatCanSendMessageWithImages,
@@ -27,6 +31,7 @@ import {
   cleanupLocalChatPreparedImages,
   prepareLocalChatImages
 } from './chat/LocalChatImagePrompt';
+import { buildNativeLocalChatHistoryContents } from './chat/LocalChatHistory';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -81,6 +86,19 @@ import {
 } from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
+import {
+  HomeTaskSuggestion,
+  buildHomeTaskSuggestionPrompt,
+  parseHomeTaskSuggestions
+} from './home/HomeTaskSuggestion';
+import {
+  HomeComfortChatMessage,
+  HomeComfortConcern,
+  buildHomeComfortChatMessages,
+  buildHomeComfortConcernPrompt,
+  parseHomeComfortConcerns,
+  parseHomeComfortReply
+} from './home/HomeEmotionalSupport';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
 import {
@@ -111,6 +129,7 @@ import {
   DataManagerProgress,
   HomeDomainViewModel,
   HomeProfileViewModel,
+  IndexedEvent,
   QueryOptions,
   QueryResult
 } from '../datamanager/DataManagerTypes';
@@ -225,6 +244,7 @@ const HDC_REVERSE_CONNECT_TIMEOUT_MS: number = 1500;
 const HDC_REVERSE_READ_TIMEOUT_MS: number = 3000;
 const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
 const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
+const LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS: number = 250;
 
 interface ServerFile {
   name: string;
@@ -547,6 +567,10 @@ struct Index {
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
   private localChatCancelRequested: boolean = false;
+  private localChatCancelledGeneration: number = 0;
+  private localChatGeneration: number = 0;
+  private localChatNativeRequestSubmitted: boolean = false;
+  private localChatCompletionProbeTimerId: number = -1;
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
@@ -572,6 +596,12 @@ struct Index {
   @State dataManagerProgressMessage: string = '准备整理数据';
   @State dataManagerProgressPercent: number = 0;
   @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @State homeTaskSuggestions: HomeTaskSuggestion[] = [];
+  @State homeTaskSuggestionsLoading: boolean = false;
+  @State homeTaskSuggestionError: string = '';
+  @State homeComfortConcerns: HomeComfortConcern[] = [];
+  @State homeComfortConcernsLoading: boolean = false;
+  @State homeComfortConcernError: string = '';
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
   @State avatarVersions: AvatarVersionViewModel[] = [];
 
@@ -584,6 +614,9 @@ struct Index {
   private modelScopeActiveStreamCancel: (() => void) | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
+  private homeTaskSuggestionBatch: number = 0;
+  private homeComfortConcernBatch: number = 0;
+  private homeTaskSuggestionsAutoStarted: boolean = false;
   private avatarForegroundEnsuring: boolean = false;
   private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
@@ -592,12 +625,6 @@ struct Index {
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private pcServerMonitor: PcServerMonitor | null = null;
   private pcServerConnectedPromptShown: boolean = false;
-  private pcServerCloudFallbackPlannerBaseUrl: string = '';
-  private pcServerCloudFallbackDeciderBaseUrl: string = '';
-  private pcServerCloudFallbackApiKey: string = '';
-  private pcServerCloudFallbackPlannerApiKey: string = '';
-  private pcServerCloudFallbackDeciderApiKey: string = '';
-  private pcServerCloudFallbackSaved: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
@@ -685,7 +712,70 @@ struct Index {
     this.chatMode = state.mode;
   }
 
+  private clearLocalChatCompletionProbe(): void {
+    if (this.localChatCompletionProbeTimerId === -1) {
+      return;
+    }
+    clearTimeout(this.localChatCompletionProbeTimerId);
+    this.localChatCompletionProbeTimerId = -1;
+  }
+
+  private nativeLocalChatRequestRunning(): boolean {
+    try {
+      return mnnllm.isChatRunning();
+    } catch (e) {
+      // 旧 native 库或瞬时查询失败时保持保守，不提前允许切换/卸载模型。
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.State', 'query native chat state failed', err);
+      return true;
+    }
+  }
+
+  private localChatCancellationRequestedFor(generation: number): boolean {
+    return this.localChatCancelRequested && this.localChatCancelledGeneration === generation;
+  }
+
+  private reconcileCompletedLocalChatInference(generation: number): boolean {
+    if (generation !== this.localChatGeneration || !this.localChatInferenceRunning ||
+      !this.localChatNativeRequestSubmitted || this.localChatCancellationRequestedFor(generation)) {
+      return false;
+    }
+    let nativeRunning = this.nativeLocalChatRequestRunning();
+    if (!chatLocalInferenceStateIsStale(this.localChatInferenceRunning,
+      this.localChatNativeRequestSubmitted, nativeRunning)) {
+      return false;
+    }
+    this.clearLocalChatCompletionProbe();
+    // 使仍在等待 Promise 完成回调的旧 finally 失效，避免它清掉随后启动的新任务状态。
+    this.localChatGeneration++;
+    this.localChatNativeRequestSubmitted = false;
+    this.localChatInferenceRunning = false;
+    this.localChatCancelRequested = false;
+    this.localChatCancelledGeneration = 0;
+    if (!this.localAgentCleaningUp && !this.restoringLocalSession && this.activeAgentRunner === null) {
+      this.isThinking = false;
+    }
+    AppLogger.info('LocalChat.State', 'native chat completed; released stale ArkTS busy state');
+    return true;
+  }
+
+  private scheduleLocalChatCompletionProbe(generation: number): void {
+    if (generation !== this.localChatGeneration || !this.localChatInferenceRunning ||
+      !this.localChatNativeRequestSubmitted) {
+      return;
+    }
+    this.clearLocalChatCompletionProbe();
+    this.localChatCompletionProbeTimerId = setTimeout(() => {
+      this.localChatCompletionProbeTimerId = -1;
+      if (this.reconcileCompletedLocalChatInference(generation)) {
+        return;
+      }
+      this.scheduleLocalChatCompletionProbe(generation);
+    }, LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS);
+  }
+
   private isLocalNativeBusy(): boolean {
+    this.reconcileCompletedLocalChatInference(this.localChatGeneration);
     if (this.isThinking || this.localAgentCleaningUp || this.restoringLocalSession) {
       return true;
     }
@@ -1455,12 +1545,9 @@ struct Index {
     }
     this.restoringLocalSession = true;
     try {
-      mnnllm.reset();
-      for (let i = 0; i < session.messages.length; i++) {
-        let message = session.messages[i];
-        if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          await mnnllm.chat(buildLocalChatMultimodalPrompt(message.content, chatMessageImagePaths(message)));
-        }
+      let result = mnnllm.restoreChatHistory(buildNativeLocalChatHistoryContents(session.messages));
+      if (result !== 'ok') {
+        throw new Error(result);
       }
     } catch (e) {
       let err = e as Error;
@@ -2598,6 +2685,14 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
+    if (!this.homeTaskSuggestionsAutoStarted) {
+      this.homeTaskSuggestionsAutoStarted = true;
+      this.refreshHomeTaskSuggestions(false).then(async (): Promise<void> => {
+        await this.refreshHomeComfortConcerns(false);
+      }).catch((e: Error) => {
+        AppLogger.warnCause('HomeAI', 'initial home AI generation failed', e);
+      });
+    }
     this.initChatSessions();
     let profileKnockShareInitToken = ++this.profileKnockShareInitToken;
     this.initializeProfileKnockShare(ctx, profileKnockShareInitToken).catch((e: Error) => {
@@ -2675,6 +2770,7 @@ struct Index {
   aboutToDisappear(): void {
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
+    this.clearLocalChatCompletionProbe();
     if (this.chatVoiceOrchestrator !== null) {
       this.chatVoiceOrchestrator.shutdown();
     }
@@ -2710,7 +2806,6 @@ struct Index {
       this.disablePcServerCloudEndpoint(false);
     }
     if (becameConnected) {
-      this.enablePcServerCloudEndpoint(false);
       this.showPcServerConnectedPrompt();
     }
   }
@@ -2739,19 +2834,6 @@ struct Index {
       showToastSafely('PC Server 未连接', 1500);
       return;
     }
-    if (!this.isPcServerCloudEndpointEnabled()) {
-      this.pcServerCloudFallbackPlannerBaseUrl = this.cloudPlannerBaseUrl;
-      this.pcServerCloudFallbackDeciderBaseUrl = this.cloudDeciderBaseUrl;
-      this.pcServerCloudFallbackApiKey = this.cloudApiKey;
-      this.pcServerCloudFallbackPlannerApiKey = this.cloudPlannerApiKey;
-      this.pcServerCloudFallbackDeciderApiKey = this.cloudDeciderApiKey;
-      this.pcServerCloudFallbackSaved = true;
-    }
-    this.cloudPlannerBaseUrl = PC_SERVER_LLM_BASE_URL;
-    this.cloudDeciderBaseUrl = PC_SERVER_LLM_BASE_URL;
-    this.cloudApiKey = '';
-    this.cloudPlannerApiKey = '';
-    this.cloudDeciderApiKey = '';
     this.pcServerCloudEnabled = true;
     if (showToast) {
       showToastSafely('已启用 PC Server 云端接口', 1600);
@@ -2763,22 +2845,6 @@ struct Index {
       return;
     }
     this.pcServerCloudEnabled = false;
-    this.cloudPlannerBaseUrl = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackPlannerBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
-    this.cloudDeciderBaseUrl = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackDeciderBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
-    this.cloudApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackApiKey : DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
-    this.cloudPlannerApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackPlannerApiKey : DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
-    this.cloudDeciderApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackDeciderApiKey : DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
-    this.pcServerCloudFallbackPlannerBaseUrl = '';
-    this.pcServerCloudFallbackDeciderBaseUrl = '';
-    this.pcServerCloudFallbackApiKey = '';
-    this.pcServerCloudFallbackPlannerApiKey = '';
-    this.pcServerCloudFallbackDeciderApiKey = '';
-    this.pcServerCloudFallbackSaved = false;
     if (showToast) {
       showToastSafely('已恢复原云端接口', 1600);
     }
@@ -3065,6 +3131,13 @@ struct Index {
       [], 'endpointDefault.cloudPlannerModel', false);
     this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
+    // 旧版会把临时 PC LLM 地址写进 PersistentStorage；升级后恢复真正的云端默认值。
+    if (this.cloudPlannerBaseUrl.trim() === PC_SERVER_LLM_BASE_URL) {
+      this.cloudPlannerBaseUrl = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+    }
+    if (this.cloudDeciderBaseUrl.trim() === PC_SERVER_LLM_BASE_URL) {
+      this.cloudDeciderBaseUrl = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+    }
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
     this.cloudPlannerApiKey = this.migrateSplitCloudApiKey(this.cloudPlannerApiKey,
@@ -4821,18 +4894,7 @@ struct Index {
     }
   }
 
-  private getCloudConfig(): CloudModelConfig {
-    if (this.isPcServerCloudEndpointEnabled()) {
-      return {
-        plannerBaseUrl: PC_SERVER_LLM_BASE_URL,
-        plannerModel: '',
-        plannerApiKey: '',
-        deciderBaseUrl: PC_SERVER_LLM_BASE_URL,
-        deciderApiKey: '',
-        apiKey: '',
-        deciderModel: ''
-      };
-    }
+  private getConfiguredCloudConfig(): CloudModelConfig {
     let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
     let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
     let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
@@ -4848,6 +4910,21 @@ struct Index {
       deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
     };
     return config;
+  }
+
+  private getCloudConfig(): CloudModelConfig {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return {
+        plannerBaseUrl: PC_SERVER_LLM_BASE_URL,
+        plannerModel: '',
+        plannerApiKey: '',
+        deciderBaseUrl: PC_SERVER_LLM_BASE_URL,
+        deciderApiKey: '',
+        apiKey: '',
+        deciderModel: ''
+      };
+    }
+    return this.getConfiguredCloudConfig();
   }
 
   private isCloudConfigReady(): boolean {
@@ -4920,7 +4997,14 @@ struct Index {
   }
 
   private isCloudPlannerConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     let config = this.getCloudConfig();
+    return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
+  }
+
+  private isConfiguredCloudPlannerReady(config: CloudModelConfig): boolean {
     return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
   }
 
@@ -5717,6 +5801,117 @@ struct Index {
     return true;
   }
 
+  private recentHomeTaskSuggestionEvents(): IndexedEvent[] {
+    if (this.dataManagerFacade === null) {
+      return [];
+    }
+    let options: QueryOptions = {
+      keywords: [],
+      domains: [],
+      entities: [],
+      date: '',
+      month: '',
+      startDate: '',
+      endDate: '',
+      workflowSceneIds: [],
+      limit: 24
+    };
+    try {
+      return this.dataManagerFacade.queryIndexedEvents(options).events;
+    } catch (e) {
+      AppLogger.warnCause('HomeSuggestion', 'load recent indexed events failed', e as Error);
+      return [];
+    }
+  }
+
+  private async refreshHomeTaskSuggestions(showFailureToast: boolean): Promise<void> {
+    if (this.homeTaskSuggestionsLoading) {
+      return;
+    }
+    this.homeTaskSuggestionsLoading = true;
+    this.homeTaskSuggestionError = '';
+    try {
+      let cloudConfig = this.getConfiguredCloudConfig();
+      if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+        throw new Error('请先在“我的”中配置 Planner 服务');
+      }
+      let recentEvents = this.recentHomeTaskSuggestionEvents();
+      let previousTasks = this.homeTaskSuggestions.map((item: HomeTaskSuggestion): string => item.task);
+      let prompt = buildHomeTaskSuggestionPrompt(recentEvents, this.homeProfile.domains, previousTasks,
+        currentLocalDateKey());
+      let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
+      this.homeTaskSuggestionBatch++;
+      let batchId = new Date().getTime().toString() + '-' + this.homeTaskSuggestionBatch.toString();
+      this.homeTaskSuggestions = parseHomeTaskSuggestions(response, batchId, previousTasks,
+        recentEvents, this.homeProfile.domains);
+      AppLogger.info('HomeSuggestion', 'generated suggestions from recentEvents=' + recentEvents.length.toString());
+    } catch (e) {
+      let err = e as Error;
+      this.homeTaskSuggestionError = err.message.length > 0 ? err.message : '推荐生成失败，请稍后重试';
+      AppLogger.errorCause('HomeSuggestion', 'generate suggestions failed', err);
+      if (showFailureToast) {
+        showToastSafely(this.homeTaskSuggestionError, 2000);
+      }
+    } finally {
+      this.homeTaskSuggestionsLoading = false;
+    }
+  }
+
+  private async refreshHomeComfortConcerns(showFailureToast: boolean): Promise<void> {
+    if (this.homeComfortConcernsLoading) {
+      return;
+    }
+    this.homeComfortConcernsLoading = true;
+    this.homeComfortConcernError = '';
+    try {
+      let cloudConfig = this.getConfiguredCloudConfig();
+      if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+        throw new Error('请先在“我的”中配置 Planner 服务');
+      }
+      let recentEvents = this.recentHomeTaskSuggestionEvents();
+      let groundedDomains = this.homeProfile.domains.filter((item: HomeDomainViewModel): boolean =>
+        item.eventCount > 0);
+      if (recentEvents.length === 0 && groundedDomains.length === 0) {
+        throw new Error('暂无足够的近期记录用于推测，完成一次数据整理后再试');
+      }
+      let prompt = buildHomeComfortConcernPrompt(recentEvents, this.homeProfile.domains, currentLocalDateKey());
+      let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
+      this.homeComfortConcernBatch++;
+      let batchId = new Date().getTime().toString() + '-' + this.homeComfortConcernBatch.toString();
+      this.homeComfortConcerns = parseHomeComfortConcerns(response, batchId, recentEvents,
+        this.homeProfile.domains);
+      AppLogger.info('HomeComfort', 'generated concerns from recentEvents=' + recentEvents.length.toString());
+    } catch (e) {
+      let err = e as Error;
+      this.homeComfortConcernError = err.message.length > 0 ? err.message : '烦恼推测生成失败，请稍后重试';
+      AppLogger.errorCause('HomeComfort', 'generate concerns failed', err);
+      if (showFailureToast) {
+        showToastSafely(this.homeComfortConcernError, 2000);
+      }
+    } finally {
+      this.homeComfortConcernsLoading = false;
+    }
+  }
+
+  private async sendHomeComfortMessage(concern: HomeComfortConcern,
+    history: HomeComfortChatMessage[]): Promise<string> {
+    let cloudConfig = this.getConfiguredCloudConfig();
+    if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+      throw new Error('请先在“我的”中配置 Planner 服务');
+    }
+    let recentEvents = this.recentHomeTaskSuggestionEvents();
+    let messages = buildHomeComfortChatMessages(concern, history, recentEvents, this.homeProfile.domains,
+      currentLocalDateKey());
+    if (messages.length <= 1) {
+      throw new Error('请先输入想聊的内容');
+    }
+    let response = await this.cloudClient.chatPlannerMessages(messages, cloudConfig);
+    let reply = parseHomeComfortReply(response);
+    AppLogger.info('HomeComfort', 'chat reply generated chars=' + reply.length.toString() +
+      ', contextMessages=' + messages.length.toString());
+    return reply;
+  }
+
   private async runHomeRecommendationAgentTask(taskText: string, keepTargetAppAfterFinish: boolean): Promise<void> {
     let options: CloudAgentTaskSubmitOptions = {
       switchToChat: false,
@@ -5836,6 +6031,7 @@ struct Index {
       return;
     }
     this.localChatCancelRequested = true;
+    this.localChatCancelledGeneration = this.localChatGeneration;
     try {
       mnnllm.cancelChat();
     } catch (e) {
@@ -5901,7 +6097,9 @@ struct Index {
       CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris));
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
       CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    let localChatGeneration = ++this.localChatGeneration;
     this.localChatCancelRequested = false;
+    this.localChatCancelledGeneration = 0;
     this.localChatInferenceRunning = true;
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
@@ -5910,7 +6108,7 @@ struct Index {
     let streamUpdateTimerId = -1;
     // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
     let flushStreamReply = (): void => {
-      if (streamedReply.length === 0) {
+      if (localChatGeneration !== this.localChatGeneration || streamedReply.length === 0) {
         return;
       }
       lastStreamUpdateAt = new Date().getTime();
@@ -5937,7 +6135,7 @@ struct Index {
     try {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
-        if (this.localChatCancelRequested) {
+        if (this.localChatCancellationRequestedFor(localChatGeneration)) {
           let cancelledReply = this.cancelledLocalChatReply(streamedReply);
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
@@ -5950,18 +6148,22 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(nativePrompt, (token: string) => {
-        if (this.localChatCancelRequested) {
+      let chatPromise: Promise<string> = mnnllm.chat(nativePrompt, (token: string) => {
+        if (localChatGeneration !== this.localChatGeneration ||
+          this.localChatCancellationRequestedFor(localChatGeneration)) {
           return;
         }
         streamedReply += token;
         scheduleStreamReplyUpdate();
       });
+      this.localChatNativeRequestSubmitted = true;
+      this.scheduleLocalChatCompletionProbe(localChatGeneration);
+      let reply: string = await chatPromise;
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
         streamUpdateTimerId = -1;
       }
-      if (this.localChatCancelRequested) {
+      if (this.localChatCancellationRequestedFor(localChatGeneration)) {
         let partialReply = streamedReply.length > 0 ? streamedReply : reply;
         let cancelledReply = this.cancelledLocalChatReply(partialReply);
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
@@ -5972,7 +6174,7 @@ struct Index {
       }
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      if (this.localChatCancelRequested) {
+      if (this.localChatCancellationRequestedFor(localChatGeneration)) {
         let cancelledReply = this.cancelledLocalChatReply(streamedReply);
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
         this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
@@ -5984,9 +6186,14 @@ struct Index {
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
       }
-      this.localChatInferenceRunning = false;
-      this.localChatCancelRequested = false;
-      this.isThinking = false;
+      if (localChatGeneration === this.localChatGeneration) {
+        this.clearLocalChatCompletionProbe();
+        this.localChatNativeRequestSubmitted = false;
+        this.localChatInferenceRunning = false;
+        this.localChatCancelRequested = false;
+        this.localChatCancelledGeneration = 0;
+        this.isThinking = false;
+      }
     }
   }
 
@@ -6247,6 +6454,23 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            taskSuggestions: this.homeTaskSuggestions,
+            taskSuggestionsLoading: this.homeTaskSuggestionsLoading,
+            taskSuggestionError: this.homeTaskSuggestionError,
+            onRefreshTaskSuggestions: async (): Promise<void> => {
+              await this.refreshHomeTaskSuggestions(true);
+            },
+            comfortConcerns: this.homeComfortConcerns,
+            comfortConcernsLoading: this.homeComfortConcernsLoading ||
+              (this.homeTaskSuggestionsLoading && this.homeComfortConcerns.length === 0),
+            comfortConcernError: this.homeComfortConcernError,
+            onRefreshComfortConcerns: async (): Promise<void> => {
+              await this.refreshHomeComfortConcerns(true);
+            },
+            onSendComfortMessage: async (concern: HomeComfortConcern,
+              history: HomeComfortChatMessage[]): Promise<string> => {
+              return await this.sendHomeComfortMessage(concern, history);
+            },
             onSetRecommendationCompleted: (id: string, completed: boolean) => {
               this.setHomeRecommendationCompleted(id, completed);
             },

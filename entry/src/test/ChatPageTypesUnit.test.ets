@@ -8,6 +8,7 @@ import {
   chatComposerVoiceReleaseShouldStop,
   chatComposerLineCount,
   chatInputAfterAcceptedSend,
+  chatLocalInferenceStateIsStale,
   chatModeLabel,
   chatModePlaceholder,
   chatVoiceStatusBarVisible,
@@ -51,6 +52,13 @@ export default function chatPageTypesUnitTest() {
     it('clearsDraftOnlyAfterAcceptedSend', 0, () => {
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', true)).assertEqual('');
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', false)).assertEqual('请问您做什么呢？');
+    });
+
+    it('releasesOnlyCompletedSubmittedLocalInferenceState', 0, () => {
+      expect(chatLocalInferenceStateIsStale(true, true, false)).assertTrue();
+      expect(chatLocalInferenceStateIsStale(true, true, true)).assertFalse();
+      expect(chatLocalInferenceStateIsStale(true, false, false)).assertFalse();
+      expect(chatLocalInferenceStateIsStale(false, true, false)).assertFalse();
     });
 
     it('usesOnePrimaryComposerButtonForSendAndVoiceCapture', 0, () => {

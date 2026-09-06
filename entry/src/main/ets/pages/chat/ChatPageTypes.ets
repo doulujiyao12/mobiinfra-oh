@@ -39,6 +39,13 @@ export function chatInputAfterAcceptedSend(currentInput: string, accepted: boole
   return accepted ? '' : currentInput;
 }
 
+// 原生请求已经结束、但 Promise 完成回调尚未清理 UI 时，允许主动释放陈旧的忙碌状态。
+// nativeRequestSubmitted 可防止模型加载阶段因尚未创建原生请求而被误判为已完成。
+export function chatLocalInferenceStateIsStale(uiRunning: boolean, nativeRequestSubmitted: boolean,
+  nativeRunning: boolean): boolean {
+  return uiRunning && nativeRequestSubmitted && !nativeRunning;
+}
+
 export type ChatComposerPrimaryActionRole = 'send' | 'busy' | 'voice_capture';
 
 // 输入栏只有一个主操作按钮：短按发送，长按语音；语音采集中优先展示麦克风状态。

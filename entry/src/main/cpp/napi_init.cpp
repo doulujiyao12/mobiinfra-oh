@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <sched.h>
 #include <vector>
+#include <utility>
 #include <errno.h>
 
 #include "llm/llm.hpp"
@@ -1796,6 +1797,91 @@ static napi_value CancelChat(napi_env env, napi_callback_info info) {
     napi_value value;
     napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
     return value;
+}
+
+static napi_value IsChatRunning(napi_env env, napi_callback_info info) {
+    (void)info;
+    // latest id 从 ChatAsync 入队时设置，并在 ChatExecute 的生命周期结束时清零。
+    // 使用它而不是 running id，可以覆盖尚在等待 g_mutex 的已入队请求。
+    bool active = g_latest_chat_request_id.load(std::memory_order_acquire) != 0;
+    napi_value value;
+    napi_get_boolean(env, active, &value);
+    return value;
+}
+
+static napi_value ChatHistoryResult(napi_env env, const char* result) {
+    napi_value value;
+    napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
+    return value;
+}
+
+static bool ReadUtf8String(napi_env env, napi_value value, std::string& output) {
+    napi_valuetype valueType;
+    if (napi_typeof(env, value, &valueType) != napi_ok || valueType != napi_string) {
+        return false;
+    }
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) {
+        return false;
+    }
+    std::vector<char> buffer(length + 1, '\0');
+    size_t copied = 0;
+    if (napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &copied) != napi_ok) {
+        return false;
+    }
+    output.assign(buffer.data(), copied);
+    return true;
+}
+
+// Restore persisted local chat context without silently regenerating every
+// historical turn. The array alternates user and assistant content.
+static napi_value RestoreChatHistory(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 1) {
+        return ChatHistoryResult(env, "error: chat history array is required");
+    }
+
+    bool isArray = false;
+    if (napi_is_array(env, args[0], &isArray) != napi_ok || !isArray) {
+        return ChatHistoryResult(env, "error: chat history must be an array");
+    }
+    uint32_t length = 0;
+    if (napi_get_array_length(env, args[0], &length) != napi_ok || length % 2 != 0) {
+        return ChatHistoryResult(env, "error: chat history must contain complete user-assistant pairs");
+    }
+
+    ChatMessages restoredMessages;
+    restoredMessages.emplace_back("system", "You are a helpful assistant.");
+    for (uint32_t i = 0; i < length; ++i) {
+        napi_value element;
+        std::string content;
+        if (napi_get_element(env, args[0], i, &element) != napi_ok ||
+            !ReadUtf8String(env, element, content) || content.empty()) {
+            return ChatHistoryResult(env, "error: chat history contains invalid content");
+        }
+        restoredMessages.emplace_back(i % 2 == 0 ? "user" : "assistant", std::move(content));
+    }
+
+    if (g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
+        return ChatHistoryResult(env, "error: chat request is active");
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
+        return ChatHistoryResult(env, "error: chat request is active");
+    }
+    if (!g_llm) {
+        return ChatHistoryResult(env, "error: model not loaded");
+    }
+    g_llm->reset();
+    g_llm->set_config("{\"reuse_kv\":false}");
+    g_llm->set_config("{\"use_template\":true}");
+    g_agent_mode = false;
+    g_prefix_pos = 0;
+    g_agent_step = 0;
+    g_messages = std::move(restoredMessages);
+    LOGI("Restored %{public}u local chat messages without inference", length);
+    return ChatHistoryResult(env, "ok");
 }
 
 // ========== 5. Agent Prefill (prefix KV cache reuse) ==========
@@ -5354,6 +5440,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat",   nullptr, CancelChat,         nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isChatRunning", nullptr, IsChatRunning,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"restoreChatHistory", nullptr, RestoreChatHistory, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
