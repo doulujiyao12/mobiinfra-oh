@@ -219,7 +219,10 @@ export function buildAssistantStreamingRenderContent(content: string, thinkingCo
   if (thinkingContent.length === 0) {
     return content;
   }
-  if (content.length === 0) {
+  // Separate reasoning streams emit a synthetic closing tag followed only by
+  // line breaks. ReAct may then start another reasoning round after a tool
+  // call, so whitespace alone must not close the displayed thinking block.
+  if (content.trim().length === 0) {
     return CHAT_THINK_OPEN_TAG + thinkingContent;
   }
   return CHAT_THINK_OPEN_TAG + thinkingContent + CHAT_THINK_CLOSE_TAG + '\n\n' + content;
