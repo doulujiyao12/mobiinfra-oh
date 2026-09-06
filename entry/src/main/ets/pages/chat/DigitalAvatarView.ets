@@ -8,7 +8,6 @@ import {
   DigitalAvatarVisualState
 } from './DigitalAvatarTypes';
 import { AppLogger } from '../../utils/AppLogger';
-import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 
 @Component
 export struct DigitalAvatarView {
@@ -488,10 +487,6 @@ export struct DigitalAvatarView {
       .translate({ x: this.waveTranslateX(), y: this.waveTranslateY() })
       .opacity(this.waveOpacity())
       .animation({ duration: 360, curve: Curve.EaseInOut });
-
-      AiGeneratedBadge({ compact: true, tone: 'overlay' })
-        .align(Alignment.BottomEnd)
-        .margin({ right: 1, bottom: 1 })
     }
     .width(this.frameWidth())
     .height(this.frameHeight());
