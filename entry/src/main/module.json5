@@ -25,6 +25,16 @@
         }
       },
       {
+        "name": "ohos.permission.SYSTEM_FLOAT_WINDOW",
+        "reason": "$string:EntryAbility_desc",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
         "name": "ohos.permission.MEDIA_LOCATION",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {
