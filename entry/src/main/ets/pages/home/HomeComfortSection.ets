@@ -69,6 +69,51 @@ export struct HomeComfortSection {
     return '#F3EEFF';
   }
 
+  private categoryIconColumn(index: number): number {
+    return Math.max(0, Math.min(11, Math.floor(index))) % 6;
+  }
+
+  private categoryIconRow(index: number): number {
+    return Math.floor(Math.max(0, Math.min(11, Math.floor(index))) / 6);
+  }
+
+  private concernIconIndex(category: string): number {
+    if (category === 'work') {
+      return 5;
+    }
+    if (category === 'relationship') {
+      return 9;
+    }
+    if (category === 'money') {
+      return 1;
+    }
+    if (category === 'health') {
+      return 10;
+    }
+    if (category === 'study') {
+      return 11;
+    }
+    return 6;
+  }
+
+  @Builder CategoryIcon(index: number, size: number) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Image($r('app.media.home_category_icons'))
+        .width(size * 6)
+        .height(size * 2)
+        .objectFit(ImageFit.Fill)
+        .translate({
+          x: -this.categoryIconColumn(index) * size,
+          y: -this.categoryIconRow(index) * size
+        })
+    }
+    .width(size)
+    .height(size)
+    .backgroundColor(Color.White)
+    .borderRadius(size / 2)
+    .clip(true)
+  }
+
   private selectedConcerns(): HomeComfortConcern[] {
     if (this.selectedConcernId.length === 0) {
       return [];
@@ -233,18 +278,16 @@ export struct HomeComfortSection {
     }
   }
 
-  @Builder ConcernRow(item: HomeComfortConcern, index: number) {
+  @Builder ConcernRow(item: HomeComfortConcern) {
     Row() {
       Stack({ alignContent: Alignment.Center }) {
-        Text((index + 1).toString())
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.concernAccent(item.category))
+        this.CategoryIcon(this.concernIconIndex(item.category), 44)
       }
-      .width(42)
-      .height(42)
-      .borderRadius(14)
-      .backgroundColor(this.concernTint(item.category))
+      .width(50)
+      .height(50)
+      .borderRadius(17)
+      .backgroundColor(Color.White)
+      .clip(true)
 
       Text(item.title)
         .fontSize(15)
@@ -262,13 +305,8 @@ export struct HomeComfortSection {
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
-    .constraintSize({ minHeight: 72 })
-    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    .backgroundColor(Color.White)
-    .borderRadius(18)
-    .border({ width: 1, color: '#ECEEF5' })
-    .shadow({ radius: 12, color: '#10000000', offsetX: 0, offsetY: 5 })
-    .margin({ top: 10 })
+    .constraintSize({ minHeight: 76 })
+    .padding({ left: 5, right: 5, top: 12, bottom: 12 })
     .onClick(() => {
       this.openConcern(item);
     })
@@ -295,16 +333,7 @@ export struct HomeComfortSection {
       .border({ width: 1, color: '#ECEEF5' })
     } else {
       Row() {
-        Stack({ alignContent: Alignment.Center }) {
-          Text('心')
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor('#8164D5')
-        .borderRadius(15)
+        this.CategoryIcon(9, 48)
         Text('和我随便聊聊，我会读心术')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
@@ -319,12 +348,10 @@ export struct HomeComfortSection {
       }
       .alignItems(VerticalAlign.Center)
       .width('100%')
-      .padding({ left: 14, right: 14, top: 13, bottom: 13 })
+      .padding({ left: 8, right: 8, top: 13, bottom: 13 })
       .margin({ top: 10 })
       .backgroundColor('#FBF9FF')
-      .borderRadius(18)
-      .border({ width: 1, color: '#E8E0FB' })
-      .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: 6 })
+      .borderRadius(20)
       .onClick(() => {
         this.openCasualChat();
       })
@@ -565,14 +592,27 @@ export struct HomeComfortSection {
       if (this.concerns.length === 0) {
         this.EmptyState()
       } else {
-        ForEach(this.concerns, (item: HomeComfortConcern, index: number) => {
-          this.ConcernRow(item, index)
-        }, (item: HomeComfortConcern) => item.id)
+        Column() {
+          ForEach(this.concerns, (item: HomeComfortConcern, index: number) => {
+            this.ConcernRow(item)
+            if (index < this.concerns.length - 1) {
+              Divider()
+                .strokeWidth(1)
+                .color('#EAE6F2')
+                .margin({ left: 68, right: 6 })
+            }
+          }, (item: HomeComfortConcern) => item.id)
+        }
+        .width('100%')
+        .padding({ left: 4, right: 4 })
+        .margin({ top: 8 })
+        .backgroundColor('#FCFBFF')
+        .borderRadius(22)
       }
     }
     .alignItems(HorizontalAlign.Start)
     .width('92%')
-    .margin({ top: 28 })
+    .margin({ top: 30 })
     .bindContentCover($$this.chatOpen, this.ChatCover(), {
       modalTransition: ModalTransition.DEFAULT,
       enableSafeArea: true,

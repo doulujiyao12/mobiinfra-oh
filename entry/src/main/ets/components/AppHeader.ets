@@ -4,8 +4,11 @@ export struct AppHeader {
   title: string = '';
   subtitle: string = '';
   icon: Resource = $r('app.media.header_companion');
+  @Prop avatarUri: string = '';
+  @Prop circularAvatar: boolean = false;
   @StorageLink('pcServerConnected') pcServerConnected: boolean = false;
   @Prop pcServerVisible: boolean = false;
+  onIconClick: () => void = () => {};
 
   private pcServerLabel(): string {
     return this.pcServerConnected ? 'PC 已连接' : 'PC 未连接';
@@ -15,13 +18,38 @@ export struct AppHeader {
     Row() {
       Row() {
         Stack({ alignContent: Alignment.Center }) {
-          Image(this.icon)
-            .width(36)
-            .height(36)
-            .objectFit(ImageFit.Contain)
+          if (this.avatarUri.length > 0) {
+            Image(this.avatarUri)
+              .width(this.circularAvatar ? 46 : 36)
+              .height(this.circularAvatar ? 46 : 36)
+              .objectFit(this.circularAvatar ? ImageFit.Cover : ImageFit.Contain)
+              .borderRadius(this.circularAvatar ? 23 : 0)
+          } else {
+            Image(this.icon)
+              .width(this.circularAvatar ? 46 : 36)
+              .height(this.circularAvatar ? 46 : 36)
+              .objectFit(this.circularAvatar ? ImageFit.Cover : ImageFit.Contain)
+              .borderRadius(this.circularAvatar ? 23 : 0)
+          }
         }
-        .width(40)
-        .height(40)
+        .width(this.circularAvatar ? 48 : 40)
+        .height(this.circularAvatar ? 48 : 40)
+        .backgroundColor(this.circularAvatar ? '#EEF2FF' : Color.Transparent)
+        .borderRadius(this.circularAvatar ? 24 : 0)
+        .border({
+          width: this.circularAvatar ? 1 : 0,
+          color: this.circularAvatar ? '#FFFFFF' : Color.Transparent
+        })
+        .shadow({
+          radius: this.circularAvatar ? 8 : 0,
+          color: this.circularAvatar ? '#160D2A63' : Color.Transparent,
+          offsetX: 0,
+          offsetY: this.circularAvatar ? 3 : 0
+        })
+        .clip(this.circularAvatar)
+        .onClick(() => {
+          this.onIconClick();
+        })
 
         Column() {
           Text(this.title)

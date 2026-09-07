@@ -18,11 +18,10 @@ import {
   HomeTaskSuggestionEvidence,
   homeTaskSuggestionCategoryLabel
 } from './HomeTaskSuggestion';
-import { homeRecommendationGridHeight } from './HomeRecommendationLayout';
 import { HomeComfortChatMessage, HomeComfortConcern } from './HomeEmotionalSupport';
 import { HomeComfortSection } from './HomeComfortSection';
 
-// ClawMate 首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
+// ClawMate 首页展示层：展示动态画像、提醒和推荐，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
@@ -58,6 +57,209 @@ export struct HomePage {
   @State avatarHistoryOpen: boolean = false;
   @State selectedAvatarVersionId: string = '';
   @State selectedAvatarPhotoUri: string = '';
+
+  private profileAvatarUri(): string {
+    if (this.profile.avatarMessageForegroundUri.length > 0) {
+      return this.profile.avatarMessageForegroundUri;
+    }
+    if (this.profile.avatarForegroundUri.length > 0) {
+      return this.profile.avatarForegroundUri;
+    }
+    return this.profile.avatarUri;
+  }
+
+  private pendingRecommendationCount(): number {
+    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean =>
+      !this.recommendationCompleted(item)).length;
+  }
+
+  private homeSummaryHeadline(): string {
+    let count = this.pendingRecommendationCount();
+    if (count === 0) {
+      return '目前没有待处理提醒';
+    }
+    return '目前有 ' + count.toString() + ' 件事值得留意';
+  }
+
+  private categoryIconColumn(index: number): number {
+    return Math.max(0, Math.min(11, Math.floor(index))) % 6;
+  }
+
+  private categoryIconRow(index: number): number {
+    return Math.floor(Math.max(0, Math.min(11, Math.floor(index))) / 6);
+  }
+
+  private homeDomainIconIndex(domain: string): number {
+    if (domain === 'eat') {
+      return 0;
+    }
+    if (domain === 'wear') {
+      return 7;
+    }
+    if (domain === 'live') {
+      return 8;
+    }
+    if (domain === 'travel') {
+      return 4;
+    }
+    if (domain === 'work') {
+      return 5;
+    }
+    return 6;
+  }
+
+  private taskSuggestionIconIndex(category: string): number {
+    if (category === 'food') {
+      return 0;
+    }
+    if (category === 'shopping') {
+      return 1;
+    }
+    if (category === 'news') {
+      return 2;
+    }
+    if (category === 'social') {
+      return 3;
+    }
+    if (category === 'travel') {
+      return 4;
+    }
+    if (category === 'work') {
+      return 5;
+    }
+    return 6;
+  }
+
+  @Builder CategoryIcon(index: number, size: number) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Image($r('app.media.home_category_icons'))
+        .width(size * 6)
+        .height(size * 2)
+        .objectFit(ImageFit.Fill)
+        .translate({
+          x: -this.categoryIconColumn(index) * size,
+          y: -this.categoryIconRow(index) * size
+        })
+    }
+    .width(size)
+    .height(size)
+    .backgroundColor(Color.White)
+    .borderRadius(size / 2)
+    .clip(true)
+  }
+
+  @Builder ProfileOverview() {
+    Column() {
+      Row() {
+        Column() {
+          Text('今日概览')
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#6F63D9')
+          Text(this.homeSummaryHeadline())
+            .fontSize(22)
+            .lineHeight(30)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#161C30')
+            .margin({ top: 6 })
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Row() {
+            Text(this.avatarStatusLabel())
+              .fontSize(13)
+              .fontColor('#5E6680')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text('›')
+              .fontSize(19)
+              .fontColor('#7669FF')
+              .margin({ left: 5 })
+          }
+          .margin({ top: 12 })
+          .onClick(() => {
+            this.avatarGenerationOpen = true;
+          })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        Column() {
+          Text(this.pendingRecommendationCount().toString())
+            .fontSize(36)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#6F63E9')
+          Text('待处理')
+            .fontSize(11)
+            .fontColor('#777E90')
+            .margin({ top: 1 })
+        }
+        .justifyContent(FlexAlign.Center)
+        .width(70)
+        .height(70)
+        .backgroundColor('#F8F7FF')
+        .borderRadius(35)
+      }
+      .width('100%')
+
+      Divider()
+        .strokeWidth(1)
+        .color('#E5E8F2')
+        .margin({ top: 18, bottom: 14 })
+
+      Row() {
+        Text('画像完整度')
+          .fontSize(13)
+          .fontColor('#4F566B')
+          .width(74)
+        Progress({ value: this.profile.completeness, total: 100, type: ProgressType.Linear })
+          .layoutWeight(1)
+          .height(5)
+          .color('#7669FF')
+          .backgroundColor('#E2E5F1')
+          .margin({ left: 8, right: 10 })
+        Text(this.profile.completeness.toString() + '%')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#665AE1')
+          .width(48)
+          .textAlign(TextAlign.End)
+      }
+      .width('100%')
+
+      Row() {
+        ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
+          this.LifestyleItem(item)
+          if (index < Math.min(3, this.profile.domains.length - 1)) {
+            Divider().vertical(true).height(38).color('#E5E8F2')
+          }
+        }, (item: HomeDomainViewModel) => item.domain + '-' + item.desc + '-' + item.eventCount)
+      }
+      .width('100%')
+      .height(74)
+      .margin({ top: 13 })
+
+      Row() {
+        AiGeneratedBadge({ compact: true })
+        Text('画像摘要由 AI 分析生成')
+          .fontSize(10)
+          .fontColor('#7E8596')
+          .margin({ left: 6 })
+        Blank()
+        Text(this.avatarUpdatedCompactLabel())
+          .fontSize(10)
+          .fontColor('#9298A6')
+          .maxLines(1)
+      }
+      .width('100%')
+      .margin({ top: 4 })
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('92%')
+    .padding({ left: 18, right: 18, top: 20, bottom: 14 })
+    .backgroundColor('#F1F4FF')
+    .borderRadius(24)
+    .margin({ top: 8 })
+  }
 
   @Builder FeatureIcon(kind: string) {
     // 首页能力卡使用语义图标，减少字母徽标带来的抽象感。
@@ -734,17 +936,26 @@ export struct HomePage {
   }
 
   @Builder LifestyleItem(item: HomeDomainViewModel) {
-    // 吃/穿/住/行画像摘要，当前为前端静态展示，后续可替换为真实画像数据。
+    // 吃/穿/住/行画像摘要始终由动态画像数据驱动，图标仅按领域映射。
     Column() {
-      Text(item.icon).fontSize(13).fontColor(item.color).fontWeight(FontWeight.Bold).height(18).textAlign(TextAlign.Center).maxLines(1)
-      Column() {
-        Text(item.title).fontSize(18).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(1)
-        Text(item.desc).fontSize(11).fontColor('#818795').margin({ top: 2 }).maxLines(1)
-      }.alignItems(HorizontalAlign.Center)
+      this.CategoryIcon(this.homeDomainIconIndex(item.domain), 30)
+      Text(item.title)
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#1B2132')
+        .margin({ top: 4 })
+        .maxLines(1)
+      Text(item.desc)
+        .fontSize(10)
+        .fontColor('#818795')
+        .margin({ top: 1 })
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
     }
     .justifyContent(FlexAlign.Center)
     .layoutWeight(1)
     .height('100%')
+    .padding({ left: 4, right: 4 })
     .onClick(() => {
       this.showProfileDetail(item);
     })
@@ -753,19 +964,19 @@ export struct HomePage {
   @Builder RecommendationImage(item: HomeRecommendationViewModel) {
     if (item.thumbnailUri.length > 0) {
       Image(item.thumbnailUri)
-        .width('100%')
-        .height(82)
+        .width(56)
+        .height(56)
         .objectFit(ImageFit.Cover)
+        .borderRadius(17)
     } else {
-      Column() {
-        Text('暂无图片')
-          .fontSize(12)
-          .fontColor('#8B93A4')
+      Stack({ alignContent: Alignment.Center }) {
+        this.CategoryIcon(this.homeDomainIconIndex(item.domain), 48)
       }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-      .height(82)
-      .backgroundColor('#EEF2F7')
+      .width(56)
+      .height(56)
+      .backgroundColor(Color.White)
+      .borderRadius(17)
+      .clip(true)
     }
   }
 
@@ -800,54 +1011,65 @@ export struct HomePage {
   }
 
   @Builder RecommendCard(item: HomeRecommendationViewModel) {
-    // 推荐卡片横滑列表，统一图片、标签、标题和元信息的布局。
-    Column() {
-      Stack({ alignContent: Alignment.TopStart }) {
-        this.RecommendationImage(item)
-        Text(this.recommendationDisplayTag(item))
-          .fontSize(11)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Color.White)
-          .maxLines(1)
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor(item.color)
-          .borderRadius(8)
-          .margin({ left: 8, top: 8 })
-      }.width('100%').height(82)
+    // 动态提醒采用连续列表；真实记录图片优先，缺图时按动态领域显示分类图标。
+    Row() {
+      this.RecommendationImage(item)
+
       Column() {
-        Text(item.title)
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.recommendationCardTitleColor(item))
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(item.desc)
-          .fontSize(11)
-          .fontColor('#787F8E')
-          .width('100%')
-          .margin({ top: 4 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row() {
+          Text(this.recommendationDisplayTag(item))
+            .fontSize(10)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(item.color)
+            .maxLines(1)
           if (item.meta.length > 0) {
-            Text(item.meta).fontSize(11).fontColor('#7C8494').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(' · ' + item.meta)
+              .fontSize(10)
+              .fontColor('#8A91A1')
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
           } else {
             Blank().layoutWeight(1)
           }
-          Text('>').fontSize(16).fontColor(Color.White).textAlign(TextAlign.Center).width(28).height(28).backgroundColor(item.color).borderRadius(14)
-        }.width('100%').margin({ top: 10 })
+        }
+        .width('100%')
+
+        Text(item.title)
+          .fontSize(15)
+          .lineHeight(21)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.recommendationCardTitleColor(item))
+          .width('100%')
+          .margin({ top: 3 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        if (item.desc.length > 0) {
+          Text(item.desc)
+            .fontSize(11)
+            .fontColor('#747C8E')
+            .width('100%')
+            .margin({ top: 2 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
       }
-      .width('100%')
-      .padding({ left: 12, right: 12, top: 10, bottom: 12 })
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 13, right: 8 })
+
+      Text('›')
+        .fontSize(25)
+        .fontColor('#9298A6')
+        .width(22)
+        .textAlign(TextAlign.Center)
     }
-    .alignItems(HorizontalAlign.Start)
+    .alignItems(VerticalAlign.Center)
     .width('100%')
-    .height(178)
-    .backgroundColor(Color.White)
-    .borderRadius(16)
-    .clip(true)
-    .shadow({ radius: 18, color: '#16000000', offsetX: 0, offsetY: 8 })
+    .constraintSize({ minHeight: 80 })
+    .padding({ left: 4, right: 2, top: 12, bottom: 12 })
+    .opacity(this.showAllRecommendations && this.recommendationCompleted(item) ? 0.65 : 1)
     .onClick(() => {
       this.openRecommendationDetail(item);
     })
@@ -895,10 +1117,6 @@ export struct HomePage {
     let page = this.currentRecommendationPageIndex();
     let start = page * 4;
     return items.slice(start, start + 4);
-  }
-
-  private recommendationGridHeight(): number {
-    return homeRecommendationGridHeight(this.recommendationPageItems().length);
   }
 
   private setRecommendationPage(index: number): void {
@@ -978,12 +1196,14 @@ export struct HomePage {
     Text(label)
       .fontSize(12)
       .fontWeight(this.showAllRecommendations === showAll ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.showAllRecommendations === showAll ? Color.White : '#6D7481')
-      .height(30)
-      .padding({ left: 12, right: 12 })
+      .fontColor(this.showAllRecommendations === showAll ? '#665AE1' : '#7B8190')
+      .height(28)
+      .padding({ left: 8, right: 8 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.showAllRecommendations === showAll ? '#8066FF' : '#F1F3F8')
-      .borderRadius(15)
+      .border({
+        width: { bottom: this.showAllRecommendations === showAll ? 2 : 0 },
+        color: this.showAllRecommendations === showAll ? '#7669FF' : Color.Transparent
+      })
       .onClick(() => {
         this.setRecommendationFilter(showAll);
       })
@@ -992,12 +1212,13 @@ export struct HomePage {
   @Builder RecommendationPagination() {
     if (this.shouldShowRecommendationPagination()) {
       Row() {
-        Button('上一页')
-          .fontSize(12)
+        Button('‹')
+          .width(32)
+          .fontSize(20)
           .fontColor(this.currentRecommendationPageIndex() > 0 ? '#8066FF' : '#A7ADBA')
           .height(32)
-          .padding({ left: 14, right: 14 })
           .backgroundColor(this.currentRecommendationPageIndex() > 0 ? '#F0ECFF' : '#EEF0F5')
+          .borderRadius(16)
           .enabled(this.currentRecommendationPageIndex() > 0)
           .onClick(() => {
             this.setRecommendationPage(this.currentRecommendationPageIndex() - 1);
@@ -1008,12 +1229,13 @@ export struct HomePage {
           .textAlign(TextAlign.Center)
           .layoutWeight(1)
           .maxLines(1)
-        Button('下一页')
-          .fontSize(12)
+        Button('›')
+          .width(32)
+          .fontSize(20)
           .fontColor(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#8066FF' : '#A7ADBA')
           .height(32)
-          .padding({ left: 14, right: 14 })
           .backgroundColor(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#F0ECFF' : '#EEF0F5')
+          .borderRadius(16)
           .enabled(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1)
           .onClick(() => {
             this.setRecommendationPage(this.currentRecommendationPageIndex() + 1);
@@ -1068,28 +1290,6 @@ export struct HomePage {
     return '#EEF0FF';
   }
 
-  private taskSuggestionIcon(category: string): string {
-    if (category === 'food') {
-      return '食';
-    }
-    if (category === 'shopping') {
-      return '购';
-    }
-    if (category === 'news') {
-      return '讯';
-    }
-    if (category === 'social') {
-      return '聊';
-    }
-    if (category === 'travel') {
-      return '行';
-    }
-    if (category === 'work') {
-      return '办';
-    }
-    return '荐';
-  }
-
   private refreshTaskSuggestions(): void {
     if (this.taskSuggestionsLoading) {
       return;
@@ -1120,69 +1320,63 @@ export struct HomePage {
   }
 
   @Builder TaskSuggestionRow(item: HomeTaskSuggestion) {
-    Row() {
-      Row() {
-        Stack({ alignContent: Alignment.Center }) {
-          Text(this.taskSuggestionIcon(item.category))
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.taskSuggestionAccent(item.category))
-        }
-        .width(44)
-        .height(44)
-        .borderRadius(14)
-        .backgroundColor(this.taskSuggestionTint(item.category))
-
-        Column() {
-          Text(item.title)
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#171C2D')
-            .width('100%')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(homeTaskSuggestionCategoryLabel(item.category) + ' · ' + item.reason)
-            .fontSize(11)
-            .fontColor(this.taskSuggestionAccent(item.category))
-            .width('100%')
-            .margin({ top: 3 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(item.task)
-            .fontSize(12)
-            .fontColor('#7A8191')
-            .width('100%')
-            .margin({ top: 4 })
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        .margin({ left: 12, right: 10 })
+    Column() {
+      Column() {
+        this.CategoryIcon(this.taskSuggestionIconIndex(item.category), 50)
+        Text(item.title)
+          .fontSize(14)
+          .lineHeight(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#1A2031')
+          .width('100%')
+          .margin({ top: 7 })
+          .textAlign(TextAlign.Center)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(item.reason)
+          .fontSize(10)
+          .fontColor('#858C9B')
+          .width('100%')
+          .margin({ top: 3 })
+          .textAlign(TextAlign.Center)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
+      .alignItems(HorizontalAlign.Center)
+      .width('100%')
       .layoutWeight(1)
-      .height('100%')
-      .alignItems(VerticalAlign.Center)
       .onClick(() => {
         this.openTaskSuggestionDetail(item);
       })
 
-      Button(this.agentTaskButtonLabel('guess-' + item.id, '执行'))
-        .width(62)
-        .height(34)
-        .fontSize(13)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(Color.White)
-        .backgroundColor(this.agentTaskSubmitting ? '#B6BDD0' : this.taskSuggestionAccent(item.category))
-        .borderRadius(17)
-        .enabled(!this.agentTaskSubmitting)
-        .onClick(() => {
-          this.executeTaskSuggestion(item);
-        })
+      Row() {
+        Text(homeTaskSuggestionCategoryLabel(item.category))
+          .fontSize(10)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.taskSuggestionAccent(item.category))
+          .layoutWeight(1)
+          .maxLines(1)
+        Button(this.agentTaskButtonLabel('guess-' + item.id, '执行'))
+          .width(58)
+          .height(24)
+          .padding(0)
+          .fontSize(11)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.agentTaskSubmitting ? '#A4A8B3' : this.taskSuggestionAccent(item.category))
+          .backgroundColor(this.agentTaskSubmitting ? '#F1F2F5' : this.taskSuggestionTint(item.category))
+          .borderRadius(12)
+          .enabled(!this.agentTaskSubmitting)
+          .onClick(() => {
+            this.executeTaskSuggestion(item);
+          })
+      }
+      .width('100%')
+      .margin({ top: 12 })
     }
-    .width('100%')
-    .height(96)
-    .padding({ left: 12, right: 12 })
+    .alignItems(HorizontalAlign.Center)
+    .layoutWeight(1)
+    .height(154)
+    .padding({ left: 9, right: 9, top: 8, bottom: 8 })
   }
 
   @Builder TaskSuggestionEvidenceCard(item: HomeTaskSuggestionEvidence, accent: string, tint: string) {
@@ -1418,16 +1612,7 @@ export struct HomePage {
           .fontColor('#6F7684')
           .margin({ left: 12 })
       } else {
-        Stack({ alignContent: Alignment.Center }) {
-          Text('荐')
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#7669FF')
-        }
-        .width(34)
-        .height(34)
-        .backgroundColor('#EEF0FF')
-        .borderRadius(12)
+        this.CategoryIcon(6, 38)
         Column() {
           Text('暂时没有新推荐')
             .fontSize(14)
@@ -1472,7 +1657,7 @@ export struct HomePage {
       }
       .width('100%')
 
-      Column() {
+      Row() {
         if (this.taskSuggestions.length === 0) {
           this.TaskSuggestionEmptyState()
         } else {
@@ -1480,24 +1665,22 @@ export struct HomePage {
             this.TaskSuggestionRow(item)
             if (index < this.taskSuggestions.length - 1) {
               Divider()
+                .vertical(true)
+                .height(104)
                 .strokeWidth(1)
-                .color('#EEF0F5')
-                .margin({ left: 68, right: 12 })
+                .color('#E7EAF2')
             }
           }, (item: HomeTaskSuggestion) => item.id)
         }
       }
+      .alignItems(VerticalAlign.Center)
       .width('100%')
-      .margin({ top: 14 })
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .border({ width: 1, color: '#EDF0F6' })
-      .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: 6 })
+      .margin({ top: 10 })
       .clip(true)
     }
     .alignItems(HorizontalAlign.Start)
     .width('92%')
-    .margin({ top: 26 })
+    .margin({ top: 30 })
   }
 
   @Builder RecommendationDetailImage(image: CollectionImageViewModel) {
@@ -1713,104 +1896,16 @@ export struct HomePage {
         Column() {
           AppHeader({
             title: '你的智伴',
-            icon: $r('app.media.header_companion'),
-            pcServerVisible: true
-          })
-
-        Column() {
-          this.AvatarImage()
-
-          Row() {
-            this.FeaturePill('understand', '理解你', '更懂你的偏好')
-            Blank().layoutWeight(1)
-            this.FeaturePill('protect', '守护你', '隐私安全可靠')
-          }.width('92%').margin({ top: 8 })
-
-          Row() {
-            this.FeaturePill('companion', '陪伴你', '服务你的生活')
-            Blank().layoutWeight(1)
-            this.FeaturePill('growth', '成就你', '助力你的成长')
-          }.width('92%').margin({ top: 10 })
-
-          Row() {
-            Row().width(8).height(8).backgroundColor('#7669FF').borderRadius(4)
-            Text(this.avatarStatusLabel())
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#1B2030')
-              .margin({ left: 10 })
-              .layoutWeight(1)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(this.avatarUpdatedCompactLabel())
-              .fontSize(12)
-              .fontColor('#7B8190')
-              .margin({ left: 10 })
-              .width(124)
-              .textAlign(TextAlign.End)
-              .maxLines(1)
-            Text('>')
-              .fontSize(17)
-              .fontColor('#8B909A')
-              .margin({ left: 6 })
-          }
-          .width('92%')
-          .height(48)
-          .padding({ left: 18, right: 14 })
-          .backgroundColor(Color.White)
-          .borderRadius(24)
-          .shadow({ radius: 10, color: '#10000000', offsetX: 0, offsetY: 4 })
-          .margin({ top: 16, bottom: 16 })
-          .onClick(() => {
-            this.avatarGenerationOpen = true;
-          })
-        }
-        .width('100%')
-        .backgroundColor('#EDF5FF')
-
-        Row() {
-          Text('画像完整度').fontSize(16).fontColor('#272C38').width(88)
-          Progress({ value: this.profile.completeness, total: 100, type: ProgressType.Linear })
-            .layoutWeight(1)
-            .height(6)
-            .color('#8066FF')
-            .backgroundColor('#E6E8F3')
-            .margin({ left: 12, right: 14 })
-          Text(this.profile.completeness + '%').fontSize(28).fontWeight(FontWeight.Bold).fontColor('#8066FF').width(86).textAlign(TextAlign.End).maxLines(1)
-          Text('>').fontSize(20).fontColor('#7A808C').margin({ left: 8 })
-        }
-        .width('92%')
-        .height(76)
-        .padding({ left: 20, right: 18 })
-        .backgroundColor(Color.White)
-        .borderRadius(18)
-        .shadow({ radius: 12, color: '#10000000', offsetX: 0, offsetY: 5 })
-        .margin({ top: 16 })
-
-        Row() {
-          AiGeneratedBadge({ compact: true })
-          Text('以下画像摘要由 AI 分析生成')
-            .fontSize(11)
-            .fontColor('#727A8B')
-            .margin({ left: 7 })
-        }
-        .width('92%')
-        .margin({ top: 10 })
-
-        Row() {
-          ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
-            this.LifestyleItem(item)
-            if (index < 3) {
-              Divider().vertical(true).height(34).color('#E5E7EF')
+            icon: $r('app.media.digital_avatar'),
+            avatarUri: this.profileAvatarUri(),
+            circularAvatar: true,
+            pcServerVisible: true,
+            onIconClick: (): void => {
+              this.avatarGenerationOpen = true;
             }
-          }, (item: HomeDomainViewModel) => item.domain + '-' + item.desc + '-' + item.eventCount)
-        }
-        .width('92%')
-        .height(82)
-        .backgroundColor(Color.White)
-        .borderRadius(18)
-        .padding({ left: 12, right: 12 })
-        .margin({ top: 14 })
+          })
+
+          this.ProfileOverview()
 
           Row() {
             Text('为你提醒').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
@@ -1824,19 +1919,20 @@ export struct HomePage {
           if (this.visibleRecommendations().length === 0) {
             this.EmptyRecommendationCard()
           } else {
-            Grid() {
-              ForEach(this.recommendationPageItems(), (item: HomeRecommendationViewModel) => {
-                GridItem() {
-                  this.RecommendCard(item)
+            Column() {
+              ForEach(this.recommendationPageItems(), (item: HomeRecommendationViewModel, index: number) => {
+                this.RecommendCard(item)
+                if (index < this.recommendationPageItems().length - 1) {
+                  Divider()
+                    .strokeWidth(1)
+                    .color('#E9ECF3')
+                    .margin({ left: 73 })
                 }
               }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
             }
-            .columnsTemplate('1fr 1fr')
-            .columnsGap(12)
-            .rowsGap(12)
             .width('92%')
-            .height(this.recommendationGridHeight())
-            .margin({ top: 14 })
+            .padding({ left: 8, right: 8 })
+            .margin({ top: 8 })
             this.RecommendationPagination()
           }
 
@@ -1857,7 +1953,7 @@ export struct HomePage {
 
           Blank().height(88)
         }.width('100%')
-      }.width('100%').height('100%').backgroundColor('#F4F8FF')
+      }.width('100%').height('100%').backgroundColor(Color.White)
 
       ForEach(this.selectedRecommendationItems(), (item: HomeRecommendationViewModel) => {
         this.RecommendationDetailOverlay(item)
@@ -1877,5 +1973,6 @@ export struct HomePage {
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(Color.White)
   }
 }
