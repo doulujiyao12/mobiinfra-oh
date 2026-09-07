@@ -57,6 +57,18 @@ export struct HomePage {
   @State avatarHistoryOpen: boolean = false;
   @State selectedAvatarVersionId: string = '';
   @State selectedAvatarPhotoUri: string = '';
+  @State profileOverviewWidth: number = 0;
+
+  private isWideProfileOverview(): boolean {
+    return this.profileOverviewWidth >= 520;
+  }
+
+  private updateProfileOverviewWidth(area: Area): void {
+    let measuredWidth = parseFloat(area.width.toString());
+    if (measuredWidth > 0 && Math.abs(measuredWidth - this.profileOverviewWidth) >= 1) {
+      this.profileOverviewWidth = measuredWidth;
+    }
+  }
 
   private profileAvatarUri(): string {
     if (this.profile.avatarMessageForegroundUri.length > 0) {
@@ -76,9 +88,9 @@ export struct HomePage {
   private homeSummaryHeadline(): string {
     let count = this.pendingRecommendationCount();
     if (count === 0) {
-      return '目前没有待处理提醒';
+      return '今天没什么要操心的';
     }
-    return '目前有 ' + count.toString() + ' 件事值得留意';
+    return '有 ' + count.toString() + ' 件事，我帮你记着';
   }
 
   private categoryIconColumn(index: number): number {
@@ -87,6 +99,29 @@ export struct HomePage {
 
   private categoryIconRow(index: number): number {
     return Math.floor(Math.max(0, Math.min(11, Math.floor(index))) / 6);
+  }
+
+  private categoryIconVisualOffsetX(index: number): number {
+    if (index === 0) {
+      return -0.11;
+    }
+    if (index === 7) {
+      return -0.04;
+    }
+    return 0;
+  }
+
+  private categoryIconVisualOffsetY(index: number): number {
+    if (index === 0) {
+      return -0.06;
+    }
+    if (index === 4) {
+      return -0.09;
+    }
+    if (index === 7 || index === 8) {
+      return 0.09;
+    }
+    return 0;
   }
 
   private homeDomainIconIndex(domain: string): number {
@@ -137,8 +172,8 @@ export struct HomePage {
         .height(size * 2)
         .objectFit(ImageFit.Fill)
         .translate({
-          x: -this.categoryIconColumn(index) * size,
-          y: -this.categoryIconRow(index) * size
+          x: (-this.categoryIconColumn(index) + this.categoryIconVisualOffsetX(index)) * size,
+          y: (-this.categoryIconRow(index) + this.categoryIconVisualOffsetY(index)) * size
         })
     }
     .width(size)
@@ -153,12 +188,12 @@ export struct HomePage {
       Row() {
         Column() {
           Text('今日概览')
-            .fontSize(12)
+            .fontSize(this.isWideProfileOverview() ? 15 : 12)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#6F63D9')
+            .fontColor('#5F63A7')
           Text(this.homeSummaryHeadline())
-            .fontSize(22)
-            .lineHeight(30)
+            .fontSize(this.isWideProfileOverview() ? 28 : 22)
+            .lineHeight(this.isWideProfileOverview() ? 36 : 30)
             .fontWeight(FontWeight.Bold)
             .fontColor('#161C30')
             .margin({ top: 6 })
@@ -166,87 +201,118 @@ export struct HomePage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Row() {
             Text(this.avatarStatusLabel())
-              .fontSize(13)
+              .fontSize(this.isWideProfileOverview() ? 15 : 13)
               .fontColor('#5E6680')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text('›')
-              .fontSize(19)
+              .fontSize(this.isWideProfileOverview() ? 21 : 19)
               .fontColor('#7669FF')
-              .margin({ left: 5 })
+              .margin({ left: this.isWideProfileOverview() ? 6 : 5 })
           }
-          .margin({ top: 12 })
+          .margin({ top: this.isWideProfileOverview() ? 8 : 12 })
           .onClick(() => {
             this.avatarGenerationOpen = true;
           })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
+        .margin({ right: this.isWideProfileOverview() ? 24 : 12 })
 
         Column() {
           Text(this.pendingRecommendationCount().toString())
-            .fontSize(36)
+            .fontSize(this.isWideProfileOverview() ? 42 : 36)
             .fontWeight(FontWeight.Bold)
             .fontColor('#6F63E9')
           Text('待处理')
-            .fontSize(11)
+            .fontSize(this.isWideProfileOverview() ? 13 : 11)
             .fontColor('#777E90')
-            .margin({ top: 1 })
+            .margin({ top: this.isWideProfileOverview() ? 2 : 1 })
         }
         .justifyContent(FlexAlign.Center)
-        .width(70)
-        .height(70)
-        .backgroundColor('#F8F7FF')
-        .borderRadius(35)
+        .width(this.isWideProfileOverview() ? 82 : 70)
+        .height(this.isWideProfileOverview() ? 82 : 70)
+        .backgroundColor('#E8FFFFFF')
+        .borderRadius(this.isWideProfileOverview() ? 41 : 35)
+        .border({ width: 1, color: '#CFFFFFFF' })
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       Divider()
         .strokeWidth(1)
-        .color('#E5E8F2')
-        .margin({ top: 18, bottom: 14 })
+        .color('#A8DDE3EC')
+        .margin({
+          top: this.isWideProfileOverview() ? 12 : 18,
+          bottom: this.isWideProfileOverview() ? 10 : 14
+        })
 
       Row() {
         Text('画像完整度')
-          .fontSize(13)
+          .fontSize(this.isWideProfileOverview() ? 15 : 13)
           .fontColor('#4F566B')
-          .width(74)
+          .width(this.isWideProfileOverview() ? 92 : 74)
         Progress({ value: this.profile.completeness, total: 100, type: ProgressType.Linear })
           .layoutWeight(1)
-          .height(5)
+          .height(this.isWideProfileOverview() ? 6 : 5)
           .color('#7669FF')
-          .backgroundColor('#E2E5F1')
-          .margin({ left: 8, right: 10 })
+          .backgroundColor('#C8E2E5F1')
+          .margin({
+            left: this.isWideProfileOverview() ? 12 : 8,
+            right: this.isWideProfileOverview() ? 15 : 10
+          })
         Text(this.profile.completeness.toString() + '%')
-          .fontSize(17)
+          .fontSize(this.isWideProfileOverview() ? 20 : 17)
           .fontWeight(FontWeight.Bold)
           .fontColor('#665AE1')
-          .width(48)
+          .width(this.isWideProfileOverview() ? 60 : 48)
           .textAlign(TextAlign.End)
       }
       .width('100%')
 
-      Row() {
-        ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
-          this.LifestyleItem(item)
-          if (index < Math.min(3, this.profile.domains.length - 1)) {
-            Divider().vertical(true).height(38).color('#E5E8F2')
-          }
-        }, (item: HomeDomainViewModel) => item.domain + '-' + item.desc + '-' + item.eventCount)
+      if (this.isWideProfileOverview()) {
+        Row() {
+          ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
+            this.WideLifestyleItem(item)
+            if (index < Math.min(3, this.profile.domains.length - 1)) {
+              Divider()
+                .vertical(true)
+                .height(60)
+                .color('#A8DDE3EC')
+            }
+          }, (item: HomeDomainViewModel) =>
+            'wide-' + item.domain + '-' + item.desc + '-' + item.eventCount)
+        }
+        .width('100%')
+        .height(104)
+        .margin({ top: 8 })
+      } else {
+        Row() {
+          ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
+            this.CompactLifestyleItem(item)
+            if (index < Math.min(3, this.profile.domains.length - 1)) {
+              Divider()
+                .vertical(true)
+                .height(38)
+                .color('#A8DDE3EC')
+            }
+          }, (item: HomeDomainViewModel) =>
+            'compact-' + item.domain + '-' + item.desc + '-' + item.eventCount)
+        }
+        .width('100%')
+        .height(74)
+        .margin({ top: 13 })
       }
-      .width('100%')
-      .height(74)
-      .margin({ top: 13 })
 
       Row() {
-        AiGeneratedBadge({ compact: true })
+        AiGeneratedBadge({ compact: !this.isWideProfileOverview() })
         Text('画像摘要由 AI 分析生成')
-          .fontSize(10)
+          .fontSize(this.isWideProfileOverview() ? 12 : 10)
           .fontColor('#7E8596')
-          .margin({ left: 6 })
+          .margin({ left: this.isWideProfileOverview() ? 8 : 6 })
         Blank()
         Text(this.avatarUpdatedCompactLabel())
-          .fontSize(10)
+          .fontSize(this.isWideProfileOverview() ? 12 : 10)
           .fontColor('#9298A6')
           .maxLines(1)
       }
@@ -255,10 +321,33 @@ export struct HomePage {
     }
     .alignItems(HorizontalAlign.Start)
     .width('92%')
-    .padding({ left: 18, right: 18, top: 20, bottom: 14 })
-    .backgroundColor('#F1F4FF')
-    .borderRadius(24)
+    .constraintSize({ maxWidth: 720 })
+    .padding({
+      left: this.isWideProfileOverview() ? 26 : 18,
+      right: this.isWideProfileOverview() ? 26 : 18,
+      top: this.isWideProfileOverview() ? 18 : 20,
+      bottom: 14
+    })
+    .backgroundColor('#F4F8FC')
+    .backgroundImage(
+      this.isWideProfileOverview() ? $r('app.media.home_overview_background') :
+        $r('app.media.home_overview_background_compact'),
+      ImageRepeat.NoRepeat
+    )
+    .backgroundImageSize(ImageSize.Cover)
+    .borderRadius(this.isWideProfileOverview() ? 30 : 24)
+    .border({ width: 1, color: '#A8FFFFFF' })
+    .clip(true)
+    .shadow({
+      radius: this.isWideProfileOverview() ? 20 : 14,
+      color: '#120D2A63',
+      offsetX: 0,
+      offsetY: this.isWideProfileOverview() ? 8 : 5
+    })
     .margin({ top: 8 })
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      this.updateProfileOverviewWidth(newValue);
+    })
   }
 
   @Builder FeatureIcon(kind: string) {
@@ -935,8 +1024,36 @@ export struct HomePage {
     .zIndex(100)
   }
 
-  @Builder LifestyleItem(item: HomeDomainViewModel) {
-    // 吃/穿/住/行画像摘要始终由动态画像数据驱动，图标仅按领域映射。
+  @Builder WideLifestyleItem(item: HomeDomainViewModel) {
+    Row() {
+      this.CategoryIcon(this.homeDomainIconIndex(item.domain), 60)
+      Column() {
+        Text(item.title)
+          .fontSize(19)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#1B2132')
+          .maxLines(1)
+        Text(item.desc)
+          .fontSize(13)
+          .fontColor('#737B8C')
+          .margin({ top: 3 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 8 })
+    }
+    .alignItems(VerticalAlign.Center)
+    .layoutWeight(1)
+    .height('100%')
+    .padding({ left: 6, right: 6 })
+    .onClick(() => {
+      this.showProfileDetail(item);
+    })
+  }
+
+  @Builder CompactLifestyleItem(item: HomeDomainViewModel) {
     Column() {
       this.CategoryIcon(this.homeDomainIconIndex(item.domain), 30)
       Text(item.title)
