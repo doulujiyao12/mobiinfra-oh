@@ -92,6 +92,7 @@ import {
   parseHomeTaskSuggestions
 } from './home/HomeTaskSuggestion';
 import {
+  HOME_COMFORT_CHAT_WINDOW_DAYS,
   HomeComfortChatMessage,
   HomeComfortConcern,
   buildHomeComfortChatMessages,
@@ -179,6 +180,7 @@ import {
   currentLocalDateKey,
   formatLocalDateKey,
   localWeekdayLabel,
+  offsetLocalDate,
   weekRangeTextFromDate
 } from '../utils/DateUtils';
 import {
@@ -245,6 +247,7 @@ const HDC_REVERSE_READ_TIMEOUT_MS: number = 3000;
 const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
 const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
 const LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS: number = 250;
+const HOME_COMFORT_CHAT_SCENE_ID: number = 3;
 
 interface ServerFile {
   name: string;
@@ -643,6 +646,13 @@ struct Index {
   private cloudStreamDisplayTimerId: number = -1;
   private cloudStreamDisplayGeneration: number = 0;
   private cloudStreamDisplayVersion: number = 0;
+  @State profileShareStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private profileShareStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private profileShareStreamDisplayTimerId: number = -1;
+  private profileShareStreamDisplayGeneration: number = 0;
+  private profileShareStreamDisplayVersion: number = 0;
+  private profileShareStreamRequestActive: boolean = false;
+  private profileShareAnalysisGeneration: number = 0;
 
   private shouldDisplayFirstLaunchOnboarding(): boolean {
     return shouldShowFirstLaunchOnboarding(this.firstLaunchOnboardingVersion);
@@ -669,6 +679,15 @@ struct Index {
 
   private chatMessagesForDisplay(): ChatMessage[] {
     let snapshot = this.cloudStreamDisplaySnapshot;
+    let streamingVersion = this.cloudStreamDisplayVersion;
+    let streamRequestActive = false;
+    let profileShareSnapshot = this.profileShareStreamDisplaySnapshot;
+    if ((this.profileShareStreamRequestActive || profileShareSnapshot.active) &&
+      profileShareSnapshot.sessionId === this.activeChatSessionId && profileShareSnapshot.messageId.length > 0) {
+      snapshot = profileShareSnapshot;
+      streamingVersion = this.profileShareStreamDisplayVersion;
+      streamRequestActive = this.profileShareStreamRequestActive;
+    }
     if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
       return this.activeChatMessages;
     }
@@ -694,8 +713,8 @@ struct Index {
         createdAt: message.createdAt,
         imagePath: message.imagePath,
         imagePaths: chatMessageImagePaths(message),
-        streamingActive: snapshot.active,
-        streamingVersion: this.cloudStreamDisplayVersion
+        streamingActive: snapshot.active || streamRequestActive,
+        streamingVersion: streamingVersion
       };
       if (message.voice !== undefined) {
         renderedMessage.voice = message.voice;
@@ -1038,6 +1057,60 @@ struct Index {
       this.cloudStreamFlushTimerId = -1;
       this.flushCloudStreamMessageUpdate();
     }, delayMs);
+  }
+
+  private clearProfileShareStreamDisplayTimer(): void {
+    if (this.profileShareStreamDisplayTimerId !== -1) {
+      clearTimeout(this.profileShareStreamDisplayTimerId);
+      this.profileShareStreamDisplayTimerId = -1;
+    }
+  }
+
+  private publishProfileShareStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.profileShareStreamDisplayVersion += 1;
+    this.profileShareStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleProfileShareStreamDisplayFrame(): void {
+    if (this.profileShareStreamDisplayTimerId !== -1 || !this.profileShareStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.profileShareStreamDisplayGeneration;
+    this.profileShareStreamDisplayTimerId = setTimeout(() => {
+      this.profileShareStreamDisplayTimerId = -1;
+      if (generation !== this.profileShareStreamDisplayGeneration) {
+        return;
+      }
+      this.publishProfileShareStreamDisplaySnapshot(this.profileShareStreamDisplayPacer.advanceFrame());
+      this.scheduleProfileShareStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private resetProfileShareStreamDisplay(): void {
+    this.clearProfileShareStreamDisplayTimer();
+    this.profileShareStreamDisplayGeneration += 1;
+    this.profileShareStreamRequestActive = false;
+    this.profileShareStreamDisplayPacer.reset();
+    this.publishProfileShareStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
+  }
+
+  private beginProfileShareStreamDisplay(): void {
+    this.resetProfileShareStreamDisplay();
+    this.profileShareStreamRequestActive = true;
+  }
+
+  private updateProfileShareStreamDisplayTarget(sessionId: string, messageId: string, content: string): void {
+    this.publishProfileShareStreamDisplaySnapshot(
+      this.profileShareStreamDisplayPacer.setTarget(sessionId, messageId, content, []));
+    this.scheduleProfileShareStreamDisplayFrame();
+  }
+
+  private finishProfileShareStreamMessage(sessionId: string, messageId: string, content: string): void {
+    this.profileShareStreamRequestActive = false;
+    this.publishProfileShareStreamDisplaySnapshot(
+      this.profileShareStreamDisplayPacer.beginFinish(sessionId, messageId, content, []));
+    this.scheduleProfileShareStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content);
   }
 
   private updateChatContextSummaryForSession(sessionId: string, summary: string, updatedAt: number,
@@ -3039,6 +3112,9 @@ struct Index {
   }
 
   private async handleProfileShareReceived(event: ProfileShareReceivedEvent): Promise<void> {
+    let analysisGeneration = ++this.profileShareAnalysisGeneration;
+    this.profileShareCloudClient.cancelActiveRequests();
+    this.resetProfileShareStreamDisplay();
     this.currentTab = MainTabIndex.Chat;
     let profileSession = this.createProfileShareCloudSession(event);
     if (profileSession === null) {
@@ -3065,33 +3141,57 @@ struct Index {
       return;
     }
 
+    let streamedReport = '';
+    this.beginProfileShareStreamDisplay();
     try {
       let localProfile = this.buildProfileShareEnvelope().profileText;
-      let report = await this.runProfileShareAffinityAnalysis(localProfile, event.profileText);
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, report);
+      let report = await this.runProfileShareAffinityAnalysis(localProfile, event.profileText, (delta: string): void => {
+        if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+          return;
+        }
+        streamedReport += delta;
+        this.updateProfileShareStreamDisplayTarget(chatSessionId, assistantMessageId, streamedReport);
+      });
+      if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+        return;
+      }
+      let finalReport = streamedReport.length > 0 ? streamedReport : report;
+      if (finalReport.trim().length === 0) {
+        throw new Error('Planner 返回了空的同频报告。');
+      }
+      this.finishProfileShareStreamMessage(chatSessionId, assistantMessageId, finalReport);
       this.appendCloudLog('[一碰分享] 同频报告生成完成。');
     } catch (e) {
+      if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+        return;
+      }
       let err = e as Error;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
-        '[错误] 同频报告生成失败：' + err.message);
+      let errorText = '[错误] 同频报告生成失败：' + err.message;
+      let failureContent = streamedReport.length > 0 ? streamedReport + '\n\n' + errorText : errorText;
+      this.finishProfileShareStreamMessage(chatSessionId, assistantMessageId, failureContent);
       this.appendCloudLog('[一碰分享] 同频报告生成失败：' + err.message);
     }
   }
 
-  private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string): Promise<string> {
+  private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string,
+    onContentDelta: (delta: string) => void): Promise<string> {
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: cloudPlannerApiKey(config),
       messages: this.buildProfileAffinityMessages(localProfile, remoteProfile),
       temperature: 0.2,
+      model: config.plannerModel,
       maxTokens: 2048,
       readTimeout: 120000,
       chatTemplateKwargs: {
         enable_thinking: false
       }
     };
-    return await this.profileShareCloudClient.chatCompletionText(options);
+    let result = await this.profileShareCloudClient.chatCompletionStream(options, {
+      onContentDelta: onContentDelta
+    });
+    return result.content;
   }
 
   private buildProfileAffinityMessages(localProfile: string, remoteProfile: string): CloudChatMessage[] {
@@ -5824,6 +5924,32 @@ struct Index {
     }
   }
 
+  private recentHomeComfortChatEvents(): IndexedEvent[] {
+    if (this.dataManagerFacade === null) {
+      return [];
+    }
+    // 解闷上下文独立于“猜你喜欢”：只读取今天及之前 6 天内的聊天场景索引。
+    let today = new Date();
+    let options: QueryOptions = {
+      keywords: [],
+      domains: [],
+      entities: [],
+      date: '',
+      month: '',
+      startDate: formatLocalDateKey(offsetLocalDate(today, 1 - HOME_COMFORT_CHAT_WINDOW_DAYS)),
+      endDate: formatLocalDateKey(today),
+      includeTodoDeadlineInTimeRange: false,
+      workflowSceneIds: [HOME_COMFORT_CHAT_SCENE_ID],
+      limit: 0
+    };
+    try {
+      return this.dataManagerFacade.queryIndexedEvents(options).events;
+    } catch (e) {
+      AppLogger.warnCause('HomeComfort', 'load recent chat events failed', e as Error);
+      return [];
+    }
+  }
+
   private async refreshHomeTaskSuggestions(showFailureToast: boolean): Promise<void> {
     if (this.homeTaskSuggestionsLoading) {
       return;
@@ -5868,19 +5994,17 @@ struct Index {
       if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
         throw new Error('请先在“我的”中配置 Planner 服务');
       }
-      let recentEvents = this.recentHomeTaskSuggestionEvents();
-      let groundedDomains = this.homeProfile.domains.filter((item: HomeDomainViewModel): boolean =>
-        item.eventCount > 0);
-      if (recentEvents.length === 0 && groundedDomains.length === 0) {
-        throw new Error('暂无足够的近期记录用于推测，完成一次数据整理后再试');
+      let recentEvents = this.recentHomeComfortChatEvents();
+      if (recentEvents.length === 0) {
+        this.homeComfortConcerns = [];
+        throw new Error('近 7 天暂无聊天记录，完成一次聊天数据整理后再试');
       }
-      let prompt = buildHomeComfortConcernPrompt(recentEvents, this.homeProfile.domains, currentLocalDateKey());
+      let prompt = buildHomeComfortConcernPrompt(recentEvents, currentLocalDateKey());
       let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
       this.homeComfortConcernBatch++;
       let batchId = new Date().getTime().toString() + '-' + this.homeComfortConcernBatch.toString();
-      this.homeComfortConcerns = parseHomeComfortConcerns(response, batchId, recentEvents,
-        this.homeProfile.domains);
-      AppLogger.info('HomeComfort', 'generated concerns from recentEvents=' + recentEvents.length.toString());
+      this.homeComfortConcerns = parseHomeComfortConcerns(response, batchId, recentEvents);
+      AppLogger.info('HomeComfort', 'generated concerns from recentChatEvents=' + recentEvents.length.toString());
     } catch (e) {
       let err = e as Error;
       this.homeComfortConcernError = err.message.length > 0 ? err.message : '烦恼推测生成失败，请稍后重试';
@@ -5899,9 +6023,8 @@ struct Index {
     if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
       throw new Error('请先在“我的”中配置 Planner 服务');
     }
-    let recentEvents = this.recentHomeTaskSuggestionEvents();
-    let messages = buildHomeComfortChatMessages(concern, history, recentEvents, this.homeProfile.domains,
-      currentLocalDateKey());
+    let recentEvents = this.recentHomeComfortChatEvents();
+    let messages = buildHomeComfortChatMessages(concern, history, recentEvents, currentLocalDateKey());
     if (messages.length <= 1) {
       throw new Error('请先输入想聊的内容');
     }

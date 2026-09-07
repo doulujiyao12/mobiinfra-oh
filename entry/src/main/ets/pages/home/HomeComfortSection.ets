@@ -1,4 +1,6 @@
+import { window } from '@kit.ArkUI';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
   HomeComfortChatMessage,
@@ -22,9 +24,12 @@ export struct HomeComfortSection {
   @State private chatMessages: HomeComfortChatMessage[] = [];
   @State private sending: boolean = false;
   @State private chatError: string = '';
+  @State private keyboardHeightVp: number = 0;
   private messageSequence: number = 0;
   private chatSessionToken: number = 0;
   private chatScroller: Scroller = new Scroller();
+  private keyboardWindow: window.Window | null = null;
+  private keyboardHeightChangeCallback: ((height: number) => void) | null = null;
 
   private concernAccent(category: string): string {
     if (category === 'work') {
@@ -120,6 +125,51 @@ export struct HomeComfortSection {
     this.chatError = '';
     this.sending = false;
     this.getUIContext().getFocusController().clearFocus();
+  }
+
+  private startKeyboardTracking(): void {
+    if (this.keyboardWindow !== null || this.keyboardHeightChangeCallback !== null) {
+      return;
+    }
+    let hostContext = this.getUIContext().getHostContext();
+    if (hostContext === undefined) {
+      return;
+    }
+    let sessionToken = this.chatSessionToken;
+    window.getLastWindow(hostContext).then((mainWindow: window.Window): void => {
+      if (!this.chatOpen || sessionToken !== this.chatSessionToken || this.keyboardWindow !== null) {
+        return;
+      }
+      let callback = (height: number): void => {
+        this.keyboardHeightVp = Math.max(0, px2vp(height));
+        if (height > 0) {
+          this.scrollToLatest();
+        }
+      };
+      mainWindow.on('keyboardHeightChange', callback);
+      this.keyboardWindow = mainWindow;
+      this.keyboardHeightChangeCallback = callback;
+    }).catch((e: Error): void => {
+      AppLogger.warn('HomeComfort', 'Failed to observe keyboard height. Cause: ' + e.message);
+      this.keyboardHeightVp = 0;
+    });
+  }
+
+  private stopKeyboardTracking(): void {
+    let mainWindow = this.keyboardWindow;
+    let callback = this.keyboardHeightChangeCallback;
+    this.keyboardWindow = null;
+    this.keyboardHeightChangeCallback = null;
+    this.keyboardHeightVp = 0;
+    if (mainWindow === null || callback === null) {
+      return;
+    }
+    try {
+      mainWindow.off('keyboardHeightChange', callback);
+    } catch (e) {
+      let error = e as Error;
+      AppLogger.warn('HomeComfort', 'Failed to stop observing keyboard height. Cause: ' + error.message);
+    }
   }
 
   private refreshConcerns(): void {
@@ -231,7 +281,7 @@ export struct HomeComfortSection {
           .width(28)
           .height(28)
           .color('#8B6BD6')
-        Text('正在看看最近有什么新鲜事')
+        Text('正在听听最近的心事')
           .fontSize(13)
           .fontColor('#6F7684')
           .margin({ left: 12 })
@@ -286,14 +336,18 @@ export struct HomeComfortSection {
       Row() {
         Blank()
           .layoutWeight(1)
-        Text(item.content)
-          .fontSize(14)
-          .lineHeight(21)
-          .fontColor(Color.White)
-          .padding({ left: 15, right: 15, top: 11, bottom: 11 })
-          .backgroundColor('#7862D3')
-          .borderRadius({ topLeft: 18, topRight: 6, bottomLeft: 18, bottomRight: 18 })
-          .constraintSize({ maxWidth: '78%' })
+        Column() {
+          Text(item.content)
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor(Color.White)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 15, right: 15, top: 11, bottom: 11 })
+        .backgroundColor('#7862D3')
+        .borderRadius({ topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
+        .clip(true)
+        .constraintSize({ maxWidth: '78%' })
       }
       .width('100%')
     } else {
@@ -315,12 +369,12 @@ export struct HomeComfortSection {
             .fontSize(14)
             .lineHeight(21)
             .fontColor('#34394A')
-            .width('100%')
-            .padding({ left: 15, right: 15, top: 11, bottom: 11 })
-            .backgroundColor(Color.White)
-            .borderRadius({ topLeft: 6, topRight: 18, bottomLeft: 18, bottomRight: 18 })
         }
         .alignItems(HorizontalAlign.Start)
+        .padding({ left: 15, right: 15, top: 11, bottom: 11 })
+        .backgroundColor(Color.White)
+        .borderRadius({ topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
+        .clip(true)
         .constraintSize({ maxWidth: '76%' })
         .margin({ left: 9 })
       }
@@ -416,7 +470,7 @@ export struct HomeComfortSection {
       }
       .width('100%')
       .layoutWeight(1)
-      .padding({ left: 18, right: 18 })
+      .padding({ left: 18, right: 18, bottom: this.keyboardHeightVp })
       .edgeEffect(EdgeEffect.Spring)
 
       Column() {
@@ -462,6 +516,7 @@ export struct HomeComfortSection {
       .padding({ left: 18, right: 18, top: 10, bottom: 10 })
       .backgroundColor(Color.White)
       .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: -5 })
+      .translate({ y: -this.keyboardHeightVp })
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     }
     .width('100%')
@@ -520,7 +575,13 @@ export struct HomeComfortSection {
     .margin({ top: 28 })
     .bindContentCover($$this.chatOpen, this.ChatCover(), {
       modalTransition: ModalTransition.DEFAULT,
-      enableSafeArea: true
+      enableSafeArea: true,
+      onAppear: () => {
+        this.startKeyboardTracking();
+      },
+      onDisappear: () => {
+        this.stopKeyboardTracking();
+      }
     })
   }
 }
