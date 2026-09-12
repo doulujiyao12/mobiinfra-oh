@@ -219,6 +219,22 @@ int HIAIModelManager::GetInputCount() {
     return (int)inputTensors_.size();
 }
 
+std::vector<int64_t> HIAIModelManager::GetInputShape(int idx) {
+    std::vector<int64_t> shape;
+    if (idx < 0 || (size_t)idx >= inputTensors_.size()) return shape;
+    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    if (!desc) return shape;
+    int32_t *dims = nullptr;
+    size_t dimCount = 0;
+    OH_NN_ReturnCode ret = OH_NNTensorDesc_GetShape(desc, &dims, &dimCount);
+    if (ret == OH_NN_SUCCESS && dims) {
+        shape.assign(dims, dims + dimCount);
+        free(dims);
+    }
+    OH_NNTensorDesc_Destroy(&desc);
+    return shape;
+}
+
 size_t HIAIModelManager::GetInputSize(int idx) {
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return 0;
     size_t sz = 0;

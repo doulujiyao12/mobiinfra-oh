@@ -39,6 +39,10 @@ public:
                           const std::vector<float>& maskInput,
                           std::vector<std::vector<float>>& outputs) = 0;
 
+    // Returns the fixed visual sequence length baked into a loaded OM chunk,
+    // or 0 when the executor cannot report it.
+    virtual size_t chunkSequenceLength(int chunkIdx) const = 0;
+
     // Release all resources held by this executor.
     virtual void unload() = 0;
 };

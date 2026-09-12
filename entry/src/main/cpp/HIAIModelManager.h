@@ -38,6 +38,9 @@ public:
     // Get output tensor shape
     std::vector<int64_t> GetOutputShape(int idx);
 
+    // Get input tensor shape (used to derive the OM's fixed sequence length)
+    std::vector<int64_t> GetInputShape(int idx);
+
     // Get input/output counts and sizes
     int GetInputCount();
     size_t GetInputSize(int idx);

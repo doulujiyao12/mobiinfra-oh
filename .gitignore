@@ -10,3 +10,6 @@
 /.clang-tidy
 **/.test
 /.appanalyzer
+/entry/libs/arm64-v8a/libMNN.so
+/entry/libs/arm64-v8a
+

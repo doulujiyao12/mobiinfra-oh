@@ -646,9 +646,17 @@ public:
         }
         double loadMs = Ms(Clock::now() - t1).count();
 
+        // Record the OM's fixed sequence length so the engine can validate the
+        // attention mask it marshals before calling runChunk().
+        chunk.seqLen = deriveSequenceLength(*chunk.mgr);
+        if (chunk.seqLen == 0) {
+            LOGE("OM loadChunk[%{public}d]: cannot derive fixed sequence length from OM inputs",
+                 chunkIdx);
+        }
+
         chunk.loaded = true;
-        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  file=%s\n",
-               chunkIdx, readMs, loadMs, modelSize / 1024,
+        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  seq_len=%zu  file=%s\n",
+               chunkIdx, readMs, loadMs, modelSize / 1024, chunk.seqLen,
                omPath.c_str() + mModelDir.size() + 1);
         fflush(stdout);
         LOGI("OM loadChunk[%{public}d] = %{public}s", chunkIdx, omPath.c_str());
@@ -711,6 +719,16 @@ public:
         return true;
     }
 
+    // Fixed visual sequence length baked into the loaded OM chunk.
+    // The engine (omni.cpp) uses this to validate that the attention mask it
+    // marshals matches the OM's fixed input shape. Returns 0 when unknown.
+    size_t chunkSequenceLength(int chunkIdx) const override {
+        if (chunkIdx < 0 || chunkIdx >= (int)mChunks.size()) {
+            return 0;
+        }
+        return mChunks[chunkIdx].seqLen;
+    }
+
     void unload() override {
         mChunks.clear();  // ~HIAIModelManager auto-unloads
     }
@@ -721,7 +739,59 @@ private:
         std::vector<uint8_t> modelBuf;
         std::string modelPath;
         bool loaded = false;
+        // Fixed sequence length of this chunk's OM, derived from the input
+        // tensor sizes reported by the runtime at load time.
+        size_t seqLen = 0;
     };
+
+    // Derive the fixed visual sequence length from the OM's own input tensors.
+    // The exported chunk takes 3 inputs: hidden [1,S,D], rotary [2,S,1,R],
+    // mask [1,S,S]. Hidden and mask both encode S; any of them is sufficient,
+    // so try each in turn and keep the first valid answer.
+    //
+    // OMG may also expose the rank-3 tensors as NCHW rank-4 with a singleton
+    // channel dim ([1,1,S,D] / [1,1,S,S]), so both layouts are accepted.
+    //
+    // The declaration order of the OM inputs is NOT guaranteed to match the
+    // ONNX input order, so shape signatures are used instead of indices.
+    static size_t deriveSequenceLength(HIAIModelManager& mgr) {
+        const int nIn = mgr.GetInputCount();
+        std::vector<std::vector<int64_t>> shapes;
+        shapes.reserve((size_t)nIn);
+        for (int i = 0; i < nIn; i++) {
+            shapes.push_back(mgr.GetInputShape(i));
+        }
+        // Pass 1: attention mask [1,S,S] or NCHW [1,1,S,S] (square, unambiguous).
+        for (const auto& shape : shapes) {
+            if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0 && shape[1] == shape[2]) {
+                return (size_t)shape[1];
+            }
+            if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 &&
+                shape[2] > 0 && shape[2] == shape[3]) {
+                return (size_t)shape[2];
+            }
+        }
+        // Pass 2: rotary [2,S,1,R].
+        for (const auto& shape : shapes) {
+            if (shape.size() == 4 && shape[0] == 2 && shape[1] > 0 && shape[2] == 1) {
+                return (size_t)shape[1];
+            }
+        }
+        // Pass 3: hidden [1,S,D] / NCHW [1,1,S,D] / rank-2 [S,D].
+        for (const auto& shape : shapes) {
+            if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0) {
+                return (size_t)shape[1];
+            }
+            if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 && shape[2] > 0) {
+                return (size_t)shape[2];
+            }
+            if (shape.size() == 2 && shape[0] > 0) {
+                return (size_t)shape[0];
+            }
+        }
+        return 0;
+    }
+
     std::string mModelDir;
     std::vector<ChunkModel> mChunks;
 };
@@ -797,7 +867,13 @@ static void LoadModelExecute(napi_env env, void* data) {
             LOGI("OM executor enabled: %{public}zu chunks", omPaths.size());
             printf("[OM] Load: %zu .om chunk(s) detected → OM path enabled\n", omPaths.size());
             auto executor = std::make_shared<HiaiNpuChunkExecutor>(modelDir);
-            g_llm->setNpuChunkExecutor(std::move(executor), omPaths);
+            if (!g_llm->setNpuChunkExecutor(std::move(executor), omPaths)) {
+                LOGE("setNpuChunkExecutor failed: model does not support offline visual NPU chunks");
+                g_llm.reset();
+                asyncData->success = false;
+                asyncData->outputStr = "error: setNpuChunkExecutor failed";
+                return;
+            }
         } else {
             printf("[OM] Load: no .om files found → fallback to MNN path\n");
         }

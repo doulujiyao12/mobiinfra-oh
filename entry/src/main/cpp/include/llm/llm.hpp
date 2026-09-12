@@ -142,8 +142,8 @@ public:
     // Inject an external NPU chunk executor (HarmonyOS OM path).
     // No-op in the base class; Omni overrides to route chunk inference
     // through pre-compiled .om files instead of MNN Module::onForward.
-    virtual void setNpuChunkExecutor(std::shared_ptr<INpuChunkExecutor> /*executor*/,
-                                     const std::vector<std::string>& /*omPaths*/) {}
+    virtual bool setNpuChunkExecutor(std::shared_ptr<INpuChunkExecutor> /*executor*/,
+                                     const std::vector<std::string>& /*omPaths*/) { return false; }
     virtual Express::VARP gen_attention_mask(int seq_len);
     virtual Express::VARP gen_position_ids(int seq_len);
     virtual Express::VARP embedding(const std::vector<int>& input_ids);
