@@ -62,3 +62,13 @@ export const setCpuMemory:    (mode: string) => string;
 export const initLogFile: (path: string) => string;
 export const getLogs: () => string;
 export const clearLogs: () => string;
+
+// Choose which OM artefact the visual NPU chunks are loaded from at load time.
+//   'online'  (default) -> prefer the engine's online-compilation cache
+//                          (<npu_model_dir>/chunk_<i>/om_cache_v2/<shape>/vision.om)
+//   'offline'           -> prefer the pre-compiled offline OMG artefacts
+//                          (visual_blocks_npu_<i>.om / visual_blocks_offline_om)
+// The non-preferred source still fills any chunk the preferred one lacks, and a
+// missing artefact for an NPU chunk falls back to online compilation + caching.
+// Call before loadModel().
+export const setOmSource: (source: 'online' | 'offline') => string;

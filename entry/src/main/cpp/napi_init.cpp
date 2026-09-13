@@ -60,6 +60,14 @@ static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
 
+// OM source selection for visual NPU chunks.
+//   true  -> prefer the engine's online-compilation cache
+//            (<npu_model_dir>/chunk_<i>/om_cache_v2/<shape>/vision.om)
+//   false -> prefer the pre-compiled offline OMG artefacts
+//            (visual_blocks_npu_<i>.om / visual_blocks_offline_om)
+// Whichever source is not preferred still fills chunks the preferred one lacks.
+static bool g_useOnlineOmCache = true;
+
 // ==================== Runtime log capture ====================
 namespace {
 struct LogCapture {
@@ -925,17 +933,32 @@ private:
             return false;
         }
 
-        // ---- Sequence length: read it from the role-resolved tensors ----
-        for (int r = 0; r < ROLE_COUNT; r++) {
-            const auto& shape = shapes[(size_t)chunk.inputSlot[r]];
-            if (r == ROLE_ROTARY) {
-                if (shape.size() >= 2 && shape[1] > 0) { chunk.seqLen = (size_t)shape[1]; break; }
-            } else if (shape.size() == 3 && shape[1] > 0) {
-                chunk.seqLen = (size_t)shape[1]; break;
-            } else if (shape.size() == 4 && shape[2] > 0) {
-                chunk.seqLen = (size_t)shape[2]; break;
-            } else if (shape.size() == 2 && shape[0] > 1) {
-                chunk.seqLen = (size_t)shape[0]; break;
+        // ---- Sequence length: take it from the mask (unambiguous) ----
+        // The attention mask is the only square tensor ([1,S,S] / NCHW
+        // [1,1,S,S]), so S is derived from it directly. Hidden must NOT be
+        // consulted first: chunk 0 carries a rank-3 hidden with S==1
+        // ([1,1,1024]) that does not encode the visual sequence length and
+        // would silently yield seq_len=1.
+        {
+            auto seqFromMask = [](const std::vector<int64_t>& shape) -> size_t {
+                if (shape.size() == 3 && shape[1] > 0 && shape[1] == shape[2]) {
+                    return (size_t)shape[1];
+                }
+                if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 &&
+                    shape[2] > 0 && shape[2] == shape[3]) {
+                    return (size_t)shape[2];
+                }
+                return 0;
+            };
+            chunk.seqLen = seqFromMask(shapes[(size_t)chunk.inputSlot[ROLE_MASK]]);
+            if (chunk.seqLen == 0) {
+                // Fall back to rotary [2,S,1,R] / [2,1,S,1,R] (S is the 2nd dim).
+                const auto& rs = shapes[(size_t)chunk.inputSlot[ROLE_ROTARY]];
+                if (rs.size() >= 2 && rs[0] == 2 && rs[1] > 0) {
+                    chunk.seqLen = (size_t)rs[1];
+                } else if (rs.size() >= 4 && rs[0] == 2 && rs[2] > 0) {
+                    chunk.seqLen = (size_t)rs[2];
+                }
             }
         }
 
@@ -1059,26 +1082,58 @@ static void LoadModelExecute(napi_env env, void* data) {
         const std::string npuModelDir = findStringValue("npu_model_dir");
         const std::string cacheRoot = npuModelDir.empty() ? modelDir : (modelDir + "/" + npuModelDir);
 
-        const std::vector<std::string> cached = listCachedOmChunkFiles(cacheRoot);
-        const std::vector<std::string> offline =
+        // Offline OMG artefacts (pre-compiled for the device). Discovered by
+        // scanning, and additionally via the explicit manifest key
+        // "visual_blocks_offline_om", whose entries are paths relative to the
+        // model dir (e.g. "om/visual_blocks_npu_0.om") — that is how the
+        // published package describes its chunks when they live in a subdir.
+        std::vector<std::string> offline =
             omCfgDir.empty() ? listOmChunkFiles(modelDir)
                              : listOmChunkFiles(modelDir + "/" + omCfgDir);
+        {
+            const std::vector<std::string> offlineList = findStringArray("visual_blocks_offline_om");
+            for (size_t i = 0; i < offlineList.size(); i++) {
+                const std::string& rel = offlineList[i];
+                if (rel.empty()) continue;
+                if (i >= offline.size()) offline.resize(i + 1, "");
+                if (!offline[i].empty()) continue;  // scan result wins
+                const std::string abs = (rel[0] == '/') ? rel : (modelDir + "/" + rel);
+                struct stat st;
+                if (::stat(abs.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                    offline[i] = abs;
+                }
+            }
+        }
 
-        // Merge: cached (newest) wins, offline fills the gaps.
-        std::vector<std::string> omPaths = cached;
-        if (offline.size() > omPaths.size()) omPaths.resize(offline.size(), "");
+        const std::vector<std::string> cached = listCachedOmChunkFiles(cacheRoot);
+
+        // Merge according to the user's source preference (setOmSource):
+        //   g_useOnlineOmCache == true  -> online cache wins, offline fills gaps
+        //   g_useOnlineOmCache == false -> offline wins, online cache fills gaps
+        // Either way the non-preferred source is only used where the preferred
+        // one has no file for that chunk.
+        std::vector<std::string> omPaths = g_useOnlineOmCache ? cached : offline;
+        const std::vector<std::string>& fallback = g_useOnlineOmCache ? offline : cached;
+        if (fallback.size() > omPaths.size()) omPaths.resize(fallback.size(), "");
         size_t cacheHits = 0;
         for (size_t i = 0; i < cached.size(); i++) {
             if (!cached[i].empty()) cacheHits++;
         }
-        for (size_t i = 0; i < offline.size(); i++) {
-            if (!offline[i].empty() && (i >= omPaths.size() || omPaths[i].empty())) {
+        for (size_t i = 0; i < fallback.size(); i++) {
+            if (!fallback[i].empty() && (i >= omPaths.size() || omPaths[i].empty())) {
                 if (i >= omPaths.size()) omPaths.resize(i + 1, "");
-                omPaths[i] = offline[i];
+                omPaths[i] = fallback[i];
             }
         }
-        printf("[OM] Load: cache=%zu offline=%zu merged=%zu chunk(s)\n",
-               cacheHits, offline.size(), omPaths.size());
+        // How many of the resolved chunks actually come from the cache, so the
+        // log reports the true source mix rather than the preference.
+        size_t usedFromCache = 0;
+        for (const auto& p : omPaths) {
+            if (!p.empty() && p.find("om_cache_v2") != std::string::npos) usedFromCache++;
+        }
+        printf("[OM] Load: prefer=%s cache=%zu offline=%zu merged=%zu chunk(s) (from cache=%zu)\n",
+               g_useOnlineOmCache ? "online" : "offline",
+               cacheHits, offline.size(), omPaths.size(), usedFromCache);
         fflush(stdout);
 
         // Which chunks must be served from an OM? Only those routed to NPU.
@@ -1100,8 +1155,8 @@ static void LoadModelExecute(napi_env env, void* data) {
         }
 
         if (!required.empty() && missing.empty()) {
-            const char* source = cacheHits == required.size() ? "online cache"
-                               : (cacheHits == 0 ? "offline .om" : "online cache + offline .om");
+            const char* source = usedFromCache == required.size() ? "online cache"
+                               : (usedFromCache == 0 ? "offline .om" : "online cache + offline .om");
             LOGI("OM executor enabled: %{public}zu chunks (%{public}s)", omPaths.size(), source);
             printf("[OM] Load: enabling offline-style loading for %zu chunk(s), source=%s\n",
                    omPaths.size(), source);
@@ -1729,6 +1784,46 @@ static napi_value SetInt8XScale(napi_env env, napi_callback_info info) {
     }
     napi_value ret;
     napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
+}
+
+// Select which OM source the offline-style loader prefers for NPU chunks.
+//   "online" / "cache" / "1" / "true"  -> prefer the online-compilation cache
+//   "offline" / "om"  / "0" / "false"  -> prefer the pre-compiled offline .om
+// The non-preferred source is still used to fill chunks the preferred one lacks.
+static napi_value SetOmSource(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool preferOnline = true;  // default: online cache first
+    if (argc >= 1) {
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, args[0], &type);
+        if (type == napi_boolean) {
+            napi_get_value_bool(env, args[0], &preferOnline);
+        } else if (type == napi_number) {
+            int32_t v = 0;
+            napi_get_value_int32(env, args[0], &v);
+            preferOnline = (v != 0);
+        } else if (type == napi_string) {
+            char buf[32] = {0};
+            size_t len = 0;
+            napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+            std::string s(buf, len);
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            preferOnline = (s == "1" || s == "true" || s == "online" || s == "cache");
+        }
+    }
+
+    g_useOnlineOmCache = preferOnline;
+    LOGI("OM source preference = %{public}s", preferOnline ? "online cache" : "offline .om");
+    printf("[OM] source preference = %s\n", preferOnline ? "online cache" : "offline .om");
+    fflush(stdout);
+
+    napi_value ret;
+    napi_create_string_utf8(env, preferOnline ? "online" : "offline", NAPI_AUTO_LENGTH, &ret);
     return ret;
 }
 
@@ -5289,6 +5384,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setInt8XScale",nullptr, SetInt8XScale,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setOmSource",  nullptr, SetOmSource,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},

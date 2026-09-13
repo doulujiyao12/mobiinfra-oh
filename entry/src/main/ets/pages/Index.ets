@@ -34,6 +34,9 @@ struct Index {
   @State debugImagePath: string = '';
   @State pickedImagePath: string = '';
   @State selectedModelVariant: string = '';
+  // Visual NPU chunk OM source: true = prefer the online-compilation cache,
+  // false = prefer the pre-compiled offline OMG artefacts.
+  @State preferOnlineOm: boolean = true;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -60,6 +63,13 @@ struct Index {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
       console.error('initLogFile failed: ' + JSON.stringify(e));
+    }
+    // Push the default OM source preference (online cache) to the native side so
+    // it matches the checkbox state before the first loadModel() call.
+    try {
+      mnnllm.setOmSource(this.preferOnlineOm ? 'online' : 'offline');
+    } catch (e) {
+      console.error('setOmSource failed: ' + JSON.stringify(e));
     }
     this.prepareCustomOpp();
   }
@@ -1078,6 +1088,21 @@ struct Index {
                     this.switchModelVariant(value ? 'modelv4' : '');
                   })
                 Text('使用 modelv4 文件夹隔离模型').fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 8 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'useOnlineOm' })
+                  .select(this.preferOnlineOm)
+                  .selectedColor('#FF8800')
+                  .onChange((value: boolean) => {
+                    this.preferOnlineOm = value;
+                    mnnllm.setOmSource(value ? 'online' : 'offline');
+                    this.output = value
+                      ? '视觉 NPU 分块：优先使用在线缓存的 OM'
+                      : '视觉 NPU 分块：优先使用离线编译的 OM';
+                  })
+                Text('视觉分块优先使用在线缓存的 OM（不勾选则优先用离线 OM）')
+                  .fontSize(15).fontColor('#333')
               }.width('100%').margin({ bottom: 8 })
 
               Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
