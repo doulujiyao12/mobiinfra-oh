@@ -40,6 +40,9 @@ struct Index {
   // Release each chunk's host-side OM copy after it is loaded onto the NPU
   // (default on; the model stays resident on the NPU either way).
   @State releaseOmBuffer: boolean = true;
+  // Device memory overcommitment plan for the NNRt builds: 'high' (default,
+  // least device memory) | 'low' | 'unset'.
+  @State omMemoryReusePlan: string = 'high';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -79,6 +82,12 @@ struct Index {
       mnnllm.setOmReleaseBuffer(this.releaseOmBuffer);
     } catch (e) {
       console.error('setOmReleaseBuffer failed: ' + JSON.stringify(e));
+    }
+    // Default: HIGH device-memory overcommit so all chunks can stay resident.
+    try {
+      mnnllm.setOmMemoryReusePlan(this.omMemoryReusePlan as 'high' | 'low' | 'unset');
+    } catch (e) {
+      console.error('setOmMemoryReusePlan failed: ' + JSON.stringify(e));
     }
     this.prepareCustomOpp();
   }
@@ -1127,6 +1136,47 @@ struct Index {
                   })
                 Text('加载完 OM 后释放 host 缓冲（默认开，省 ~580MB 内存）')
                   .fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 8 })
+
+              Text('设备内存复用档位（6 个分块需同时常驻，HIGH 占用最少）')
+                .fontSize(13).fontColor('#666').width('100%').margin({ bottom: 4 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'reuseHigh' })
+                  .select(this.omMemoryReusePlan === 'high')
+                  .selectedColor('#4CAF50')
+                  .onChange((value: boolean) => {
+                    this.omMemoryReusePlan = value ? 'high' : '';
+                    if (value) {
+                      mnnllm.setOmMemoryReusePlan('high');
+                      this.output = '设备内存复用：HIGH（占用最少，6 分块可共存）';
+                    }
+                  })
+                Text('HIGH').fontSize(15).fontColor('#333').margin({ right: 12 })
+
+                Checkbox({ name: 'reuseLow' })
+                  .select(this.omMemoryReusePlan === 'low')
+                  .selectedColor('#FF8800')
+                  .onChange((value: boolean) => {
+                    this.omMemoryReusePlan = value ? 'low' : '';
+                    if (value) {
+                      mnnllm.setOmMemoryReusePlan('low');
+                      this.output = '设备内存复用：LOW（占用较多，单模型性能更好）';
+                    }
+                  })
+                Text('LOW').fontSize(15).fontColor('#333').margin({ right: 12 })
+
+                Checkbox({ name: 'reuseUnset' })
+                  .select(this.omMemoryReusePlan === 'unset')
+                  .selectedColor('#F44336')
+                  .onChange((value: boolean) => {
+                    this.omMemoryReusePlan = value ? 'unset' : '';
+                    if (value) {
+                      mnnllm.setOmMemoryReusePlan('unset');
+                      this.output = '设备内存复用：UNSET（NNRt 默认，可能加载到第 4 个失败）';
+                    }
+                  })
+                Text('UNSET').fontSize(15).fontColor('#333')
               }.width('100%').margin({ bottom: 8 })
 
               Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {

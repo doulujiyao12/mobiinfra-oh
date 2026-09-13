@@ -54,6 +54,20 @@ void DestroyTensors(std::vector<NN_Tensor*> &tensors) {
 }
 } // anonymous namespace
 
+// Device-side memory overcommitment plan. Default HIGH: the visual chunk
+// executor keeps one loaded model per chunk, so the reduced device footprint is
+// required for all 6 to coexist.
+static int g_deviceMemoryReusePlan = 2;  // HIAI_DEVICE_MEMORY_REUSE_PLAN_HIGH
+
+void HIAIModelManager::SetDeviceMemoryReusePlan(int plan) {
+    if (plan < 0 || plan > 2) plan = 2;
+    g_deviceMemoryReusePlan = plan;
+}
+
+int HIAIModelManager::GetDeviceMemoryReusePlan() {
+    return g_deviceMemoryReusePlan;
+}
+
 // ================================================================
 // Public API
 // ================================================================
@@ -104,6 +118,25 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
     //     ret = HMS_HiAIOptions_SetOmOptions(compilation, omType, out_path);
     //     OH_LOG_INFO(LOG_APP, "SetOmOptions ret=%{public}d", ret);
     // }
+
+    // Device memory overcommitment. Must be set before OH_NNCompilation_Build,
+    // since it only takes effect during the model building phase. Without it the
+    // NNRt default (UNSET = no overcommit) lets the 6 resident chunks exhaust the
+    // device feature-map memory and the 4th load fails.
+    {
+        HiAI_DeviceMemoryReusePlan plan = HIAI_DEVICE_MEMORY_REUSE_PLAN_UNSET;
+        const char *planName = "UNSET";
+        if (g_deviceMemoryReusePlan == 1) {
+            plan = HIAI_DEVICE_MEMORY_REUSE_PLAN_LOW;
+            planName = "LOW";
+        } else if (g_deviceMemoryReusePlan == 2) {
+            plan = HIAI_DEVICE_MEMORY_REUSE_PLAN_HIGH;
+            planName = "HIGH";
+        }
+        OH_NN_ReturnCode mrRet = HMS_HiAIOptions_SetDeviceMemoryReusePlan(compilation, plan);
+        OH_LOG_INFO(LOG_APP, "SetDeviceMemoryReusePlan(%{public}s) ret=%{public}d",
+                    planName, (int)mrRet);
+    }
 
     ret = OH_NNCompilation_Build(compilation);
     if (ret != OH_NN_SUCCESS) {

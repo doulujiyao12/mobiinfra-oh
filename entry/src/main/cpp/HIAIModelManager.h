@@ -23,6 +23,14 @@ public:
     // Load model from memory buffer (.omc file content)
     OH_NN_ReturnCode LoadModelFromBuffer(uint8_t *modelData, size_t modelSize);
 
+    // Device-side memory overcommitment plan applied to every build
+    // (HMS_HiAIOptions_SetDeviceMemoryReusePlan). 0 = UNSET (NNRt default),
+    // 1 = LOW (more device memory, better perf), 2 = HIGH (less device memory).
+    // Defaults to 2 (HIGH) because the visual chunk executor keeps all chunks
+    // resident simultaneously, which needs the reduced footprint.
+    static void SetDeviceMemoryReusePlan(int plan);
+    static int GetDeviceMemoryReusePlan();
+
     // Prepare input/output tensors (shapes auto-detected from model)
     OH_NN_ReturnCode InitIOTensors();
 

@@ -80,3 +80,13 @@ export const setOmSource: (source: 'online' | 'offline') => string;
 // so this does NOT trigger runtime re-loading; it just frees the 6 x ~97MB host
 // buffers to ease memory pressure. Turn it off only to A/B compare.
 export const setOmReleaseBuffer: (release: boolean) => string;
+
+// Device-side memory overcommitment (reuse) plan for the NNRt model builds,
+// applied via HMS_HiAIOptions_SetDeviceMemoryReusePlan before Build.
+//
+//   'high'  (default) -> least device memory (all 6 resident chunks coexist)
+//   'low'             -> more device memory, better per-model performance
+//   'unset'           -> NNRt default, no overcommit (may fail past ~3 chunks)
+//
+// Must be called before loadModel().
+export const setOmMemoryReusePlan: (plan: 'high' | 'low' | 'unset') => string;

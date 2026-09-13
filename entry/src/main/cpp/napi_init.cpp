@@ -85,6 +85,20 @@ static bool g_useOnlineOmCache = true;
 // pressure (which is what makes the 4th+ chunk loads fail on device).
 static bool g_omReleaseHostBuffer = true;
 
+// Device-side memory overcommitment (reuse) plan for the NNRt builds.
+//
+// Why this matters: this executor keeps ALL chunks resident at once (one
+// HIAIModelManager per chunk), whereas the engine's own HiAI_MR path loads one
+// model at a time. With the NNRt default (UNSET = no overcommit) the 6 chunks'
+// feature maps compete for device memory and the 4th load fails with
+// "AllocateFeatureMapMemory failed" / "alloc dma memory fail".
+//
+// The value itself is stored in HIAIModelManager (single source of truth, it is
+// consumed inside LoadModelFromBuffer); this local copy only mirrors it for logs.
+//   0 = UNSET (NNRt default) | 1 = LOW (more device mem, better perf)
+//   2 = HIGH  (less device mem, slightly lower perf)  <- default
+static int g_omMemoryReusePlan = 2;
+
 // ==================== Runtime log capture ====================
 namespace {
 struct LogCapture {
@@ -1896,6 +1910,62 @@ static napi_value SetOmReleaseBuffer(napi_env env, napi_callback_info info) {
 
     napi_value ret;
     napi_create_string_utf8(env, release ? "on" : "off", NAPI_AUTO_LENGTH, &ret);
+    return ret;
+}
+
+// Set the device-side memory overcommitment (reuse) plan for the NNRt builds.
+//
+//   "high" / "2"  -> HIAI_DEVICE_MEMORY_REUSE_PLAN_HIGH  (least device memory) <- default
+//   "low"  / "1"  -> HIAI_DEVICE_MEMORY_REUSE_PLAN_LOW   (more device memory, better perf)
+//   "unset"/ "0"  -> HIAI_DEVICE_MEMORY_REUSE_PLAN_UNSET (NNRt default, no overcommit)
+//
+// This executor keeps ALL visual chunks resident at once, whereas the engine's
+// own HiAI_MR path holds only one model at a time. Without overcommit the 6
+// chunks' feature maps exhaust device memory and e.g. the 4th load fails with
+// "AllocateFeatureMapMemory failed". Call before loadModel().
+static napi_value SetOmMemoryReusePlan(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int plan = 2;  // default: HIGH
+    if (argc >= 1) {
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, args[0], &type);
+        if (type == napi_number) {
+            napi_get_value_int32(env, args[0], &plan);
+        } else if (type == napi_string) {
+            char buf[16] = {0};
+            size_t len = 0;
+            napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+            std::string s(buf, len);
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            if (s == "0" || s == "unset" || s == "none") {
+                plan = 0;
+            } else if (s == "1" || s == "low") {
+                plan = 1;
+            } else {
+                plan = 2;  // "2" / "high" / anything else
+            }
+        } else if (type == napi_boolean) {
+            // Convenience: true -> HIGH, false -> UNSET.
+            bool b = false;
+            napi_get_value_bool(env, args[0], &b);
+            plan = b ? 2 : 0;
+        }
+    }
+    if (plan < 0 || plan > 2) plan = 2;
+
+    g_omMemoryReusePlan = plan;
+    HIAIModelManager::SetDeviceMemoryReusePlan(plan);
+    const char *name = plan == 0 ? "UNSET" : (plan == 1 ? "LOW" : "HIGH");
+    LOGI("OM device memory reuse plan = %{public}s", name);
+    printf("[OM] device memory reuse plan = %s (%d)\n", name, plan);
+    fflush(stdout);
+
+    napi_value ret;
+    napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &ret);
     return ret;
 }
 
@@ -5458,6 +5528,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setInt8XScale",nullptr, SetInt8XScale,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOmSource",  nullptr, SetOmSource,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOmReleaseBuffer", nullptr, SetOmReleaseBuffer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setOmMemoryReusePlan", nullptr, SetOmMemoryReusePlan, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
