@@ -72,3 +72,11 @@ export const clearLogs: () => string;
 // missing artefact for an NPU chunk falls back to online compilation + caching.
 // Call before loadModel().
 export const setOmSource: (source: 'online' | 'offline') => string;
+
+// Release each visual chunk's host-side OM copy after it has been loaded onto
+// the NPU. Default: on.
+//
+// The model stays resident on the NPU (runChunk only uses the OH_NNExecutor),
+// so this does NOT trigger runtime re-loading; it just frees the 6 x ~97MB host
+// buffers to ease memory pressure. Turn it off only to A/B compare.
+export const setOmReleaseBuffer: (release: boolean) => string;

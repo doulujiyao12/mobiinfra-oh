@@ -37,6 +37,9 @@ struct Index {
   // Visual NPU chunk OM source: true = prefer the online-compilation cache,
   // false = prefer the pre-compiled offline OMG artefacts.
   @State preferOnlineOm: boolean = true;
+  // Release each chunk's host-side OM copy after it is loaded onto the NPU
+  // (default on; the model stays resident on the NPU either way).
+  @State releaseOmBuffer: boolean = true;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -70,6 +73,12 @@ struct Index {
       mnnllm.setOmSource(this.preferOnlineOm ? 'online' : 'offline');
     } catch (e) {
       console.error('setOmSource failed: ' + JSON.stringify(e));
+    }
+    // Default: release each chunk's host buffer after loading it onto the NPU.
+    try {
+      mnnllm.setOmReleaseBuffer(this.releaseOmBuffer);
+    } catch (e) {
+      console.error('setOmReleaseBuffer failed: ' + JSON.stringify(e));
     }
     this.prepareCustomOpp();
   }
@@ -1102,6 +1111,21 @@ struct Index {
                       : '视觉 NPU 分块：优先使用离线编译的 OM';
                   })
                 Text('视觉分块优先使用在线缓存的 OM（不勾选则优先用离线 OM）')
+                  .fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 8 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'releaseOmBuffer' })
+                  .select(this.releaseOmBuffer)
+                  .selectedColor('#0A59F7')
+                  .onChange((value: boolean) => {
+                    this.releaseOmBuffer = value;
+                    mnnllm.setOmReleaseBuffer(value);
+                    this.output = value
+                      ? '加载完 OM 后释放 host 缓冲（省内存）'
+                      : '保留 OM host 缓冲（占用更多内存）';
+                  })
+                Text('加载完 OM 后释放 host 缓冲（默认开，省 ~580MB 内存）')
                   .fontSize(15).fontColor('#333')
               }.width('100%').margin({ bottom: 8 })
 

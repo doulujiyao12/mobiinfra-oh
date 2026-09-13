@@ -68,6 +68,23 @@ static std::string g_runtimeSandboxDir;
 // Whichever source is not preferred still fills chunks the preferred one lacks.
 static bool g_useOnlineOmCache = true;
 
+// Release each chunk's host-side OM copy after it has been loaded onto the NPU.
+//
+// HIAIModelManager::LoadModelFromBuffer hands the buffer to
+// OH_NNCompilation_ConstructWithOfflineModelBuffer, which only stores the
+// POINTER (no copy) and requires the memory to stay valid until the compilation
+// is destroyed. LoadModelFromBuffer immediately calls OH_NNCompilation_Destroy
+// after OH_NNExecutor_Construct, so once it returns the buffer is no longer
+// referenced by anything. The engine's own cache path
+// (NPUBackend::bulidIRModelAndLoad) uses a function-local vector in exactly the
+// same way, i.e. it already releases the bytes right after loading.
+//
+// Releasing therefore does NOT unload the model and does NOT cause any
+// re-loading at inference time: runChunk only talks to the already-built
+// OH_NNExecutor. It only drops the 6 x ~97MB host copies, easing overall memory
+// pressure (which is what makes the 4th+ chunk loads fail on device).
+static bool g_omReleaseHostBuffer = true;
+
 // ==================== Runtime log capture ====================
 namespace {
 struct LogCapture {
@@ -741,10 +758,20 @@ public:
             return false;
         }
 
+        // Drop the host-side OM copy now that the model lives on the NPU.
+        // Safe here: LoadModelFromBuffer already destroyed its OH_NNCompilation,
+        // and InitIOTensors/routing only use the OH_NNExecutor. The model itself
+        // stays loaded (chunk.mgr), so runChunk never re-reads or re-builds it.
+        size_t releasedKb = 0;
+        if (g_omReleaseHostBuffer) {
+            releasedKb = chunk.modelBuf.size() / 1024;
+            std::vector<uint8_t>().swap(chunk.modelBuf);  // free, don't just clear
+        }
+
         chunk.loaded = true;
-        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  seq_len=%zu  n_out=%d  file=%s\n",
+        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  seq_len=%zu  n_out=%d  released_host=%zuKB  file=%s\n",
                chunkIdx, readMs, loadMs, modelSize / 1024, chunk.seqLen,
-               (int)chunk.outputIsDeepstack.size(),
+               (int)chunk.outputIsDeepstack.size(), releasedKb,
                omPath.c_str() + mModelDir.size() + 1);
         fflush(stdout);
         LOGI("OM loadChunk[%{public}d] = %{public}s", chunkIdx, omPath.c_str());
@@ -1824,6 +1851,51 @@ static napi_value SetOmSource(napi_env env, napi_callback_info info) {
 
     napi_value ret;
     napi_create_string_utf8(env, preferOnline ? "online" : "offline", NAPI_AUTO_LENGTH, &ret);
+    return ret;
+}
+
+// Enable/disable releasing each chunk's host-side OM copy once the model has
+// been loaded onto the NPU (default: enabled).
+//
+// The model itself stays resident on the NPU — runChunk talks only to the
+// OH_NNExecutor — so this does NOT cause runtime re-loading; it merely drops the
+// 6 x ~97MB host buffers after load, easing memory pressure.
+//
+//   true / "1" / "on"  -> release host buffers after load (default)
+//   false / "0" / "off"-> keep the buffers resident (for A/B comparison)
+static napi_value SetOmReleaseBuffer(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool release = true;  // default: release
+    if (argc >= 1) {
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, args[0], &type);
+        if (type == napi_boolean) {
+            napi_get_value_bool(env, args[0], &release);
+        } else if (type == napi_number) {
+            int32_t v = 0;
+            napi_get_value_int32(env, args[0], &v);
+            release = (v != 0);
+        } else if (type == napi_string) {
+            char buf[16] = {0};
+            size_t len = 0;
+            napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+            std::string s(buf, len);
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            release = !(s == "0" || s == "false" || s == "off" || s == "no");
+        }
+    }
+
+    g_omReleaseHostBuffer = release;
+    LOGI("OM release host buffer = %{public}s", release ? "on" : "off");
+    printf("[OM] release host buffer = %s\n", release ? "on" : "off");
+    fflush(stdout);
+
+    napi_value ret;
+    napi_create_string_utf8(env, release ? "on" : "off", NAPI_AUTO_LENGTH, &ret);
     return ret;
 }
 
@@ -5385,6 +5457,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setInt8XScale",nullptr, SetInt8XScale,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOmSource",  nullptr, SetOmSource,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setOmReleaseBuffer", nullptr, SetOmReleaseBuffer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
