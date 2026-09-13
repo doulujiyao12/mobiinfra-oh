@@ -120,6 +120,18 @@ export struct CollectionPage {
     return normalizeMemorySceneId(this.collectionModule) === scene.sceneId;
   }
 
+  private groupSubtitle(group: CollectionGroupViewModel): string {
+    let source = group.source.trim();
+    let time = group.time.trim();
+    if (source.length === 0) {
+      return time;
+    }
+    if (time.length === 0) {
+      return source;
+    }
+    return source + ' · ' + time;
+  }
+
   private wechatInputOrDefault(input: string, fallback: string): string {
     let text = input.trim();
     if (text.length > 0) {
@@ -277,26 +289,36 @@ export struct CollectionPage {
         }
       }
       .alignItems(HorizontalAlign.Start)
-      .width('86%')
+      .width('92%')
+      .constraintSize({ maxWidth: 720 })
       .padding(18)
-      .backgroundColor('#F9FBFF')
-      .borderRadius(16)
+      .backgroundColor(Color.White)
+      .border({ width: 1, color: '#E8ECF3' })
+      .borderRadius(20)
       .margin({ top: COLLECTION_SECTION_GAP })
     }
   }
 
   @Builder CollectTab(scene: WorkflowSceneConfig) {
     // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
-    Text(scene.label)
-      .fontSize(13)
-      .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.isActiveCollectionScene(scene) ? Color.White : '#6D7481')
-      .height(38)
-      .padding({ left: 16, right: 16 })
-      .textAlign(TextAlign.Center)
-      .backgroundColor(this.isActiveCollectionScene(scene) ? scene.color : Color.White)
-      .borderRadius(10)
-      .margin({ left: scene.sceneId === 0 ? 0 : 10 })
+    Column() {
+      Text(scene.label)
+        .fontSize(14)
+        .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Medium)
+        .fontColor(this.isActiveCollectionScene(scene) ? '#6657E8' : '#4E5668')
+        .height(34)
+        .textAlign(TextAlign.Center)
+        .maxLines(1)
+      Row()
+        .width(this.isActiveCollectionScene(scene) ? 26 : 0)
+        .height(3)
+        .backgroundColor('#7669FF')
+        .borderRadius(2)
+    }
+      .justifyContent(FlexAlign.End)
+      .height(42)
+      .padding({ left: 14, right: 14 })
+      .margin({ left: scene.sceneId === 0 ? 8 : 0 })
       .onClick(() => {
         this.collectionModule = scene.sceneId;
         this.groupPageIndex = 0;
@@ -306,11 +328,12 @@ export struct CollectionPage {
   @Builder GroupThumbnail(group: CollectionGroupViewModel) {
     if (group.thumbnailUri.length > 0) {
       Image(group.thumbnailUri)
-        .width(58)
-        .height(58)
+        .width(60)
+        .height(60)
         .objectFit(ImageFit.Cover)
-        .backgroundColor('#EEF2F7')
-        .borderRadius(11)
+        .backgroundColor('#F0F3F8')
+        .borderRadius(14)
+        .border({ width: 1, color: '#E7EBF2' })
     } else {
       Column() {
         Text('暂无图片')
@@ -319,26 +342,72 @@ export struct CollectionPage {
           .maxLines(1)
       }
       .justifyContent(FlexAlign.Center)
-      .width(58)
-      .height(58)
-      .backgroundColor('#EEF2F7')
-      .borderRadius(11)
+      .width(60)
+      .height(60)
+      .backgroundColor('#F0F3F8')
+      .borderRadius(14)
+      .border({ width: 1, color: '#E7EBF2' })
     }
+  }
+
+  @Builder TimelineMarker() {
+    Stack({ alignContent: Alignment.Center }) {
+      Divider()
+        .vertical(true)
+        .height(86)
+        .strokeWidth(1)
+        .color('#D9DDEA')
+      Row()
+        .width(10)
+        .height(10)
+        .borderRadius(5)
+        .backgroundColor('#8173FF')
+        .border({ width: 2, color: Color.White })
+        .shadow({ radius: 4, color: '#307669FF', offsetX: 0, offsetY: 1 })
+    }
+    .width(20)
+    .height(86)
   }
 
   @Builder GroupRow(group: CollectionGroupViewModel) {
     Row() {
+      this.TimelineMarker()
       this.GroupThumbnail(group)
       Column() {
-        Text(group.title).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(group.source).fontSize(12).fontColor('#7C8494').margin({ top: 5 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(group.time).fontSize(12).fontColor('#7C8494').margin({ top: 2 }).maxLines(1)
-      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ left: 12, right: 8 })
-      Column() {
-        Text(group.meta).fontSize(13).fontColor('#161B28').maxLines(1)
-        Text('详情').fontSize(12).fontColor('#8066FF').margin({ top: 6 }).maxLines(1)
-      }.alignItems(HorizontalAlign.End)
-    }.width('100%').padding({ top: 10, bottom: 10 }).onClick(() => {
+        Text(group.title)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#161C2D')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.groupSubtitle(group))
+          .fontSize(12)
+          .fontColor('#7A8292')
+          .margin({ top: 6 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .justifyContent(FlexAlign.Center)
+      .layoutWeight(1)
+      .height(72)
+      .margin({ left: 13, right: 8 })
+      Row() {
+        Text(group.meta)
+          .fontSize(14)
+          .fontColor('#242A38')
+          .maxLines(1)
+        Text('›')
+          .fontSize(25)
+          .fontColor('#A2A8B5')
+          .margin({ left: 9 })
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .height(86)
+    .onClick(() => {
       router.pushUrl({
         url: 'pages/collection/CollectionGroupDetailPage',
         params: {
@@ -356,21 +425,18 @@ export struct CollectionPage {
         Text('生成日志后，点击同步即可开始整理').fontSize(12).fontColor('#7C8494').margin({ top: 6 })
       }.width('100%').height(92).justifyContent(FlexAlign.Center)
     } else {
-      List({ space: 0 }) {
-        ForEach(this.currentPageGroups(), (group: CollectionGroupViewModel) => {
-          ListItem() {
-            Column() {
-              this.GroupRow(group)
-              Divider().color('#EEF0F5')
-            }
-            .width('100%')
+      Column() {
+        ForEach(this.currentPageGroups(), (group: CollectionGroupViewModel, index: number) => {
+          this.GroupRow(group)
+          if (index < this.currentPageGroups().length - 1) {
+            Divider()
+              .strokeWidth(1)
+              .color('#E8EBF1')
+              .margin({ left: 94 })
           }
-          .width('100%')
         }, (group: CollectionGroupViewModel) => group.id)
       }
       .width('100%')
-      .alignListItem(ListItemAlign.Start)
-      .scrollBar(BarState.Off)
     }
   }
 
@@ -382,7 +448,7 @@ export struct CollectionPage {
           .fontColor(this.currentGroupPageIndex() > 0 ? '#8066FF' : '#A7ADBA')
           .height(32)
           .padding({ left: 14, right: 14 })
-          .backgroundColor(this.currentGroupPageIndex() > 0 ? '#F0ECFF' : '#EEF0F5')
+          .backgroundColor(Color.Transparent)
           .enabled(this.currentGroupPageIndex() > 0)
           .onClick(() => {
             this.setGroupPage(this.currentGroupPageIndex() - 1);
@@ -398,14 +464,14 @@ export struct CollectionPage {
           .fontColor(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#8066FF' : '#A7ADBA')
           .height(32)
           .padding({ left: 14, right: 14 })
-          .backgroundColor(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#F0ECFF' : '#EEF0F5')
+          .backgroundColor(Color.Transparent)
           .enabled(this.currentGroupPageIndex() < this.groupPageCount() - 1)
           .onClick(() => {
             this.setGroupPage(this.currentGroupPageIndex() + 1);
           })
       }
       .width('100%')
-      .margin({ top: 12 })
+      .margin({ top: 10 })
     }
   }
 
@@ -416,132 +482,220 @@ export struct CollectionPage {
       .maxLines(1)
   }
 
-  @Builder CollectionActionCard(icon: string, title: string, description: string,
-    accentColor: string, softColor: string, borderColor: string, onTap: () => void) {
-    Column() {
-      Row({ space: 8 }) {
-        Text(icon)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(accentColor)
-          .width(32)
-          .height(32)
-          .textAlign(TextAlign.Center)
-          .backgroundColor(softColor)
-          .borderRadius(10)
-
+  @Builder CollectionActionRow(icon: string, title: string, description: string,
+    accentColor: string, softColor: string, onTap: () => void) {
+    Row() {
+      Text(icon)
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(accentColor)
+        .width(38)
+        .height(38)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(softColor)
+        .borderRadius(12)
+      Column() {
         Text(title)
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
           .fontColor('#172033')
-          .layoutWeight(1)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(description)
+          .fontSize(11)
+          .fontColor('#747C8C')
+          .margin({ top: 4 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+      Text('›')
+        .fontSize(22)
+        .fontColor('#A0A6B2')
+    }
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .height(68)
+    .padding({ left: 14, right: 14 })
+    .onClick(onTap)
+  }
 
-        Text('›')
-          .fontSize(20)
-          .fontColor(accentColor)
+  @Builder CollectionOverview() {
+    Stack({ alignContent: Alignment.Center }) {
+      Row() {
+        Column() {
+          Text('足迹概览')
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#535C70')
+            .maxLines(1)
+          Row() {
+            Text(this.getCollectionCount())
+              .fontSize(32)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#6C5CE7')
+              .maxLines(1)
+            Divider()
+              .vertical(true)
+              .height(32)
+              .color('#DCE0EA')
+              .margin({ left: 15, right: 15 })
+            Text(this.groupCount().toString() + ' 个主题')
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#232939')
+              .maxLines(1)
+          }
+          .alignItems(VerticalAlign.Center)
+          .margin({ top: 8 })
+          Row() {
+            Row()
+              .width(7)
+              .height(7)
+              .borderRadius(4)
+              .backgroundColor('#39C2B3')
+              .margin({ right: 8 })
+            Text('最近同步 ' + this.getCollectionSyncTime())
+              .fontSize(12)
+              .fontColor('#727A8B')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .margin({ top: 9 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        Column({ space: 1 }) {
+          Stack({ alignContent: Alignment.Center }) {
+            if (this.refreshing) {
+              LoadingProgress()
+                .width(22)
+                .height(22)
+                .color('#7669FF')
+            } else {
+              Text('⟳')
+                .width(32)
+                .height(28)
+                .fontSize(26)
+                .lineHeight(28)
+                .fontColor('#7669FF')
+                .textAlign(TextAlign.Center)
+            }
+          }
+          .width(32)
+          .height(28)
+
+          Text(this.refreshing ? '整理中' : '同步')
+            .width('100%')
+            .height(18)
+            .fontSize(12)
+            .lineHeight(18)
+            .fontColor('#5F6575')
+            .textAlign(TextAlign.Center)
+        }
+        .alignItems(HorizontalAlign.Center)
+        .justifyContent(FlexAlign.Center)
+        .width(64)
+        .height(64)
+        .backgroundColor('#DFFFFFFF')
+        .borderRadius(32)
+        .border({ width: 1, color: '#C9D3DDF2' })
+        .shadow({ radius: 10, color: '#141E2A58', offsetX: 0, offsetY: 4 })
+        .onClick(() => {
+          dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
+          if (this.refreshing) {
+            return;
+          }
+          this.onRefresh();
+        })
       }
       .width('100%')
-      .height(32)
-      .alignItems(VerticalAlign.Center)
-
-      Text(description)
-        .fontSize(11)
-        .fontColor('#747C8C')
-        .lineHeight(16)
-        .width('100%')
-        .margin({ top: 8 })
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .padding({ left: 22, right: 20 })
     }
-    .alignItems(HorizontalAlign.Start)
-    .layoutWeight(1)
-    .height(100)
-    .padding(12)
-    .backgroundColor(Color.White)
-    .border({ width: 1, color: borderColor })
-    .borderRadius(18)
-    .shadow({ radius: 10, color: '#10000000', offsetX: 0, offsetY: 4 })
-    .onClick(onTap)
+    .width('92%')
+    .constraintSize({ maxWidth: 720 })
+    .height(128)
+    .backgroundColor('#F2F6FF')
+    .backgroundImage($r('app.media.home_overview_background_compact'), ImageRepeat.NoRepeat)
+    .backgroundImageSize(ImageSize.Cover)
+    .borderRadius(24)
+    .border({ width: 1, color: '#B8FFFFFF' })
+    .clip(true)
+    .shadow({ radius: 16, color: '#120D2A63', offsetX: 0, offsetY: 6 })
+    .margin({ top: 16 })
   }
 
   build() {
     Scroll() {
       Column() {
-        AppHeader({ title: '你的足迹', icon: $r('app.media.header_footprint') })
+        AppHeader({ title: '你的足迹', icon: $r('app.media.header_footprint_generated') })
 
         Scroll() {
           Row() {
             ForEach(memorySceneConfigs(), (scene: WorkflowSceneConfig) => {
               this.CollectTab(scene)
             }, (scene: WorkflowSceneConfig) => scene.tabId)
-          }.padding({ left: 24, right: 24 })
+          }.padding({ left: 16, right: 16 })
         }
         .width('100%')
-        .height(42)
+        .height(44)
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
-        .margin({ top: COLLECTION_SECTION_GAP, bottom: 0 })
+        .margin({ top: 8, bottom: 0 })
 
-        Row() {
-          Column() {
-            Text('已整理').fontSize(12).fontColor('#737987').maxLines(1)
-            Text(this.getCollectionCount()).fontSize(24).fontWeight(FontWeight.Bold).fontColor('#8066FF').margin({ top: 3 }).maxLines(1)
-          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          Divider().vertical(true).height(44).color('#E7E9F0')
-          Column() {
-            Text('最近同步').fontSize(12).fontColor('#737987').maxLines(1)
-            Text(this.getCollectionSyncTime()).fontSize(16).fontColor('#151A28').margin({ top: 5 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          }.alignItems(HorizontalAlign.Start).layoutWeight(1).padding({ left: 18, right: 10 })
-          Text(this.refreshing ? '整理中' : '同步')
-            .fontSize(12)
-            .fontColor('#8066FF')
-            .width(44)
-            .height(44)
-            .textAlign(TextAlign.Center)
-            .backgroundColor('#F0ECFF')
-            .borderRadius(22)
-            .onClick(() => {
-              dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
-              if (this.refreshing) {
-                return;
-              }
-              this.onRefresh();
-            })
-        }
-        .width('86%')
-        .height(82)
-        .padding({ left: 22, right: 16 })
-        .backgroundColor('#F8FAFE')
-        .borderRadius(16)
-        .margin({ top: COLLECTION_SECTION_GAP })
+        this.CollectionOverview()
 
         Column() {
           Row() {
-            Text(this.getCollectionTitle()).fontSize(20).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.getCollectionTitle())
+              .fontSize(20)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
             this.GroupRangeLabel()
-          }.width('100%').margin({ bottom: 8 })
+          }
+          .width('100%')
+          .margin({ bottom: 4 })
           this.CollectionRows()
           this.GroupPagination()
-        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
+        }
+        .width('92%')
+        .constraintSize({ maxWidth: 720 })
+        .margin({ top: 24 })
 
         this.WechatAutoSummaryCard()
 
-        Row({ space: 12 }) {
-          this.CollectionActionCard('＋', '新增采集源', '连接更多平台与数据源',
-            '#725CFF', '#F1EEFF', '#E5DEFF', () => {
+        Column() {
+          this.CollectionActionRow('＋', '新增采集源', '连接更多平台与数据源',
+            '#725CFF', '#F1EEFF', () => {
               this.onOpenDataCollectionSettings();
             })
-          this.CollectionActionCard('图', '图库分析', '相册、截图 OCR 与分类整理',
-            '#3F7FEF', '#EDF4FF', '#DCE9FF', () => {
+          Divider()
+            .color('#E8EBF2')
+            .margin({ left: 64 })
+          this.CollectionActionRow('图', '图库分析', '相册、截图 OCR 与分类整理',
+            '#3F7FEF', '#EDF4FF', () => {
               router.pushUrl({ url: 'pages/gallery/GalleryPage' });
             })
         }
-        .width('86%')
+        .width('92%')
+        .constraintSize({ maxWidth: 720 })
+        .backgroundColor(Color.White)
+        .border({ width: 1, color: '#E8ECF3' })
+        .borderRadius(20)
+        .clip(true)
         .margin({ top: COLLECTION_SECTION_GAP })
         Blank().height(110)
-      }.width('100%')
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F7FAFE')
   }
 }
