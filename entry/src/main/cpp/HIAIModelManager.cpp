@@ -202,14 +202,17 @@ std::vector<float> HIAIModelManager::GetOutputData(int idx) {
 std::vector<int64_t> HIAIModelManager::GetOutputShape(int idx) {
     std::vector<int64_t> shape;
     if (idx < 0 || (size_t)idx >= outputTensors_.size()) return shape;
-    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(outputTensors_[idx]);
+    // Introspect through a descriptor OWNED by the caller. Do NOT use
+    // OH_NNTensor_GetTensorDesc here: it returns the tensor's inner descriptor,
+    // which must not be destroyed (double free) and whose dims array must not be
+    // freed. A freshly created descriptor is destroyed below, exactly like
+    // InitIOTensors does.
+    NN_TensorDesc *desc = OH_NNExecutor_CreateOutputTensorDesc(executor_, (size_t)idx);
     if (!desc) return shape;
     int32_t *dims = nullptr;
     size_t dimCount = 0;
-    OH_NN_ReturnCode ret = OH_NNTensorDesc_GetShape(desc, &dims, &dimCount);
-    if (ret == OH_NN_SUCCESS && dims) {
-        shape.assign(dims, dims + dimCount);
-        free(dims);
+    if (OH_NNTensorDesc_GetShape(desc, &dims, &dimCount) == OH_NN_SUCCESS && dims) {
+        shape.assign(dims, dims + dimCount);  // dims is owned by desc: no free()
     }
     OH_NNTensorDesc_Destroy(&desc);
     return shape;
@@ -222,14 +225,13 @@ int HIAIModelManager::GetInputCount() {
 std::vector<int64_t> HIAIModelManager::GetInputShape(int idx) {
     std::vector<int64_t> shape;
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return shape;
-    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    // See GetOutputShape for the ownership rationale.
+    NN_TensorDesc *desc = OH_NNExecutor_CreateInputTensorDesc(executor_, (size_t)idx);
     if (!desc) return shape;
     int32_t *dims = nullptr;
     size_t dimCount = 0;
-    OH_NN_ReturnCode ret = OH_NNTensorDesc_GetShape(desc, &dims, &dimCount);
-    if (ret == OH_NN_SUCCESS && dims) {
-        shape.assign(dims, dims + dimCount);
-        free(dims);
+    if (OH_NNTensorDesc_GetShape(desc, &dims, &dimCount) == OH_NN_SUCCESS && dims) {
+        shape.assign(dims, dims + dimCount);  // dims is owned by desc: no free()
     }
     OH_NNTensorDesc_Destroy(&desc);
     return shape;
@@ -245,11 +247,11 @@ size_t HIAIModelManager::GetInputSize(int idx) {
 std::string HIAIModelManager::GetInputName(int idx) {
     std::string name;
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return name;
-    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    NN_TensorDesc *desc = OH_NNExecutor_CreateInputTensorDesc(executor_, (size_t)idx);
     if (!desc) return name;
-    const char *tensorName = nullptr;
+    const char *tensorName = nullptr;  // must be NULL on input
     if (OH_NNTensorDesc_GetName(desc, &tensorName) == OH_NN_SUCCESS && tensorName != nullptr) {
-        name = tensorName;
+        name = tensorName;  // copy: the name is owned by desc
     }
     OH_NNTensorDesc_Destroy(&desc);
     return name;
@@ -258,11 +260,11 @@ std::string HIAIModelManager::GetInputName(int idx) {
 std::string HIAIModelManager::GetOutputName(int idx) {
     std::string name;
     if (idx < 0 || (size_t)idx >= outputTensors_.size()) return name;
-    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(outputTensors_[idx]);
+    NN_TensorDesc *desc = OH_NNExecutor_CreateOutputTensorDesc(executor_, (size_t)idx);
     if (!desc) return name;
-    const char *tensorName = nullptr;
+    const char *tensorName = nullptr;  // must be NULL on input
     if (OH_NNTensorDesc_GetName(desc, &tensorName) == OH_NN_SUCCESS && tensorName != nullptr) {
-        name = tensorName;
+        name = tensorName;  // copy: the name is owned by desc
     }
     OH_NNTensorDesc_Destroy(&desc);
     return name;
@@ -270,7 +272,7 @@ std::string HIAIModelManager::GetOutputName(int idx) {
 
 size_t HIAIModelManager::GetInputElementCount(int idx) {
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return 0;
-    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    NN_TensorDesc *desc = OH_NNExecutor_CreateInputTensorDesc(executor_, (size_t)idx);
     if (!desc) return 0;
     size_t count = 0;
     if (OH_NNTensorDesc_GetElementCount(desc, &count) != OH_NN_SUCCESS) count = 0;
