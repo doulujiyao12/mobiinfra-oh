@@ -242,6 +242,42 @@ size_t HIAIModelManager::GetInputSize(int idx) {
     return sz;
 }
 
+std::string HIAIModelManager::GetInputName(int idx) {
+    std::string name;
+    if (idx < 0 || (size_t)idx >= inputTensors_.size()) return name;
+    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    if (!desc) return name;
+    const char *tensorName = nullptr;
+    if (OH_NNTensorDesc_GetName(desc, &tensorName) == OH_NN_SUCCESS && tensorName != nullptr) {
+        name = tensorName;
+    }
+    OH_NNTensorDesc_Destroy(&desc);
+    return name;
+}
+
+std::string HIAIModelManager::GetOutputName(int idx) {
+    std::string name;
+    if (idx < 0 || (size_t)idx >= outputTensors_.size()) return name;
+    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(outputTensors_[idx]);
+    if (!desc) return name;
+    const char *tensorName = nullptr;
+    if (OH_NNTensorDesc_GetName(desc, &tensorName) == OH_NN_SUCCESS && tensorName != nullptr) {
+        name = tensorName;
+    }
+    OH_NNTensorDesc_Destroy(&desc);
+    return name;
+}
+
+size_t HIAIModelManager::GetInputElementCount(int idx) {
+    if (idx < 0 || (size_t)idx >= inputTensors_.size()) return 0;
+    NN_TensorDesc *desc = OH_NNTensor_GetTensorDesc(inputTensors_[idx]);
+    if (!desc) return 0;
+    size_t count = 0;
+    if (OH_NNTensorDesc_GetElementCount(desc, &count) != OH_NN_SUCCESS) count = 0;
+    OH_NNTensorDesc_Destroy(&desc);
+    return count;
+}
+
 int HIAIModelManager::GetOutputCount() {
     return (int)outputTensors_.size();
 }

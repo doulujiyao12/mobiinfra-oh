@@ -41,6 +41,16 @@ public:
     // Get input tensor shape (used to derive the OM's fixed sequence length)
     std::vector<int64_t> GetInputShape(int idx);
 
+    // Semantic routing helpers. The offline OMG input order is
+    // [hidden_states_in, rotary_pos_emb, attention_mask] while the
+    // engine-online order is [rotary_pos_emb, hidden_states_in, attention_mask],
+    // so inputs must be routed by role (shape/name), never by a fixed index.
+    // These return an empty string when the runtime does not expose a name.
+    std::string GetInputName(int idx);
+    std::string GetOutputName(int idx);
+    // Total element count of the i-th input tensor (0 when unavailable).
+    size_t GetInputElementCount(int idx);
+
     // Get input/output counts and sizes
     int GetInputCount();
     size_t GetInputSize(int idx);

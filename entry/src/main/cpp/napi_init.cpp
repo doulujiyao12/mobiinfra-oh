@@ -599,6 +599,83 @@ static std::vector<std::string> listOmChunkFiles(const std::string& omDir) {
     return out;
 }
 
+// Scan the engine's online-compilation OM cache.
+//
+// Layout written by NPUBackend (MNN_HIAI_CACHE_OM_BY_CHUNK):
+//   <npu_model_dir>/chunk_<i>/om_cache_v2/<shape_key>/vision.om
+//
+// A chunk may accumulate several <shape_key> directories (one per input shape
+// seen). We pick the newest vision.om by mtime so a changed input shape wins
+// over a stale one, matching what the engine would itself reload.
+//
+// Returns the same sparse array shape as listOmChunkFiles: vec[chunkIdx] = path.
+static std::vector<std::string> listCachedOmChunkFiles(const std::string& cacheRoot) {
+    std::map<int, std::string> found;
+    std::map<int, time_t> foundTime;
+    printf("[OM] scanning cached om dir: %s\n", cacheRoot.c_str());
+    fflush(stdout);
+
+    DIR* root = ::opendir(cacheRoot.c_str());
+    if (root == nullptr) {
+        printf("[OM] cached om dir absent: %s (errno=%d)\n", cacheRoot.c_str(), errno);
+        fflush(stdout);
+        return {};
+    }
+
+    struct dirent* ent = nullptr;
+    const std::string chunkPrefix = "chunk_";
+    while ((ent = ::readdir(root)) != nullptr) {
+        const std::string chunkName(ent->d_name);
+        if (chunkName.size() <= chunkPrefix.size()) continue;
+        if (chunkName.compare(0, chunkPrefix.size(), chunkPrefix) != 0) continue;
+        size_t p = chunkPrefix.size();
+        if (!std::isdigit((unsigned char)chunkName[p])) continue;
+        const int chunkIdx = std::atoi(chunkName.c_str() + chunkPrefix.size());
+        if (chunkIdx < 0) continue;
+
+        const std::string v2Dir = cacheRoot + "/" + chunkName + "/om_cache_v2";
+        DIR* v2 = ::opendir(v2Dir.c_str());
+        if (v2 == nullptr) continue;
+
+        struct dirent* shapeEnt = nullptr;
+        while ((shapeEnt = ::readdir(v2)) != nullptr) {
+            const std::string shapeName(shapeEnt->d_name);
+            if (shapeName == "." || shapeName == "..") continue;
+            const std::string omPath = v2Dir + "/" + shapeName + "/vision.om";
+            struct stat st;
+            if (::stat(omPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+                continue;
+            }
+            // Prefer the most recently written cache entry for this chunk.
+            auto it = foundTime.find(chunkIdx);
+            if (it == foundTime.end() || st.st_mtime > it->second) {
+                found[chunkIdx] = omPath;
+                foundTime[chunkIdx] = st.st_mtime;
+            }
+        }
+        ::closedir(v2);
+    }
+    ::closedir(root);
+
+    if (found.empty()) {
+        printf("[OM] cached om: 0 chunk(s)\n");
+        fflush(stdout);
+        return {};
+    }
+    int maxIdx = found.rbegin()->first;
+    std::vector<std::string> out((size_t)maxIdx + 1, "");
+    for (auto& kv : found) {
+        out[(size_t)kv.first] = kv.second;
+    }
+    printf("[OM] cached om: %zu chunk(s), maxIdx=%d\n", found.size(), maxIdx);
+    fflush(stdout);
+    for (auto& kv : found) {
+        printf("[OM]   chunk %d -> %s\n", kv.first, kv.second.c_str());
+    }
+    fflush(stdout);
+    return out;
+}
+
 class HiaiNpuChunkExecutor : public INpuChunkExecutor {
 public:
     explicit HiaiNpuChunkExecutor(const std::string& modelDir) : mModelDir(modelDir) {}
@@ -646,17 +723,20 @@ public:
         }
         double loadMs = Ms(Clock::now() - t1).count();
 
-        // Record the OM's fixed sequence length so the engine can validate the
-        // attention mask it marshals before calling runChunk().
-        chunk.seqLen = deriveSequenceLength(*chunk.mgr);
-        if (chunk.seqLen == 0) {
-            LOGE("OM loadChunk[%{public}d]: cannot derive fixed sequence length from OM inputs",
-                 chunkIdx);
+        // Resolve semantic routing for this OM. The offline OMG order is
+        // [hidden, rotary, mask] while the engine-online order is
+        // [rotary, hidden, mask]; both are resolved by shape/name so the same
+        // code path is correct for either artefact.
+        if (!resolveChunkRouting(chunkIdx, *chunk.mgr)) {
+            LOGE("OM loadChunk[%{public}d]: cannot resolve input routing from OM", chunkIdx);
+            chunk.mgr.reset();
+            return false;
         }
 
         chunk.loaded = true;
-        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  seq_len=%zu  file=%s\n",
+        printf("[OM] load chunk %d OK  read=%.1fms  init=%.1fms  size=%zuKB  seq_len=%zu  n_out=%d  file=%s\n",
                chunkIdx, readMs, loadMs, modelSize / 1024, chunk.seqLen,
+               (int)chunk.outputIsDeepstack.size(),
                omPath.c_str() + mModelDir.size() + 1);
         fflush(stdout);
         LOGI("OM loadChunk[%{public}d] = %{public}s", chunkIdx, omPath.c_str());
@@ -678,26 +758,29 @@ public:
         auto& chunk = mChunks[chunkIdx];
         auto* mgr = chunk.mgr.get();
 
-        // Only SetInput + Run — model stays loaded across chunks
+        // Feed the three inputs to their semantic slots. chunk.inputSlot maps
+        // InputRole -> OM input index and was resolved from the OM's own tensor
+        // shapes at load time, so this works for both the offline OMG order
+        // ([hidden, rotary, mask]) and the engine-online order
+        // ([rotary, hidden, mask]).
+        const std::vector<float>* roleData[3] = {&hidden, &rotary, &mask};
         auto t0 = Clock::now();
-        OH_NN_ReturnCode ret = mgr->SetInputData(0, hidden.data(), hidden.size());
-        if (ret != OH_NN_SUCCESS) {
-            LOGE("OM runChunk[%{public}d]: SetInputData[0] failed", chunkIdx);
-            return false;
-        }
-        ret = mgr->SetInputData(1, rotary.data(), rotary.size());
-        if (ret != OH_NN_SUCCESS) {
-            LOGE("OM runChunk[%{public}d]: SetInputData[1] failed", chunkIdx);
-            return false;
-        }
-        ret = mgr->SetInputData(2, mask.data(), mask.size());
-        if (ret != OH_NN_SUCCESS) {
-            LOGE("OM runChunk[%{public}d]: SetInputData[2] failed", chunkIdx);
-            return false;
+        for (int role = 0; role < 3; role++) {
+            const int slot = chunk.inputSlot[role];
+            if (slot < 0) {
+                LOGE("OM runChunk[%{public}d]: missing input slot for role %{public}d", chunkIdx, role);
+                return false;
+            }
+            OH_NN_ReturnCode setRet = mgr->SetInputData(slot, roleData[role]->data(), roleData[role]->size());
+            if (setRet != OH_NN_SUCCESS) {
+                LOGE("OM runChunk[%{public}d]: SetInputData[%{public}d] role=%{public}d failed",
+                     chunkIdx, slot, role);
+                return false;
+            }
         }
         double setInputMs = Ms(Clock::now() - t0).count();
 
-        ret = mgr->RunModel();
+        OH_NN_ReturnCode ret = mgr->RunModel();
         auto tRunDone = Clock::now();
         double runMs = Ms(tRunDone - t0).count();
         if (ret != OH_NN_SUCCESS) {
@@ -705,15 +788,29 @@ public:
             return false;
         }
 
-        int nOut = mgr->GetOutputCount();
+        // Emit outputs in the semantic order the engine expects:
+        //   outputs[0] = hidden_states, outputs[1..] = deepstack (in OM order).
+        // Roles were classified by tensor name/shape at load time, so a chunk
+        // that consolidates hidden==deepstack into a single output still yields
+        // exactly one entry here (the engine duplicates it via
+        // visual_blocks_om_deepstack_dup when needed).
+        const int nOut = mgr->GetOutputCount();
         outputs.clear();
-        outputs.resize(nOut);
+        outputs.reserve((size_t)nOut);
         for (int oi = 0; oi < nOut; oi++) {
-            outputs[oi] = mgr->GetOutputData(oi);
+            if (oi < (int)chunk.outputIsDeepstack.size() && chunk.outputIsDeepstack[oi]) {
+                continue;  // deepstack emitted after hidden below
+            }
+            outputs.push_back(mgr->GetOutputData(oi));
+        }
+        for (int oi = 0; oi < nOut; oi++) {
+            if (oi < (int)chunk.outputIsDeepstack.size() && chunk.outputIsDeepstack[oi]) {
+                outputs.push_back(mgr->GetOutputData(oi));
+            }
         }
 
         printf("[OM] chunk %d/%zu OK  out=%d  set=%.1fms  run=%.1fms  file=%s\n",
-               chunkIdx, mChunks.size(), nOut, setInputMs, runMs - setInputMs,
+               chunkIdx, mChunks.size(), (int)outputs.size(), setInputMs, runMs - setInputMs,
                chunk.modelPath.c_str() + mModelDir.size() + 1);
         fflush(stdout);
         return true;
@@ -734,62 +831,139 @@ public:
     }
 
 private:
+    // Semantic input roles. The engine always hands over (hidden, rotary, mask)
+    // in that order; which OM input slot each one belongs to is resolved per
+    // chunk at load time.
+    enum InputRole { ROLE_HIDDEN = 0, ROLE_ROTARY = 1, ROLE_MASK = 2, ROLE_COUNT = 3 };
+
     struct ChunkModel {
         std::unique_ptr<HIAIModelManager> mgr;
         std::vector<uint8_t> modelBuf;
         std::string modelPath;
         bool loaded = false;
         // Fixed sequence length of this chunk's OM, derived from the input
-        // tensor sizes reported by the runtime at load time.
+        // tensor shapes reported by the runtime at load time.
         size_t seqLen = 0;
+        // inputSlot[role] = OM input index that carries that role (-1 if absent).
+        int inputSlot[ROLE_COUNT] = {-1, -1, -1};
+        // Per OM output index: true when the tensor is a deepstack output.
+        std::vector<bool> outputIsDeepstack;
     };
 
-    // Derive the fixed visual sequence length from the OM's own input tensors.
-    // The exported chunk takes 3 inputs: hidden [1,S,D], rotary [2,S,1,R],
-    // mask [1,S,S]. Hidden and mask both encode S; any of them is sufficient,
-    // so try each in turn and keep the first valid answer.
+    // Classify one OM input tensor into a semantic role using its tensor name
+    // first (most reliable) and its shape as a fallback.
     //
-    // OMG may also expose the rank-3 tensors as NCHW rank-4 with a singleton
-    // channel dim ([1,1,S,D] / [1,1,S,S]), so both layouts are accepted.
-    //
-    // The declaration order of the OM inputs is NOT guaranteed to match the
-    // ONNX input order, so shape signatures are used instead of indices.
-    static size_t deriveSequenceLength(HIAIModelManager& mgr) {
+    //   hidden_states_in : [1,S,D]  / [1,1,S,D] / [1,D]   (and [S,D])
+    //   rotary_pos_emb   : [2,S,1,R] (OMG rank 4) or 5D before squeeze
+    //   attention_mask   : [1,S,S]  / [1,1,S,S]           (square)
+    static int classifyInputRole(const std::string& name,
+                                 const std::vector<int64_t>& shape) {
+        auto lowered = name;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        if (lowered.find("rotary") != std::string::npos) return ROLE_ROTARY;
+        if (lowered.find("mask") != std::string::npos) return ROLE_MASK;
+        if (lowered.find("hidden") != std::string::npos) return ROLE_HIDDEN;
+
+        // Shape based fallback.
+        if (shape.size() == 3 && shape[1] > 0 && shape[1] == shape[2]) return ROLE_MASK;
+        if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 &&
+            shape[2] > 0 && shape[2] == shape[3]) {
+            return ROLE_MASK;
+        }
+        if (shape.size() == 4 && shape[0] == 2) return ROLE_ROTARY;
+        // 5D rotary [2,1,S,1,R] as declared by MNN chunk models.
+        if (shape.size() == 5 && shape[0] == 2 && shape[2] > 0) return ROLE_ROTARY;
+        return ROLE_HIDDEN;
+    }
+
+    // True when an OM output tensor carries a deepstack activation.
+    static bool isDeepstackOutput(const std::string& name) {
+        auto lowered = name;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        return lowered.find("deepstack") != std::string::npos;
+    }
+
+    // Resolve per-chunk input slots and output roles from the loaded OM.
+    bool resolveChunkRouting(int chunkIdx, HIAIModelManager& mgr) {
+        auto& chunk = mChunks[chunkIdx];
+
+        // ---- Inputs: assign every role exactly once ----
         const int nIn = mgr.GetInputCount();
-        std::vector<std::vector<int64_t>> shapes;
-        shapes.reserve((size_t)nIn);
+        std::vector<std::vector<int64_t>> shapes((size_t)nIn);
         for (int i = 0; i < nIn; i++) {
-            shapes.push_back(mgr.GetInputShape(i));
+            shapes[(size_t)i] = mgr.GetInputShape(i);
         }
-        // Pass 1: attention mask [1,S,S] or NCHW [1,1,S,S] (square, unambiguous).
-        for (const auto& shape : shapes) {
-            if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0 && shape[1] == shape[2]) {
-                return (size_t)shape[1];
-            }
-            if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 &&
-                shape[2] > 0 && shape[2] == shape[3]) {
-                return (size_t)shape[2];
-            }
-        }
-        // Pass 2: rotary [2,S,1,R].
-        for (const auto& shape : shapes) {
-            if (shape.size() == 4 && shape[0] == 2 && shape[1] > 0 && shape[2] == 1) {
-                return (size_t)shape[1];
+        // Pass 1: name-based (authoritative when the runtime exposes names).
+        for (int i = 0; i < nIn; i++) {
+            const std::string name = mgr.GetInputName(i);
+            if (name.empty()) continue;
+            const int role = classifyInputRole(name, shapes[(size_t)i]);
+            if (chunk.inputSlot[role] < 0) {
+                chunk.inputSlot[role] = i;
             }
         }
-        // Pass 3: hidden [1,S,D] / NCHW [1,1,S,D] / rank-2 [S,D].
-        for (const auto& shape : shapes) {
-            if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0) {
-                return (size_t)shape[1];
+        // Pass 2: fill any unresolved role by shape.
+        for (int i = 0; i < nIn; i++) {
+            bool taken = false;
+            for (int r = 0; r < ROLE_COUNT; r++) {
+                if (chunk.inputSlot[r] == i) { taken = true; break; }
             }
-            if (shape.size() == 4 && shape[0] == 1 && shape[1] == 1 && shape[2] > 0) {
-                return (size_t)shape[2];
-            }
-            if (shape.size() == 2 && shape[0] > 0) {
-                return (size_t)shape[0];
+            if (taken) continue;
+            const int role = classifyInputRole(std::string(), shapes[(size_t)i]);
+            if (chunk.inputSlot[role] < 0) {
+                chunk.inputSlot[role] = i;
             }
         }
-        return 0;
+
+        if (chunk.inputSlot[ROLE_HIDDEN] < 0 || chunk.inputSlot[ROLE_ROTARY] < 0 ||
+            chunk.inputSlot[ROLE_MASK] < 0) {
+            LOGE("OM routing[%{public}d]: unresolved input role hidden=%{public}d rotary=%{public}d mask=%{public}d",
+                 chunkIdx, chunk.inputSlot[ROLE_HIDDEN], chunk.inputSlot[ROLE_ROTARY],
+                 chunk.inputSlot[ROLE_MASK]);
+            return false;
+        }
+
+        // ---- Sequence length: read it from the role-resolved tensors ----
+        for (int r = 0; r < ROLE_COUNT; r++) {
+            const auto& shape = shapes[(size_t)chunk.inputSlot[r]];
+            if (r == ROLE_ROTARY) {
+                if (shape.size() >= 2 && shape[1] > 0) { chunk.seqLen = (size_t)shape[1]; break; }
+            } else if (shape.size() == 3 && shape[1] > 0) {
+                chunk.seqLen = (size_t)shape[1]; break;
+            } else if (shape.size() == 4 && shape[2] > 0) {
+                chunk.seqLen = (size_t)shape[2]; break;
+            } else if (shape.size() == 2 && shape[0] > 1) {
+                chunk.seqLen = (size_t)shape[0]; break;
+            }
+        }
+
+        // ---- Outputs: mark which ones are deepstack ----
+        const int nOut = mgr.GetOutputCount();
+        chunk.outputIsDeepstack.assign((size_t)nOut, false);
+        int deepstackCount = 0;
+        for (int oi = 0; oi < nOut; oi++) {
+            if (isDeepstackOutput(mgr.GetOutputName(oi))) {
+                chunk.outputIsDeepstack[(size_t)oi] = true;
+                deepstackCount++;
+            }
+        }
+        // Fallback when the runtime hides output names: outputs are ordered
+        // [hidden, deepstack...] by convention, so everything past the first
+        // non-deepstack tensor is treated as deepstack.
+        if (deepstackCount == 0 && nOut > 1) {
+            for (int oi = 1; oi < nOut; oi++) {
+                chunk.outputIsDeepstack[(size_t)oi] = true;
+                deepstackCount++;
+            }
+        }
+
+        printf("[OM] routing chunk %d: slots hidden=%d rotary=%d mask=%d | seq_len=%zu | outputs=%d (deepstack=%d)\n",
+               chunkIdx, chunk.inputSlot[ROLE_HIDDEN], chunk.inputSlot[ROLE_ROTARY],
+               chunk.inputSlot[ROLE_MASK], chunk.seqLen, nOut, deepstackCount);
+        fflush(stdout);
+        return chunk.seqLen > 0;
     }
 
     std::string mModelDir;
@@ -823,9 +997,15 @@ static void LoadModelExecute(napi_env env, void* data) {
     std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
     g_llm->set_config(tmpConfig);
 
-    // OM path: search for pre-compiled .om chunk files.  Priority:
-    //   1. config.json "visual_blocks_om_dir" (relative to model dir)
-    //   2. model dir itself (auto-detect)
+    // OM path selection. Priority (highest first):
+    //   1. engine online-compilation cache: <npu_model_dir>/chunk_<i>/om_cache_v2/<shape>/vision.om
+    //      Loading these at load() time means the first inference no longer has
+    //      to compile (or lazily load) an OM.
+    //   2. pre-compiled offline OMG artefacts: <visual_blocks_om_dir or model dir>/visual_blocks_npu_<i>.om
+    //   3. neither -> do not install an executor; the engine compiles online and
+    //      caches the result for the next launch.
+    // Cached and offline entries are merged per chunk (cache wins) so a partial
+    // cache still uses the fastest available artefact for every chunk.
     {
         const std::string configPath = asyncData->inputStr;
         std::string configText;
@@ -837,35 +1017,95 @@ static void LoadModelExecute(napi_env env, void* data) {
                 configText = oss.str();
             }
         }
-        std::vector<std::string> omPaths;
-        // Inline JSON key extraction (extractJsonString is scoped inside a
-        // later anonymous namespace, not visible here).
-        std::string omCfgDir;
-        {
-            const std::string needle = "\"visual_blocks_om_dir\"";
+
+        // Inline JSON helpers (extractJsonString lives in a later anonymous
+        // namespace and is not visible here).
+        auto findStringValue = [&configText](const std::string& key) -> std::string {
+            const std::string needle = "\"" + key + "\"";
             auto kpos = configText.find(needle);
-            if (kpos != std::string::npos) {
-                auto col = configText.find(':', kpos + needle.size());
-                if (col != std::string::npos) {
-                    auto q1 = configText.find('"', col + 1);
-                    if (q1 != std::string::npos) {
-                        auto q2 = configText.find('"', q1 + 1);
-                        if (q2 != std::string::npos) {
-                            omCfgDir = configText.substr(q1 + 1, q2 - q1 - 1);
-                        }
-                    }
-                }
+            if (kpos == std::string::npos) return std::string();
+            auto col = configText.find(':', kpos + needle.size());
+            if (col == std::string::npos) return std::string();
+            auto q1 = configText.find('"', col + 1);
+            if (q1 == std::string::npos) return std::string();
+            auto q2 = configText.find('"', q1 + 1);
+            if (q2 == std::string::npos) return std::string();
+            return configText.substr(q1 + 1, q2 - q1 - 1);
+        };
+        auto findStringArray = [&configText](const std::string& key) -> std::vector<std::string> {
+            std::vector<std::string> out;
+            const std::string needle = "\"" + key + "\"";
+            auto kpos = configText.find(needle);
+            if (kpos == std::string::npos) return out;
+            auto lb = configText.find('[', kpos);
+            if (lb == std::string::npos) return out;
+            auto rb = configText.find(']', lb);
+            if (rb == std::string::npos) return out;
+            const std::string body = configText.substr(lb + 1, rb - lb - 1);
+            size_t pos = 0;
+            while (true) {
+                auto q1 = body.find('"', pos);
+                if (q1 == std::string::npos) break;
+                auto q2 = body.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                out.push_back(body.substr(q1 + 1, q2 - q1 - 1));
+                pos = q2 + 1;
+            }
+            return out;
+        };
+
+        const std::string omCfgDir = findStringValue("visual_blocks_om_dir");
+        // Mirror LlmConfig::npu_model_dir(): base_dir + config value, default base_dir.
+        const std::string npuModelDir = findStringValue("npu_model_dir");
+        const std::string cacheRoot = npuModelDir.empty() ? modelDir : (modelDir + "/" + npuModelDir);
+
+        const std::vector<std::string> cached = listCachedOmChunkFiles(cacheRoot);
+        const std::vector<std::string> offline =
+            omCfgDir.empty() ? listOmChunkFiles(modelDir)
+                             : listOmChunkFiles(modelDir + "/" + omCfgDir);
+
+        // Merge: cached (newest) wins, offline fills the gaps.
+        std::vector<std::string> omPaths = cached;
+        if (offline.size() > omPaths.size()) omPaths.resize(offline.size(), "");
+        size_t cacheHits = 0;
+        for (size_t i = 0; i < cached.size(); i++) {
+            if (!cached[i].empty()) cacheHits++;
+        }
+        for (size_t i = 0; i < offline.size(); i++) {
+            if (!offline[i].empty() && (i >= omPaths.size() || omPaths[i].empty())) {
+                if (i >= omPaths.size()) omPaths.resize(i + 1, "");
+                omPaths[i] = offline[i];
             }
         }
-        if (!omCfgDir.empty()) {
-            omPaths = listOmChunkFiles(modelDir + "/" + omCfgDir);
+        printf("[OM] Load: cache=%zu offline=%zu merged=%zu chunk(s)\n",
+               cacheHits, offline.size(), omPaths.size());
+        fflush(stdout);
+
+        // Which chunks must be served from an OM? Only those routed to NPU.
+        std::vector<std::string> backends = findStringArray("visual_blocks_chunk_backends");
+        std::vector<size_t> required;
+        if (!backends.empty()) {
+            for (size_t i = 0; i < backends.size(); i++) {
+                std::string b = backends[i];
+                std::transform(b.begin(), b.end(), b.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                if (b == "npu" || b == "hiai") required.push_back(i);
+            }
         } else {
-            // Auto-detect: look for .om files directly in the model directory.
-            omPaths = listOmChunkFiles(modelDir);
+            for (size_t i = 0; i < omPaths.size(); i++) required.push_back(i);
         }
-        if (!omPaths.empty()) {
-            LOGI("OM executor enabled: %{public}zu chunks", omPaths.size());
-            printf("[OM] Load: %zu .om chunk(s) detected → OM path enabled\n", omPaths.size());
+        std::vector<size_t> missing;
+        for (size_t idx : required) {
+            if (idx >= omPaths.size() || omPaths[idx].empty()) missing.push_back(idx);
+        }
+
+        if (!required.empty() && missing.empty()) {
+            const char* source = cacheHits == required.size() ? "online cache"
+                               : (cacheHits == 0 ? "offline .om" : "online cache + offline .om");
+            LOGI("OM executor enabled: %{public}zu chunks (%{public}s)", omPaths.size(), source);
+            printf("[OM] Load: enabling offline-style loading for %zu chunk(s), source=%s\n",
+                   omPaths.size(), source);
+            fflush(stdout);
             auto executor = std::make_shared<HiaiNpuChunkExecutor>(modelDir);
             if (!g_llm->setNpuChunkExecutor(std::move(executor), omPaths)) {
                 LOGE("setNpuChunkExecutor failed: model does not support offline visual NPU chunks");
@@ -874,8 +1114,16 @@ static void LoadModelExecute(napi_env env, void* data) {
                 asyncData->outputStr = "error: setNpuChunkExecutor failed";
                 return;
             }
+        } else if (missing.empty()) {
+            printf("[OM] Load: no NPU chunks declared → MNN path\n");
+            fflush(stdout);
         } else {
-            printf("[OM] Load: no .om files found → fallback to MNN path\n");
+            printf("[OM] Load: %zu NPU chunk(s) lack an OM (", missing.size());
+            for (size_t k = 0; k < missing.size(); k++) {
+                printf("%s%zu", k ? "," : "", missing[k]);
+            }
+            printf(") → online compile + cache\n");
+            fflush(stdout);
         }
     }
 
