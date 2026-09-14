@@ -90,3 +90,17 @@ export const setOmReleaseBuffer: (release: boolean) => string;
 //
 // Must be called before loadModel().
 export const setOmMemoryReusePlan: (plan: 'high' | 'low' | 'unset') => string;
+
+// Prefer the engine's HiAI (NPUBackend) path with eager warm-up for the visual
+// NPU chunks.
+//
+//   true (default) -> the chunks run through the engine's own HiAI backend
+//     (faster than the NNRt/OM executor) and are built/loaded during
+//     loadModel(), so the first image turn starts immediately. The online OM
+//     cache is still consumed via [NPU_CACHE].
+//   false -> use the NNRt + pre-compiled OM executor path (HiaiNpuChunkExecutor).
+//
+// The optional second argument overrides the visual sequence length used by the
+// warm-up (default 608, matching the <hw>600,270</hw> the UI sends).
+// Must be called before loadModel().
+export const setHiaiPrewarm: (enable: boolean, seqLen?: number) => string;

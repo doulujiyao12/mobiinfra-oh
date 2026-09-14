@@ -68,6 +68,24 @@ static std::string g_runtimeSandboxDir;
 // Whichever source is not preferred still fills chunks the preferred one lacks.
 static bool g_useOnlineOmCache = true;
 
+// Prefer the engine's own HiAI (NPUBackend) path for visual NPU chunks, with
+// eager warm-up at load() time.
+//
+//   true  (default) -> do NOT inject HiaiNpuChunkExecutor. The chunks run
+//          through the engine's HiAI backend, which is markedly faster than the
+//          NNRt/OM executor path, and still consumes the online OM cache via
+//          [NPU_CACHE]. Because that backend builds its graph lazily on the
+//          first forward (which for vision only happens on the first image),
+//          Llm::setPrewarmVisualChunks() is also enabled so the chunks are
+//          built/loaded during load() instead of on the first image turn.
+//   false -> current behaviour: inject HiaiNpuChunkExecutor (NNRt + OM).
+static bool g_preferHiaiPrewarm = true;
+
+// Visual sequence length baked into the NPU chunks (the app sends
+// <hw>600,270</hw>, which qwen2VisionProcess rounds to 608). Only used by the
+// HiAI prewarm path above; overridable via setHiaiPrewarm().
+static int g_hiaiPrewarmSeqLen = 608;
+
 // Release each chunk's host-side OM copy after it has been loaded onto the NPU.
 //
 // HIAIModelManager::LoadModelFromBuffer hands the buffer to
@@ -1195,7 +1213,35 @@ static void LoadModelExecute(napi_env env, void* data) {
             if (idx >= omPaths.size() || omPaths[idx].empty()) missing.push_back(idx);
         }
 
-        if (!required.empty() && missing.empty()) {
+        // Does the ONLINE cache cover every NPU chunk? Only then do we take the
+        // HiAI path: the engine then consumes the cached OMs itself via
+        // [NPU_CACHE], and prewarm builds/loads them during load(). If the cache
+        // is incomplete we keep the NNRt + OM executor path (which can also use
+        // the offline OMs).
+        bool cacheCoversAll = !required.empty();
+        for (size_t idx : required) {
+            if (idx >= cached.size() || cached[idx].empty()) {
+                cacheCoversAll = false;
+                break;
+            }
+        }
+
+        if (g_preferHiaiPrewarm && cacheCoversAll) {
+            // HiAI path: let the engine's own NPUBackend handle the NPU chunks by
+            // NOT injecting an executor. Prewarm builds/loads them during load()
+            // so the first image turn does not pay the HiAI compile/load cost.
+            g_llm->setPrewarmVisualChunks(true, g_hiaiPrewarmSeqLen);
+            printf("[OM] Load: HiAI prewarm path (%zu NPU chunk(s), seq=%d) → "
+                   "engine NPUBackend + warm-up (online cache covers all)\n",
+                   required.size(), g_hiaiPrewarmSeqLen);
+            fflush(stdout);
+        } else if (!required.empty() && missing.empty()) {
+            if (g_preferHiaiPrewarm) {
+                printf("[OM] Load: HiAI prewarm enabled but online cache incomplete "
+                       "(%zu/%zu cached) → NNRt + OM executor\n",
+                       cacheHits, required.size());
+                fflush(stdout);
+            }
             const char* source = usedFromCache == required.size() ? "online cache"
                                : (usedFromCache == 0 ? "offline .om" : "online cache + offline .om");
             LOGI("OM executor enabled: %{public}zu chunks (%{public}s)", omPaths.size(), source);
@@ -1966,6 +2012,65 @@ static napi_value SetOmMemoryReusePlan(napi_env env, napi_callback_info info) {
 
     napi_value ret;
     napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &ret);
+    return ret;
+}
+
+// Prefer the engine's HiAI (NPUBackend) path with eager warm-up for the visual
+// NPU chunks.
+//
+//   true  (default) -> do not inject the NNRt/OM executor; the chunks run
+//          through the engine's HiAI backend (fast) and are built/loaded during
+//          loadModel() instead of on the first image turn (the online OM cache
+//          is still used via [NPU_CACHE]).
+//   false -> inject HiaiNpuChunkExecutor (NNRt + pre-compiled OM).
+//
+// Optional second argument overrides the visual sequence length used by the
+// warm-up (default 608, matching the <hw>600,270</hw> the UI sends). Must be
+// called before loadModel().
+static napi_value SetHiaiPrewarm(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool enable = g_preferHiaiPrewarm;
+    if (argc >= 1) {
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, args[0], &type);
+        if (type == napi_boolean) {
+            napi_get_value_bool(env, args[0], &enable);
+        } else if (type == napi_number) {
+            int32_t v = 0;
+            napi_get_value_int32(env, args[0], &v);
+            enable = (v != 0);
+        } else if (type == napi_string) {
+            char buf[16] = {0};
+            size_t len = 0;
+            napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+            std::string s(buf, len);
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            enable = !(s == "0" || s == "false" || s == "off" || s == "no");
+        }
+    }
+    int seqLen = g_hiaiPrewarmSeqLen;
+    if (argc >= 2) {
+        napi_valuetype t2 = napi_undefined;
+        napi_typeof(env, args[1], &t2);
+        if (t2 == napi_number) {
+            int32_t v = 0;
+            napi_get_value_int32(env, args[1], &v);
+            if (v > 0) seqLen = (int)v;
+        }
+    }
+
+    g_preferHiaiPrewarm = enable;
+    if (seqLen > 0) g_hiaiPrewarmSeqLen = seqLen;
+    LOGI("HiAI prewarm = %{public}s (seq=%{public}d)", enable ? "on" : "off", seqLen);
+    printf("[OM] HiAI prewarm = %s (seq=%d)\n", enable ? "on" : "off", seqLen);
+    fflush(stdout);
+
+    napi_value ret;
+    napi_create_string_utf8(env, enable ? "on" : "off", NAPI_AUTO_LENGTH, &ret);
     return ret;
 }
 
@@ -5529,6 +5634,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setOmSource",  nullptr, SetOmSource,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOmReleaseBuffer", nullptr, SetOmReleaseBuffer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOmMemoryReusePlan", nullptr, SetOmMemoryReusePlan, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setHiaiPrewarm", nullptr, SetHiaiPrewarm, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},

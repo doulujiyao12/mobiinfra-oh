@@ -144,6 +144,21 @@ public:
     // through pre-compiled .om files instead of MNN Module::onForward.
     virtual bool setNpuChunkExecutor(std::shared_ptr<INpuChunkExecutor> /*executor*/,
                                      const std::vector<std::string>& /*omPaths*/) { return false; }
+    // Enable eager warm-up of the visual NPU chunks at load() time.
+    //
+    // Background: when the chunks run through the engine's own HiAI backend
+    // (NPUBackend, i.e. NO external INpuChunkExecutor is injected), the HiAI
+    // graph build / model load happens lazily on the FIRST forward. For the
+    // visual chunks that first forward only happens when the user sends the
+    // first image, so the first image turn carries the whole compile+load cost.
+    //
+    // With this enabled, Omni::load() performs one dummy forward over the
+    // chunks right after loading them, which forces NPUBackend to build/load
+    // (and, with MNN_HIAI_CACHE_OM_BY_CHUNK, to consume the on-device OM cache)
+    // before any image arrives. The dummy outputs are discarded.
+    //
+    // No-op in the base class.
+    virtual void setPrewarmVisualChunks(bool /*enable*/, int /*seqLen*/) {}
     virtual Express::VARP gen_attention_mask(int seq_len);
     virtual Express::VARP gen_position_ids(int seq_len);
     virtual Express::VARP embedding(const std::vector<int>& input_ids);

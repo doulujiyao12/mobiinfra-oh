@@ -43,6 +43,10 @@ struct Index {
   // Device memory overcommitment plan for the NNRt builds: 'high' (default,
   // least device memory) | 'low' | 'unset'.
   @State omMemoryReusePlan: string = 'high';
+  // Prefer the engine's HiAI path for the visual NPU chunks, with the chunks
+  // built/loaded during loadModel() (so the first image turn is not slowed by
+  // the HiAI compile/load).
+  @State hiaiPrewarm: boolean = true;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -88,6 +92,12 @@ struct Index {
       mnnllm.setOmMemoryReusePlan(this.omMemoryReusePlan as 'high' | 'low' | 'unset');
     } catch (e) {
       console.error('setOmMemoryReusePlan failed: ' + JSON.stringify(e));
+    }
+    // Default: HiAI path with eager warm-up at load time.
+    try {
+      mnnllm.setHiaiPrewarm(this.hiaiPrewarm, 608);
+    } catch (e) {
+      console.error('setHiaiPrewarm failed: ' + JSON.stringify(e));
     }
     this.prepareCustomOpp();
   }
@@ -1120,6 +1130,21 @@ struct Index {
                       : '视觉 NPU 分块：优先使用离线编译的 OM';
                   })
                 Text('视觉分块优先使用在线缓存的 OM（不勾选则优先用离线 OM）')
+                  .fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 8 })
+
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'hiaiPrewarm' })
+                  .select(this.hiaiPrewarm)
+                  .selectedColor('#4CAF50')
+                  .onChange((value: boolean) => {
+                    this.hiaiPrewarm = value;
+                    mnnllm.setHiaiPrewarm(value, 608);
+                    this.output = value
+                      ? '视觉 NPU：走 HiAI 路径，加载模型时预编译/加载 OM（首轮图片即可用）'
+                      : '视觉 NPU：走 NNRt + 离线 OM 加载路径';
+                  })
+                Text('视觉分块走 HiAI 路径并在加载模型时预热（默认开，消除首轮图片延迟）')
                   .fontSize(15).fontColor('#333')
               }.width('100%').margin({ bottom: 8 })
 
