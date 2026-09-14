@@ -1,3 +1,4 @@
+import { PrivacyConsent } from '../../utils/PrivacyConsent';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { parseJsonCompat } from '../../utils/JsonCompat';
@@ -102,7 +103,7 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(normalizedUrl, requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
@@ -115,7 +116,7 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
@@ -155,7 +156,7 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(imageBaseUrl, requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
@@ -191,7 +192,7 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 }

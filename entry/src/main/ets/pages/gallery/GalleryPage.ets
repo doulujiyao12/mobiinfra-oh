@@ -1,4 +1,6 @@
 import { promptAction, router } from '@kit.ArkUI';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { PrivacyConsent } from '../../utils/PrivacyConsent';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -229,6 +231,9 @@ struct GalleryPage {
   }
 
   private async runGalleryQuestionAnswer(): Promise<void> {
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     let query = this.galleryQuestion.trim();
     if (query.length === 0) {
       showToastSafely('请输入要问的问题', 1200);
@@ -315,6 +320,9 @@ struct GalleryPage {
   }
 
   private async startManualAnalyze(): Promise<void> {
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -381,6 +389,9 @@ struct GalleryPage {
   }
 
   private async startAutoAnalyze(): Promise<void> {
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -412,6 +423,9 @@ struct GalleryPage {
   }
 
   private async continueAutoAnalyze(): Promise<void> {
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -732,6 +746,9 @@ struct GalleryPage {
   }
 
   private async generateAiMonthlySummary(insight: GalleryMonthlyInsight): Promise<void> {
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.monthlyAiLoadingKey.length > 0) {
       return;
     }
@@ -2765,6 +2782,9 @@ struct GalleryPage {
   }
 
   private async resolveCaptureAddressLazy(item: GalleryAnalysisResult, force: boolean): Promise<void> {
+    if (!PrivacyConsent.isAccepted() && (!force || !await PrivacyConsentDialog.show(this.getUIContext()))) {
+      return;
+    }
     let rawLocation = this.captureRawLatLng(item);
     if (!rawLocation) {
       return;

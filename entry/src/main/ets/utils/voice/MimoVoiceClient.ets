@@ -1,3 +1,4 @@
+import { PrivacyConsent } from '../PrivacyConsent';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { parseJsonCompat } from '../JsonCompat';
@@ -366,7 +367,7 @@ export class MimoVoiceClient {
       readTimeout: config.readTimeoutMs === undefined ? 120000 : config.readTimeoutMs,
       expectDataType: http.HttpDataType.STRING
     };
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(MimoVoiceClient.normalizeChatUrl(config.baseUrl), requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
@@ -379,7 +380,7 @@ export class MimoVoiceClient {
         format: 'wav'
       };
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
@@ -402,7 +403,7 @@ export class MimoVoiceClient {
       connectTimeout: 10000,
       readTimeout: config.readTimeoutMs === undefined ? 120000 : config.readTimeoutMs
     };
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     return new Promise<MimoTtsStreamResult>((resolve, reject) => {
       let resolved = false;
       let responseCode = -1;
@@ -418,7 +419,7 @@ export class MimoVoiceClient {
         httpReq.off('dataReceive');
         httpReq.off('dataEnd');
         try {
-          httpReq.destroy();
+          PrivacyConsent.destroyHttp(httpReq);
         } catch (e) {
         }
       };
@@ -430,6 +431,7 @@ export class MimoVoiceClient {
         cleanup();
         reject(new Error(message));
       };
+      PrivacyConsent.onHttpCancel(httpReq, () => { finishWithError('隐私授权已撤回'); });
       callbacks.onRequest?.({
         cancel: () => { finishWithError('MiMO TTS stream cancelled'); }
       });

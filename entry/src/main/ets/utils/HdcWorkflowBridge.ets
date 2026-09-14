@@ -1,3 +1,4 @@
+import { PrivacyConsent } from './PrivacyConsent';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { AgentExecutionController } from './AgentExecutionController';
@@ -90,7 +91,7 @@ export class HdcWorkflowBridge {
       action: action,
       payload: requestPayload
     };
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     let startedAt = new Date().getTime();
     try {
       AppLogger.info('HdcBridge', 'request action=' + action + ', payloadKeys=' +
@@ -129,7 +130,7 @@ export class HdcWorkflowBridge {
         message: 'HDC bridge 请求失败：' + err.message
       };
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 

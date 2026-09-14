@@ -1,4 +1,5 @@
 import { socket } from '@kit.NetworkKit';
+import { PrivacyConsent } from './PrivacyConsent';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
@@ -146,6 +147,7 @@ export class AgentRouterServer {
   }
 
   public submitLocalTask(task: string): void {
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'local';
     this.currentTask = task;
     this.cloudTask = '';
@@ -155,6 +157,7 @@ export class AgentRouterServer {
   }
 
   public submitCloudTask(task: string): void {
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'cloud';
     this.currentTask = task;
     this.cloudTask = '';
@@ -312,6 +315,14 @@ export class AgentRouterServer {
   private async handleRequest(client: socket.TCPSocketConnection, req: RequestMap): Promise<void> {
     let reqType = this.getString(req, 'type');
 
+    // Keep cleanup messages available, but do not hand out tasks or model actions without consent.
+    if (!PrivacyConsent.isAccepted() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, 'Privacy consent required');
+      return;
+    }
+
     if (reqType === 'poll') {
       if (this.routeMode === 'cloud' && this.currentTask.length > 0) {
         this.log('cloud', '>> [Cloud Poll] PC fetched task: ' + this.currentTask);
@@ -357,6 +368,10 @@ export class AgentRouterServer {
     }
 
     await AgentExecutionController.waitIfPaused();
+    if (!PrivacyConsent.isAccepted()) {
+      this.sendTerminate(client, 'Privacy consent revoked');
+      return;
+    }
     if (this.isCancellationRequested()) {
       this.log(this.routeMode, '>> [Cancel] cancellation intercepted after pause: ' + reqType);
       this.sendTerminate(client, 'Task cancelled by user');
@@ -741,7 +756,7 @@ export class AgentRouterServer {
   }
 
   private isCancellationRequested(): boolean {
-    return this.cancellationRequested || AgentExecutionController.isCancelRequested();
+    return !PrivacyConsent.isAccepted() || this.cancellationRequested || AgentExecutionController.isCancelRequested();
   }
 
   private clearCancellationState(): void {

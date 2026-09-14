@@ -94,12 +94,15 @@ import {
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
 import { HuaweiAccountCard } from './HuaweiAccountCard';
+import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 
 registerGallerySettingsDefaults();
 
 const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
 @Component
 export struct SettingsCenterPage {
+  @StorageProp(PRIVACY_STATE_KEY) privacyConsentState: string = 'unselected';
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
@@ -844,6 +847,7 @@ export struct SettingsCenterPage {
   @Builder PrivacySection() {
     Column() {
       this.SectionTitle(SettingsSectionId.PersonalPrivacy)
+      this.PrivacyDeclarationEntry()
       SettingsGroupCard({
         title: 'Agent 确认策略',
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
@@ -866,6 +870,35 @@ export struct SettingsCenterPage {
       (value: boolean) => { this.autoConfirm = value; })
     this.SettingToggle('云端 Agent 自动同意', '关闭后云端模型动作需要手动确认后发给 PC', this.cloudAutoConfirm,
       (value: boolean) => { this.cloudAutoConfirm = value; })
+  }
+
+  @Builder PrivacyDeclarationEntry() {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 12 }) {
+        Column({ space: 5 }) {
+          Text('隐私声明')
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('sys.color.ohos_id_color_text_primary'))
+          Text(this.privacyConsentState === 'accepted' ? '已同意 · 可随时撤回同意' :
+            (this.privacyConsentState === 'rejected' ? '已拒绝 · 任务与云端分析已关闭' : '未选择 · 阅读并管理云端分析授权'))
+            .fontSize(12)
+            .fontColor($r('sys.color.ohos_id_color_text_secondary'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Text('›').fontSize(24).fontColor($r('sys.color.ohos_id_color_text_secondary'))
+      }
+      .width('100%')
+    }
+    .width('92%')
+    .padding(18)
+    .borderRadius(20)
+    .backgroundColor($r('sys.color.ohos_id_color_dialog_bg'))
+    .margin({ top: 16 })
+    .onClick(() => { PrivacyConsentDialog.show(this.getUIContext(), true); })
   }
 
   @Builder AvatarImageServiceGroup() {

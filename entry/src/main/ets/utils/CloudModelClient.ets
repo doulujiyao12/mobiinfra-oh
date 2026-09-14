@@ -1,3 +1,4 @@
+import { PrivacyConsent } from './PrivacyConsent';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import {
@@ -302,7 +303,7 @@ export class CloudModelClient {
     this.activeRequests = [];
     for (let i = 0; i < pending.length; i++) {
       try {
-        pending[i].destroy();
+        PrivacyConsent.destroyHttp(pending[i]);
       } catch (e) {
         AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
@@ -682,7 +683,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     let startedAt = new Date().getTime();
@@ -718,7 +719,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
@@ -737,7 +738,7 @@ export class CloudModelClient {
       readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     AppLogger.info('CloudModel', 'chat stream request start url=' + url +
@@ -771,7 +772,7 @@ export class CloudModelClient {
         httpReq.off('dataEnd');
         self.unregisterActiveRequest(httpReq);
         try {
-          httpReq.destroy();
+          PrivacyConsent.destroyHttp(httpReq);
         } catch (e) {
           AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
         }
@@ -885,6 +886,7 @@ export class CloudModelClient {
         AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
+      PrivacyConsent.onHttpCancel(httpReq, () => { finishWithError('隐私授权已撤回'); });
       let decodeStreamData = (data: ArrayBuffer): string => {
         try {
           return textDecoder.decodeWithStream(new Uint8Array(data));
@@ -1407,7 +1409,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
@@ -1424,7 +1426,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 

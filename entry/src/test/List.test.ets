@@ -1,4 +1,5 @@
 import localUnitTest from './LocalUnit.test';
+import privacyConsentUnitTest from './PrivacyConsentUnit.test';
 import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
@@ -39,6 +40,7 @@ import homeTaskSuggestionUnitTest from './HomeTaskSuggestionUnit.test';
 import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
 
 export default function testsuite() {
+  privacyConsentUnitTest();
   localUnitTest();
   dataManagerUnitTest();
   workflowStorageUnitTest();

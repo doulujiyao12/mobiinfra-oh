@@ -6,6 +6,7 @@ import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -671,6 +672,13 @@ export struct TaskPage {
   private async runTask(task: WorkflowTask): Promise<void> {
     if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
+    // A second tap must not start another run while consent is being loaded or displayed.
+    if (this.isTaskExecutionBusy()) {
       return;
     }
     let flushedContext = this.flushTaskContextDrafts();

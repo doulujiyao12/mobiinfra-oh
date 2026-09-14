@@ -110,6 +110,8 @@ import {
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
+import { PrivacyConsent } from '../utils/PrivacyConsent';
+import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import {
   CloudChatCompletionOptions,
@@ -1206,6 +1208,9 @@ struct Index {
   }
 
   private async toggleVoiceInput(): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().toggleVoiceInput();
   }
 
@@ -1214,10 +1219,16 @@ struct Index {
   }
 
   private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
   }
 
   private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().replayAssistantMessageVoice(messageId, text);
   }
 
@@ -1744,6 +1755,9 @@ struct Index {
 
   private async runMobileGuiTaskForChatSession(sessionId: string,
     request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (!await this.ensurePrivacyConsent()) {
+      return mobileGuiTaskRunResultFromFailure('privacy_consent_required', '未同意隐私声明，任务未执行', true);
+    }
     if (!this.isMobileGuiTaskCloudConfigReady()) {
       this.appendCloudLogToSession(sessionId, this.mobileGuiTaskConfigMissingMessage());
       return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
@@ -2142,6 +2156,9 @@ struct Index {
   }
 
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，未生成头像');
+    }
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
       showToastSafely('数据管理服务未就绪', 1500);
@@ -2623,6 +2640,9 @@ struct Index {
   }
 
   private async refreshDataManager(): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     dataManagerInfo(`refreshDataManager invoked: hasFacade=${this.dataManagerFacade !== null}, refreshing=${this.dataManagerRefreshing}`);
     if (this.dataManagerFacade === null) {
       dataManagerWarn('refreshDataManager skipped: facade is null');
@@ -2670,6 +2690,9 @@ struct Index {
   }
 
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (this.wechatAutoSummaryRunning) {
       showToastSafely('微信采集正在进行', 1200);
       return;
@@ -2734,6 +2757,15 @@ struct Index {
   }
 
   aboutToAppear() {
+    PrivacyConsent.setRevokeHandler(() => {
+      this.cancelCurrentCloudChat();
+      if (this.chatVoiceOrchestrator !== null) {
+        this.chatVoiceOrchestrator.shutdown();
+      }
+      if (AgentExecutionController.isExecutionActive()) {
+        AgentExecutionController.requestCancellation();
+      }
+    });
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     this.migrateWechatAutoSummaryDefaultValues();
@@ -2758,14 +2790,6 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
-    if (!this.homeTaskSuggestionsAutoStarted) {
-      this.homeTaskSuggestionsAutoStarted = true;
-      this.refreshHomeTaskSuggestions(false).then(async (): Promise<void> => {
-        await this.refreshHomeComfortConcerns(false);
-      }).catch((e: Error) => {
-        AppLogger.warnCause('HomeAI', 'initial home AI generation failed', e);
-      });
-    }
     this.initChatSessions();
     let profileKnockShareInitToken = ++this.profileKnockShareInitToken;
     this.initializeProfileKnockShare(ctx, profileKnockShareInitToken).catch((e: Error) => {
@@ -2831,6 +2855,7 @@ struct Index {
   }
 
   onPageShow(): void {
+    this.initializePrivacyConsent();
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
@@ -2841,6 +2866,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    PrivacyConsent.setRevokeHandler(null);
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
     this.clearLocalChatCompletionProbe();
@@ -2849,6 +2875,28 @@ struct Index {
     }
     this.profileKnockShareInitToken++;
     this.profileKnockShareService.dispose();
+  }
+
+  private initializePrivacyConsent(): void {
+    PrivacyConsent.initialize(getContext(this) as common.UIAbilityContext).then(async (): Promise<void> => {
+      if (PrivacyConsent.state() === 'unselected') {
+        await PrivacyConsentDialog.show(this.getUIContext());
+      }
+      if (PrivacyConsent.isAccepted() && !this.homeTaskSuggestionsAutoStarted) {
+        this.homeTaskSuggestionsAutoStarted = true;
+        await this.refreshHomeTaskSuggestions(false);
+        await this.refreshHomeComfortConcerns(false);
+      }
+    }).catch(() => {
+      showToastSafely('隐私设置读取失败，任务与云端上传暂不可用，请稍后重试', 2000);
+    });
+  }
+
+  private async ensurePrivacyConsent(): Promise<boolean> {
+    if (PrivacyConsent.isAccepted()) {
+      return true;
+    }
+    return await PrivacyConsentDialog.show(this.getUIContext());
   }
 
   private startPcServerMonitor(): void {
@@ -3175,6 +3223,9 @@ struct Index {
 
   private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string,
     onContentDelta: (delta: string) => void): Promise<string> {
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，未上传资料进行分析');
+    }
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
@@ -5138,6 +5189,9 @@ struct Index {
   }
 
   async runCloudPlannerOnce(voiceMetadata?: ChatVoiceMetadata) {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
@@ -5951,6 +6005,9 @@ struct Index {
   }
 
   private async refreshHomeTaskSuggestions(showFailureToast: boolean): Promise<void> {
+    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
+      return;
+    }
     if (this.homeTaskSuggestionsLoading) {
       return;
     }
@@ -5984,6 +6041,9 @@ struct Index {
   }
 
   private async refreshHomeComfortConcerns(showFailureToast: boolean): Promise<void> {
+    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
+      return;
+    }
     if (this.homeComfortConcernsLoading) {
       return;
     }
@@ -6019,6 +6079,9 @@ struct Index {
 
   private async sendHomeComfortMessage(concern: HomeComfortConcern,
     history: HomeComfortChatMessage[]): Promise<string> {
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，消息未发送');
+    }
     let cloudConfig = this.getConfiguredCloudConfig();
     if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
       throw new Error('请先在“我的”中配置 Planner 服务');
@@ -6082,6 +6145,9 @@ struct Index {
 
   private async submitDirectCloudAgentTask(taskText: string,
     options: CloudAgentTaskSubmitOptions): Promise<CloudAgentTaskSubmitResult> {
+    if (!await this.ensurePrivacyConsent()) {
+      return { success: false, error: '未同意隐私声明，任务未执行' };
+    }
     let task = taskText.trim();
     if (task.length === 0) {
       return { success: false, error: '请先输入云端 Agent 任务。' };
@@ -6112,6 +6178,9 @@ struct Index {
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
@@ -6359,6 +6428,9 @@ struct Index {
   }
 
   private async submitLocalAgentTask(): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     let task = this.userInput.trim();
     if (task.length === 0) {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
@@ -6434,6 +6506,9 @@ struct Index {
   }
 
   private async submitCurrentCloudTask(): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     let task = this.cloudUserInput.trim();
     if (task.length === 0 || this.cloudThinking) {
       return;
