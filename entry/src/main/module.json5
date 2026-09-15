@@ -25,16 +25,6 @@
         }
       },
       {
-        "name": "ohos.permission.SYSTEM_FLOAT_WINDOW",
-        "reason": "$string:EntryAbility_desc",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "always"
-        }
-      },
-      {
         "name": "ohos.permission.MEDIA_LOCATION",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {
@@ -105,19 +95,7 @@
                 "linkFeature": "FileOpen"
               },
               {
-                "scheme": "datashare",
-                "utd": "com.mobiinfra.profile-json",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
                 "scheme": "file",
-                "type": "application/vnd.mobiinfra.profile+json",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
-                "scheme": "datashare",
                 "type": "application/vnd.mobiinfra.profile+json",
                 "maxFileSupported": 1,
                 "linkFeature": "FileOpen"
@@ -129,19 +107,7 @@
                 "linkFeature": "FileOpen"
               },
               {
-                "scheme": "datashare",
-                "type": "application/octet-stream",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
                 "scheme": "file",
-                "type": "application/json",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
-                "scheme": "datashare",
                 "type": "application/json",
                 "maxFileSupported": 1,
                 "linkFeature": "FileOpen"
@@ -153,31 +119,13 @@
                 "linkFeature": "FileOpen"
               },
               {
-                "scheme": "datashare",
-                "type": "text/plain",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
                 "scheme": "file",
                 "type": "*/*",
                 "maxFileSupported": 1,
                 "linkFeature": "FileOpen"
               },
               {
-                "scheme": "datashare",
-                "type": "*/*",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
                 "scheme": "file",
-                "pathRegex": ".*\\.mobi-profile(\\.json)?$",
-                "maxFileSupported": 1,
-                "linkFeature": "FileOpen"
-              },
-              {
-                "scheme": "datashare",
                 "pathRegex": ".*\\.mobi-profile(\\.json)?$",
                 "maxFileSupported": 1,
                 "linkFeature": "FileOpen"
