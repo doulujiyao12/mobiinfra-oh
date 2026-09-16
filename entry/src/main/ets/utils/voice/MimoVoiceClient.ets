@@ -1,4 +1,5 @@
 import { PrivacyConsent } from '../PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from '../AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { parseJsonCompat } from '../JsonCompat';
@@ -347,6 +348,7 @@ export class MimoVoiceClient {
   }
 
   async synthesizeSpeech(text: string, config: MimoVoiceConfig): Promise<MimoTtsSynthesisResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = MimoVoiceClient.buildTtsRequest(text, {
       model: config.model,
       voice: config.voice,
@@ -370,6 +372,7 @@ export class MimoVoiceClient {
     let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(MimoVoiceClient.normalizeChatUrl(config.baseUrl), requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error('MiMO TTS HTTP ' + String(response.responseCode) + ': ' + String(response.result));
       }
@@ -386,6 +389,7 @@ export class MimoVoiceClient {
 
   async synthesizeSpeechStream(text: string, config: MimoTtsStreamConfig,
     callbacks: MimoTtsStreamCallbacks = {}): Promise<MimoTtsStreamResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = MimoVoiceClient.buildStreamingTtsRequest(text, {
       model: config.model,
       selectedVoice: config.voice,
@@ -439,6 +443,10 @@ export class MimoVoiceClient {
         if (resolved) {
           return;
         }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
+          return;
+        }
         if (responseCode < 0) {
           finishResultPending = true;
           return;
@@ -465,6 +473,10 @@ export class MimoVoiceClient {
       };
       let processStreamEvent = (lines: string[]): void => {
         if (resolved) {
+          return;
+        }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
           return;
         }
         try {

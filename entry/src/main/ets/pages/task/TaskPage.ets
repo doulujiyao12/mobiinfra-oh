@@ -7,6 +7,7 @@ import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../../components/AiLoginGuard';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -103,6 +104,7 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 @Component
 export struct TaskPage {
   @Link taskScene: number;
+  onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
 
   @State tasks: WorkflowTask[] = [];
@@ -670,11 +672,20 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await this.onEnsureDesktopCompanion()) {
       return;
     }
     // A second tap must not start another run while consent is being loaded or displayed.
@@ -709,6 +720,9 @@ export struct TaskPage {
   }
 
   private async runEnabledTasks(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
@@ -725,12 +739,25 @@ export struct TaskPage {
       showToastSafely('请先开启至少一个任务', 1500);
       return;
     }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await this.onEnsureDesktopCompanion()) {
+      return;
+    }
     this.batchRunning = true;
     this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
     let stoppedByError = false;
     let stoppedByCancel = false;
     try {
       for (let i = 0; i < queue.length; i++) {
+        if (!AiLoginGuard.ensure(this.getUIContext())) {
+          stoppedByCancel = true;
+          break;
+        }
         let currentTask = this.findTask(queue[i].id);
         if (!currentTask || !currentTask.enabled) {
           continue;

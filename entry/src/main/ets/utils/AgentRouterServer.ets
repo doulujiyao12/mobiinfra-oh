@@ -1,5 +1,6 @@
 import { socket } from '@kit.NetworkKit';
 import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
@@ -147,6 +148,7 @@ export class AgentRouterServer {
   }
 
   public submitLocalTask(task: string): void {
+    AiServiceAccess.requireAllowed();
     PrivacyConsent.requireAccepted();
     this.routeMode = 'local';
     this.currentTask = task;
@@ -157,6 +159,7 @@ export class AgentRouterServer {
   }
 
   public submitCloudTask(task: string): void {
+    AiServiceAccess.requireAllowed();
     PrivacyConsent.requireAccepted();
     this.routeMode = 'cloud';
     this.currentTask = task;
@@ -315,6 +318,14 @@ export class AgentRouterServer {
   private async handleRequest(client: socket.TCPSocketConnection, req: RequestMap): Promise<void> {
     let reqType = this.getString(req, 'type');
 
+    // 登录限制与隐私授权独立；始终保留任务清理和浮窗恢复消息。
+    if (!AiServiceAccess.isAllowed() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
+
     // Keep cleanup messages available, but do not hand out tasks or model actions without consent.
     if (!PrivacyConsent.isAccepted() && reqType !== 'clear' && reqType !== 'error' &&
       reqType !== 'capture_overlay_restore') {
@@ -368,6 +379,10 @@ export class AgentRouterServer {
     }
 
     await AgentExecutionController.waitIfPaused();
+    if (!AiServiceAccess.isAllowed()) {
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
     if (!PrivacyConsent.isAccepted()) {
       this.sendTerminate(client, 'Privacy consent revoked');
       return;
@@ -756,7 +771,8 @@ export class AgentRouterServer {
   }
 
   private isCancellationRequested(): boolean {
-    return !PrivacyConsent.isAccepted() || this.cancellationRequested || AgentExecutionController.isCancelRequested();
+    return !AiServiceAccess.isAllowed() || !PrivacyConsent.isAccepted() || this.cancellationRequested ||
+      AgentExecutionController.isCancelRequested();
   }
 
   private clearCancellationState(): void {

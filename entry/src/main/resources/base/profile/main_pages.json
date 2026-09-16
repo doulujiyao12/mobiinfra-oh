@@ -4,6 +4,7 @@
     "pages/EdgeFlowWindow",
     "pages/FloatWindow",
     "pages/task/WorkflowFileViewer",
+    "pages/settings/DesktopCompanionPage",
     "pages/collection/CollectionGroupDetailPage",
     "pages/OpTest",
     "pages/ProfileTest",

@@ -1,4 +1,5 @@
 import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import {
@@ -668,6 +669,7 @@ export class CloudModelClient {
   }
 
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = this.buildChatRequestBody(options);
 
     let headers: Record<string, string> = {
@@ -696,6 +698,7 @@ export class CloudModelClient {
       ' read_timeout=' + (options.readTimeout === undefined ? '' : options.readTimeout.toString()));
     try {
       let response = await httpReq.request(url, requestOptions);
+      AiServiceAccess.requireAllowed();
       let elapsedMs = new Date().getTime() - startedAt;
       let responseText = response.result as string;
       AppLogger.info('CloudModel', 'chat response status=' + response.responseCode.toString() +
@@ -725,6 +728,7 @@ export class CloudModelClient {
 
   async chatCompletionStream(options: CloudChatCompletionOptions,
     callbacks: CloudChatCompletionStreamCallbacks = {}): Promise<CloudChatCompletionResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = this.buildChatRequestBody(options, true);
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -836,6 +840,10 @@ export class CloudModelClient {
         if (resolved) {
           return;
         }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
+          return;
+        }
         if (responseCode < 0) {
           finishResultPending = true;
           return;
@@ -886,7 +894,9 @@ export class CloudModelClient {
         AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
-      PrivacyConsent.onHttpCancel(httpReq, () => { finishWithError('隐私授权已撤回'); });
+      PrivacyConsent.onHttpCancel(httpReq, () => {
+        finishWithError(AiServiceAccess.isAllowed() ? '隐私授权已撤回' : AI_LOGIN_REQUIRED_MESSAGE);
+      });
       let decodeStreamData = (data: ArrayBuffer): string => {
         try {
           return textDecoder.decodeWithStream(new Uint8Array(data));
@@ -896,6 +906,10 @@ export class CloudModelClient {
       };
       let processStreamLine = (line: string): void => {
         if (resolved) {
+          return;
+        }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
           return;
         }
         try {
@@ -1392,6 +1406,7 @@ export class CloudModelClient {
   }
 
   async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {
+    AiServiceAccess.requireAllowed();
     let requestBody: CloudEmbeddingRequest = {
       model: config.model,
       input: input
@@ -1413,6 +1428,7 @@ export class CloudModelClient {
     this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Embedding HTTP ${response.responseCode}: ${response.result}`);
       }

@@ -25,7 +25,11 @@ import {
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT,
+  GALLERY_API_KEY_DEFAULT_SNAPSHOT,
   GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_MODEL_DEFAULT_SNAPSHOT,
+  galleryApiUsesLegacyDefaults,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import {
@@ -94,6 +98,7 @@ import {
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
 import { HuaweiAccountCard } from './HuaweiAccountCard';
+import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
 import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
 import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 
@@ -183,7 +188,7 @@ export struct SettingsCenterPage {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   @State private activeSensitiveInputId: string = '';
-  @State private huaweiAccountSessionActive: boolean = false;
+  @StorageLink(HUAWEI_ACCOUNT_SESSION_KEY) private huaweiAccountSessionActive: boolean = false;
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onDownloadModelScopeModel: () => Promise<void> = async () => {};
@@ -215,6 +220,21 @@ export struct SettingsCenterPage {
   }
 
   private migrateGalleryDefaultValues(): void {
+    if (galleryApiUsesLegacyDefaults(this.galleryApiBaseUrl, this.galleryModel)) {
+      this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
+      this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
+      this.galleryModel = DEFAULT_GALLERY_MODEL;
+      AppStorage.setOrCreate(GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_BASE_URL);
+      AppStorage.setOrCreate(GALLERY_API_KEY_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_KEY);
+      AppStorage.setOrCreate(GALLERY_MODEL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_MODEL);
+    } else {
+      this.galleryApiBaseUrl = this.migrateGalleryDefaultValue(this.galleryApiBaseUrl,
+        DEFAULT_GALLERY_API_BASE_URL, [''], GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT);
+      this.galleryApiKey = this.migrateGalleryDefaultValue(this.galleryApiKey,
+        DEFAULT_GALLERY_API_KEY, [''], GALLERY_API_KEY_DEFAULT_SNAPSHOT);
+      this.galleryModel = this.migrateGalleryDefaultValue(this.galleryModel,
+        DEFAULT_GALLERY_MODEL, [''], GALLERY_MODEL_DEFAULT_SNAPSHOT);
+    }
     this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
       DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
     this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
@@ -775,6 +795,46 @@ export struct SettingsCenterPage {
     .onClick(() => { this.openSection(item.id); })
   }
 
+  @Builder DesktopCompanionEntry() {
+    Row() {
+      Text('PC')
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(44)
+        .height(44)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#4F68FF')
+        .borderRadius(14)
+      Column() {
+        Text('桌面端 App')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text('查看 ClawMate 桌面端下载链接')
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 10 })
+      Text('›')
+        .fontSize(28)
+        .fontColor('#8A93A3')
+    }
+    .width('92%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(18)
+    .margin({ top: 14 })
+    .onClick(() => { router.pushUrl({ url: 'pages/settings/DesktopCompanionPage' }); })
+  }
+
   @Builder SettingsSectionList() {
     Column() {
       AppHeader({
@@ -783,6 +843,7 @@ export struct SettingsCenterPage {
         icon: $r('app.media.header_mine')
       })
       HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
+      this.DesktopCompanionEntry()
       Text('设置与服务')
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
@@ -1003,7 +1064,7 @@ export struct SettingsCenterPage {
     SettingInput({
       label: '图库大模型',
       value: this.galleryModel,
-      placeholder: DEFAULT_GALLERY_MODEL,
+      placeholder: '留空则不发送 model 字段',
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryModel = value; }
     })

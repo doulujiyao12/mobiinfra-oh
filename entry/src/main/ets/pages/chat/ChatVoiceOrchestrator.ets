@@ -19,6 +19,7 @@ import { HarmonySpeechRecognizerAsrProvider } from '../../utils/voice/HarmonySpe
 import { MimoTtsStreamRequestControl, MimoVoiceClient } from '../../utils/voice/MimoVoiceClient';
 import { buildPcm16WavBytes, concatPcmChunks } from '../../utils/voice/PcmWav';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { AiServiceAccess } from '../../utils/AiServiceAccess';
 
 export interface ChatVoiceTtsConfig {
   baseUrl: string;
@@ -101,6 +102,7 @@ export class ChatVoiceOrchestrator {
   }
 
   async toggleVoiceInput(): Promise<void> {
+    AiServiceAccess.requireAllowed();
     let status = this.voiceController.snapshot().status;
     if (status === 'listening' || status === 'transcribing') {
       await this.stopVoiceInput();
@@ -131,11 +133,13 @@ export class ChatVoiceOrchestrator {
   }
 
   async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    AiServiceAccess.requireAllowed();
     let sessionId = this.host.activeSessionId();
     await this.playAssistantMessageVoiceInSession(sessionId, messageId, text, false);
   }
 
   async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    AiServiceAccess.requireAllowed();
     let sessionId = this.host.activeSessionId();
     await this.playAssistantMessageVoiceInSession(sessionId, messageId, text, true);
   }
@@ -181,7 +185,7 @@ export class ChatVoiceOrchestrator {
     let startGeneration = nextVoiceInputStartGeneration(this.voiceInputStartGeneration);
     this.voiceInputStartGeneration = startGeneration;
     let granted = await this.ensureMicrophonePermission();
-    if (!granted) {
+    if (!granted || !AiServiceAccess.isAllowed()) {
       return;
     }
     if (!this.voiceInputStartActive(startGeneration)) {

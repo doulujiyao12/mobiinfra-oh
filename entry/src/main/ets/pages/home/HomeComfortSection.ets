@@ -1,5 +1,6 @@
 import { window } from '@kit.ArkUI';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { AiLoginGuard } from '../../components/AiLoginGuard';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
@@ -142,6 +143,9 @@ export struct HomeComfortSection {
   }
 
   private openConcern(item: HomeComfortConcern): void {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     this.chatSessionToken++;
     let now = new Date().getTime();
     let opening: HomeComfortChatMessage = {
@@ -236,6 +240,9 @@ export struct HomeComfortSection {
     let text = this.chatInput.trim();
     let selected = this.selectedConcerns();
     if (text.length === 0 || selected.length === 0 || this.sending) {
+      return;
+    }
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
     let userMessage: HomeComfortChatMessage = {

@@ -1,5 +1,6 @@
 import { promptAction, router } from '@kit.ArkUI';
 import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../../components/AiLoginGuard';
 import { PrivacyConsent } from '../../utils/PrivacyConsent';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
@@ -38,7 +39,11 @@ import {
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT,
+  GALLERY_API_KEY_DEFAULT_SNAPSHOT,
   GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_MODEL_DEFAULT_SNAPSHOT,
+  galleryApiUsesLegacyDefaults,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import {
@@ -193,6 +198,21 @@ struct GalleryPage {
   }
 
   private migrateGalleryDefaultValues(): void {
+    if (galleryApiUsesLegacyDefaults(this.galleryApiBaseUrl, this.galleryModel)) {
+      this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
+      this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
+      this.galleryModel = DEFAULT_GALLERY_MODEL;
+      AppStorage.setOrCreate(GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_BASE_URL);
+      AppStorage.setOrCreate(GALLERY_API_KEY_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_KEY);
+      AppStorage.setOrCreate(GALLERY_MODEL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_MODEL);
+    } else {
+      this.galleryApiBaseUrl = this.migrateGalleryDefaultValue(this.galleryApiBaseUrl,
+        DEFAULT_GALLERY_API_BASE_URL, [''], GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT);
+      this.galleryApiKey = this.migrateGalleryDefaultValue(this.galleryApiKey,
+        DEFAULT_GALLERY_API_KEY, [''], GALLERY_API_KEY_DEFAULT_SNAPSHOT);
+      this.galleryModel = this.migrateGalleryDefaultValue(this.galleryModel,
+        DEFAULT_GALLERY_MODEL, [''], GALLERY_MODEL_DEFAULT_SNAPSHOT);
+    }
     this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
       DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
     this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
@@ -231,6 +251,9 @@ struct GalleryPage {
   }
 
   private async runGalleryQuestionAnswer(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
@@ -320,6 +343,9 @@ struct GalleryPage {
   }
 
   private async startManualAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
@@ -389,6 +415,9 @@ struct GalleryPage {
   }
 
   private async startAutoAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
@@ -423,6 +452,9 @@ struct GalleryPage {
   }
 
   private async continueAutoAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
@@ -746,6 +778,9 @@ struct GalleryPage {
   }
 
   private async generateAiMonthlySummary(insight: GalleryMonthlyInsight): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
@@ -1563,7 +1598,7 @@ struct GalleryPage {
                     onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
                     onValueChange: (value: string) => { this.updateSetting(1, value); }
                   })
-                  this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
+                  this.SettingInput('大模型名称', this.galleryModel, '留空则不发送 model 字段', 2)
                   this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
                   this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)

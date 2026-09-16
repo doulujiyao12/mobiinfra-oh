@@ -112,6 +112,8 @@ import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCen
 import { TaskPage } from './task/TaskPage';
 import { PrivacyConsent } from '../utils/PrivacyConsent';
 import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../components/AiLoginGuard';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE, HUAWEI_ACCOUNT_SESSION_KEY } from '../utils/AiServiceAccess';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import {
   CloudChatCompletionOptions,
@@ -195,6 +197,11 @@ import {
   DEFAULT_MODELSCOPE_MNN_REPO,
   LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS
 } from '../config/ModelDownloadConfig';
+import {
+  DESKTOP_COMPANION_APP_NAME,
+  DESKTOP_COMPANION_DOWNLOAD_URL,
+  DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY
+} from '../config/DesktopCompanionConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
   createAiGeneratedContentMetadata,
@@ -409,6 +416,7 @@ PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
+PersistentStorage.persistProp(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY, false);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -503,9 +511,15 @@ struct Index {
   @State downloadedModels: DownloadedModelItem[] = [];
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
+  @StorageLink(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY)
+  desktopCompanionReminderSuppressed: boolean = false;
+  @State desktopCompanionReminderVisible: boolean = false;
+  @State desktopCompanionDontRemindAgain: boolean = false;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State currentTab: number = 0;
+  @StorageProp(HUAWEI_ACCOUNT_SESSION_KEY) @Watch('onAiAccountSessionChanged')
+  huaweiAccountSessionActive: boolean = false;
   @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
@@ -625,6 +639,8 @@ struct Index {
   private avatarForegroundEnsuring: boolean = false;
   private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
+  private desktopCompanionReminderResolver: ((confirmed: boolean) => void) | null = null;
+  private desktopCompanionReminderPromise: Promise<boolean> | null = null;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -1208,6 +1224,9 @@ struct Index {
   }
 
   private async toggleVoiceInput(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -1219,6 +1238,9 @@ struct Index {
   }
 
   private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -1226,6 +1248,9 @@ struct Index {
   }
 
   private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -1755,6 +1780,9 @@ struct Index {
 
   private async runMobileGuiTaskForChatSession(sessionId: string,
     request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (!this.ensureAiServiceLogin()) {
+      return mobileGuiTaskRunResultFromFailure('login_required', AI_LOGIN_REQUIRED_MESSAGE, true);
+    }
     if (!await this.ensurePrivacyConsent()) {
       return mobileGuiTaskRunResultFromFailure('privacy_consent_required', '未同意隐私声明，任务未执行', true);
     }
@@ -2156,6 +2184,9 @@ struct Index {
   }
 
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
     if (!await this.ensurePrivacyConsent()) {
       throw new Error('未同意隐私声明，未生成头像');
     }
@@ -2640,6 +2671,9 @@ struct Index {
   }
 
   private async refreshDataManager(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -2690,6 +2724,9 @@ struct Index {
   }
 
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -2866,6 +2903,9 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    if (this.desktopCompanionReminderResolver !== null) {
+      this.finishDesktopCompanionReminder(false);
+    }
     PrivacyConsent.setRevokeHandler(null);
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
@@ -2879,10 +2919,7 @@ struct Index {
 
   private initializePrivacyConsent(): void {
     PrivacyConsent.initialize(getContext(this) as common.UIAbilityContext).then(async (): Promise<void> => {
-      if (PrivacyConsent.state() === 'unselected') {
-        await PrivacyConsentDialog.show(this.getUIContext());
-      }
-      if (PrivacyConsent.isAccepted() && !this.homeTaskSuggestionsAutoStarted) {
+      if (AiServiceAccess.isAllowed() && PrivacyConsent.isAccepted() && !this.homeTaskSuggestionsAutoStarted) {
         this.homeTaskSuggestionsAutoStarted = true;
         await this.refreshHomeTaskSuggestions(false);
         await this.refreshHomeComfortConcerns(false);
@@ -2897,6 +2934,66 @@ struct Index {
       return true;
     }
     return await PrivacyConsentDialog.show(this.getUIContext());
+  }
+
+  private async ensureDesktopCompanionReminder(): Promise<boolean> {
+    if (this.desktopCompanionReminderSuppressed) {
+      return true;
+    }
+    if (this.desktopCompanionReminderPromise !== null) {
+      // 不把重复点击排队到同一次确认之后，避免一次确认启动多个任务。
+      return false;
+    }
+    this.desktopCompanionDontRemindAgain = false;
+    this.desktopCompanionReminderVisible = true;
+    this.desktopCompanionReminderPromise = new Promise<boolean>((resolve) => {
+      this.desktopCompanionReminderResolver = resolve;
+    });
+    return await this.desktopCompanionReminderPromise;
+  }
+
+  private finishDesktopCompanionReminder(confirmed: boolean): void {
+    let resolver = this.desktopCompanionReminderResolver;
+    this.desktopCompanionReminderResolver = null;
+    this.desktopCompanionReminderPromise = null;
+    this.desktopCompanionReminderVisible = false;
+    resolver?.(confirmed);
+  }
+
+  private toggleDesktopCompanionReminderSuppressed(): void {
+    this.desktopCompanionDontRemindAgain = !this.desktopCompanionDontRemindAgain;
+    this.desktopCompanionReminderSuppressed = this.desktopCompanionDontRemindAgain;
+  }
+
+  private async openDesktopCompanionDownloadPage(): Promise<void> {
+    try {
+      let context = getContext(this) as common.UIAbilityContext;
+      await context.openLink(DESKTOP_COMPANION_DOWNLOAD_URL);
+    } catch (e) {
+      showToastSafely('无法打开下载链接，请到“我的 > 桌面端 App”中查看', 2200);
+    }
+  }
+
+  private ensureAiServiceLogin(showPrompt: boolean = true): boolean {
+    return AiLoginGuard.ensure(this.getUIContext(), showPrompt);
+  }
+
+  private onAiAccountSessionChanged(): void {
+    if (AiServiceAccess.isAllowed()) {
+      // 登录后补上此前静默跳过的首页生成，不恢复被拦截的消息或任务。
+      this.initializePrivacyConsent();
+      return;
+    }
+    this.homeTaskSuggestionsAutoStarted = false;
+    this.cancelCurrentCloudChat();
+    this.cloudClient.cancelActiveRequests();
+    this.cancelCurrentLocalChatInference();
+    if (this.chatVoiceOrchestrator !== null) {
+      this.chatVoiceOrchestrator.shutdown();
+    }
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.requestCancellation();
+    }
   }
 
   private startPcServerMonitor(): void {
@@ -3223,6 +3320,9 @@ struct Index {
 
   private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string,
     onContentDelta: (delta: string) => void): Promise<string> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
     if (!await this.ensurePrivacyConsent()) {
       throw new Error('未同意隐私声明，未上传资料进行分析');
     }
@@ -5160,6 +5260,9 @@ struct Index {
   }
 
   async testCloudPlanner() {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!this.isCloudPlannerConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner 服务地址和 API Key。', true);
       return;
@@ -5189,6 +5292,9 @@ struct Index {
   }
 
   async runCloudPlannerOnce(voiceMetadata?: ChatVoiceMetadata) {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -6005,6 +6111,9 @@ struct Index {
   }
 
   private async refreshHomeTaskSuggestions(showFailureToast: boolean): Promise<void> {
+    if (!this.ensureAiServiceLogin(showFailureToast)) {
+      return;
+    }
     if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
       return;
     }
@@ -6041,6 +6150,9 @@ struct Index {
   }
 
   private async refreshHomeComfortConcerns(showFailureToast: boolean): Promise<void> {
+    if (!this.ensureAiServiceLogin(showFailureToast)) {
+      return;
+    }
     if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
       return;
     }
@@ -6079,6 +6191,9 @@ struct Index {
 
   private async sendHomeComfortMessage(concern: HomeComfortConcern,
     history: HomeComfortChatMessage[]): Promise<string> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
     if (!await this.ensurePrivacyConsent()) {
       throw new Error('未同意隐私声明，消息未发送');
     }
@@ -6145,6 +6260,9 @@ struct Index {
 
   private async submitDirectCloudAgentTask(taskText: string,
     options: CloudAgentTaskSubmitOptions): Promise<CloudAgentTaskSubmitResult> {
+    if (!this.ensureAiServiceLogin()) {
+      return { success: false, error: AI_LOGIN_REQUIRED_MESSAGE };
+    }
     if (!await this.ensurePrivacyConsent()) {
       return { success: false, error: '未同意隐私声明，任务未执行' };
     }
@@ -6178,6 +6296,9 @@ struct Index {
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
@@ -6241,6 +6362,9 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     let pendingImageUris = normalizeChatImageAttachments(this.localPendingChatImageUris)
       .slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
     if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking ||
@@ -6280,6 +6404,9 @@ struct Index {
     } finally {
       cleanupLocalChatPreparedImages(preparedImagePaths);
       this.localChatImagePreparing = false;
+    }
+    if (!this.ensureAiServiceLogin()) {
+      return;
     }
     let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
@@ -6340,6 +6467,7 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
+      AiServiceAccess.requireAllowed();
       let chatPromise: Promise<string> = mnnllm.chat(nativePrompt, (token: string) => {
         if (localChatGeneration !== this.localChatGeneration ||
           this.localChatCancellationRequestedFor(localChatGeneration)) {
@@ -6428,7 +6556,13 @@ struct Index {
   }
 
   private async submitLocalAgentTask(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
+    if (!await this.ensureDesktopCompanionReminder()) {
       return;
     }
     let task = this.userInput.trim();
@@ -6506,7 +6640,13 @@ struct Index {
   }
 
   private async submitCurrentCloudTask(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
+    if (!await this.ensureDesktopCompanionReminder()) {
       return;
     }
     let task = this.cloudUserInput.trim();
@@ -6639,6 +6779,110 @@ struct Index {
     }
   }
 
+  @Builder DesktopCompanionReminderOverlay() {
+    if (this.desktopCompanionReminderVisible) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Text('需要配合桌面端 App 使用')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+          Text('任务执行和聊天中的“下发任务”功能需要连接 ClawMate 桌面端 App。请先在电脑上下载安装并启动桌面端 App，再继续执行任务。')
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor('#555D70')
+            .width('100%')
+            .margin({ top: 12 })
+          Column() {
+            Text(DESKTOP_COMPANION_APP_NAME)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#30384C')
+              .width('100%')
+              .maxLines(2)
+            Text(DESKTOP_COMPANION_DOWNLOAD_URL)
+              .fontSize(12)
+              .lineHeight(18)
+              .fontColor('#4F68FF')
+              .width('100%')
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .margin({ top: 6 })
+              .onClick(async () => { await this.openDesktopCompanionDownloadPage(); })
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(12)
+          .backgroundColor('#F4F7FF')
+          .borderRadius(12)
+          .margin({ top: 14 })
+
+          Row({ space: 10 }) {
+            Button('查看下载链接')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(13)
+              .fontColor('#4F68FF')
+              .backgroundColor('#EEF1FF')
+              .borderRadius(13)
+              .onClick(async () => { await this.openDesktopCompanionDownloadPage(); })
+            Button('知道了，继续')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor('#4F68FF')
+              .borderRadius(13)
+              .onClick(() => { this.finishDesktopCompanionReminder(true); })
+          }
+          .width('100%')
+          .margin({ top: 16 })
+
+          Row() {
+            Blank().layoutWeight(1)
+            Row({ space: 7 }) {
+              Stack({ alignContent: Alignment.Center }) {
+                if (this.desktopCompanionDontRemindAgain) {
+                  Row()
+                    .width(9)
+                    .height(9)
+                    .backgroundColor('#4F68FF')
+                    .borderRadius(5)
+                }
+              }
+              .width(19)
+              .height(19)
+              .borderRadius(10)
+              .border({
+                width: 2,
+                color: this.desktopCompanionDontRemindAgain ? '#4F68FF' : '#A7AEBC'
+              })
+              Text('不再提醒')
+                .fontSize(12)
+                .fontColor('#687083')
+            }
+            .padding({ left: 6, right: 2, top: 6, bottom: 2 })
+            .onClick(() => { this.toggleDesktopCompanionReminderSuppressed(); })
+          }
+          .width('100%')
+          .margin({ top: 8 })
+        }
+        .width('86%')
+        .padding({ left: 22, right: 22, top: 24, bottom: 18 })
+        .backgroundColor(Color.White)
+        .borderRadius(22)
+        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#73000000')
+      .zIndex(120)
+      .onClick(() => {})
+    }
+  }
+
   build() {
     Stack() {
       if (this.shouldDisplayFirstLaunchOnboarding()) {
@@ -6767,6 +7011,9 @@ struct Index {
         TabContent() {
           TaskPage({
             taskScene: $taskScene,
+            onEnsureDesktopCompanion: async (): Promise<boolean> => {
+              return await this.ensureDesktopCompanionReminder();
+            },
             onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Task), mainTabLabel(MainTabIndex.Task), MainTabIndex.Task))
@@ -6826,6 +7073,7 @@ struct Index {
       .backgroundColor('#F4F8FF')
 
       this.DataManagerProgressOverlay()
+      this.DesktopCompanionReminderOverlay()
       }
     }
     .width('100%')
