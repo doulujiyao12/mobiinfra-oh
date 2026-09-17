@@ -6169,7 +6169,7 @@ struct Index {
       let recentEvents = this.recentHomeComfortChatEvents();
       if (recentEvents.length === 0) {
         this.homeComfortConcerns = [];
-        throw new Error('近 7 天暂无聊天记录，完成一次聊天数据整理后再试');
+        throw new Error('近 7 天暂无聊天记录，请进入任务界面，执行采集任务后再试');
       }
       let prompt = buildHomeComfortConcernPrompt(recentEvents, currentLocalDateKey());
       let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
