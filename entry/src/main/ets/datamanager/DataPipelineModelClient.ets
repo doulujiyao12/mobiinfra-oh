@@ -45,6 +45,9 @@ import {
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
 import { memorySceneLabel } from '../utils/WorkflowSceneConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
+import {
+  ChatMemoryInput, ChatMemoryResult, buildChatMemoryPrompt, parseChatMemoryResults
+} from './ChatMemoryExtraction';
 
 interface BatchSplitEntryPromptPayload {
   source_date: string;
@@ -516,6 +519,15 @@ const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
 export class DataPipelineModelClient {
   private cloudClient: CloudModelClient = new CloudModelClient();
   private requestSequence: number = 0;
+
+  async extractChatMemory(inputs: ChatMemoryInput[], config: DataManagerModelConfig): Promise<ChatMemoryResult[]> {
+    if (!this.isEnabled(config)) {
+      throw new Error('请先配置同步使用的 Planner 服务，再提取聊天信息');
+    }
+    let prompt = buildChatMemoryPrompt(inputs);
+    let payload = await this.callJson(config, 'chat.memory', prompt.systemPrompt, prompt.userPrompt);
+    return parseChatMemoryResults(payload, inputs);
+  }
 
   async splitEntryIntoFacts(entry: SourceEntry, config: DataManagerModelConfig): Promise<CandidateFact[]> {
     let batch = await this.splitEntriesIntoFacts([entry], config);

@@ -20,10 +20,12 @@ import {
 } from './HomeTaskSuggestion';
 import { HomeComfortChatMessage, HomeComfortConcern } from './HomeEmotionalSupport';
 import { HomeComfortSection } from './HomeComfortSection';
+import { HomeComfortChatStore } from './HomeComfortChatStore';
 
 // ClawMate 首页展示层：展示动态画像、提醒和推荐，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
+  @ObjectLink comfortChatStore: HomeComfortChatStore;
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   @Prop taskSuggestions: HomeTaskSuggestion[] = [];
   @Prop taskSuggestionsLoading: boolean = false;
@@ -2056,6 +2058,7 @@ export struct HomePage {
           this.GuessYouLikeSection()
 
           HomeComfortSection({
+            chatStore: this.comfortChatStore,
             concerns: this.comfortConcerns,
             loading: this.comfortConcernsLoading,
             errorMessage: this.comfortConcernError,

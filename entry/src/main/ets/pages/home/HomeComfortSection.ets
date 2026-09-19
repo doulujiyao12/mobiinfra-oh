@@ -3,6 +3,7 @@ import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { AiLoginGuard } from '../../components/AiLoginGuard';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { HomeComfortChatStore } from './HomeComfortChatStore';
 import {
   HomeComfortChatMessage,
   HomeComfortConcern
@@ -12,6 +13,7 @@ const HOME_COMFORT_CASUAL_CHAT_ID: string = 'comfort-casual-chat';
 
 @Component
 export struct HomeComfortSection {
+  @ObjectLink @Watch('onChatSessionsChanged') chatStore: HomeComfortChatStore;
   @Prop concerns: HomeComfortConcern[] = [];
   @Prop loading: boolean = false;
   @Prop errorMessage: string = '';
@@ -26,7 +28,6 @@ export struct HomeComfortSection {
   @State private sending: boolean = false;
   @State private chatError: string = '';
   @State private keyboardHeightVp: number = 0;
-  private messageSequence: number = 0;
   private chatSessionToken: number = 0;
   private chatScroller: Scroller = new Scroller();
   private keyboardWindow: window.Window | null = null;
@@ -137,30 +138,47 @@ export struct HomeComfortSection {
     };
   }
 
-  private nextMessageId(role: string): string {
-    this.messageSequence++;
-    return 'comfort-message-' + role + '-' + new Date().getTime().toString() + '-' + this.messageSequence.toString();
-  }
-
   private openConcern(item: HomeComfortConcern): void {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
     this.chatSessionToken++;
-    let now = new Date().getTime();
-    let opening: HomeComfortChatMessage = {
-      id: this.nextMessageId('assistant'),
-      role: 'assistant',
-      content: item.opening,
-      createdAt: now
-    };
+    this.chatStore.open(item);
     this.selectedConcernId = item.id;
-    this.chatMessages = [opening];
     this.chatInput = '';
-    this.chatError = '';
-    this.sending = false;
     this.chatOpen = true;
+    this.onChatSessionsChanged();
+  }
+
+  private onChatSessionsChanged(): void {
+    if (!this.chatOpen) {
+      return;
+    }
+    let session = this.chatStore.get(this.selectedConcernId);
+    if (!session) {
+      this.closeChat();
+      this.selectedConcernId = '';
+      this.chatMessages = [];
+      return;
+    }
+    this.chatMessages = session.messages;
+    this.sending = session.sending;
+    this.chatError = session.error;
     this.scrollToLatest();
+  }
+
+  private restartChat(): void {
+    let selected = this.selectedConcerns();
+    if (selected.length === 0) {
+      return;
+    }
+    this.chatStore.restart(selected[0]);
+    this.chatInput = '';
+    this.onChatSessionsChanged();
+  }
+
+  aboutToDisappear(): void {
+    this.stopKeyboardTracking();
   }
 
   private openCasualChat(): void {
@@ -236,7 +254,7 @@ export struct HomeComfortSection {
     }, 0);
   }
 
-  private async sendMessage(): Promise<void> {
+  private sendMessage(): void {
     let text = this.chatInput.trim();
     let selected = this.selectedConcerns();
     if (text.length === 0 || selected.length === 0 || this.sending) {
@@ -245,44 +263,9 @@ export struct HomeComfortSection {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
-    let userMessage: HomeComfortChatMessage = {
-      id: this.nextMessageId('user'),
-      role: 'user',
-      content: text,
-      createdAt: new Date().getTime()
-    };
-    let history: HomeComfortChatMessage[] = this.chatMessages.concat([userMessage]);
-    let requestToken = this.chatSessionToken;
-    this.chatMessages = history;
     this.chatInput = '';
-    this.chatError = '';
-    this.sending = true;
-    this.scrollToLatest();
-    try {
-      let reply = await this.onSendMessage(selected[0], history);
-      if (requestToken !== this.chatSessionToken) {
-        return;
-      }
-      let assistantMessage: HomeComfortChatMessage = {
-        id: this.nextMessageId('assistant'),
-        role: 'assistant',
-        content: reply,
-        createdAt: new Date().getTime()
-      };
-      this.chatMessages = this.chatMessages.concat([assistantMessage]);
-    } catch (e) {
-      if (requestToken !== this.chatSessionToken) {
-        return;
-      }
-      let err = e as Error;
-      this.chatError = err.message.length > 0 ? err.message : '回复生成失败，请稍后再试';
-      showToastSafely(this.chatError, 1800);
-    } finally {
-      if (requestToken === this.chatSessionToken) {
-        this.sending = false;
-        this.scrollToLatest();
-      }
-    }
+    this.chatStore.send(selected[0], text, this.onSendMessage);
+    this.onChatSessionsChanged();
   }
 
   @Builder ConcernRow(item: HomeComfortConcern) {
@@ -439,6 +422,17 @@ export struct HomeComfortSection {
           .fontColor('#171B2B')
           .layoutWeight(1)
           .margin({ left: 12 })
+        Button('重头开聊')
+          .height(32)
+          .fontSize(12)
+          .fontColor('#7557BC')
+          .backgroundColor('#F1ECFF')
+          .padding({ left: 13, right: 13 })
+          .borderRadius(16)
+          .margin({ left: 8 })
+          .onClick(() => {
+            this.restartChat();
+          })
       }
       .width('100%')
       .height(70)

@@ -33,7 +33,7 @@ import {
 const COLLECTION_GROUPS_PER_PAGE: number = 5;
 const COLLECTION_SECTION_GAP: number = 18;
 
-// 足迹汇总页：按 workflow 场景切换展示对应任务采集到的已整理数据。
+// 足迹汇总页：按场景展示采集数据、图库分析和聊天提取的信息。
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
@@ -422,7 +422,8 @@ export struct CollectionPage {
     if (this.groupCount() === 0) {
       Column() {
         Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#151A28')
-        Text('生成日志后，点击同步即可开始整理').fontSize(12).fontColor('#7C8494').margin({ top: 6 })
+        Text('点击同步，整理采集数据及近 7 天未处理的聊天信息')
+          .fontSize(12).fontColor('#7C8494').textAlign(TextAlign.Center).margin({ top: 6 })
       }.width('100%').height(92).justifyContent(FlexAlign.Center)
     } else {
       Column() {

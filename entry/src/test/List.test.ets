@@ -39,6 +39,8 @@ import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
 import aiGeneratedBadgeUnitTest from './AiGeneratedBadgeUnit.test';
 import homeTaskSuggestionUnitTest from './HomeTaskSuggestionUnit.test';
 import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
+import homeComfortChatStoreUnitTest from './HomeComfortChatStoreUnit.test';
+import chatMemorySyncUnitTest from './ChatMemorySyncUnit.test';
 
 export default function testsuite() {
   privacyConsentUnitTest();
@@ -82,4 +84,6 @@ export default function testsuite() {
   aiGeneratedBadgeUnitTest();
   homeTaskSuggestionUnitTest();
   homeEmotionalSupportUnitTest();
+  homeComfortChatStoreUnitTest();
+  chatMemorySyncUnitTest();
 }

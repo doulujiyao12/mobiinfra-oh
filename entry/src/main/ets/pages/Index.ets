@@ -100,6 +100,7 @@ import {
   parseHomeComfortConcerns,
   parseHomeComfortReply
 } from './home/HomeEmotionalSupport';
+import { HomeComfortChatStore } from './home/HomeComfortChatStore';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
 import {
@@ -619,6 +620,7 @@ struct Index {
   @State homeTaskSuggestionsLoading: boolean = false;
   @State homeTaskSuggestionError: string = '';
   @State homeComfortConcerns: HomeComfortConcern[] = [];
+  @State homeComfortChatStore: HomeComfortChatStore = new HomeComfortChatStore();
   @State homeComfortConcernsLoading: boolean = false;
   @State homeComfortConcernError: string = '';
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
@@ -2686,16 +2688,18 @@ struct Index {
       dataManagerWarn('refreshDataManager skipped: already refreshing');
       return;
     }
-    if (!this.dataManagerFacade.hasDailyLogData()) {
-      dataManagerInfo('refreshDataManager skipped: no daily-log data');
-      showToastSafely('暂无数据', 1500);
-      return;
-    }
     this.dataManagerRefreshing = true;
     this.dataManagerProgressStage = '正在整理日志';
     this.dataManagerProgressMessage = '';
     this.dataManagerProgressPercent = 0;
     try {
+      if (!this.dataManagerFacade.hasDataToSync()) {
+        this.dataManagerProgressStage = '完成';
+        this.dataManagerProgressMessage = '暂无待同步数据';
+        this.dataManagerProgressPercent = 100;
+        showToastSafely('暂无待同步数据', 1500);
+        return;
+      }
       let modelConfig = this.getDataManagerModelConfig();
       dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
       let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
@@ -6168,14 +6172,17 @@ struct Index {
       }
       let recentEvents = this.recentHomeComfortChatEvents();
       if (recentEvents.length === 0) {
+        this.homeComfortChatStore.clear();
         this.homeComfortConcerns = [];
-        throw new Error('近 7 天暂无聊天记录，请进入任务界面，执行采集任务后再试');
+        throw new Error('近 7 天没有任务记录，请进入任务界面，执行采集任务后再试');
       }
       let prompt = buildHomeComfortConcernPrompt(recentEvents, currentLocalDateKey());
       let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
       this.homeComfortConcernBatch++;
       let batchId = new Date().getTime().toString() + '-' + this.homeComfortConcernBatch.toString();
-      this.homeComfortConcerns = parseHomeComfortConcerns(response, batchId, recentEvents);
+      let concerns = parseHomeComfortConcerns(response, batchId, recentEvents);
+      this.homeComfortChatStore.clear();
+      this.homeComfortConcerns = concerns;
       AppLogger.info('HomeComfort', 'generated concerns from recentChatEvents=' + recentEvents.length.toString());
     } catch (e) {
       let err = e as Error;
@@ -6895,6 +6902,7 @@ struct Index {
       Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
         TabContent() {
           HomePage({
+            comfortChatStore: this.homeComfortChatStore,
             profile: this.homeProfile,
             taskSuggestions: this.homeTaskSuggestions,
             taskSuggestionsLoading: this.homeTaskSuggestionsLoading,

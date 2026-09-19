@@ -39,6 +39,7 @@ import {
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { ChatMemorySync } from './ChatMemorySync';
 import { normalizeMemorySceneIds } from '../utils/WorkflowSceneConfig';
 
 export interface ConsolidationResult {
@@ -155,11 +156,13 @@ export class ConsolidationService {
 
   private collectSourceEntries(): SourceEntry[] {
     let entries: SourceEntry[] = [];
+    let exportedPaths = GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot)
+      .concat(ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage));
     let daySet: Record<string, boolean> = new Object() as Record<string, boolean>;
     this.storage.listDir(this.paths.dailyLogRoot)
       .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name))
       .forEach((name: string) => daySet[name] = true);
-    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+    exportedPaths.forEach((relativePath: string) => {
       let slash = relativePath.indexOf('/');
       if (slash > 0) {
         let day = relativePath.substring(0, slash);
@@ -174,7 +177,7 @@ export class ConsolidationService {
       let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
       let fileSet: Record<string, boolean> = new Object() as Record<string, boolean>;
       this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
-      GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      exportedPaths.forEach((relativePath: string) => {
         if (relativePath.startsWith(day + '/')) {
           let fileName = relativePath.substring(day.length + 1);
           if (fileName.endsWith('.md')) {
