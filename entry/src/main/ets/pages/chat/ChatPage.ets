@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { inputMethod } from '@kit.IMEKit';
 import {
   CHAT_COMPOSER_MAX_LINES,
@@ -7,6 +9,7 @@ import {
   chatComposerTextAreaHeight,
   chatComposerPrimaryActionRole,
   chatComposerVoiceReleaseShouldStop,
+  chatPageBackgroundColor,
   chatDeepThinkingToggleVisible,
   chatModeLabel,
   chatModePlaceholder,
@@ -38,9 +41,12 @@ import { DigitalAvatarView } from './DigitalAvatarView';
 import { digitalAvatarContainerHeight, digitalAvatarVisualStateForVoiceStatus } from './DigitalAvatarTypes';
 import { VoiceInteractionStatus, voiceStatusLabel } from './VoiceInteractionTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
 
 @Component
 export struct ChatPage {
+  private pageScroller: Scroller = new Scroller();
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) private debugEnabled: boolean = false;
   @Link chatMode: string;
   @Link cloudUserInput: string;
   @Link userInput: string;
@@ -48,6 +54,7 @@ export struct ChatPage {
   @State previewImagePath: string = '';
   @State attachmentSourceMenuVisible: boolean = false;
   @Prop cloudOutput: string = '';
+  @Prop navigationBottomInset: number = 0;
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
   @Prop localOutput: string = '';
@@ -123,7 +130,8 @@ export struct ChatPage {
   }
 
   private bottomOverlayInset(): number {
-    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + this.voiceStatusExtraHeight() + 64;
+    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + this.voiceStatusExtraHeight() + 52 +
+      this.navigationBottomInset;
   }
 
   private welcomeGreeting(): string {
@@ -401,7 +409,7 @@ export struct ChatPage {
   }
 
   @Builder EmptyWelcome() {
-    Scroll() {
+    Scroll(this.pageScroller) {
       Column() {
         this.WelcomeAvatarHero()
 
@@ -424,9 +432,9 @@ export struct ChatPage {
           .lineHeight(22)
 
         Column() {
-          this.WelcomeActionCard('image', '整理今天截图里的关键信息', '从图片和聊天里提取重点', '整理今天截图里的关键信息')
-          this.WelcomeActionCard('flow', '规划一个自动化 workflow', '拆解步骤并生成执行计划', '规划一个收集微信聊天记录的 workflow')
-          this.WelcomeActionCard('search', '淘宝搜索耳机比价', '帮你比较价格和参数', '淘宝搜索耳机比价')
+          this.WelcomeActionCard('flow', '总结上周做过的事', '回顾上周的记录与进展', '帮我总结一下上周我做了哪些事情。')
+          this.WelcomeActionCard('search', '淘宝搜索华为 Mate 80 Pro', '在淘宝查找这款手机', '淘宝上搜索华为Mate 80 Pro手机')
+          this.WelcomeActionCard('image', '手机碰一碰，找到同频爱好', '发现共同兴趣与话题', '手机碰一碰，找到同频爱好')
         }
         .width('100%')
         .margin({ top: 14 })
@@ -436,15 +444,19 @@ export struct ChatPage {
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
+      .padding({ top: APP_HEADER_CONTENT_GAP })
     }
     .width('100%')
     .layoutWeight(1)
     .scrollBar(BarState.Off)
+    .clip(false)
   }
 
   @Builder ConversationPanel() {
     if (this.messages.length > 0) {
       ChatMessageList({
+        messageScroller: this.pageScroller,
+        topOverlayInset: APP_HEADER_CONTENT_GAP,
         messages: this.messages,
         thinking: this.showConversationThinkingRow(),
         autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
@@ -464,7 +476,7 @@ export struct ChatPage {
         onScrollContent: (_yOffset: number) => {}
       })
     } else {
-      Scroll() {
+      Scroll(this.pageScroller) {
         Column() {
           Row() {
             Text(this.isCloudMode() ? '云' : '本')
@@ -509,9 +521,11 @@ export struct ChatPage {
             .height(this.bottomOverlayInset())
         }
         .width('100%')
+        .padding({ top: APP_HEADER_CONTENT_GAP })
       }
       .layoutWeight(1)
       .width('100%')
+      .clip(false)
     }
   }
 
@@ -693,7 +707,8 @@ export struct ChatPage {
           left: 20,
           right: 20,
           top: 16,
-          bottom: Math.max(22, Math.round(this.bottomOverlayInset() * 0.18))
+          bottom: Math.max(22, Math.round((this.bottomOverlayInset() - this.navigationBottomInset) * 0.18)) +
+            this.navigationBottomInset
         })
         .backgroundColor(Color.White)
         .borderRadius(24)
@@ -777,59 +792,76 @@ export struct ChatPage {
     }
   }
 
-  build() {
-    Stack({ alignContent: Alignment.Bottom }) {
-      Column() {
-        Row() {
-          Text('☰')
-            .fontSize(28)
-            .fontColor('#111827')
-            .width(44)
-            .height(44)
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
-              this.onOpenSessionDrawer();
-            })
-          Row() {
-            Text('MobiAgent')
-              .fontSize(18)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#111827')
-              .maxLines(1)
-              .layoutWeight(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Row() {
-              this.ModeTopTabs()
-            }
-            .margin({ left: 6 })
-          }
-          .justifyContent(FlexAlign.Center)
+  @Builder PageHeader() {
+    Row() {
+      Text('☰')
+        .fontSize(28)
+        .fontColor('#111827')
+        .width(44)
+        .height(40)
+        .textAlign(TextAlign.Center)
+        .onClick(() => {
+          this.onOpenSessionDrawer();
+        })
+      Row() {
+        Text('MobiAgent')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#111827')
+          .lineHeight(28)
+          .maxLines(1)
           .layoutWeight(1)
-          Text('日志')
-            .fontSize(14)
-            .fontColor('#111827')
-            .width(52)
-            .height(36)
-            .textAlign(TextAlign.Center)
-            .onClick(() => { this.onOpenRuntimeLogs(); })
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row() {
+          this.ModeTopTabs()
         }
-        .width('100%')
-        .padding({ left: 18, right: 18, top: 22 })
+        .margin({ left: 6 })
+      }
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .layoutWeight(1)
+      if (this.debugEnabled) {
+        Text('日志')
+          .fontSize(14)
+          .fontColor('#111827')
+          .width(52)
+          .height(36)
+          .textAlign(TextAlign.Center)
+          .onClick(() => { this.onOpenRuntimeLogs(); })
+      }
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .alignItems(VerticalAlign.Center)
+    .padding({ left: 18, right: 18, top: 8, bottom: 8 })
+  }
 
-        Column() {
-          if (this.hasConversationContent()) {
-            this.ConversationPanel()
-          } else {
-            this.EmptyWelcome()
-          }
+  @Builder PageContent() {
+    Column() {
+      Column() {
+        if (this.hasConversationContent()) {
+          this.ConversationPanel()
+        } else {
+          this.EmptyWelcome()
         }
-        .width('100%')
-        .padding({ left: 28, right: 28 })
-        .layoutWeight(1)
       }
       .width('100%')
-      .height('100%')
-      .backgroundColor(this.hasConversationContent() ? Color.White : '#F4F8FF')
+      .padding({ left: 28, right: 28 })
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      FrostedPage({
+        pageBackgroundColor: chatPageBackgroundColor(this.hasConversationContent()),
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       Column() {
         this.PendingImageAttachmentPreview()
@@ -951,9 +983,10 @@ export struct ChatPage {
         .backgroundColor(Color.White)
         .borderRadius(26)
         .shadow({ radius: 14, color: '#20000000', offsetX: 0, offsetY: 5 })
-        .margin({ left: 20, right: 20, bottom: 22 })
+        .margin({ left: 20, right: 20, bottom: 10 })
       }
       .width('100%')
+      .padding({ bottom: this.navigationBottomInset })
 
       this.AttachmentSourceMenuOverlay()
 
@@ -983,11 +1016,13 @@ export struct ChatPage {
         .width('100%')
         .height('100%')
         .alignItems(VerticalAlign.Top)
+        .padding({ bottom: this.navigationBottomInset })
       }
 
       this.ImagePreviewOverlay()
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
   }
 }

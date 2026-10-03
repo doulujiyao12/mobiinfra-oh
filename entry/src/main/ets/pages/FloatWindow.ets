@@ -1,4 +1,5 @@
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { AiGeneratedBadge } from '../components/AiGeneratedBadge';
 
 // 后台浮窗页面：展示 AppStorage.floatText 中的实时模型输出/Agent 状态，
 // 并提供暂停/继续、终止入口通知 AgentExecutionController 控制当前任务。
@@ -70,15 +71,20 @@ struct FloatWindow {
       if (!this.captureOverlayHidden && this.panelExpanded) {
         Row() {
           Column() {
-            Text(this.statusLabel())
+            Row() {
+              Text(this.statusLabel())
+                .layoutWeight(1)
+                .fontSize(9)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
+                .textAlign(TextAlign.Start)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              AiGeneratedBadge({ compact: true, tone: 'overlay' })
+            }
               .width('100%')
               .height(16)
-              .fontSize(9)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
-              .textAlign(TextAlign.Start)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .alignItems(VerticalAlign.Center)
 
             Scroll(this.textScroller) {
               Text(this.floatText)

@@ -48,7 +48,7 @@ export class ChatStreamDisplayPacer {
     this.targetContent = targetContent;
     this.visibleTrace = trace.slice();
     if (this.targetContent.indexOf(this.visibleContent) !== 0) {
-      this.visibleContent = '';
+      this.visibleContent = this.commonPrefix(this.visibleContent, this.targetContent);
     }
     this.active = this.visibleContent.length < this.targetContent.length;
     return this.snapshot();
@@ -126,5 +126,14 @@ export class ChatStreamDisplayPacer {
       return 6;
     }
     return Math.min(backlog, CHAT_STREAM_DISPLAY_MIN_CHARS_PER_TICK);
+  }
+
+  private commonPrefix(left: string, right: string): string {
+    let limit = Math.min(left.length, right.length);
+    let length = 0;
+    while (length < limit && left.charAt(length) === right.charAt(length)) {
+      length += 1;
+    }
+    return left.substring(0, length);
   }
 }

@@ -29,6 +29,10 @@ export interface ChatReactAgentRunOptions {
   runMobileGuiTask?: MobileGuiTaskRunCallback;
   enableThinking?: boolean;
   enableTools?: boolean;
+  maxTokens?: number;
+  readTimeout?: number;
+  logResponseContent?: boolean;
+  beforeIteration?: () => Promise<void>;
   onTrace?: ChatReactTraceHandler;
   onContentDelta?: ChatReactContentDeltaHandler;
 }
@@ -91,8 +95,10 @@ export class ChatReactAgent {
     let toolCallCount = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      let completionOptions = this.buildCompletionOptions(workingMessages, config, tools,
-        options.enableThinking === true);
+      if (options.beforeIteration !== undefined) {
+        await options.beforeIteration();
+      }
+      let completionOptions = this.buildCompletionOptions(workingMessages, config, tools, options);
       let result = await this.requestCompletion(completionOptions, options);
       if (!toolsEnabled || result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
@@ -153,14 +159,17 @@ export class ChatReactAgent {
   }
 
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,
-    tools: CloudChatToolDefinition[], enableThinking: boolean): CloudChatCompletionOptions {
+    tools: CloudChatToolDefinition[], runOptions: ChatReactAgentRunOptions): CloudChatCompletionOptions {
+    let enableThinking = runOptions.enableThinking === true;
     let preset = enableThinking ? QWEN_GENERAL_THINKING_PRESET : QWEN_GENERAL_INSTRUCT_PRESET;
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: cloudPlannerApiKey(config),
       messages: messages,
       temperature: preset.temperature,
-      maxTokens: QWEN_CHAT_MAX_TOKENS,
+      maxTokens: runOptions.maxTokens === undefined ? QWEN_CHAT_MAX_TOKENS : runOptions.maxTokens,
+      readTimeout: runOptions.readTimeout,
+      logResponseContent: runOptions.logResponseContent,
       top_p: preset.top_p,
       top_k: preset.top_k,
       min_p: preset.min_p,

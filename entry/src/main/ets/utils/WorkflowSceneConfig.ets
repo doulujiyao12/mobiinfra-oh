@@ -5,6 +5,8 @@ export interface WorkflowSceneConfig {
   color: string;
 }
 
+export const PERSONAL_INFO_MEMORY_SCENE_ID: number = 12;
+
 const WORKFLOW_SCENES: WorkflowSceneConfig[] = [
   { sceneId: 0, tabId: 'shopping', label: '购物', color: '#765BFF' },
   { sceneId: 1, tabId: 'takeout', label: '外卖', color: '#39BFA3' },
@@ -15,13 +17,14 @@ const WORKFLOW_SCENES: WorkflowSceneConfig[] = [
   { sceneId: 6, tabId: 'travel', label: '差旅', color: '#0EA5E9' }
 ];
 
-// DataManager 记忆层需要接纳图库分析补充场景，但工作流任务页仍只展示原 7 类采集场景。
+// DataManager 记忆层需要接纳图库分析和聊天提取的个人信息，工作流任务页仍只展示原 7 类采集场景。
 // 图库“餐饮”与既有“外卖”消费场景合并，避免汇总页出现重复页签。
 const MEMORY_EXTRA_SCENES: WorkflowSceneConfig[] = [
   { sceneId: 8, tabId: 'gallery-document', label: '文档', color: '#64748B' },
   { sceneId: 9, tabId: 'gallery-health', label: '健康', color: '#10B981' },
   { sceneId: 10, tabId: 'gallery-work', label: '办公', color: '#2563EB' },
-  { sceneId: 11, tabId: 'gallery-other', label: '图库', color: '#9333EA' }
+  { sceneId: 11, tabId: 'gallery-other', label: '图库', color: '#9333EA' },
+  { sceneId: PERSONAL_INFO_MEMORY_SCENE_ID, tabId: 'personal-info', label: '个人信息', color: '#4F6FA8' }
 ];
 
 export function workflowSceneConfigs(): WorkflowSceneConfig[] {

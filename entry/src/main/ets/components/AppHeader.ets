@@ -1,63 +1,86 @@
-// 跨页面头部组件：保持 ClawMate 各 tab 的品牌区和隐私状态样式一致。
+export const APP_HEADER_HEIGHT: number = 56;
+// 标题高度由导航容器避让；内容只需额外保留这段呼吸间距。
+export const APP_HEADER_CONTENT_GAP: number = 16;
+
+// 标题内容保持透明，由 FrostedPage 统一提供固定位置和背景模糊。
 @Component
 export struct AppHeader {
-  title: string = '';
-  subtitle: string = '';
+  @Prop title: string = '';
   icon: Resource = $r('app.media.header_companion');
+  @Prop showIcon: boolean = false;
+  @Prop avatarUri: string = '';
+  @Prop circularAvatar: boolean = false;
   @StorageLink('pcServerConnected') pcServerConnected: boolean = false;
   @Prop pcServerVisible: boolean = false;
+  @Prop showBackButton: boolean = false;
+  onIconClick: () => void = () => {};
+  onBackClick: () => void = () => {};
 
   private pcServerLabel(): string {
     return this.pcServerConnected ? 'PC 已连接' : 'PC 未连接';
   }
 
   build() {
-    Row() {
-      Row() {
-        Stack({ alignContent: Alignment.Center }) {
-          Image(this.icon)
-            .width(36)
-            .height(36)
-            .objectFit(ImageFit.Contain)
-        }
-        .width(40)
-        .height(40)
-
-        Column() {
-          Text(this.title)
-            .fontSize(25)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#172033')
-            .lineHeight(32)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.subtitle.length > 0) {
-            Text(this.subtitle)
-              .fontSize(14)
-              .fontColor('#717684')
-              .lineHeight(18)
-              .margin({ top: 3 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-        }
-        .alignItems(HorizontalAlign.Start)
-        .justifyContent(FlexAlign.Center)
-        .height(this.subtitle.length > 0 ? 52 : 40)
-        .margin({ left: 9 })
-      }
-      .height(52)
-      .alignItems(VerticalAlign.Center)
-      .layoutWeight(1)
-
-      Column() {
-        Row() {
-          Text('盾').fontSize(12).fontColor('#8066FF').width(24).height(24).textAlign(TextAlign.Center).borderRadius(12).backgroundColor('#F0ECFF')
-          Text('隐私守护中').fontSize(13).fontColor('#6B6F7C').margin({ left: 5, right: 5 }).maxLines(1)
-          Text('>').fontSize(16).fontColor('#8B909A')
-        }
+    Stack({ alignContent: Alignment.Center }) {
+      Text(this.title)
+        .fontSize(20)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#172033')
+        .lineHeight(28)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
         .width('100%')
-        .justifyContent(FlexAlign.End)
+        .padding({ left: this.showIcon || this.pcServerVisible ? 88 : (this.showBackButton ? 56 : 0),
+          right: this.showIcon || this.pcServerVisible ? 88 : (this.showBackButton ? 56 : 0) })
+
+      Row() {
+        if (this.showBackButton) {
+          Button('‹')
+            .width(42)
+            .height(40)
+            .fontSize(28)
+            .fontColor('#11182F')
+            .backgroundColor(Color.White)
+            .borderRadius(14)
+            .accessibilityText('返回')
+            .onClick(() => { this.onBackClick(); })
+        } else if (this.showIcon) {
+          Stack({ alignContent: Alignment.Center }) {
+            if (this.avatarUri.length > 0) {
+              Image(this.avatarUri)
+                .width(34)
+                .height(34)
+                .objectFit(this.circularAvatar ? ImageFit.Cover : ImageFit.Contain)
+                .borderRadius(this.circularAvatar ? 17 : 0)
+            } else {
+              Image(this.icon)
+                .width(34)
+                .height(34)
+                .objectFit(this.circularAvatar ? ImageFit.Cover : ImageFit.Contain)
+                .borderRadius(this.circularAvatar ? 17 : 0)
+            }
+          }
+          .width(40)
+          .height(40)
+          .backgroundColor(this.circularAvatar ? '#EEF2FF' : Color.Transparent)
+          .borderRadius(this.circularAvatar ? 20 : 0)
+          .border({
+            width: this.circularAvatar ? 1 : 0,
+            color: this.circularAvatar ? '#FFFFFF' : Color.Transparent
+          })
+          .shadow({
+            radius: this.circularAvatar ? 8 : 0,
+            color: this.circularAvatar ? '#160D2A63' : Color.Transparent,
+            offsetX: 0,
+            offsetY: this.circularAvatar ? 3 : 0
+          })
+          .clip(this.circularAvatar)
+          .onClick(() => {
+            this.onIconClick();
+          })
+        }
+        Blank()
 
         if (this.pcServerVisible) {
           Row() {
@@ -73,16 +96,17 @@ export struct AppHeader {
               .fontWeight(FontWeight.Medium)
               .maxLines(1)
           }
+          .alignItems(VerticalAlign.Center)
+          .width(80)
           .justifyContent(FlexAlign.End)
-          .width('100%')
-          .margin({ top: 5 })
         }
       }
-      .alignItems(HorizontalAlign.End)
-      .width(128)
+      .alignItems(VerticalAlign.Center)
+      .width('100%')
+      .height('100%')
     }
-    .alignItems(VerticalAlign.Center)
     .width('100%')
-    .padding({ left: 22, right: 18, top: 24, bottom: 10 })
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
   }
 }

@@ -267,6 +267,17 @@ export default function chatSessionStorageUnitTest() {
       expect(rendered.content).assertEqual('');
     });
 
+    it('keepsThinkingRenderAppendOnlyAcrossWhitespaceOnlyClosures', 0, () => {
+      let firstRound = buildAssistantStreamingRenderContent('', '第一段思考');
+      let syntheticClose = buildAssistantStreamingRenderContent('\n\n', '第一段思考');
+      let secondRound = buildAssistantStreamingRenderContent('\n\n', '第一段思考第二段思考');
+      let finalAnswer = buildAssistantStreamingRenderContent('\n\n最终回答', '第一段思考第二段思考');
+
+      expect(syntheticClose).assertEqual(firstRound);
+      expect(secondRound.indexOf(firstRound)).assertEqual(0);
+      expect(finalAnswer.indexOf(secondRound)).assertEqual(0);
+    });
+
     it('streamsVisibleContentAfterSplitClosingThinkTag', 0, () => {
       let state = createChatStreamThinkingState(true);
       let thinking = '';

@@ -715,6 +715,8 @@ export default function dataManagerUnitTest() {
       expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '餐饮').length).assertEqual(0);
       expect(collectionTabSpecs().filter((spec: CollectionTabSpec): boolean => spec.title === '餐饮记录').length).assertEqual(0);
       expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '图库').length).assertEqual(1);
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '个人信息').length).assertEqual(1);
+      expect(collectionTabSpecByIndex(12).title).assertEqual('个人信息记录');
       let foodSpec = collectionTabSpecByIndex(galleryMemorySceneIdForCategory('餐饮'));
       expect(foodSpec.title).assertEqual('外卖记录');
       expect(foodSpec.query.workflowSceneIds[0]).assertEqual(1);
@@ -828,6 +830,17 @@ export default function dataManagerUnitTest() {
         entry.text.indexOf('第一张餐饮图') >= 0)[0];
 
       expect(stableEntry.index).assertEqual(firstIndex);
+      storage.removeTree(root);
+    });
+
+    it('galleryMemoryReminderDetectsOnlyNewSavedResults', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('sync-reminder');
+      storage.removeTree(root);
+      let result = galleryMemoryItem('reminder-001', '文档', '新文档', '新保存的分析记录');
+      galleryMemoryWriteItem(root, result);
+      expect(GalleryMemorySync.hasNewValidResultsSince(root, result.createdAt - 1)).assertTrue();
+      expect(GalleryMemorySync.hasNewValidResultsSince(root, result.createdAt)).assertFalse();
       storage.removeTree(root);
     });
 
@@ -2640,7 +2653,8 @@ export default function dataManagerUnitTest() {
     });
 
     it('seedreamTextToImageRequestBodyMatchesArkShape', 0, () => {
-      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '', createDefaultAvatarGenerationParams('2K', 'url', true));
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '',
+        createDefaultAvatarGenerationParams('2K', 'url', false));
       expect(String(body['model'])).assertEqual('doubao-seedream-4-5-251128');
       expect(String(body['prompt'])).assertEqual('生成数字分身');
       expect(String(body['sequential_image_generation'])).assertEqual('disabled');

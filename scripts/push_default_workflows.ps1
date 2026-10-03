@@ -7,9 +7,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot "app_identity.ps1")
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$appBundleName = Get-AppBundleName -RepoRoot $repoRoot
 
 $DefaultRemoteWorkflowRoots = @(
-  "/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/workflows",
+  "/data/app/el2/100/base/$appBundleName/haps/entry/files/workflows",
   "/data/storage/el2/base/haps/entry/files/workflows"
 )
 
@@ -124,7 +128,6 @@ function Workflow-Source {
   return "workflow"
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($RepoConfigDir)) {
   $repoConfigPath = Join-Path $repoRoot "entry\src\main\resources\rawfile\workflows\configs"
 } elseif ([System.IO.Path]::IsPathRooted($RepoConfigDir)) {

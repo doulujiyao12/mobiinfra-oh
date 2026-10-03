@@ -1,0 +1,32 @@
+{
+  "agentCards": [
+    {
+      "agentId": "clawmate_personal_memory",
+      "name": "ClawMate",
+      "description": "经用户授权，在本机查找已同步的个人记忆，包括个人信息、外卖和微信消息，只返回相关摘要。",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": true,
+        "pushNotifications": false,
+        "stateTransitionHistory": false
+      },
+      "defaultInputModes": ["text/plain"],
+      "defaultOutputModes": ["text/plain"],
+      "iconUrl": "$media:Icon",
+      "skills": [
+        {
+          "id": "read_personal_memory",
+          "name": "查询个人记忆",
+          "description": "根据用户的问题查询本机已同步的个人信息、外卖、微信消息等记忆摘要；证件号码和详细住址不通过此技能返回。",
+          "tags": ["个人记忆", "本机查询", "只读"],
+          "examples": ["我之前说过的生日是什么？", "我上次点了什么外卖？", "我最近的微信聊天里提到了什么？"]
+        }
+      ],
+      "category": "productivity",
+      "appInfo": {
+        "deviceTypes": ["phone"],
+        "minAppVersion": "1.0.0"
+      }
+    }
+  ]
+}

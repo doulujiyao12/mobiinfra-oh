@@ -19,6 +19,7 @@ import {
 } from './ChatSessionTypes';
 import { ChatVoiceMetadata, optionalChatVoiceMetadata } from './VoiceInteractionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
+import { DebugSettings } from '../../utils/DebugSettings';
 
 export interface ChatSessionViewState {
   sessions: ChatSessionSummary[];
@@ -73,6 +74,7 @@ export class ChatSessionController {
 
   static appendMessage(filesDir: string, state: ChatSessionViewState, mode: string,
     message: ChatMessage): ChatSessionViewState {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE && !DebugSettings.isEnabled()) { return state; }
     let active = ChatSessionController.ensureActive(filesDir, state, mode);
     if (active.activeSession === null) {
       return active;
@@ -86,6 +88,7 @@ export class ChatSessionController {
 
   static appendMessageToSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
     message: ChatMessage): ChatSessionViewState {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE && !DebugSettings.isEnabled()) { return state; }
     if (filesDir.length === 0 || sessionId.length === 0) {
       return state;
     }
@@ -106,6 +109,7 @@ export class ChatSessionController {
 
   static appendTaskTraceLineToSession(filesDir: string, state: ChatSessionViewState, sessionId: string, line: string,
     messageId: string): ChatSessionViewState {
+    if (!DebugSettings.isEnabled()) { return state; }
     if (filesDir.length === 0) {
       return state;
     }

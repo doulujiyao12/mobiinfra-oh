@@ -1,3 +1,5 @@
+import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import {
@@ -125,6 +127,7 @@ export interface CloudChatCompletionOptions {
   model?: string;
   maxTokens?: number;
   readTimeout?: number;
+  logResponseContent?: boolean;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
   top_p?: number;
   top_k?: number;
@@ -302,7 +305,7 @@ export class CloudModelClient {
     this.activeRequests = [];
     for (let i = 0; i < pending.length; i++) {
       try {
-        pending[i].destroy();
+        PrivacyConsent.destroyHttp(pending[i]);
       } catch (e) {
         AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
@@ -667,6 +670,7 @@ export class CloudModelClient {
   }
 
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = this.buildChatRequestBody(options);
 
     let headers: Record<string, string> = {
@@ -682,7 +686,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     let startedAt = new Date().getTime();
@@ -695,35 +699,40 @@ export class CloudModelClient {
       ' read_timeout=' + (options.readTimeout === undefined ? '' : options.readTimeout.toString()));
     try {
       let response = await httpReq.request(url, requestOptions);
+      AiServiceAccess.requireAllowed();
       let elapsedMs = new Date().getTime() - startedAt;
       let responseText = response.result as string;
       AppLogger.info('CloudModel', 'chat response status=' + response.responseCode.toString() +
         ' elapsedMs=' + elapsedMs.toString() +
-        ' bytes=' + responseText.length.toString() +
-        ' preview=' + CloudModelClient.previewTextForLog(responseText, 512));
+        ' bytes=' + responseText.length.toString() + (options.logResponseContent === false ? '' :
+        ' preview=' + CloudModelClient.previewTextForLog(responseText, 512)));
       if (response.responseCode < 200 || response.responseCode >= 300) {
+        if (options.logResponseContent === false) {
+          throw new Error('Cloud HTTP ' + response.responseCode.toString());
+        }
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
       let parsed = CloudModelClient.parseChatCompletionResponseText(responseText);
       AppLogger.info('CloudModel', 'chat parsed content_chars=' + parsed.content.length.toString() +
-        ' finish_reason=' + parsed.finishReason +
-        ' content_preview=' + CloudModelClient.previewTextForLog(parsed.content, 512));
+        ' finish_reason=' + parsed.finishReason + (options.logResponseContent === false ? '' :
+        ' content_preview=' + CloudModelClient.previewTextForLog(parsed.content, 512)));
       return parsed;
     } catch (e) {
       let err = e as Error;
       AppLogger.error('CloudModel', 'chat request failed url=' + url +
         ' model=' + (options.model === undefined ? '' : options.model) +
         ' elapsedMs=' + (new Date().getTime() - startedAt).toString() +
-        ' error=' + (err.message || String(e)));
+        ' error=' + (options.logResponseContent === false ? err.name : (err.message || String(e))));
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
   async chatCompletionStream(options: CloudChatCompletionOptions,
     callbacks: CloudChatCompletionStreamCallbacks = {}): Promise<CloudChatCompletionResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = this.buildChatRequestBody(options, true);
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -737,7 +746,7 @@ export class CloudModelClient {
       readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     AppLogger.info('CloudModel', 'chat stream request start url=' + url +
@@ -771,7 +780,7 @@ export class CloudModelClient {
         httpReq.off('dataEnd');
         self.unregisterActiveRequest(httpReq);
         try {
-          httpReq.destroy();
+          PrivacyConsent.destroyHttp(httpReq);
         } catch (e) {
           AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
         }
@@ -835,6 +844,10 @@ export class CloudModelClient {
         if (resolved) {
           return;
         }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
+          return;
+        }
         if (responseCode < 0) {
           finishResultPending = true;
           return;
@@ -885,6 +898,9 @@ export class CloudModelClient {
         AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
+      PrivacyConsent.onHttpCancel(httpReq, () => {
+        finishWithError(AiServiceAccess.isAllowed() ? '隐私授权已撤回' : AI_LOGIN_REQUIRED_MESSAGE);
+      });
       let decodeStreamData = (data: ArrayBuffer): string => {
         try {
           return textDecoder.decodeWithStream(new Uint8Array(data));
@@ -894,6 +910,10 @@ export class CloudModelClient {
       };
       let processStreamLine = (line: string): void => {
         if (resolved) {
+          return;
+        }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
           return;
         }
         try {
@@ -1390,6 +1410,7 @@ export class CloudModelClient {
   }
 
   async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {
+    AiServiceAccess.requireAllowed();
     let requestBody: CloudEmbeddingRequest = {
       model: config.model,
       input: input
@@ -1407,10 +1428,11 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Embedding HTTP ${response.responseCode}: ${response.result}`);
       }
@@ -1424,7 +1446,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 

@@ -39,7 +39,8 @@ import {
   DEFAULT_GALLERY_EMBEDDING_API_KEY,
   DEFAULT_GALLERY_EMBEDDING_BASE_URL,
   DEFAULT_GALLERY_EMBEDDING_MODEL,
-  DEFAULT_GALLERY_MODEL
+  DEFAULT_GALLERY_MODEL,
+  galleryApiUsesLegacyDefaults
 } from '../main/ets/utils/gallery/GallerySettingsDefaults';
 
 export default function settingsCenterConfigUnitTest() {
@@ -125,6 +126,9 @@ export default function settingsCenterConfigUnitTest() {
         '输入 URL')).assertEqual('默认（输入新值以覆盖）');
       expect(hiddenDefaultSettingEditorValue('https://custom.example/v1', 'https://internal.example/v1'))
         .assertEqual('https://custom.example/v1');
+      expect(hiddenDefaultSettingEditorValue(DEFAULT_GALLERY_API_BASE_URL, DEFAULT_GALLERY_API_BASE_URL))
+        .assertEqual('');
+      expect(settingUsesDefaultValue(DEFAULT_GALLERY_API_KEY, DEFAULT_GALLERY_API_KEY)).assertTrue();
     });
 
     it('migratesOldDefaultsWithoutOverwritingCustomValues', 0, () => {
@@ -153,13 +157,25 @@ export default function settingsCenterConfigUnitTest() {
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat).assertEqual('url');
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl).assertEqual('https://api.xiaomimimo.com/v1');
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey.length > 0).assertTrue();
-      expect(DEFAULT_GALLERY_API_BASE_URL).assertEqual('https://api.modelbest.cn/v1');
-      expect(DEFAULT_GALLERY_API_KEY.length > 0).assertTrue();
-      expect(DEFAULT_GALLERY_MODEL).assertEqual('MiniCPM-V-4.6-Instruct');
+      expect(DEFAULT_GALLERY_API_BASE_URL).assertEqual(DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+      expect(DEFAULT_GALLERY_API_KEY).assertEqual(DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
+      expect(DEFAULT_GALLERY_MODEL).assertEqual(DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
+      expect(DEFAULT_GALLERY_MODEL).assertEqual('');
       expect(DEFAULT_GALLERY_EMBEDDING_BASE_URL).assertEqual('https://api.siliconflow.cn/v1');
       expect(DEFAULT_GALLERY_EMBEDDING_API_KEY.length > 0).assertTrue();
       expect(DEFAULT_GALLERY_EMBEDDING_MODEL).assertEqual('BAAI/bge-m3');
       expect(DEFAULT_GALLERY_AMAP_WEB_KEY.length > 0).assertTrue();
+    });
+
+    it('recognizesOnlyTheLegacyGalleryDefaultEndpointBundle', 0, () => {
+      expect(galleryApiUsesLegacyDefaults('https://api.modelbest.co/v1', 'MiniCPM-V-4.6-Instruct'))
+        .assertTrue();
+      expect(galleryApiUsesLegacyDefaults('https://api.modelbest.cn/v1', 'MiniCPM-V-4.6-Instruct'))
+        .assertTrue();
+      expect(galleryApiUsesLegacyDefaults('https://custom.example/v1', 'MiniCPM-V-4.6-Instruct'))
+        .assertFalse();
+      expect(galleryApiUsesLegacyDefaults('https://api.modelbest.co/v1', 'custom-model'))
+        .assertFalse();
     });
 
     it('resolvesSeparatePlannerAndDeciderApiKeys', 0, () => {

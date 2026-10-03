@@ -1,8 +1,12 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
 import { AppLogger } from '../utils/AppLogger';
+import { DebugSettings } from '../utils/DebugSettings';
+import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
+import { getAppBundleName } from '../utils/AppIdentity';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 import {
   CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
@@ -51,6 +55,10 @@ export default class EntryAbility extends UIAbility {
   private floatPanelRectChangeCallback: ((options: window.RectChangeOptions) => void) | null = null;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    try { DebugSettings.initialize(this.context); } catch (e) {
+      // A settings failure keeps logging off; the settings page can retry.
+      AppLogger.errorCause('Debug', 'Cannot initialize Debug settings', e as Error);
+    }
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
@@ -72,7 +80,7 @@ export default class EntryAbility extends UIAbility {
     });
     AgentExecutionController.setReturnToAppHandler(async () => {
       let wantInfo: Want = {
-        bundleName: 'com.example.mnnllmchat',
+        bundleName: getAppBundleName(),
         abilityName: 'EntryAbility'
       };
       try {
@@ -138,6 +146,13 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppLogger.info('Ability', 'Ability onForeground');
+    // Runs for both a cold launch and returning to the App; never blocks the first screen.
+    SelfHdcTaskSettings.refreshLocalIp(this.context.filesDir, 'app-foreground').catch((error: Error): void => {
+      AppLogger.warnCause('SelfHdc', 'Cannot refresh saved phone IP', error);
+    });
+    HuaweiAccountSession.refresh(this.context).catch((): void => {
+      AppLogger.warn('HuaweiAccount', 'foreground session restore unavailable');
+    });
     this.destroyFloatWindow();
     try {
       // 当应用回到前台，停止后台长时任务，省电
@@ -162,7 +177,7 @@ export default class EntryAbility extends UIAbility {
       let wantAgentInfo: wantAgent.WantAgentInfo = {
         wants: [
           {
-            bundleName: "com.example.mnnllmchat",
+            bundleName: getAppBundleName(),
             abilityName: "EntryAbility"
           }
         ],

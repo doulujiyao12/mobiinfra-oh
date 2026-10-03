@@ -1,7 +1,10 @@
+import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess } from './AiServiceAccess';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
@@ -368,8 +371,6 @@ export function resolveWorkflowJsonForRun(filesDir: string, task: WorkflowTask,
 }
 
 export class WorkflowRunner {
-  private static readonly APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
-
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: () => CloudModelConfig;
@@ -413,12 +414,20 @@ export class WorkflowRunner {
     return runRootOverride.length > 0 ? runRootOverride : WorkflowStorage.runsDir(filesDir);
   }
 
+  // Opt-in device injection for task-page phone control. The default PC constructor and execution path are unchanged.
+  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void {
+    if (this.runningTask !== null) { throw new Error('Cannot switch device backend during a workflow'); }
+    this.hdcBridge = bridge;
+  }
+
   private workflowJsonForRun(task: WorkflowTask): string {
     return resolveWorkflowJsonForRun(this.filesDir, task, WorkflowStorage.readTaskWorkflowJson,
       (message: string): void => { this.log(message); });
   }
 
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
     this.workflow = WorkflowStorage.validateWorkflowJson(this.workflowJsonForRun(task));
     this.runningTask = task;
@@ -562,7 +571,8 @@ export class WorkflowRunner {
 
   private async returnToHostApp(): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await this.hdcBridge.startApp(bundleName, bundleName, false);
       return true;
     } catch (e) {
       let err = e as Error;

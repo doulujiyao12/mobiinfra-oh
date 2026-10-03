@@ -1,9 +1,11 @@
+import { chatPageBackgroundColor } from '../chat/ChatPageTypes';
+
 export enum MainTabIndex {
   Home = 0,
   Summary = 1,
   Chat = 2,
   Task = 3,
-  Settings = 4
+  Mine = 4
 }
 
 export interface MainTabItem {
@@ -18,11 +20,27 @@ export const MAIN_TAB_ITEMS: MainTabItem[] = [
   { index: MainTabIndex.Summary, icon: 'tab_summary', label: '汇总' },
   { index: MainTabIndex.Chat, icon: 'tab_chat', label: '聊天' },
   { index: MainTabIndex.Task, icon: 'tab_task', label: '任务' },
-  { index: MainTabIndex.Settings, icon: 'tab_settings', label: '设置' }
+  { index: MainTabIndex.Mine, icon: 'tab_mine', label: '我的' }
 ];
 
 export function centerTabIndex(): MainTabIndex {
   return MainTabIndex.Chat;
+}
+
+export function mainTabBackgroundColor(index: number, chatHasConversationContent: boolean = true): string {
+  if (index === MainTabIndex.Chat) {
+    return chatPageBackgroundColor(chatHasConversationContent);
+  }
+  if (index === MainTabIndex.Summary) {
+    return '#F7FAFE';
+  }
+  if (index === MainTabIndex.Task) {
+    return '#F4F7FB';
+  }
+  if (index === MainTabIndex.Mine) {
+    return '#F4F8FF';
+  }
+  return '#FFFFFF';
 }
 
 export function mainTabLabel(index: MainTabIndex): string {

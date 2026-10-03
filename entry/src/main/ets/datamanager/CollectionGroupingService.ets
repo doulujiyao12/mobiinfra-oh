@@ -279,6 +279,10 @@ export class CollectionGroupingService {
     if (events.length === 0) {
       return [];
     }
+    if (spec.tabId === 'personal-info') {
+      // 个人信息只使用本地固定分组，避免额外提交详细资料做分组或把具体值写入分组标题。
+      return heuristicCollectionGroups(spec.tabId, spec.title, events);
+    }
     if ((previous.groups || []).length > 0) {
       return await this.buildIncrementalGroupsForTab(spec, events, modelConfig, previous);
     }
@@ -519,6 +523,9 @@ function heuristicCollectionGroupsWithoutNormalize(tabId: string, title: string,
 }
 
 function heuristicGroupKey(tabId: string, event: IndexedEvent): string {
+  if (tabId === 'personal-info') {
+    return 'personal-info';
+  }
   let source = firstText(event.sources, sourceDisplayName(event.source_state_file));
   let domain = firstText(event.domains, 'other');
   let entity = firstEntityName(event);
@@ -795,6 +802,9 @@ function isInvalidGroupTopic(value: string, prefix: string): boolean {
 }
 
 function sourcePrefixForGroup(tabId: string, group: CollectionGroupState, events: IndexedEvent[]): string {
+  if (tabId === 'personal-info') {
+    return '';
+  }
   if (tabId === 'chat') {
     return chatConversationPrefix(events, group.source);
   }

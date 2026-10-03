@@ -1,6 +1,9 @@
-export const DEFAULT_GALLERY_API_BASE_URL: string = 'https://api.modelbest.co/v1';
-export const DEFAULT_GALLERY_API_KEY: string = 'lis_sk_298cf78155f231c7_DkrDcNLHnK8dJRnfFrJCd4JGDbBLMkHrC3T-wLpvC9zy0BPemsyFuQ';
-export const DEFAULT_GALLERY_MODEL: string = 'MiniCPM-V-4.6-Instruct';
+import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
+
+// 图库分析默认复用 Planner。模型名为空时，CloudModelClient 不会发送 model 字段。
+export const DEFAULT_GALLERY_API_BASE_URL: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+export const DEFAULT_GALLERY_API_KEY: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
+export const DEFAULT_GALLERY_MODEL: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
 export const DEFAULT_GALLERY_SKIP_OCR: string = 'false';
 export const DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER: string = 'true';
 export const DEFAULT_GALLERY_OCR_CONCURRENCY: string = '3';
@@ -16,6 +19,19 @@ export const DEFAULT_GALLERY_AMAP_WEB_KEY: string = 'c9ebe32082120fd93624aa545fc
 
 export const GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT: string = 'galleryDefault.embeddingApiKey';
 export const GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT: string = 'galleryDefault.amapWebKey';
+export const GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT: string = 'galleryDefault.apiBaseUrl';
+export const GALLERY_API_KEY_DEFAULT_SNAPSHOT: string = 'galleryDefault.apiKey';
+export const GALLERY_MODEL_DEFAULT_SNAPSHOT: string = 'galleryDefault.model';
+
+const LEGACY_GALLERY_API_BASE_URLS: string[] = [
+  'https://api.modelbest.co/v1',
+  'https://api.modelbest.cn/v1'
+];
+const LEGACY_GALLERY_MODEL: string = 'MiniCPM-V-4.6-Instruct';
+
+export function galleryApiUsesLegacyDefaults(apiBaseUrl: string, model: string): boolean {
+  return LEGACY_GALLERY_API_BASE_URLS.includes(apiBaseUrl.trim()) && model.trim() === LEGACY_GALLERY_MODEL;
+}
 
 export function registerGallerySettingsDefaults(): void {
   PersistentStorage.persistProp('galleryApiBaseUrl', DEFAULT_GALLERY_API_BASE_URL);
@@ -35,4 +51,7 @@ export function registerGallerySettingsDefaults(): void {
   PersistentStorage.persistProp('galleryAmapWebKey', DEFAULT_GALLERY_AMAP_WEB_KEY);
   PersistentStorage.persistProp(GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT, '');
   PersistentStorage.persistProp(GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT, '');
+  PersistentStorage.persistProp(GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT, '');
+  PersistentStorage.persistProp(GALLERY_API_KEY_DEFAULT_SNAPSHOT, '');
+  PersistentStorage.persistProp(GALLERY_MODEL_DEFAULT_SNAPSHOT, '');
 }

@@ -59,6 +59,7 @@ import {
 } from './DataManagerUtils';
 import {
   memorySceneConfigs,
+  PERSONAL_INFO_MEMORY_SCENE_ID,
   normalizeMemorySceneId,
   normalizeMemorySceneIds,
   workflowSceneConfigs,
@@ -2355,6 +2356,10 @@ export class IndexService {
     profileDomains.forEach((domain: string) => byDomain[domain] = []);
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
+      // 个人信息只供按需查询，避免自动进入每轮云端聊天携带的画像摘要及碰一碰分享。
+      if ((event.workflow_scene_ids || []).indexOf(PERSONAL_INFO_MEMORY_SCENE_ID) >= 0) {
+        return;
+      }
       let domains = normalizeDomains(event.profile_domains || event.domains || [])
         .filter((domain: string): boolean => domain !== 'other');
       domains.forEach((domain: string) => {

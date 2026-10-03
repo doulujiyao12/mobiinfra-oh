@@ -1,10 +1,14 @@
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
-import { AppHeader } from '../../components/AppHeader';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../../components/AiLoginGuard';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -17,6 +21,10 @@ import {
   WorkflowToolInputs
 } from '../../utils/WorkflowTypes';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import { TaskDeviceControlPanel } from '../../components/TaskDeviceControlPanel';
+import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
+import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
 
 interface WorkflowNodeTemplate {
   key: string;
@@ -100,8 +108,15 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 // 新增的图编辑器只改变前端展示和编辑方式，保存结果仍然是一份可执行的 workflow JSON。
 @Component
 export struct TaskPage {
+  private pageScroller: Scroller = new Scroller();
   @Link taskScene: number;
+  onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
+  onRunPhoneWorkflow: (task: WorkflowTask) => Promise<void> = async (_task: WorkflowTask): Promise<void> => {
+    throw new Error('手机任务执行器未连接');
+  };
+  @State private taskControlMode: string = 'phone';
+  @StorageLink('selfHdcRunning') private phoneControlBusy: boolean = false;
 
   @State tasks: WorkflowTask[] = [];
   @State editorOpen: boolean = false;
@@ -161,6 +176,9 @@ export struct TaskPage {
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    try { this.taskControlMode = SelfHdcTaskSettings.load(this.filesDir).mode; } catch (e) {
+      showToastSafely('手机控制配置读取失败，请到“我的 > 手机 HDC”检查：' + (e as Error).message, 2200);
+    }
     try {
       WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
     } catch (e) {
@@ -283,7 +301,7 @@ export struct TaskPage {
   }
 
   private isTaskExecutionBusy(): boolean {
-    return this.batchRunning || this.runningTaskId.length > 0;
+    return this.batchRunning || this.runningTaskId.length > 0 || this.phoneControlBusy;
   }
 
   private isWorkflowCancelledStatus(status: string, message: string): boolean {
@@ -668,8 +686,26 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (this.taskControlMode === 'phone' &&
+      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-start')) { return; }
+    if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
+      return;
+    }
+    // A second tap must not start another run while consent is being loaded or displayed.
+    if (this.isTaskExecutionBusy()) {
       return;
     }
     let flushedContext = this.flushTaskContextDrafts();
@@ -691,7 +727,7 @@ export struct TaskPage {
     this.runningTaskId = currentTask.id;
     this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
     try {
-      await this.onRunWorkflow(currentTask);
+      await this.runSelectedWorkflow(currentTask);
     } finally {
       this.runningTaskId = '';
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
@@ -700,6 +736,9 @@ export struct TaskPage {
   }
 
   private async runEnabledTasks(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
     if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
@@ -716,12 +755,28 @@ export struct TaskPage {
       showToastSafely('请先开启至少一个任务', 1500);
       return;
     }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (this.taskControlMode === 'phone' &&
+      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-batch-start')) { return; }
+    if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
+      return;
+    }
+    if (this.isTaskExecutionBusy()) { return; }
     this.batchRunning = true;
     this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
     let stoppedByError = false;
     let stoppedByCancel = false;
     try {
       for (let i = 0; i < queue.length; i++) {
+        if (!AiLoginGuard.ensure(this.getUIContext())) {
+          stoppedByCancel = true;
+          break;
+        }
         let currentTask = this.findTask(queue[i].id);
         if (!currentTask || !currentTask.enabled) {
           continue;
@@ -730,7 +785,7 @@ export struct TaskPage {
         this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
         this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
-          await this.onRunWorkflow(currentTask);
+          await this.runSelectedWorkflow(currentTask);
           this.tasks = WorkflowStorage.loadTasks(this.filesDir);
           if (this.isTaskCancelled(currentTask.id)) {
             stoppedByCancel = true;
@@ -757,6 +812,18 @@ export struct TaskPage {
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
       this.refreshStatsText();
     }
+  }
+
+  private async runSelectedWorkflow(task: WorkflowTask): Promise<void> {
+    if (this.taskControlMode === 'phone') {
+      await this.onRunPhoneWorkflow(task);
+      if (this.batchRunning) {
+        let saved = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
+        if (saved && (saved.lastStatus === 'failed' || saved.lastStatus === '失败')) {
+          throw new Error(saved.lastMessage || '手机任务失败，停止后续批量任务');
+        }
+      }
+    } else { await this.onRunWorkflow(task); }
   }
 
   private copyWorkflowTask(task: WorkflowTask): void {
@@ -907,6 +974,10 @@ export struct TaskPage {
       return true;
     }
     return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  }
+
+  private fileViewerContainsAiGeneratedContent(): boolean {
+    return this.fileViewerCategory === 'daily' || this.fileViewerCategory === 'run';
   }
 
   private contextToText(context: WorkflowJsonMap | undefined): string {
@@ -3558,7 +3629,7 @@ export struct TaskPage {
     .backgroundColor(Color.White)
     .borderRadius(14)
     .border({ width: 1, color: '#E3E8F1' })
-    .margin({ top: 24, bottom: 18 })
+    .margin({ top: 12, bottom: 18 })
   }
 
   @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
@@ -3712,7 +3783,7 @@ export struct TaskPage {
         .onClick(() => { this.reloadTasks(); })
     }
     .width('86%')
-    .margin({ top: 18 })
+    .margin({ top: 8 })
   }
 
   @Builder TaskContextPanel(task: WorkflowTask) {
@@ -4089,6 +4160,10 @@ export struct TaskPage {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.fileViewerContainsAiGeneratedContent()) {
+            AiGeneratedBadge({ compact: true })
+              .margin({ right: 8 })
+          }
           Button('关闭')
             .height(30)
             .fontSize(11)
@@ -4178,15 +4253,14 @@ export struct TaskPage {
     }
   }
 
-  build() {
-    Scroll() {
+  @Builder PageHeader() {
+    AppHeader({ title: this.configViewOpen ? '配置任务' : '自定义任务' })
+  }
+
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
       Column() {
         if (this.configViewOpen) {
-          AppHeader({
-            title: '配置任务',
-            subtitle: 'Workflow 编排与文件管理',
-            icon: $r('app.media.header_task')
-          })
           this.ConfigHeaderPanel()
           this.CreatePanel()
           if (this.editorOpen && this.editingTaskId.length === 0) {
@@ -4210,17 +4284,30 @@ export struct TaskPage {
           this.TaskSceneList()
           this.FileManagerPanel()
         } else {
-          AppHeader({ title: '自定义任务', icon: $r('app.media.header_task') })
           this.TaskExecutionHeaderPanel()
+          TaskDeviceControlPanel({ mode: this.taskControlMode,
+            busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
+            onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
           this.TaskExecutionList()
           this.BatchRunPanel()
         }
         Blank().height(110)
       }
       .width('100%')
+      .padding({ top: APP_HEADER_CONTENT_GAP })
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#F4F7FB')
+    .clip(false)
+  }
+
+  build() {
+    FrostedPage({
+      pageBackgroundColor: '#F4F7FB',
+      scrollers: [this.pageScroller],
+      headerBuilder: (): void => { this.PageHeader(); },
+      contentBuilder: (): void => { this.PageContent(); }
+    })
   }
 }

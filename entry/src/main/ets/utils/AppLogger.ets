@@ -1,4 +1,5 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DebugSettings } from './DebugSettings';
 
 const APP_LOG_DOMAIN: number = 0x0000;
 const APP_LOG_TAG: string = 'MobiInfra';
@@ -64,18 +65,22 @@ function formatMessageWithCause(message: string, cause: AppLogCause): string {
 // 统一封装 Hilog 输出，保证所有模块在系统日志中都有相同 tag 和模块前缀。
 export class AppLogger {
   static debug(moduleName: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     hilog.debug(APP_LOG_DOMAIN, APP_LOG_TAG, '%{public}s', formatMessage(moduleName, message));
   }
 
   static info(moduleName: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     hilog.info(APP_LOG_DOMAIN, APP_LOG_TAG, '%{public}s', formatMessage(moduleName, message));
   }
 
   static warn(moduleName: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     hilog.warn(APP_LOG_DOMAIN, APP_LOG_TAG, '%{public}s', formatMessage(moduleName, message));
   }
 
   static error(moduleName: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     hilog.error(APP_LOG_DOMAIN, APP_LOG_TAG, '%{public}s', formatMessage(moduleName, message));
   }
 

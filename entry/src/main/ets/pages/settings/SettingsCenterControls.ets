@@ -5,6 +5,7 @@ import {
   settingsSensitiveInputShouldUseMultiline,
   SettingsActionKind
 } from './SettingsCenterTypes';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import {
   SETTINGS_ACTION_GAP,
   SETTINGS_BUTTON_HEIGHT,
@@ -414,12 +415,19 @@ export struct SettingsActionRow {
 export struct SettingsOutputPanel {
   @Prop title: string = '';
   @Prop content: string = '';
+  @Prop aiGenerated: boolean = false;
 
   build() {
     Column() {
-      Text(this.title)
-        .fontSize(13)
-        .fontColor(SETTINGS_MUTED_TEXT_COLOR)
+      Row() {
+        Text(this.title)
+          .fontSize(13)
+          .fontColor(SETTINGS_MUTED_TEXT_COLOR)
+          .layoutWeight(1)
+        if (this.aiGenerated) {
+          AiGeneratedBadge({ compact: true })
+        }
+      }
         .width('100%')
       Scroll() {
         Text(this.content.length > 0 ? this.content : '暂无输出')

@@ -14,6 +14,8 @@ export interface LibEntryNative extends AgentLoopNativeApi {
   generate: (prompt: string) => Promise<string>;
   profileGenerate: (prompt: string, topK?: number) => Promise<string>;
   cancelChat: () => string;
+  isChatRunning: () => boolean;
+  restoreChatHistory: (alternatingContents: string[]) => string;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
@@ -28,6 +30,7 @@ export interface LibEntryNative extends AgentLoopNativeApi {
   setCpuMemory: (mode: string) => string;
 
   initLogFile: (path: string) => string;
+  setDebugLogging: (enabled: boolean) => string;
   getLogs: () => string;
   clearLogs: () => string;
 }
@@ -40,6 +43,8 @@ export const generate: (prompt: string) => Promise<string>;
 export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
 export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
 export const cancelChat: () => string;
+export const isChatRunning: () => boolean;
+export const restoreChatHistory: (alternatingContents: string[]) => string;
 export const reset: () => string;
 export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;
@@ -100,5 +105,6 @@ export const setCpuMemory:    (mode: string) => string;
 
 // Runtime log capture (stdout/stderr redirected to file + in-memory ring buffer)
 export const initLogFile: (path: string) => string;
+export const setDebugLogging: (enabled: boolean) => string;
 export const getLogs: () => string;
 export const clearLogs: () => string;

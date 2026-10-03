@@ -2,6 +2,7 @@ import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
+import { DebugSettings } from '../DebugSettings';
 import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryStorage } from './GalleryStorage';
@@ -1242,6 +1243,7 @@ export class GalleryAnalyzer {
   }
 
   private captureLog(level: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let previous = AppStorage.get(GALLERY_LOG_STORAGE_KEY) as string;
     let current = previous && previous.length > 0 ? previous : '';
     let line = '[' + new Date().toLocaleTimeString() + '] [' + level + '] ' + message;
