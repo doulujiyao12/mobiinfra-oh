@@ -96,7 +96,7 @@ std::string resourceSnapshotString(const char* stage) {
 }
 
 std::string floatVectorSummary(const char* role, const TensorMetadata& metadata,
-                               const std::vector<float>& values) {
+                               const std::vector<float>& values, const char* direction = "input") {
     size_t finiteCount = 0;
     size_t nanCount = 0;
     size_t positiveInfinityCount = 0;
@@ -131,7 +131,7 @@ std::string floatVectorSummary(const char* role, const TensorMetadata& metadata,
     }
     char hashText[24] = {};
     std::snprintf(hashText, sizeof(hashText), "%016llx", static_cast<unsigned long long>(hash));
-    return "input_values role=" + std::string(role) +
+    return std::string(direction) + "_values role=" + std::string(role) +
         " name=" + (metadata.name.empty() ? "<empty>" : metadata.name) +
         " actual_elements=" + std::to_string(values.size()) +
         " expected_elements=" + std::to_string(metadata.elementCount) +
@@ -774,6 +774,8 @@ bool OfflineNpuChunkExecutor::runChunk(int chunkIdx,
         traceOffline("error", chunkIdx, error);
         return false;
     }
+    traceDiagnostic(chunkIdx, floatVectorSummary("hidden",
+                    runtime.outputMetadata[runtime.hiddenOutputIndex], outputs[0], "output"));
     size_t nextOutput = 1;
     for (size_t i = 0; i < runtime.outputs.size(); ++i) {
         if (static_cast<int>(i) == runtime.hiddenOutputIndex) continue;

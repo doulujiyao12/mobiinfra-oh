@@ -12,7 +12,11 @@ import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { ChatVoiceOrchestrator, ChatVoiceTtsConfig } from './chat/ChatVoiceOrchestrator';
-import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_MODE_CLOUD_AGENT,
+  chatInputAfterAcceptedSend,
+  chatLocalInferenceStateIsStale
+} from './chat/ChatPageTypes';
 import {
   CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
   chatCanSendMessageWithImages,
@@ -27,6 +31,7 @@ import {
   cleanupLocalChatPreparedImages,
   prepareLocalChatImages
 } from './chat/LocalChatImagePrompt';
+import { buildNativeLocalChatHistoryContents } from './chat/LocalChatHistory';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -81,7 +86,29 @@ import {
 } from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
-import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { PhoneHdcWorkflowBridge } from '../utils/selfhdc/PhoneHdcWorkflowBridge';
+import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
+import { PhoneHdcRunSession } from '../utils/selfhdc/PhoneHdcRunSession';
+import { SelfHdcSetupGuard } from '../utils/selfhdc/SelfHdcSetupGuard';
+import {
+  HomeTaskSuggestion,
+  buildHomeTaskSuggestionPrompt,
+  parseHomeTaskSuggestions
+} from './home/HomeTaskSuggestion';
+import {
+  HOME_COMFORT_CHAT_WINDOW_DAYS,
+  HomeComfortChatMessage,
+  HomeComfortConcern,
+  buildHomeComfortChatMessages,
+  buildHomeComfortConcernPrompt,
+  parseHomeComfortConcerns,
+  parseHomeComfortReply
+} from './home/HomeEmotionalSupport';
+import { HomeComfortChatStore } from './home/HomeComfortChatStore';
+import { mainTabBackgroundColor, mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { FLOATING_MAIN_TABS_INSET, FloatingMainTabs, supportsFloatingMainTabs } from './main/FloatingMainTabs';
+import { applyPageStatusBar } from '../utils/PageStatusBar';
 import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
 import {
   FIRST_LAUNCH_ONBOARDING_STORAGE_KEY,
@@ -89,8 +116,13 @@ import {
   shouldShowFirstLaunchOnboarding
 } from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
+import { SettingsBackupController } from './settings/SettingsBackupController';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
+import { PrivacyConsent } from '../utils/PrivacyConsent';
+import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../components/AiLoginGuard';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE, HUAWEI_ACCOUNT_SESSION_KEY } from '../utils/AiServiceAccess';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import {
   CloudChatCompletionOptions,
@@ -111,10 +143,12 @@ import {
   DataManagerProgress,
   HomeDomainViewModel,
   HomeProfileViewModel,
+  IndexedEvent,
   QueryOptions,
   QueryResult
 } from '../datamanager/DataManagerTypes';
 import { createQueryEventsTool } from '../datamanager/DataManagerQueryEventsTool';
+import { nowIsoLocal } from '../datamanager/DataManagerUtils';
 import {
   AvatarGenerateRequest,
   AvatarGenerationMode,
@@ -125,9 +159,12 @@ import {
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { getAppBundleName } from '../utils/AppIdentity';
 import { AppLogger } from '../utils/AppLogger';
+import { DEBUG_ENABLED_STORAGE_KEY, DebugSettings } from '../utils/DebugSettings';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
+import { initializeChatCloudConfigStorage, readChatCloudConfig } from '../utils/ChatCloudConfig';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
 import {
@@ -159,6 +196,7 @@ import {
   currentLocalDateKey,
   formatLocalDateKey,
   localWeekdayLabel,
+  offsetLocalDate,
   weekRangeTextFromDate
 } from '../utils/DateUtils';
 import {
@@ -171,7 +209,16 @@ import {
   DEFAULT_MODELSCOPE_MNN_REPO,
   LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS
 } from '../config/ModelDownloadConfig';
+import {
+  DESKTOP_COMPANION_APP_NAME,
+  DESKTOP_COMPANION_DOWNLOAD_URL,
+  DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY
+} from '../config/DesktopCompanionConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
+import {
+  createAiGeneratedContentMetadata,
+  ensureAiGeneratedTextNotice
+} from '../utils/AiGeneratedContent';
 import {
   PROFILE_KNOCK_SHARE_UTD,
   ProfileKnockShareService,
@@ -220,6 +267,10 @@ const HDC_REVERSE_CONNECT_TIMEOUT_MS: number = 1500;
 const HDC_REVERSE_READ_TIMEOUT_MS: number = 3000;
 const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
 const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
+const LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS: number = 250;
+const HOME_COMFORT_CHAT_SCENE_ID: number = 3;
+const SYNC_REMINDER_SUPPRESSED_KEY: string = 'syncReminderSuppressed';
+const SYNC_REMINDER_FIRST_OPENED_AT_KEY: string = 'syncReminderFirstOpenedAt';
 
 interface ServerFile {
   name: string;
@@ -379,15 +430,12 @@ PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
+PersistentStorage.persistProp(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY, false);
+PersistentStorage.persistProp(SYNC_REMINDER_SUPPRESSED_KEY, false);
+PersistentStorage.persistProp(SYNC_REMINDER_FIRST_OPENED_AT_KEY, '');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
-PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
-PersistentStorage.persistProp('cloudPlannerModel', DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
-PersistentStorage.persistProp('cloudPlannerApiKey', DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
-PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
-PersistentStorage.persistProp('cloudDeciderApiKey', DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
-PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
-PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+initializeChatCloudConfigStorage();
 PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl);
 PersistentStorage.persistProp('voiceTtsApiKey', DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey);
 PersistentStorage.persistProp('voiceTtsModel', DEFAULT_ENDPOINT_CONFIG.voiceTtsModel);
@@ -457,7 +505,7 @@ struct Index {
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
-  @State localChatImagePreparing: boolean = false;
+  @State @Watch('onChatAppearanceChanged') localChatImagePreparing: boolean = false;
   @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
@@ -473,12 +521,28 @@ struct Index {
   @State downloadedModels: DownloadedModelItem[] = [];
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
+  @StorageLink(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY)
+  desktopCompanionReminderSuppressed: boolean = false;
+  @State desktopCompanionReminderVisible: boolean = false;
+  @State desktopCompanionDontRemindAgain: boolean = false;
+  @StorageLink(SYNC_REMINDER_SUPPRESSED_KEY) syncReminderSuppressed: boolean = false;
+  @StorageLink(SYNC_REMINDER_FIRST_OPENED_AT_KEY) syncReminderFirstOpenedAt: string = '';
+  @State syncReminderVisible: boolean = false;
+  @State syncReminderDontRemindAgain: boolean = false;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
-  @State currentTab: number = 0;
-  @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
+  @State @Watch('onCurrentTabChanged') currentTab: number = 0;
+  private readonly floatingMainTabsEnabled: boolean = supportsFloatingMainTabs();
+  private pageVisible: boolean = false;
+  private appliedPageBackgroundColor: string = '';
+  private appliedNavigationBarColor: string = '';
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onDebugEnabledChanged') private debugEnabled: boolean = false;
+  @StorageProp(HUAWEI_ACCOUNT_SESSION_KEY) @Watch('onAiAccountSessionChanged')
+  huaweiAccountSessionActive: boolean = false;
+  @State @Watch('onChatAppearanceChanged') chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
+  @State private taskConfigViewOpen: boolean = false;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
@@ -533,8 +597,8 @@ struct Index {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State wechatAutoSummaryRunning: boolean = false;
   @State wechatAutoSummaryStatus: string = '';
-  @State isThinking: boolean = false;
-  @State localAgentCleaningUp: boolean = false;
+  @State @Watch('onChatAppearanceChanged') isThinking: boolean = false;
+  @State @Watch('onChatAppearanceChanged') localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudPendingChatImageUris: string[] = [];
@@ -542,15 +606,19 @@ struct Index {
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
   private localChatCancelRequested: boolean = false;
+  private localChatCancelledGeneration: number = 0;
+  private localChatGeneration: number = 0;
+  private localChatNativeRequestSubmitted: boolean = false;
+  private localChatCompletionProbeTimerId: number = -1;
   @State cloudAutoConfirm: boolean = true;
-  @State cloudThinking: boolean = false;
+  @State @Watch('onChatAppearanceChanged') cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
   @State voiceStatus: VoiceInteractionStatus = 'idle';
   @State voicePartialTranscript: string = '';
   @State voiceActiveMessageId: string = '';
   @State chatSessions: ChatSessionSummary[] = [];
   @State activeChatSessionId: string = '';
-  @State activeChatMessages: ChatMessage[] = [];
+  @State @Watch('onChatAppearanceChanged') activeChatMessages: ChatMessage[] = [];
   @State chatSessionDrawerOpen: boolean = false;
   @State restoringLocalSession: boolean = false;
   @State hdcConnected: boolean = false;
@@ -563,12 +631,22 @@ struct Index {
   @State pcServerStatusText: string = 'PC Server 未连接';
   @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
+  @State dataManagerSyncFailed: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
   @State dataManagerProgressPercent: number = 0;
   @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @State homeTaskSuggestions: HomeTaskSuggestion[] = [];
+  @State homeTaskSuggestionsLoading: boolean = false;
+  @State homeTaskSuggestionError: string = '';
+  @State homeComfortConcerns: HomeComfortConcern[] = [];
+  @State homeComfortChatStore: HomeComfortChatStore = new HomeComfortChatStore();
+  @State homeComfortConcernsLoading: boolean = false;
+  @State homeComfortConcernError: string = '';
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
   @State avatarVersions: AvatarVersionViewModel[] = [];
+  @State backupBusy: boolean = false;
+  @State backupStatus: string = '尚未执行备份操作';
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -579,21 +657,26 @@ struct Index {
   private modelScopeActiveStreamCancel: (() => void) | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
+  private homeTaskSuggestionBatch: number = 0;
+  private homeComfortConcernBatch: number = 0;
+  private homeTaskSuggestionsAutoStarted: boolean = false;
   private avatarForegroundEnsuring: boolean = false;
   private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
+  private desktopCompanionReminderResolver: ((confirmed: boolean) => void) | null = null;
+  private desktopCompanionReminderPromise: Promise<boolean> | null = null;
+  private syncReminderShownThisSession: boolean = false;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private pcServerMonitor: PcServerMonitor | null = null;
   private pcServerConnectedPromptShown: boolean = false;
-  private pcServerCloudFallbackPlannerBaseUrl: string = '';
-  private pcServerCloudFallbackDeciderBaseUrl: string = '';
-  private pcServerCloudFallbackApiKey: string = '';
-  private pcServerCloudFallbackPlannerApiKey: string = '';
-  private pcServerCloudFallbackDeciderApiKey: string = '';
-  private pcServerCloudFallbackSaved: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
+  private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
+  private activePhoneRunSession: PhoneHdcRunSession | null = null;
+  @StorageProp('selfHdcSetupForegroundEpoch') @Watch('showPhoneSetupForForeground')
+  private phoneSetupForegroundEpoch: number = 0;
+  private phoneSetupShownForegroundEpoch: number = -1;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
@@ -611,6 +694,13 @@ struct Index {
   private cloudStreamDisplayTimerId: number = -1;
   private cloudStreamDisplayGeneration: number = 0;
   private cloudStreamDisplayVersion: number = 0;
+  @State profileShareStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private profileShareStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private profileShareStreamDisplayTimerId: number = -1;
+  private profileShareStreamDisplayGeneration: number = 0;
+  private profileShareStreamDisplayVersion: number = 0;
+  private profileShareStreamRequestActive: boolean = false;
+  private profileShareAnalysisGeneration: number = 0;
 
   private shouldDisplayFirstLaunchOnboarding(): boolean {
     return shouldShowFirstLaunchOnboarding(this.firstLaunchOnboardingVersion);
@@ -619,6 +709,7 @@ struct Index {
   private completeFirstLaunchOnboarding(): void {
     this.currentTab = MainTabIndex.Home;
     this.firstLaunchOnboardingVersion = FIRST_LAUNCH_ONBOARDING_VERSION;
+    this.maybeShowSyncReminder();
   }
 
   private nextChatMessageId(prefix: string = 'msg'): string {
@@ -637,6 +728,15 @@ struct Index {
 
   private chatMessagesForDisplay(): ChatMessage[] {
     let snapshot = this.cloudStreamDisplaySnapshot;
+    let streamingVersion = this.cloudStreamDisplayVersion;
+    let streamRequestActive = false;
+    let profileShareSnapshot = this.profileShareStreamDisplaySnapshot;
+    if ((this.profileShareStreamRequestActive || profileShareSnapshot.active) &&
+      profileShareSnapshot.sessionId === this.activeChatSessionId && profileShareSnapshot.messageId.length > 0) {
+      snapshot = profileShareSnapshot;
+      streamingVersion = this.profileShareStreamDisplayVersion;
+      streamRequestActive = this.profileShareStreamRequestActive;
+    }
     if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
       return this.activeChatMessages;
     }
@@ -662,8 +762,8 @@ struct Index {
         createdAt: message.createdAt,
         imagePath: message.imagePath,
         imagePaths: chatMessageImagePaths(message),
-        streamingActive: snapshot.active,
-        streamingVersion: this.cloudStreamDisplayVersion
+        streamingActive: snapshot.active || streamRequestActive,
+        streamingVersion: streamingVersion
       };
       if (message.voice !== undefined) {
         renderedMessage.voice = message.voice;
@@ -680,7 +780,70 @@ struct Index {
     this.chatMode = state.mode;
   }
 
+  private clearLocalChatCompletionProbe(): void {
+    if (this.localChatCompletionProbeTimerId === -1) {
+      return;
+    }
+    clearTimeout(this.localChatCompletionProbeTimerId);
+    this.localChatCompletionProbeTimerId = -1;
+  }
+
+  private nativeLocalChatRequestRunning(): boolean {
+    try {
+      return mnnllm.isChatRunning();
+    } catch (e) {
+      // 旧 native 库或瞬时查询失败时保持保守，不提前允许切换/卸载模型。
+      let err = e as Error;
+      AppLogger.warnCause('LocalChat.State', 'query native chat state failed', err);
+      return true;
+    }
+  }
+
+  private localChatCancellationRequestedFor(generation: number): boolean {
+    return this.localChatCancelRequested && this.localChatCancelledGeneration === generation;
+  }
+
+  private reconcileCompletedLocalChatInference(generation: number): boolean {
+    if (generation !== this.localChatGeneration || !this.localChatInferenceRunning ||
+      !this.localChatNativeRequestSubmitted || this.localChatCancellationRequestedFor(generation)) {
+      return false;
+    }
+    let nativeRunning = this.nativeLocalChatRequestRunning();
+    if (!chatLocalInferenceStateIsStale(this.localChatInferenceRunning,
+      this.localChatNativeRequestSubmitted, nativeRunning)) {
+      return false;
+    }
+    this.clearLocalChatCompletionProbe();
+    // 使仍在等待 Promise 完成回调的旧 finally 失效，避免它清掉随后启动的新任务状态。
+    this.localChatGeneration++;
+    this.localChatNativeRequestSubmitted = false;
+    this.localChatInferenceRunning = false;
+    this.localChatCancelRequested = false;
+    this.localChatCancelledGeneration = 0;
+    if (!this.localAgentCleaningUp && !this.restoringLocalSession && this.activeAgentRunner === null) {
+      this.isThinking = false;
+    }
+    AppLogger.info('LocalChat.State', 'native chat completed; released stale ArkTS busy state');
+    return true;
+  }
+
+  private scheduleLocalChatCompletionProbe(generation: number): void {
+    if (generation !== this.localChatGeneration || !this.localChatInferenceRunning ||
+      !this.localChatNativeRequestSubmitted) {
+      return;
+    }
+    this.clearLocalChatCompletionProbe();
+    this.localChatCompletionProbeTimerId = setTimeout(() => {
+      this.localChatCompletionProbeTimerId = -1;
+      if (this.reconcileCompletedLocalChatInference(generation)) {
+        return;
+      }
+      this.scheduleLocalChatCompletionProbe(generation);
+    }, LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS);
+  }
+
   private isLocalNativeBusy(): boolean {
+    this.reconcileCompletedLocalChatInference(this.localChatGeneration);
     if (this.isThinking || this.localAgentCleaningUp || this.restoringLocalSession) {
       return true;
     }
@@ -945,6 +1108,60 @@ struct Index {
     }, delayMs);
   }
 
+  private clearProfileShareStreamDisplayTimer(): void {
+    if (this.profileShareStreamDisplayTimerId !== -1) {
+      clearTimeout(this.profileShareStreamDisplayTimerId);
+      this.profileShareStreamDisplayTimerId = -1;
+    }
+  }
+
+  private publishProfileShareStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.profileShareStreamDisplayVersion += 1;
+    this.profileShareStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleProfileShareStreamDisplayFrame(): void {
+    if (this.profileShareStreamDisplayTimerId !== -1 || !this.profileShareStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.profileShareStreamDisplayGeneration;
+    this.profileShareStreamDisplayTimerId = setTimeout(() => {
+      this.profileShareStreamDisplayTimerId = -1;
+      if (generation !== this.profileShareStreamDisplayGeneration) {
+        return;
+      }
+      this.publishProfileShareStreamDisplaySnapshot(this.profileShareStreamDisplayPacer.advanceFrame());
+      this.scheduleProfileShareStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private resetProfileShareStreamDisplay(): void {
+    this.clearProfileShareStreamDisplayTimer();
+    this.profileShareStreamDisplayGeneration += 1;
+    this.profileShareStreamRequestActive = false;
+    this.profileShareStreamDisplayPacer.reset();
+    this.publishProfileShareStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
+  }
+
+  private beginProfileShareStreamDisplay(): void {
+    this.resetProfileShareStreamDisplay();
+    this.profileShareStreamRequestActive = true;
+  }
+
+  private updateProfileShareStreamDisplayTarget(sessionId: string, messageId: string, content: string): void {
+    this.publishProfileShareStreamDisplaySnapshot(
+      this.profileShareStreamDisplayPacer.setTarget(sessionId, messageId, content, []));
+    this.scheduleProfileShareStreamDisplayFrame();
+  }
+
+  private finishProfileShareStreamMessage(sessionId: string, messageId: string, content: string): void {
+    this.profileShareStreamRequestActive = false;
+    this.publishProfileShareStreamDisplaySnapshot(
+      this.profileShareStreamDisplayPacer.beginFinish(sessionId, messageId, content, []));
+    this.scheduleProfileShareStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content);
+  }
+
   private updateChatContextSummaryForSession(sessionId: string, summary: string, updatedAt: number,
     untilMessageId: string, messageCount: number): void {
     let state = ChatSessionController.updateContextSummaryInSession(this.filesDir, this.currentChatSessionViewState(),
@@ -965,6 +1182,7 @@ struct Index {
   }
 
   private appendActiveTaskTraceLine(line: string, messageId: string = ''): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let state = ChatSessionController.appendTaskTraceLine(this.filesDir, this.currentChatSessionViewState(),
       this.chatMode, line, messageId);
     this.applyChatSessionViewState(state);
@@ -1038,6 +1256,12 @@ struct Index {
   }
 
   private async toggleVoiceInput(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().toggleVoiceInput();
   }
 
@@ -1046,10 +1270,22 @@ struct Index {
   }
 
   private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
   }
 
   private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     await this.voiceOrchestrator().replayAssistantMessageVoice(messageId, text);
   }
 
@@ -1195,18 +1431,28 @@ struct Index {
     return fallbackId.length > 0 ? fallbackId : this.activeChatSessionId;
   }
 
+  private onDebugEnabledChanged(): void {
+    if (!this.debugEnabled) {
+      this.cloudOutput = '';
+      this.output = '';
+    }
+  }
+
   private appendTaskTraceLineForSession(sessionId: string, line: string, messageId: string = ''): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let state = ChatSessionController.appendTaskTraceLineToSession(this.filesDir, this.currentChatSessionViewState(),
       this.taskSessionId(sessionId), line, messageId);
     this.applyChatSessionViewState(state);
   }
 
   private handleLocalAgentLog(message: string): void {
-    this.output = message;
-    let sessionId = this.taskSessionId(this.localTaskSessionId);
-    let traceLine = this.formatAgentTraceLog(message);
-    if (traceLine.length > 0) {
-      this.appendTaskTraceLineForSession(sessionId, traceLine);
+    if (DebugSettings.isEnabled()) {
+      this.output = message;
+      let sessionId = this.taskSessionId(this.localTaskSessionId);
+      let traceLine = this.formatAgentTraceLog(message);
+      if (traceLine.length > 0) {
+        this.appendTaskTraceLineForSession(sessionId, traceLine);
+      }
     }
     let imagePath = this.snapshotImagePathFromLog(message);
     if (imagePath.length > 0) {
@@ -1450,12 +1696,9 @@ struct Index {
     }
     this.restoringLocalSession = true;
     try {
-      mnnllm.reset();
-      for (let i = 0; i < session.messages.length; i++) {
-        let message = session.messages[i];
-        if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          await mnnllm.chat(buildLocalChatMultimodalPrompt(message.content, chatMessageImagePaths(message)));
-        }
+      let result = mnnllm.restoreChatHistory(buildNativeLocalChatHistoryContents(session.messages));
+      if (result !== 'ok') {
+        throw new Error(result);
       }
     } catch (e) {
       let err = e as Error;
@@ -1468,6 +1711,13 @@ struct Index {
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLogToSession(sessionId: string, message: string, replaceExisting: boolean = false): void {
+    // Completion is a task result, and must not depend on diagnostic logging.
+    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
+      this.appendChatMessageForSession(sessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+    }
+    if (!DebugSettings.isEnabled()) { return; }
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
@@ -1478,11 +1728,6 @@ struct Index {
     if (traceLine.length > 0) {
       this.appendTaskTraceLineForSession(sessionId, traceLine);
     }
-    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
-      this.appendChatMessageForSession(sessionId,
-        createChatMessage(this.nextChatMessageId('task-result'), 'task',
-          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
-    }
   }
 
   private appendCloudLog(message: string, replaceExisting: boolean = false): void {
@@ -1490,6 +1735,7 @@ struct Index {
   }
 
   private resetCloudLog(message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
@@ -1503,7 +1749,7 @@ struct Index {
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
         title: '大模型返回确认',
-        message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+        message: ensureAiGeneratedTextNotice('模型推理结果：\n' + response + '\n\n是否同意执行？'),
         buttons: [
           { text: '拒绝', color: '#ff0000' },
           { text: '同意', color: '#00cc00' }
@@ -1525,7 +1771,7 @@ struct Index {
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
         title: '云端模型返回确认',
-        message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+        message: ensureAiGeneratedTextNotice('模型推理结果:\n' + response + '\n\n是否同意执行？'),
         buttons: [
           { text: '拒绝', color: '#ff0000' },
           { text: '同意', color: '#00cc00' }
@@ -1579,6 +1825,17 @@ struct Index {
 
   private async runMobileGuiTaskForChatSession(sessionId: string,
     request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (!this.ensureAiServiceLogin()) {
+      return mobileGuiTaskRunResultFromFailure('login_required', AI_LOGIN_REQUIRED_MESSAGE, true);
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return mobileGuiTaskRunResultFromFailure('privacy_consent_required', '未同意隐私声明，任务未执行', true);
+    }
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') {
+      return mobileGuiTaskRunResultFromFailure('hdc_settings_unavailable', '控制设置读取失败，任务未执行', true);
+    }
+    if (deviceMode === 'phone') { return await this.runPhoneMobileGuiTaskForChatSession(sessionId, request); }
     if (!this.isMobileGuiTaskCloudConfigReady()) {
       this.appendCloudLogToSession(sessionId, this.mobileGuiTaskConfigMissingMessage());
       return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
@@ -1616,6 +1873,48 @@ struct Index {
       let errorCode = classifyMobileGuiWorkflowFailure(message);
       this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行异常：' + errorCode + ' ' + message);
       return mobileGuiTaskRunResultFromFailure(errorCode, message, true);
+    }
+  }
+
+  private async runPhoneMobileGuiTaskForChatSession(sessionId: string,
+    request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      return mobileGuiTaskRunResultFromFailure('hdc_busy', '已有 Agent 正在执行或收尾', true);
+    }
+    if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'phone-chat-workflow', false)) {
+      return mobileGuiTaskRunResultFromFailure('hdc_settings_required',
+        '请在“我的 > 手机 HDC”设置 IP 和无线调试连接端口后重新下发任务', true);
+    }
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      return mobileGuiTaskRunResultFromFailure('hdc_busy', '已有 Agent 正在执行或收尾', true);
+    }
+    let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-chat-workflow',
+      async (): Promise<void> => { this.cloudClient.cancelActiveRequests(); });
+    this.activePhoneRunSession = session;
+    let runDir = '';
+    try {
+      return await session.run<MobileGuiTaskRunResult>('聊天 GUI 工具：' + request.task,
+        async (bridge: PhoneHdcWorkflowBridge): Promise<MobileGuiTaskRunResult> => {
+          this.currentTab = MainTabIndex.Chat;
+          let runRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(this.filesDir, sessionId);
+          let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getConfiguredCloudConfig(), '',
+            (message: string): void => {
+              this.appendCloudLogToSession(sessionId, message); session.record(message);
+            }, runRoot);
+          runner.useDeviceBridgeForPhone(bridge);
+          let result = await runner.runTask(buildMobileGuiWorkflowTask(request));
+          session.setResult(result.status, result.message);
+          session.record('WORKFLOW_SUMMARY runDir=' + result.runDir + ' returnedToApp=' + result.returnedToApp);
+          let mapped = mobileGuiTaskRunResultFromWorkflowResult(this.filesDir, result);
+          runDir = mapped.runDir;
+          return mapped;
+        }, async (): Promise<void> => { this.requirePhoneCloudAgentConfig(); });
+    } catch (e) {
+      let message = (e as Error).message;
+      this.appendCloudLogToSession(sessionId, '手机自控 GUI 工具失败：' + message);
+      return mobileGuiTaskRunResultFromFailure(classifyMobileGuiWorkflowFailure(message), message, true, runDir);
+    } finally {
+      if (this.activePhoneRunSession === session) { this.activePhoneRunSession = null; }
     }
   }
 
@@ -1977,6 +2276,12 @@ struct Index {
   }
 
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，未生成头像');
+    }
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
       showToastSafely('数据管理服务未就绪', 1500);
@@ -2452,12 +2757,18 @@ struct Index {
   }
 
   private updateDataManagerProgress(progress: DataManagerProgress): void {
-    this.dataManagerProgressStage = progress.percent < 60 ? '正在整理日志' : '正在构建索引';
+    this.dataManagerProgressStage = progress.stage;
     this.dataManagerProgressMessage = progress.message;
     this.dataManagerProgressPercent = Math.max(0, Math.min(100, progress.percent));
   }
 
   private async refreshDataManager(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     dataManagerInfo(`refreshDataManager invoked: hasFacade=${this.dataManagerFacade !== null}, refreshing=${this.dataManagerRefreshing}`);
     if (this.dataManagerFacade === null) {
       dataManagerWarn('refreshDataManager skipped: facade is null');
@@ -2467,16 +2778,19 @@ struct Index {
       dataManagerWarn('refreshDataManager skipped: already refreshing');
       return;
     }
-    if (!this.dataManagerFacade.hasDailyLogData()) {
-      dataManagerInfo('refreshDataManager skipped: no daily-log data');
-      showToastSafely('暂无数据', 1500);
-      return;
-    }
     this.dataManagerRefreshing = true;
+    this.dataManagerSyncFailed = false;
     this.dataManagerProgressStage = '正在整理日志';
     this.dataManagerProgressMessage = '';
     this.dataManagerProgressPercent = 0;
     try {
+      if (!this.dataManagerFacade.hasDataToSync()) {
+        this.dataManagerProgressStage = '完成';
+        this.dataManagerProgressMessage = '暂无待同步数据';
+        this.dataManagerProgressPercent = 100;
+        showToastSafely('暂无待同步数据', 1500);
+        return;
+      }
       let modelConfig = this.getDataManagerModelConfig();
       dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
       let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
@@ -2487,16 +2801,14 @@ struct Index {
       this.dataManagerProgressStage = '完成';
       this.dataManagerProgressMessage = summary.message;
       this.dataManagerProgressPercent = 100;
-      if (summary.skipped) {
-        showToastSafely('已是最新数据', 1500);
-      }
+      showToastSafely(summary.skipped ? '已是最新数据' : '同步完成', 1800);
       dataManagerInfo('refreshDataManager success: ' + summary.message);
     } catch (e) {
       let err = e as Error;
       this.appendCloudLog('DataManager refresh failed: ' + err.message);
-      this.dataManagerProgressStage = '失败';
-      this.dataManagerProgressMessage = '整理失败: ' + err.message;
-      this.dataManagerProgressPercent = 100;
+      this.dataManagerProgressStage = '同步失败';
+      this.dataManagerProgressMessage = err.message || '同步遇到异常，请稍后重试';
+      this.dataManagerSyncFailed = true;
       dataManagerError('refreshDataManager failed: ' + err.message);
     } finally {
       this.dataManagerRefreshing = false;
@@ -2504,7 +2816,46 @@ struct Index {
     }
   }
 
+  private maybeShowSyncReminder(): void {
+    if (this.syncReminderShownThisSession || this.syncReminderSuppressed || this.dataManagerRefreshing ||
+      this.shouldDisplayFirstLaunchOnboarding() || this.dataManagerFacade === null) {
+      return;
+    }
+    if (this.syncReminderFirstOpenedAt.length === 0) {
+      this.syncReminderFirstOpenedAt = nowIsoLocal();
+    }
+    try {
+      if (this.dataManagerFacade.shouldRemindToSync(Date.now(), this.syncReminderFirstOpenedAt)) {
+        this.syncReminderShownThisSession = true;
+        this.syncReminderDontRemindAgain = false;
+        this.syncReminderVisible = true;
+      }
+    } catch (e) {
+      dataManagerWarn('sync reminder check failed: ' + (e as Error).message);
+    }
+  }
+
+  private toggleSyncReminderSuppressed(): void {
+    this.syncReminderDontRemindAgain = !this.syncReminderDontRemindAgain;
+    this.syncReminderSuppressed = this.syncReminderDontRemindAgain;
+  }
+
+  private dismissSyncReminder(startSync: boolean): void {
+    this.syncReminderVisible = false;
+    if (startSync) {
+      this.refreshDataManager().catch((e: Error) => {
+        dataManagerWarn('sync reminder refresh failed: ' + e.message);
+      });
+    }
+  }
+
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (this.wechatAutoSummaryRunning) {
       showToastSafely('微信采集正在进行', 1200);
       return;
@@ -2569,6 +2920,15 @@ struct Index {
   }
 
   aboutToAppear() {
+    PrivacyConsent.setRevokeHandler(() => {
+      this.cancelCurrentCloudChat();
+      if (this.chatVoiceOrchestrator !== null) {
+        this.chatVoiceOrchestrator.shutdown();
+      }
+      if (AgentExecutionController.isExecutionActive()) {
+        AgentExecutionController.requestCancellation();
+      }
+    });
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     this.migrateWechatAutoSummaryDefaultValues();
@@ -2587,9 +2947,9 @@ struct Index {
     this.syncModelDir();
     this.refreshDownloadedModels();
     try {
-      mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
+      DebugSettings.initialize(ctx);
     } catch (e) {
-      AppLogger.errorCause('NativeRuntime', 'initLogFile failed', e as Error);
+      AppLogger.errorCause('Debug', 'Cannot initialize Debug settings', e as Error);
     }
     this.prepareCustomOpp();
     this.initDataManager();
@@ -2620,6 +2980,15 @@ struct Index {
     this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.activePhoneRunSession !== null) {
+        await this.activePhoneRunSession.requestCancellation();
+        return;
+      }
+      if (this.activePhoneWorkflowBridge !== null) {
+        this.activePhoneWorkflowBridge.cancel();
+        this.cloudClient.cancelActiveRequests();
+        return;
+      }
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
         this.localAgentCleaningUp = true;
         this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
@@ -2640,6 +3009,15 @@ struct Index {
       }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.activePhoneRunSession !== null) {
+        await this.activePhoneRunSession.requestCancellation();
+        return;
+      }
+      if (this.activePhoneWorkflowBridge !== null) {
+        this.activePhoneWorkflowBridge.cancel();
+        this.cloudClient.cancelActiveRequests();
+        return;
+      }
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
         await this.activeAgentRunner.requestCancellation();
         this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
@@ -2657,24 +3035,164 @@ struct Index {
     this.startPcServerMonitor();
   }
 
+  onBackPress(): boolean {
+    if (this.currentTab === MainTabIndex.Task && this.taskConfigViewOpen) {
+      this.taskConfigViewOpen = false;
+      return true;
+    }
+    return false;
+  }
+
   onPageShow(): void {
+    this.pageVisible = true;
+    this.onCurrentTabChanged();
+    this.initializePrivacyConsent();
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
+    this.maybeShowSyncReminder();
+    this.showPhoneSetupForForeground();
+  }
+
+  private showPhoneSetupForForeground(): void {
+    if (this.pageVisible && this.phoneSetupShownForegroundEpoch !== this.phoneSetupForegroundEpoch && this.filesDir.length > 0 &&
+      !AgentExecutionController.isExecutionActive() && !SelfHdcTestRunner.shared().snapshot().running) {
+      this.phoneSetupShownForegroundEpoch = this.phoneSetupForegroundEpoch;
+      // Remind only while the saved HDC port is empty and the user has not opted out.
+      SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'app-open', false, true).catch((e: Error): void => {
+        AppLogger.warnCause('SelfHdc', 'Startup setup check failed', e);
+      });
+    }
   }
 
   onPageHide(): void {
+    this.pageVisible = false;
+    this.appliedPageBackgroundColor = '';
+    this.appliedNavigationBarColor = '';
+    applyPageStatusBar(this.getUIContext(), '#FFFFFF', '#FFFFFF');
     this.stopHomeRecommendationDateTimer();
   }
 
+  private onCurrentTabChanged(): void {
+    if (this.pageVisible) {
+      let backgroundColor = this.currentPageBackgroundColor();
+      let navigationBarColor = this.currentTab === MainTabIndex.Chat ? backgroundColor : '#FFFFFF';
+      if (backgroundColor !== this.appliedPageBackgroundColor ||
+        navigationBarColor !== this.appliedNavigationBarColor) {
+        applyPageStatusBar(this.getUIContext(), backgroundColor, navigationBarColor);
+        this.appliedPageBackgroundColor = backgroundColor;
+        this.appliedNavigationBarColor = navigationBarColor;
+      }
+    }
+  }
+
+  private onChatAppearanceChanged(): void {
+    if (this.currentTab === MainTabIndex.Chat) {
+      this.onCurrentTabChanged();
+    }
+  }
+
+  private currentPageBackgroundColor(): string {
+    let busy = this.chatMode === CHAT_MODE_LOCAL_INFERENCE ?
+      this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing : this.cloudThinking;
+    return mainTabBackgroundColor(this.currentTab, this.activeChatMessages.length > 0 || busy);
+  }
+
   aboutToDisappear(): void {
+    if (this.desktopCompanionReminderResolver !== null) {
+      this.finishDesktopCompanionReminder(false);
+    }
+    PrivacyConsent.setRevokeHandler(null);
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
+    this.clearLocalChatCompletionProbe();
     if (this.chatVoiceOrchestrator !== null) {
       this.chatVoiceOrchestrator.shutdown();
     }
     this.profileKnockShareInitToken++;
     this.profileKnockShareService.dispose();
+  }
+
+  private initializePrivacyConsent(): void {
+    PrivacyConsent.initialize(getContext(this) as common.UIAbilityContext).then(async (): Promise<void> => {
+      if (AiServiceAccess.isAllowed() && PrivacyConsent.isAccepted() && !this.homeTaskSuggestionsAutoStarted) {
+        this.homeTaskSuggestionsAutoStarted = true;
+        await this.refreshHomeTaskSuggestions(false);
+        await this.refreshHomeComfortConcerns(false);
+      }
+    }).catch(() => {
+      showToastSafely('隐私设置读取失败，任务与云端上传暂不可用，请稍后重试', 2000);
+    });
+  }
+
+  private async ensurePrivacyConsent(): Promise<boolean> {
+    if (PrivacyConsent.isAccepted()) {
+      return true;
+    }
+    return await PrivacyConsentDialog.show(this.getUIContext());
+  }
+
+  private async ensureDesktopCompanionReminder(): Promise<boolean> {
+    let mode = this.selectedAgentDeviceMode();
+    if (mode === 'unavailable') { return false; }
+    if (mode !== 'pc') { return true; }
+    if (this.desktopCompanionReminderSuppressed) {
+      return true;
+    }
+    if (this.desktopCompanionReminderPromise !== null) {
+      // 不把重复点击排队到同一次确认之后，避免一次确认启动多个任务。
+      return false;
+    }
+    this.desktopCompanionDontRemindAgain = false;
+    this.desktopCompanionReminderVisible = true;
+    this.desktopCompanionReminderPromise = new Promise<boolean>((resolve) => {
+      this.desktopCompanionReminderResolver = resolve;
+    });
+    return await this.desktopCompanionReminderPromise;
+  }
+
+  private finishDesktopCompanionReminder(confirmed: boolean): void {
+    let resolver = this.desktopCompanionReminderResolver;
+    this.desktopCompanionReminderResolver = null;
+    this.desktopCompanionReminderPromise = null;
+    this.desktopCompanionReminderVisible = false;
+    resolver?.(confirmed);
+  }
+
+  private toggleDesktopCompanionReminderSuppressed(): void {
+    this.desktopCompanionDontRemindAgain = !this.desktopCompanionDontRemindAgain;
+    this.desktopCompanionReminderSuppressed = this.desktopCompanionDontRemindAgain;
+  }
+
+  private async openDesktopCompanionDownloadPage(): Promise<void> {
+    try {
+      let context = getContext(this) as common.UIAbilityContext;
+      await context.openLink(DESKTOP_COMPANION_DOWNLOAD_URL);
+    } catch (e) {
+      showToastSafely('无法打开下载链接，请到“我的 > 桌面端 App”中查看', 2200);
+    }
+  }
+
+  private ensureAiServiceLogin(showPrompt: boolean = true): boolean {
+    return AiLoginGuard.ensure(this.getUIContext(), showPrompt);
+  }
+
+  private onAiAccountSessionChanged(): void {
+    if (AiServiceAccess.isAllowed()) {
+      // 登录后补上此前静默跳过的首页生成，不恢复被拦截的消息或任务。
+      this.initializePrivacyConsent();
+      return;
+    }
+    this.homeTaskSuggestionsAutoStarted = false;
+    this.cancelCurrentCloudChat();
+    this.cloudClient.cancelActiveRequests();
+    this.cancelCurrentLocalChatInference();
+    if (this.chatVoiceOrchestrator !== null) {
+      this.chatVoiceOrchestrator.shutdown();
+    }
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.requestCancellation();
+    }
   }
 
   private startPcServerMonitor(): void {
@@ -2705,12 +3223,12 @@ struct Index {
       this.disablePcServerCloudEndpoint(false);
     }
     if (becameConnected) {
-      this.enablePcServerCloudEndpoint(false);
       this.showPcServerConnectedPrompt();
     }
   }
 
   private showPcServerConnectedPrompt(): void {
+    if (this.selectedAgentDeviceMode() !== 'pc') { return; }
     if (this.pcServerConnectedPromptShown) {
       return;
     }
@@ -2734,19 +3252,6 @@ struct Index {
       showToastSafely('PC Server 未连接', 1500);
       return;
     }
-    if (!this.isPcServerCloudEndpointEnabled()) {
-      this.pcServerCloudFallbackPlannerBaseUrl = this.cloudPlannerBaseUrl;
-      this.pcServerCloudFallbackDeciderBaseUrl = this.cloudDeciderBaseUrl;
-      this.pcServerCloudFallbackApiKey = this.cloudApiKey;
-      this.pcServerCloudFallbackPlannerApiKey = this.cloudPlannerApiKey;
-      this.pcServerCloudFallbackDeciderApiKey = this.cloudDeciderApiKey;
-      this.pcServerCloudFallbackSaved = true;
-    }
-    this.cloudPlannerBaseUrl = PC_SERVER_LLM_BASE_URL;
-    this.cloudDeciderBaseUrl = PC_SERVER_LLM_BASE_URL;
-    this.cloudApiKey = '';
-    this.cloudPlannerApiKey = '';
-    this.cloudDeciderApiKey = '';
     this.pcServerCloudEnabled = true;
     if (showToast) {
       showToastSafely('已启用 PC Server 云端接口', 1600);
@@ -2758,22 +3263,6 @@ struct Index {
       return;
     }
     this.pcServerCloudEnabled = false;
-    this.cloudPlannerBaseUrl = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackPlannerBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
-    this.cloudDeciderBaseUrl = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackDeciderBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
-    this.cloudApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackApiKey : DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
-    this.cloudPlannerApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackPlannerApiKey : DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
-    this.cloudDeciderApiKey = this.pcServerCloudFallbackSaved ?
-      this.pcServerCloudFallbackDeciderApiKey : DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
-    this.pcServerCloudFallbackPlannerBaseUrl = '';
-    this.pcServerCloudFallbackDeciderBaseUrl = '';
-    this.pcServerCloudFallbackApiKey = '';
-    this.pcServerCloudFallbackPlannerApiKey = '';
-    this.pcServerCloudFallbackDeciderApiKey = '';
-    this.pcServerCloudFallbackSaved = false;
     if (showToast) {
       showToastSafely('已恢复原云端接口', 1600);
     }
@@ -2808,14 +3297,19 @@ struct Index {
 
   private buildProfileShareEnvelope(): ProfileShareEnvelope {
     let snapshot = this.buildProfileShareSnapshot();
+    let generationTime = new Date();
+    let generatedAt = generationTime.toISOString();
+    let contentId = 'profile-' + String(generationTime.getTime());
     return {
       schemaVersion: 1,
       typeId: PROFILE_KNOCK_SHARE_UTD,
-      appId: 'com.example.mnnllmchat',
+      appId: getAppBundleName(),
       appName: 'MobiInfer LLM Chat',
-      generatedAt: new Date().toISOString(),
-      profileText: this.buildProfileShareText(snapshot),
-      profile: snapshot
+      generatedAt: generatedAt,
+      profileText: ensureAiGeneratedTextNotice(this.buildProfileShareText(snapshot)),
+      profile: snapshot,
+      aiGenerated: true,
+      aiContentMetadata: createAiGeneratedContentMetadata(contentId, generatedAt)
     };
   }
 
@@ -2963,6 +3457,9 @@ struct Index {
   }
 
   private async handleProfileShareReceived(event: ProfileShareReceivedEvent): Promise<void> {
+    let analysisGeneration = ++this.profileShareAnalysisGeneration;
+    this.profileShareCloudClient.cancelActiveRequests();
+    this.resetProfileShareStreamDisplay();
     this.currentTab = MainTabIndex.Chat;
     let profileSession = this.createProfileShareCloudSession(event);
     if (profileSession === null) {
@@ -2989,33 +3486,63 @@ struct Index {
       return;
     }
 
+    let streamedReport = '';
+    this.beginProfileShareStreamDisplay();
     try {
       let localProfile = this.buildProfileShareEnvelope().profileText;
-      let report = await this.runProfileShareAffinityAnalysis(localProfile, event.profileText);
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, report);
+      let report = await this.runProfileShareAffinityAnalysis(localProfile, event.profileText, (delta: string): void => {
+        if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+          return;
+        }
+        streamedReport += delta;
+        this.updateProfileShareStreamDisplayTarget(chatSessionId, assistantMessageId, streamedReport);
+      });
+      if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+        return;
+      }
+      let finalReport = streamedReport.length > 0 ? streamedReport : report;
+      if (finalReport.trim().length === 0) {
+        throw new Error('Planner 返回了空的同频报告。');
+      }
+      this.finishProfileShareStreamMessage(chatSessionId, assistantMessageId, finalReport);
       this.appendCloudLog('[一碰分享] 同频报告生成完成。');
     } catch (e) {
+      if (analysisGeneration !== this.profileShareAnalysisGeneration) {
+        return;
+      }
       let err = e as Error;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
-        '[错误] 同频报告生成失败：' + err.message);
+      let errorText = '[错误] 同频报告生成失败：' + err.message;
+      let failureContent = streamedReport.length > 0 ? streamedReport + '\n\n' + errorText : errorText;
+      this.finishProfileShareStreamMessage(chatSessionId, assistantMessageId, failureContent);
       this.appendCloudLog('[一碰分享] 同频报告生成失败：' + err.message);
     }
   }
 
-  private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string): Promise<string> {
+  private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string,
+    onContentDelta: (delta: string) => void): Promise<string> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，未上传资料进行分析');
+    }
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: cloudPlannerApiKey(config),
       messages: this.buildProfileAffinityMessages(localProfile, remoteProfile),
       temperature: 0.2,
+      model: config.plannerModel,
       maxTokens: 2048,
       readTimeout: 120000,
       chatTemplateKwargs: {
         enable_thinking: false
       }
     };
-    return await this.profileShareCloudClient.chatCompletionText(options);
+    let result = await this.profileShareCloudClient.chatCompletionStream(options, {
+      onContentDelta: onContentDelta
+    });
+    return result.content;
   }
 
   private buildProfileAffinityMessages(localProfile: string, remoteProfile: string): CloudChatMessage[] {
@@ -3055,6 +3582,13 @@ struct Index {
       [], 'endpointDefault.cloudPlannerModel', false);
     this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
+    // 旧版会把临时 PC LLM 地址写进 PersistentStorage；升级后恢复真正的云端默认值。
+    if (this.cloudPlannerBaseUrl.trim() === PC_SERVER_LLM_BASE_URL) {
+      this.cloudPlannerBaseUrl = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+    }
+    if (this.cloudDeciderBaseUrl.trim() === PC_SERVER_LLM_BASE_URL) {
+      this.cloudDeciderBaseUrl = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+    }
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
     this.cloudPlannerApiKey = this.migrateSplitCloudApiKey(this.cloudPlannerApiKey,
@@ -3901,6 +4435,66 @@ struct Index {
       this.output = '所有 model 目录下均无 debug_outputs';
     } else {
       this.output = `已删除 ${totalDeleted} 个调试输出文件\n${results.join('\n')}`;
+    }
+  }
+
+  private async exportEncryptedBackup(password: string, includeSensitiveSettings: boolean): Promise<void> {
+    this.backupBusy = true;
+    AppLogger.info('Backup.UI', 'export requested includeSensitive=' + String(includeSensitiveSettings));
+    try {
+      let context = this.backupAbilityContext();
+      await SettingsBackupController.exportEncryptedBackup({
+        context: context,
+        filesDir: this.filesDir,
+        password: password,
+        includeSensitiveSettings: includeSensitiveSettings,
+        onStatusChange: (status: string) => { this.backupStatus = status; }
+      });
+      AppLogger.info('Backup.UI', 'export flow finished');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.errorCause('Backup.UI', 'export flow failed', err);
+      throw err;
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private async importEncryptedBackup(password: string): Promise<void> {
+    this.backupBusy = true;
+    AppLogger.info('Backup.UI', 'import requested');
+    try {
+      let context = this.backupAbilityContext();
+      await SettingsBackupController.importEncryptedBackup({
+        context: context,
+        filesDir: this.filesDir,
+        password: password,
+        onStatusChange: (status: string) => { this.backupStatus = status; },
+        onRestored: () => {
+          this.initDataManager();
+          this.initChatSessions();
+        }
+      });
+      AppLogger.info('Backup.UI', 'import flow finished');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.errorCause('Backup.UI', 'import flow failed', err);
+      throw err;
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private backupAbilityContext(): common.UIAbilityContext {
+    try {
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('host context is undefined');
+      }
+      return hostContext as common.UIAbilityContext;
+    } catch (e) {
+      AppLogger.errorCause('Backup.UI', 'get host context failed', e as Error);
+      throw new Error('无法获取页面上下文，请返回设置页后重试');
     }
   }
 
@@ -4811,6 +5405,10 @@ struct Index {
     }
   }
 
+  private getConfiguredCloudConfig(): CloudModelConfig {
+    return readChatCloudConfig();
+  }
+
   private getCloudConfig(): CloudModelConfig {
     if (this.isPcServerCloudEndpointEnabled()) {
       return {
@@ -4823,21 +5421,7 @@ struct Index {
         deciderModel: ''
       };
     }
-    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
-    let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
-    let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
-    let config: CloudModelConfig = {
-      plannerBaseUrl: configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
-        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
-      plannerModel: configuredEndpointValueOrDefault(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
-      plannerApiKey: plannerApiKey,
-      deciderBaseUrl: configuredEndpointValueOrDefault(this.cloudDeciderBaseUrl,
-        DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
-      deciderApiKey: deciderApiKey,
-      apiKey: plannerApiKey,
-      deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
-    };
-    return config;
+    return this.getConfiguredCloudConfig();
   }
 
   private isCloudConfigReady(): boolean {
@@ -4910,11 +5494,21 @@ struct Index {
   }
 
   private isCloudPlannerConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     let config = this.getCloudConfig();
     return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
   }
 
+  private isConfiguredCloudPlannerReady(config: CloudModelConfig): boolean {
+    return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
+  }
+
   async testCloudPlanner() {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     if (!this.isCloudPlannerConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner 服务地址和 API Key。', true);
       return;
@@ -4944,6 +5538,12 @@ struct Index {
   }
 
   async runCloudPlannerOnce(voiceMetadata?: ChatVoiceMetadata) {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
@@ -5707,6 +6307,161 @@ struct Index {
     return true;
   }
 
+  private recentHomeTaskSuggestionEvents(): IndexedEvent[] {
+    if (this.dataManagerFacade === null) {
+      return [];
+    }
+    let options: QueryOptions = {
+      keywords: [],
+      domains: [],
+      entities: [],
+      date: '',
+      month: '',
+      startDate: '',
+      endDate: '',
+      workflowSceneIds: [],
+      limit: 24
+    };
+    try {
+      return this.dataManagerFacade.queryIndexedEvents(options).events;
+    } catch (e) {
+      AppLogger.warnCause('HomeSuggestion', 'load recent indexed events failed', e as Error);
+      return [];
+    }
+  }
+
+  private recentHomeComfortChatEvents(): IndexedEvent[] {
+    if (this.dataManagerFacade === null) {
+      return [];
+    }
+    // 解闷上下文独立于“猜你喜欢”：只读取今天及之前 6 天内的聊天场景索引。
+    let today = new Date();
+    let options: QueryOptions = {
+      keywords: [],
+      domains: [],
+      entities: [],
+      date: '',
+      month: '',
+      startDate: formatLocalDateKey(offsetLocalDate(today, 1 - HOME_COMFORT_CHAT_WINDOW_DAYS)),
+      endDate: formatLocalDateKey(today),
+      includeTodoDeadlineInTimeRange: false,
+      workflowSceneIds: [HOME_COMFORT_CHAT_SCENE_ID],
+      limit: 0
+    };
+    try {
+      return this.dataManagerFacade.queryIndexedEvents(options).events;
+    } catch (e) {
+      AppLogger.warnCause('HomeComfort', 'load recent chat events failed', e as Error);
+      return [];
+    }
+  }
+
+  private async refreshHomeTaskSuggestions(showFailureToast: boolean): Promise<void> {
+    if (!this.ensureAiServiceLogin(showFailureToast)) {
+      return;
+    }
+    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
+      return;
+    }
+    if (this.homeTaskSuggestionsLoading) {
+      return;
+    }
+    this.homeTaskSuggestionsLoading = true;
+    this.homeTaskSuggestionError = '';
+    try {
+      let cloudConfig = this.getConfiguredCloudConfig();
+      if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+        throw new Error('请先在“我的”中配置 Planner 服务');
+      }
+      let recentEvents = this.recentHomeTaskSuggestionEvents();
+      let previousTasks = this.homeTaskSuggestions.map((item: HomeTaskSuggestion): string => item.task);
+      let prompt = buildHomeTaskSuggestionPrompt(recentEvents, this.homeProfile.domains, previousTasks,
+        currentLocalDateKey());
+      let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
+      this.homeTaskSuggestionBatch++;
+      let batchId = new Date().getTime().toString() + '-' + this.homeTaskSuggestionBatch.toString();
+      this.homeTaskSuggestions = parseHomeTaskSuggestions(response, batchId, previousTasks,
+        recentEvents, this.homeProfile.domains);
+      AppLogger.info('HomeSuggestion', 'generated suggestions from recentEvents=' + recentEvents.length.toString());
+    } catch (e) {
+      let err = e as Error;
+      this.homeTaskSuggestionError = err.message.length > 0 ? err.message : '推荐生成失败，请稍后重试';
+      AppLogger.errorCause('HomeSuggestion', 'generate suggestions failed', err);
+      if (showFailureToast) {
+        showToastSafely(this.homeTaskSuggestionError, 2000);
+      }
+    } finally {
+      this.homeTaskSuggestionsLoading = false;
+    }
+  }
+
+  private async refreshHomeComfortConcerns(showFailureToast: boolean): Promise<void> {
+    if (!this.ensureAiServiceLogin(showFailureToast)) {
+      return;
+    }
+    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
+      return;
+    }
+    if (this.homeComfortConcernsLoading) {
+      return;
+    }
+    this.homeComfortConcernsLoading = true;
+    this.homeComfortConcernError = '';
+    try {
+      let cloudConfig = this.getConfiguredCloudConfig();
+      if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+        throw new Error('请先在“我的”中配置 Planner 服务');
+      }
+      let recentEvents = this.recentHomeComfortChatEvents();
+      if (recentEvents.length === 0) {
+        this.homeComfortChatStore.clear();
+        this.homeComfortConcerns = [];
+        throw new Error('近 7 天没有任务记录，请进入任务界面，执行采集任务后再试');
+      }
+      let prompt = buildHomeComfortConcernPrompt(recentEvents, currentLocalDateKey());
+      let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
+      this.homeComfortConcernBatch++;
+      let batchId = new Date().getTime().toString() + '-' + this.homeComfortConcernBatch.toString();
+      let concerns = parseHomeComfortConcerns(response, batchId, recentEvents);
+      this.homeComfortChatStore.clear();
+      this.homeComfortConcerns = concerns;
+      AppLogger.info('HomeComfort', 'generated concerns from recentChatEvents=' + recentEvents.length.toString());
+    } catch (e) {
+      let err = e as Error;
+      this.homeComfortConcernError = err.message.length > 0 ? err.message : '烦恼推测生成失败，请稍后重试';
+      AppLogger.errorCause('HomeComfort', 'generate concerns failed', err);
+      if (showFailureToast) {
+        showToastSafely(this.homeComfortConcernError, 2000);
+      }
+    } finally {
+      this.homeComfortConcernsLoading = false;
+    }
+  }
+
+  private async sendHomeComfortMessage(concern: HomeComfortConcern,
+    history: HomeComfortChatMessage[]): Promise<string> {
+    if (!this.ensureAiServiceLogin()) {
+      throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      throw new Error('未同意隐私声明，消息未发送');
+    }
+    let cloudConfig = this.getConfiguredCloudConfig();
+    if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
+      throw new Error('请先在“我的”中配置 Planner 服务');
+    }
+    let recentEvents = this.recentHomeComfortChatEvents();
+    let messages = buildHomeComfortChatMessages(concern, history, recentEvents, currentLocalDateKey());
+    if (messages.length <= 1) {
+      throw new Error('请先输入想聊的内容');
+    }
+    let response = await this.cloudClient.chatPlannerMessages(messages, cloudConfig);
+    let reply = parseHomeComfortReply(response);
+    AppLogger.info('HomeComfort', 'chat reply generated chars=' + reply.length.toString() +
+      ', contextMessages=' + messages.length.toString());
+    return reply;
+  }
+
   private async runHomeRecommendationAgentTask(taskText: string, keepTargetAppAfterFinish: boolean): Promise<void> {
     let options: CloudAgentTaskSubmitOptions = {
       switchToChat: false,
@@ -5718,19 +6473,21 @@ struct Index {
     }
   }
 
-  private createAgentLoopRunner(): AgentLoopRunner {
+  private createAgentLoopRunner(phoneSession: PhoneHdcRunSession | null = null): AgentLoopRunner {
     return new AgentLoopRunner(
       this.filesDir,
       this.modelDir,
       this.hdcServerIp,
       mnnllm,
       this.cloudClient,
-      () => this.getCloudConfig(),
+      () => phoneSession !== null ? this.getConfiguredCloudConfig() : this.getCloudConfig(),
       (msg: string) => {
         this.handleLocalAgentLog(msg);
+        phoneSession?.record(msg);
       },
       (msg: string) => {
         this.handleCloudAgentLog(msg);
+        phoneSession?.record(msg);
       },
       async (response: string) => {
         return await this.approveLocalAgentResponse(response);
@@ -5738,8 +6495,64 @@ struct Index {
       async (response: string) => {
         return await this.approveCloudAgentResponse(response);
       },
-      this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud'
+      phoneSession !== null ? 'cloud' : (this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud')
     );
+  }
+
+  private selectedAgentDeviceMode(): string {
+    try { return SelfHdcTaskSettings.load(this.filesDir).mode; }
+    catch (e) {
+      let error = e as Error;
+      AppLogger.errorCause('SelfHdc', 'Cannot read shared device control selection', error);
+      showToastSafely('手机控制设置读取失败：' + error.message, 2500);
+      return 'unavailable';
+    }
+  }
+
+  private requirePhoneCloudAgentConfig(): void {
+    let config = this.getConfiguredCloudConfig();
+    if (!isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl,
+      cloudPlannerApiKey(config), cloudDeciderApiKey(config))) {
+      throw new Error('PHONE_AGENT_CLOUD_CONFIG: 请在我的中配置云端 Planner / Decider 地址和密钥');
+    }
+  }
+
+  private async runPhoneChatAgent(task: string, mode: string, returnOnSuccess: boolean): Promise<void> {
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      throw new Error('PHONE_HDC_BUSY: 已有 Agent 正在执行或收尾');
+    }
+    if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'phone-chat-' + mode, false)) {
+      throw new Error('PHONE_HDC_SETUP_REQUIRED: 请在“我的 > 手机 HDC”设置 IP 和无线调试连接端口后重新下发任务');
+    }
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      throw new Error('PHONE_HDC_BUSY: 已有 Agent 正在执行或收尾');
+    }
+    let runner: AgentLoopRunner | null = null;
+    let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-chat-' + mode,
+      async (): Promise<void> => { if (runner !== null) { await runner.requestCancellation(); } });
+    runner = this.createAgentLoopRunner(session);
+    let phoneRunner = runner;
+    this.activePhoneRunSession = session;
+    this.activeAgentRunner = phoneRunner;
+    try {
+      await session.run<void>((mode === 'local' ? '本地' : '云端') + ' Agent：' + task,
+        async (bridge: PhoneHdcWorkflowBridge): Promise<void> => {
+          phoneRunner.useDeviceBridgeForPhone(bridge);
+          if (mode === 'local') { await phoneRunner.runLocalTask(task); }
+          else { await phoneRunner.runCloudTask(task, returnOnSuccess); }
+        }, async (): Promise<void> => {
+          if (mode === 'local') {
+            session.record('MODEL backend=local-MNN; existing loadModel/agentPrefill/agentStep/agentReset APIs');
+            if (!await this.ensureLocalModelLoaded()) { throw new Error(this.output || '本地模型加载失败'); }
+          } else {
+            session.record('MODEL backend=configured-cloud; Planner/Decider; PC endpoint override not used');
+            this.requirePhoneCloudAgentConfig();
+          }
+        }, returnOnSuccess);
+    } finally {
+      if (this.activePhoneRunSession === session) { this.activePhoneRunSession = null; }
+      if (this.activeAgentRunner === phoneRunner) { this.activeAgentRunner = null; }
+    }
   }
 
   private setHomeRecommendationCompleted(id: string, completed: boolean): void {
@@ -5753,10 +6566,34 @@ struct Index {
   }
 
   private async submitDirectCloudAgentTask(taskText: string,
-    options: CloudAgentTaskSubmitOptions): Promise<CloudAgentTaskSubmitResult> {
+    options: CloudAgentTaskSubmitOptions, deviceMode: string = ''): Promise<CloudAgentTaskSubmitResult> {
+    if (!this.ensureAiServiceLogin()) {
+      return { success: false, error: AI_LOGIN_REQUIRED_MESSAGE };
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return { success: false, error: '未同意隐私声明，任务未执行' };
+    }
     let task = taskText.trim();
     if (task.length === 0) {
       return { success: false, error: '请先输入云端 Agent 任务。' };
+    }
+    let selectedMode = deviceMode || this.selectedAgentDeviceMode();
+    if (selectedMode === 'unavailable') { return { success: false, error: '控制设置读取失败，任务未执行' }; }
+    if (SelfHdcTestRunner.shared().snapshot().running || this.activePhoneRunSession !== null) {
+      return { success: false, error: '已有手机测试或 GUI 任务正在执行，请先结束当前任务' };
+    }
+    if (selectedMode === 'phone') {
+      if (options.switchToChat) { this.currentTab = MainTabIndex.Chat; }
+      this.resetCloudLog('云端 Agent 开始执行（手机自控）：' + task);
+      try {
+        await this.runPhoneChatAgent(task, 'cloud', options.returnToHostAppOnFinish);
+        this.appendCloudLog('云端 Agent 手机自控任务完成。');
+        return { success: true, error: '' };
+      } catch (e) {
+        let message = (e as Error).message;
+        this.appendCloudLog('云端 Agent 手机自控失败：' + message);
+        return { success: false, error: message };
+      }
     }
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
@@ -5783,7 +6620,80 @@ struct Index {
     }
   }
 
+  private async runPhoneWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.ensureAiServiceLogin() || !await this.ensurePrivacyConsent()) { return; }
+    let hub = SelfHdcTestRunner.shared();
+    let bridge: PhoneHdcWorkflowBridge | null = null;
+    let ownsLog = false;
+    let outcome = 'failed';
+    let message = '';
+    try {
+      if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
+        throw new Error('已有手机测试或 GUI 任务正在执行');
+      }
+      let context = getContext(this) as common.UIAbilityContext;
+      let settings = new SelfHdcTaskSettings();
+      let settingsError = '';
+      try { settings = await SelfHdcTaskSettings.refreshLocalIp(this.filesDir, 'phone-workflow'); }
+      catch (e) { settingsError = (e as Error).message; }
+      if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
+        throw new Error('已有手机测试或 GUI 任务正在执行');
+      }
+      hub.beginExternal(this.filesDir, task.title, settings.ip + ':' + settings.port, (): void => {
+        AgentExecutionController.requestCancellation();
+      });
+      ownsLog = true;
+      if (settingsError) { throw new Error('PHONE_HDC_SETTINGS: ' + settingsError); }
+      hub.recordExternal('CONNECTION ipMode=' + (settings.autoIp ? 'auto-wifi' : 'manual') + ' ip=' + settings.ip +
+        ' portSource=manual；连接设置位于 我的 → 手机 HDC');
+      hub.recordExternal('IP_STATUS ' + (AppStorage.get<string>('selfHdcIpStatus') || '未读取检测状态'));
+      if (!this.isCloudConfigReady()) { throw new Error('Planner / Decider 云端模型配置不完整'); }
+      bridge = new PhoneHdcWorkflowBridge(context, settings, (event: string): void => { hub.recordExternal(event); },
+        (): void => { AgentExecutionController.requestCancellation(); });
+      this.activePhoneWorkflowBridge = bridge;
+      AgentExecutionController.beginExecution('手机 GUI 任务连接中：' + task.title);
+      await bridge.open();
+      let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(), '',
+        (event: string): void => { hub.recordExternal(event); });
+      runner.useDeviceBridgeForPhone(bridge);
+      let result = await runner.runTask(task);
+      outcome = bridge.hasExpired() ? 'failed' : result.status;
+      message = bridge.hasExpired() ? 'PHONE_HDC_BACKGROUND_EXPIRED: 系统后台额度到期' : result.message;
+      if (result.dailyLogPath) { message += '，daily-log 已生成'; }
+      hub.recordExternal('WORKFLOW_SUMMARY runDir=' + result.runDir + ' returnedToApp=' + result.returnedToApp);
+    } catch (e) {
+      outcome = bridge?.hasExpired() ? 'failed' :
+        (bridge !== null && AgentExecutionController.isCancelRequested() ? 'cancelled' : 'failed');
+      message = (e as Error).message;
+      if (ownsLog) { hub.recordExternal('WORKFLOW_FAILED error=' + message); }
+      else { this.appendCloudLog('手机 Workflow 无法启动：' + message); }
+    } finally {
+      if (bridge) {
+        if (outcome !== 'success') { this.cloudClient.cancelActiveRequests(); }
+        try { await bridge.returnHost(); } catch (e) {
+          hub.recordExternal('RETURN_APP_FAILED error=' + (e as Error).message + '；请手动切回 App');
+        }
+        bridge.close();
+      }
+      this.activePhoneWorkflowBridge = null;
+      try {
+        if (message.length > 0) { WorkflowStorage.updateTaskRun(this.filesDir, task.id, outcome, message); }
+      } finally {
+        if (ownsLog) {
+          AgentExecutionController.finishExecution('手机 Workflow ' + outcome);
+          hub.finishExternal(outcome, message);
+        }
+      }
+    }
+  }
+
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
@@ -5826,6 +6736,7 @@ struct Index {
       return;
     }
     this.localChatCancelRequested = true;
+    this.localChatCancelledGeneration = this.localChatGeneration;
     try {
       mnnllm.cancelChat();
     } catch (e) {
@@ -5843,6 +6754,9 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     let pendingImageUris = normalizeChatImageAttachments(this.localPendingChatImageUris)
       .slice(0, LOCAL_CHAT_IMAGE_MAX_COUNT);
     if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking ||
@@ -5883,6 +6797,9 @@ struct Index {
       cleanupLocalChatPreparedImages(preparedImagePaths);
       this.localChatImagePreparing = false;
     }
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
     let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.localPendingChatImageUris = [];
@@ -5891,7 +6808,9 @@ struct Index {
       CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris));
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
       CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    let localChatGeneration = ++this.localChatGeneration;
     this.localChatCancelRequested = false;
+    this.localChatCancelledGeneration = 0;
     this.localChatInferenceRunning = true;
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
@@ -5900,7 +6819,7 @@ struct Index {
     let streamUpdateTimerId = -1;
     // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
     let flushStreamReply = (): void => {
-      if (streamedReply.length === 0) {
+      if (localChatGeneration !== this.localChatGeneration || streamedReply.length === 0) {
         return;
       }
       lastStreamUpdateAt = new Date().getTime();
@@ -5927,7 +6846,7 @@ struct Index {
     try {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
-        if (this.localChatCancelRequested) {
+        if (this.localChatCancellationRequestedFor(localChatGeneration)) {
           let cancelledReply = this.cancelledLocalChatReply(streamedReply);
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
@@ -5940,18 +6859,23 @@ struct Index {
         }
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(nativePrompt, (token: string) => {
-        if (this.localChatCancelRequested) {
+      AiServiceAccess.requireAllowed();
+      let chatPromise: Promise<string> = mnnllm.chat(nativePrompt, (token: string) => {
+        if (localChatGeneration !== this.localChatGeneration ||
+          this.localChatCancellationRequestedFor(localChatGeneration)) {
           return;
         }
         streamedReply += token;
         scheduleStreamReplyUpdate();
       });
+      this.localChatNativeRequestSubmitted = true;
+      this.scheduleLocalChatCompletionProbe(localChatGeneration);
+      let reply: string = await chatPromise;
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
         streamUpdateTimerId = -1;
       }
-      if (this.localChatCancelRequested) {
+      if (this.localChatCancellationRequestedFor(localChatGeneration)) {
         let partialReply = streamedReply.length > 0 ? streamedReply : reply;
         let cancelledReply = this.cancelledLocalChatReply(partialReply);
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
@@ -5962,7 +6886,7 @@ struct Index {
       }
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      if (this.localChatCancelRequested) {
+      if (this.localChatCancellationRequestedFor(localChatGeneration)) {
         let cancelledReply = this.cancelledLocalChatReply(streamedReply);
         this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, cancelledReply);
         this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${cancelledReply}\n`);
@@ -5974,9 +6898,14 @@ struct Index {
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
       }
-      this.localChatInferenceRunning = false;
-      this.localChatCancelRequested = false;
-      this.isThinking = false;
+      if (localChatGeneration === this.localChatGeneration) {
+        this.clearLocalChatCompletionProbe();
+        this.localChatNativeRequestSubmitted = false;
+        this.localChatInferenceRunning = false;
+        this.localChatCancelRequested = false;
+        this.localChatCancelledGeneration = 0;
+        this.isThinking = false;
+      }
     }
   }
 
@@ -5997,7 +6926,7 @@ struct Index {
       return false;
     }
     this.settingsSectionId = SettingsSectionId.ModelAgents;
-    this.currentTab = MainTabIndex.Settings;
+    this.currentTab = MainTabIndex.Mine;
     await this.downloadModelScopeModel();
     return false;
   }
@@ -6019,9 +6948,26 @@ struct Index {
   }
 
   private async submitLocalAgentTask(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') { return; }
+    let phoneControl = deviceMode === 'phone';
+    if (!phoneControl && !await this.ensureDesktopCompanionReminder()) {
+      return;
+    }
     let task = this.userInput.trim();
     if (task.length === 0) {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (SelfHdcTestRunner.shared().snapshot().running || this.activePhoneRunSession !== null ||
+      (phoneControl && (AgentExecutionController.isExecutionActive() || this.restoringLocalSession))) {
+      this.reportLocalAgentCleanupStatus('已有手机测试、GUI 任务或模型恢复正在执行，请稍后再试。');
       return;
     }
     if (this.localAgentCleaningUp ||
@@ -6045,30 +6991,36 @@ struct Index {
     this.debugImagePath = '';
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.isThinking = true;
-    AgentExecutionController.beginExecution('本地 Agent 准备中...');
-    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。');
+    if (!phoneControl) { AgentExecutionController.beginExecution('本地 Agent 准备中...'); }
+    this.reportLocalAgentStartupStatus(phoneControl ? '任务已下发，使用手机自控，正在检查本地模型。' :
+      '任务已下发，正在检查本地模型和 HDC Server。');
     await this.sleep(50);
     try {
-      if (this.abortLocalAgentStartupIfCancelled()) {
-        return;
+      if (phoneControl) {
+        this.output = '====== 本地 Agent 手机自控 ======\n当前任务: ' + task + '\n推理与 HDC 设备控制均在手机中执行。';
+        await this.runPhoneChatAgent(task, 'local', true);
+      } else {
+        if (this.abortLocalAgentStartupIfCancelled()) {
+          return;
+        }
+        if (!await this.ensureLocalAgentReady()) {
+          let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
+          this.appendChatMessageForSession(this.localTaskSessionId,
+            createChatMessage(this.nextChatMessageId('task-result'), 'task',
+              CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
+          AgentExecutionController.finishExecution('本地 Agent 启动失败');
+          return;
+        }
+        if (this.abortLocalAgentStartupIfCancelled()) {
+          return;
+        }
+        this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
+        await this.sleep(30);
+        let runner = this.createAgentLoopRunner();
+        this.activeAgentRunner = runner;
+        this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+        await runner.runLocalTask(task);
       }
-      if (!await this.ensureLocalAgentReady()) {
-        let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
-        this.appendChatMessageForSession(this.localTaskSessionId,
-          createChatMessage(this.nextChatMessageId('task-result'), 'task',
-            CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
-        AgentExecutionController.finishExecution('本地 Agent 启动失败');
-        return;
-      }
-      if (this.abortLocalAgentStartupIfCancelled()) {
-        return;
-      }
-      this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
-      await this.sleep(30);
-      let runner = this.createAgentLoopRunner();
-      this.activeAgentRunner = runner;
-      this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
-      await runner.runLocalTask(task);
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
           CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
@@ -6086,7 +7038,7 @@ struct Index {
       if (this.localAgentCleaningUp && this.activeAgentRunner !== null) {
         this.reportLocalAgentStartupStatus('本地 Agent 收尾完成，可以重新下发任务。', true, true);
       }
-      this.activeAgentRunner = null;
+      if (!phoneControl) { this.activeAgentRunner = null; }
       this.localTaskSessionId = '';
       this.isThinking = false;
       this.localAgentCleaningUp = false;
@@ -6094,6 +7046,17 @@ struct Index {
   }
 
   private async submitCurrentCloudTask(): Promise<void> {
+    if (!this.ensureAiServiceLogin()) {
+      return;
+    }
+    if (!await this.ensurePrivacyConsent()) {
+      return;
+    }
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') { return; }
+    if (deviceMode !== 'phone' && !await this.ensureDesktopCompanionReminder()) {
+      return;
+    }
     let task = this.cloudUserInput.trim();
     if (task.length === 0 || this.cloudThinking) {
       return;
@@ -6113,7 +7076,7 @@ struct Index {
       let result = await this.submitDirectCloudAgentTask(task, {
         switchToChat: true,
         returnToHostAppOnFinish: true
-      });
+      }, deviceMode);
       if (result.success) {
         this.appendChatMessageForSession(this.cloudTaskSessionId,
           createChatMessage(this.nextChatMessageId('task-result'), 'task',
@@ -6156,38 +7119,31 @@ struct Index {
     if (icon === 'tab_task') {
       return $r('app.media.tab_task');
     }
-    if (icon === 'tab_settings') {
-      return $r('app.media.tab_settings');
+    if (icon === 'tab_mine') {
+      return $r('app.media.tab_mine');
     }
     return $r('app.media.tab_home');
   }
 
-  @Builder TabItem(icon: string, label: string, index: number) {
-    Column() {
-      Stack({ alignContent: Alignment.Center }) {
-        Image(this.tabIconResource(icon))
-          .width(21)
-          .height(21)
-          .objectFit(ImageFit.Contain)
-      }
-        .width(32)
-        .height(32)
-        .backgroundColor(this.currentTab === index ? '#EEF0FF' : '#00FFFFFF')
-        .borderRadius(16)
-      Text(label)
-        .fontSize(13)
-        .fontColor(this.currentTab === index ? '#5B5CE2' : '#747B87')
-        .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Regular)
-        .margin({ top: 2 })
-        .maxLines(1)
-    }.width(72).height(58).justifyContent(FlexAlign.Center)
-    .onClick(() => {
-      this.currentTab = index;
-    })
+  private mainTabBottomInset(): number {
+    return this.floatingMainTabsEnabled ? FLOATING_MAIN_TABS_INSET : 0;
+  }
+
+  private tabBarStyle(index: MainTabIndex): BottomTabBarStyle {
+    return BottomTabBarStyle.of(this.tabIconResource(mainTabIcon(index)), mainTabLabel(index))
+      .layoutMode(LayoutMode.VERTICAL)
+      .labelStyle({
+        font: { size: 12, weight: FontWeight.Medium },
+        selectedColor: '#5B5CE2',
+        unselectedColor: '#747B87',
+        maxLines: 1
+      })
+      .iconStyle({ selectedColor: '#5B5CE2', unselectedColor: '#747B87' })
+      .padding({ left: 2, right: 2, top: 6, bottom: 6 });
   }
 
   @Builder DataManagerProgressOverlay() {
-    if (this.dataManagerRefreshing) {
+    if (this.dataManagerRefreshing || this.dataManagerSyncFailed) {
       Stack({ alignContent: Alignment.Center }) {
         Column() {
           Text(this.dataManagerProgressStage)
@@ -6198,7 +7154,7 @@ struct Index {
           Progress({ value: this.dataManagerProgressPercent, total: 100, type: ProgressType.Linear })
             .width('100%')
             .height(8)
-            .color('#4F68FF')
+            .color(this.dataManagerSyncFailed ? '#D94F4F' : '#4F68FF')
             .backgroundColor('#E7EBF5')
             .margin({ top: 18 })
           Row() {
@@ -6209,6 +7165,44 @@ struct Index {
           }
           .width('100%')
           .margin({ top: 10 })
+          if (this.dataManagerProgressMessage.length > 0) {
+            Text(this.dataManagerProgressMessage)
+              .fontSize(14)
+              .fontColor(this.dataManagerSyncFailed ? '#B63E3E' : '#657086')
+              .maxLines(8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+              .margin({ top: 12 })
+          }
+          if (this.dataManagerSyncFailed && !this.dataManagerRefreshing) {
+            Text('已保存的处理结果会保留，可重新同步继续整理。')
+              .fontSize(12)
+              .fontColor('#657086')
+              .width('100%')
+              .margin({ top: 10 })
+            Row() {
+              Button('关闭')
+                .layoutWeight(1)
+                .backgroundColor('#E7EBF5')
+                .fontColor('#414D65')
+                .onClick(() => {
+                  this.dataManagerSyncFailed = false;
+                })
+              Button('重新同步')
+                .layoutWeight(1)
+                .margin({ left: 12 })
+                .backgroundColor('#4F68FF')
+                .fontColor(Color.White)
+                .onClick(() => {
+                  this.dataManagerSyncFailed = false;
+                  this.refreshDataManager().catch((e: Error) => {
+                    dataManagerError('retry refreshDataManager failed: ' + e.message);
+                  });
+                })
+            }
+            .width('100%')
+            .margin({ top: 18 })
+          }
         }
         .width('78%')
         .padding({ left: 22, right: 22, top: 24, bottom: 22 })
@@ -6224,6 +7218,374 @@ struct Index {
     }
   }
 
+  @Builder DesktopCompanionReminderOverlay() {
+    if (this.desktopCompanionReminderVisible) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Text('需要配合桌面端 App 使用')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+          Text('任务执行和聊天中的“下发任务”功能需要连接 ClawMate 桌面端 App。请先在电脑上下载安装并启动桌面端 App，再继续执行任务。')
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor('#555D70')
+            .width('100%')
+            .margin({ top: 12 })
+          Column() {
+            Text(DESKTOP_COMPANION_APP_NAME)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#30384C')
+              .width('100%')
+              .maxLines(2)
+            Text(DESKTOP_COMPANION_DOWNLOAD_URL)
+              .fontSize(12)
+              .lineHeight(18)
+              .fontColor('#4F68FF')
+              .width('100%')
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .margin({ top: 6 })
+              .onClick(async () => { await this.openDesktopCompanionDownloadPage(); })
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(12)
+          .backgroundColor('#F4F7FF')
+          .borderRadius(12)
+          .margin({ top: 14 })
+
+          Row({ space: 10 }) {
+            Button('查看下载链接')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(13)
+              .fontColor('#4F68FF')
+              .backgroundColor('#EEF1FF')
+              .borderRadius(13)
+              .onClick(async () => { await this.openDesktopCompanionDownloadPage(); })
+            Button('知道了，继续')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor('#4F68FF')
+              .borderRadius(13)
+              .onClick(() => { this.finishDesktopCompanionReminder(true); })
+          }
+          .width('100%')
+          .margin({ top: 16 })
+
+          Row() {
+            Blank().layoutWeight(1)
+            Row({ space: 7 }) {
+              Stack({ alignContent: Alignment.Center }) {
+                if (this.desktopCompanionDontRemindAgain) {
+                  Row()
+                    .width(9)
+                    .height(9)
+                    .backgroundColor('#4F68FF')
+                    .borderRadius(5)
+                }
+              }
+              .width(19)
+              .height(19)
+              .borderRadius(10)
+              .border({
+                width: 2,
+                color: this.desktopCompanionDontRemindAgain ? '#4F68FF' : '#A7AEBC'
+              })
+              Text('不再提醒')
+                .fontSize(12)
+                .fontColor('#687083')
+            }
+            .padding({ left: 6, right: 2, top: 6, bottom: 2 })
+            .onClick(() => { this.toggleDesktopCompanionReminderSuppressed(); })
+          }
+          .width('100%')
+          .margin({ top: 8 })
+        }
+        .width('86%')
+        .padding({ left: 22, right: 22, top: 24, bottom: 18 })
+        .backgroundColor(Color.White)
+        .borderRadius(22)
+        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#73000000')
+      .zIndex(120)
+      .onClick(() => {})
+    }
+  }
+
+  @Builder SyncReminderOverlay() {
+    if (this.syncReminderVisible) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Text('有新记录待同步')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#20263A')
+            .width('100%')
+          Text('已有至少 3 天未同步，发现了新保存的记录。现在同步，更新汇总和聊天记忆吗？')
+            .fontSize(14)
+            .lineHeight(22)
+            .fontColor('#555D70')
+            .width('100%')
+            .maxLines(4)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 12 })
+          Row({ space: 10 }) {
+            Button('暂时不用')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(14)
+              .fontColor('#4F68FF')
+              .backgroundColor('#EEF1FF')
+              .borderRadius(13)
+              .onClick(() => { this.dismissSyncReminder(false); })
+            Button('立即同步')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor('#4F68FF')
+              .borderRadius(13)
+              .onClick(() => { this.dismissSyncReminder(true); })
+          }
+          .width('100%')
+          .margin({ top: 20 })
+          Row() {
+            Blank().layoutWeight(1)
+            Row({ space: 7 }) {
+              Stack({ alignContent: Alignment.Center }) {
+                if (this.syncReminderDontRemindAgain) {
+                  Row()
+                    .width(9)
+                    .height(9)
+                    .backgroundColor('#4F68FF')
+                    .borderRadius(5)
+                }
+              }
+              .width(19)
+              .height(19)
+              .borderRadius(10)
+              .border({ width: 2, color: this.syncReminderDontRemindAgain ? '#4F68FF' : '#A7AEBC' })
+              Text('不再提醒')
+                .fontSize(12)
+                .fontColor('#687083')
+            }
+            .padding({ left: 6, right: 2, top: 6, bottom: 2 })
+            .onClick(() => { this.toggleSyncReminderSuppressed(); })
+          }
+          .width('100%')
+          .margin({ top: 10 })
+        }
+        .width('86%')
+        .padding({ left: 22, right: 22, top: 24, bottom: 18 })
+        .backgroundColor(Color.White)
+        .borderRadius(22)
+        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#73000000')
+      .zIndex(130)
+      .onClick(() => {})
+    }
+  }
+
+  @Builder MainTabContents() {
+    TabContent() {
+      HomePage({
+        navigationBottomInset: this.mainTabBottomInset(),
+        comfortChatStore: this.homeComfortChatStore,
+        profile: this.homeProfile,
+        taskSuggestions: this.homeTaskSuggestions,
+        taskSuggestionsLoading: this.homeTaskSuggestionsLoading,
+        taskSuggestionError: this.homeTaskSuggestionError,
+        onRefreshTaskSuggestions: async (): Promise<void> => {
+          await this.refreshHomeTaskSuggestions(true);
+        },
+        comfortConcerns: this.homeComfortConcerns,
+        comfortConcernsLoading: this.homeComfortConcernsLoading ||
+          (this.homeTaskSuggestionsLoading && this.homeComfortConcerns.length === 0),
+        comfortConcernError: this.homeComfortConcernError,
+        onRefreshComfortConcerns: async (): Promise<void> => {
+          await this.refreshHomeComfortConcerns(true);
+        },
+        onSendComfortMessage: async (concern: HomeComfortConcern,
+          history: HomeComfortChatMessage[]): Promise<string> => {
+          return await this.sendHomeComfortMessage(concern, history);
+        },
+        onSetRecommendationCompleted: (id: string, completed: boolean) => {
+          this.setHomeRecommendationCompleted(id, completed);
+        },
+        avatarVersions: this.avatarVersions,
+        onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
+          await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
+        },
+        onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
+          await this.generateHomeAvatar(mode, sourceImage);
+        },
+        onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
+          return await this.saveHomeAvatarReferencePhoto(sourceImage);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Home))
+    TabContent() {
+      CollectionPage({
+        collectionModule: $collectionModule,
+        viewModels: this.collectionViews,
+        refreshing: this.dataManagerRefreshing,
+        wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
+        wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
+        onRefresh: () => { this.refreshDataManager(); },
+        onOpenDataCollectionSettings: () => {
+          this.settingsSectionId = SettingsSectionId.DataCollection;
+          this.currentTab = MainTabIndex.Mine;
+        },
+        onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
+          await this.runWechatAutoSummary(request);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Summary))
+    TabContent() {
+      ChatPage({
+        navigationBottomInset: this.mainTabBottomInset(),
+        chatMode: $chatMode,
+        cloudUserInput: $cloudUserInput,
+        userInput: $userInput,
+        chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
+        cloudOutput: this.cloudOutput,
+        cloudDebugImagePath: this.cloudDebugImagePath,
+        cloudThinking: this.cloudThinking,
+        localOutput: this.output,
+        localDebugImagePath: this.debugImagePath,
+        chatHistory: this.chatHistory,
+        localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
+        localChatCancelable: this.localChatInferenceRunning,
+        modelLoaded: this.modelLoaded,
+        sessions: this.chatSessions,
+        activeSessionId: this.activeChatSessionId,
+        messages: this.chatMessagesForDisplay(),
+        avatarForegroundUri: this.homeProfile.avatarForegroundUri,
+        avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+        pendingImageAttachmentUris: this.activePendingChatImageUris(),
+        sessionDrawerOpen: this.chatSessionDrawerOpen,
+        restoringLocalSession: this.restoringLocalSession,
+        pcServerConnected: this.pcServerConnected,
+        pcServerCloudEnabled: this.pcServerCloudEnabled,
+        voiceStatus: this.voiceStatus,
+        voicePartialTranscript: this.voicePartialTranscript,
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
+        onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
+        onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
+        onCreateSession: (mode: string) => { this.createChatSession(mode); },
+        onSelectSession: async (id: string) => { await this.selectChatSession(id); },
+        onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+        onRenameSession: async (id: string, title: string) => {
+          return await this.renameChatSession(id, title);
+        },
+        onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
+        onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
+        onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
+        onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+        onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
+        onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
+        onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
+        onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
+        onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+        onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+        onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
+        onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
+        onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
+        onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
+        onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
+        onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
+        onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
+        onStopVoiceInput: async () => { await this.stopVoiceInput(); },
+        onPlayVoiceMessage: async (messageId: string, text: string) => {
+          await this.playAssistantMessageVoice(messageId, text);
+        },
+        onReplayVoiceMessage: async (messageId: string, text: string) => {
+          await this.replayAssistantMessageVoice(messageId, text);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Chat))
+    TabContent() {
+      TaskPage({
+        taskScene: $taskScene,
+        configViewOpen: $taskConfigViewOpen,
+        onEnsureDesktopCompanion: async (): Promise<boolean> => {
+          return await this.ensureDesktopCompanionReminder();
+        },
+        onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
+        onRunPhoneWorkflow: async (task: WorkflowTask) => { await this.runPhoneWorkflowTask(task); }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Task))
+    TabContent() {
+      SettingsCenterPage({
+        autoConfirm: $autoConfirm,
+        cloudAutoConfirm: $cloudAutoConfirm,
+        threadNumInput: $threadNumInput,
+        localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
+        selectedSectionId: $settingsSectionId,
+        output: $output,
+        chunkOmCacheOutput: $chunkOmCacheOutput,
+        cloudOutput: $cloudOutput,
+        modelDownloadProgressVisible: $modelDownloadProgressVisible,
+        modelDownloadProgressPercent: $modelDownloadProgressPercent,
+        modelDownloadProgressText: $modelDownloadProgressText,
+        modelDownloadProgressTitle: $modelDownloadProgressTitle,
+        downloading: $downloading,
+        modelScopeDownloading: $modelScopeDownloading,
+        modelScopePauseRequested: $modelScopePauseRequested,
+        hdcAutoStatus: this.hdcAutoStatus,
+        hdcAutoConnected: this.hdcAutoConnected,
+        hdcAutoConnecting: this.hdcAutoConnecting,
+        hdcManualPairing: this.hdcManualPairing,
+        downloadedModels: this.downloadedModels,
+        selectedModelId: this.selectedModelId,
+        onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
+        onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
+        onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
+        onShowConfigJson: () => { this.showConfigJson(); },
+        onDiscoverHdc: async () => {
+          this.hdcManualPairing = false;
+          await this.discoverHdcServer(true, true);
+        },
+        onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
+        onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
+        onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
+        onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
+        onStartCloudBackend: async () => { await this.startCloudBackend(); },
+        onClearScreenshots: () => { this.clearScreenshots(); },
+        onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
+        onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+        onDeleteDownloadedModel: (modelId: string) => { this.deleteDownloadedModel(modelId); },
+        onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
+        onListScreenshots: () => { this.listScreenshots(); },
+        onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
+        onListModelFilesTree: () => { this.listModelFilesTree(); },
+        onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
+        onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+        onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Mine))
+  }
+
   build() {
     Stack() {
       if (this.shouldDisplayFirstLaunchOnboarding()) {
@@ -6233,170 +7595,21 @@ struct Index {
           }
         })
       } else {
-      Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-        TabContent() {
-          HomePage({
-            profile: this.homeProfile,
-            onSetRecommendationCompleted: (id: string, completed: boolean) => {
-              this.setHomeRecommendationCompleted(id, completed);
-            },
-            avatarVersions: this.avatarVersions,
-            onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
-              await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
-            },
-            onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
-              await this.generateHomeAvatar(mode, sourceImage);
-            },
-            onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
-              return await this.saveHomeAvatarReferencePhoto(sourceImage);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Home), mainTabLabel(MainTabIndex.Home), MainTabIndex.Home))
-        TabContent() {
-          CollectionPage({
-            collectionModule: $collectionModule,
-            viewModels: this.collectionViews,
-            refreshing: this.dataManagerRefreshing,
-            wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
-            wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
-            onRefresh: () => { this.refreshDataManager(); },
-            onOpenDataCollectionSettings: () => {
-              this.settingsSectionId = SettingsSectionId.DataCollection;
-              this.currentTab = MainTabIndex.Settings;
-            },
-            onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
-              await this.runWechatAutoSummary(request);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))
-        TabContent() {
-          ChatPage({
-            chatMode: $chatMode,
-            cloudUserInput: $cloudUserInput,
-            userInput: $userInput,
-            chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
-            cloudOutput: this.cloudOutput,
-            cloudDebugImagePath: this.cloudDebugImagePath,
-            cloudThinking: this.cloudThinking,
-            localOutput: this.output,
-            localDebugImagePath: this.debugImagePath,
-            chatHistory: this.chatHistory,
-            localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
-            localChatCancelable: this.localChatInferenceRunning,
-            modelLoaded: this.modelLoaded,
-            sessions: this.chatSessions,
-            activeSessionId: this.activeChatSessionId,
-            messages: this.chatMessagesForDisplay(),
-            avatarForegroundUri: this.homeProfile.avatarForegroundUri,
-            avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
-            pendingImageAttachmentUris: this.activePendingChatImageUris(),
-            sessionDrawerOpen: this.chatSessionDrawerOpen,
-            restoringLocalSession: this.restoringLocalSession,
-            pcServerConnected: this.pcServerConnected,
-            pcServerCloudEnabled: this.pcServerCloudEnabled,
-            voiceStatus: this.voiceStatus,
-            voicePartialTranscript: this.voicePartialTranscript,
-            voiceActiveMessageId: this.voiceActiveMessageId,
-            onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
-            onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
-            onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
-            onCreateSession: (mode: string) => { this.createChatSession(mode); },
-            onSelectSession: async (id: string) => { await this.selectChatSession(id); },
-            onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
-            onRenameSession: async (id: string, title: string) => {
-              return await this.renameChatSession(id, title);
-            },
-            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
-            onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
-            onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
-            onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
-            onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
-            onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
-            onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
-            onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
-            onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
-            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
-            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
-            onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
-            onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
-            onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
-            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
-            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
-            onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
-            onStopVoiceInput: async () => { await this.stopVoiceInput(); },
-            onPlayVoiceMessage: async (messageId: string, text: string) => {
-              await this.playAssistantMessageVoice(messageId, text);
-            },
-            onReplayVoiceMessage: async (messageId: string, text: string) => {
-              await this.replayAssistantMessageVoice(messageId, text);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))
-        TabContent() {
-          TaskPage({
-            taskScene: $taskScene,
-            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Task), mainTabLabel(MainTabIndex.Task), MainTabIndex.Task))
-        TabContent() {
-          SettingsCenterPage({
-            autoConfirm: $autoConfirm,
-            cloudAutoConfirm: $cloudAutoConfirm,
-            threadNumInput: $threadNumInput,
-            localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
-            selectedSectionId: $settingsSectionId,
-            output: $output,
-            chunkOmCacheOutput: $chunkOmCacheOutput,
-            cloudOutput: $cloudOutput,
-            modelDownloadProgressVisible: $modelDownloadProgressVisible,
-            modelDownloadProgressPercent: $modelDownloadProgressPercent,
-            modelDownloadProgressText: $modelDownloadProgressText,
-            modelDownloadProgressTitle: $modelDownloadProgressTitle,
-            downloading: $downloading,
-            modelScopeDownloading: $modelScopeDownloading,
-            modelScopePauseRequested: $modelScopePauseRequested,
-            hdcAutoStatus: this.hdcAutoStatus,
-            hdcAutoConnected: this.hdcAutoConnected,
-            hdcAutoConnecting: this.hdcAutoConnecting,
-            hdcManualPairing: this.hdcManualPairing,
-            downloadedModels: this.downloadedModels,
-            selectedModelId: this.selectedModelId,
-            onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
-            onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
-            onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
-            onShowConfigJson: () => { this.showConfigJson(); },
-            onDiscoverHdc: async () => {
-              this.hdcManualPairing = false;
-              await this.discoverHdcServer(true, true);
-            },
-            onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
-            onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
-            onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
-            onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
-            onStartCloudBackend: async () => { await this.startCloudBackend(); },
-            onClearScreenshots: () => { this.clearScreenshots(); },
-            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
-            onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
-            onDeleteDownloadedModel: (modelId: string) => { this.deleteDownloadedModel(modelId); },
-            onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
-            onListScreenshots: () => { this.listScreenshots(); },
-            onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
-            onListModelFilesTree: () => { this.listModelFilesTree(); },
-            onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
-            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
-            onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
-      }
-      .onChange((index: number) => { this.currentTab = index; })
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#F4F8FF')
+        FloatingMainTabs({
+          selectedIndex: $currentTab,
+          floating: this.floatingMainTabsEnabled,
+          pageBackgroundColor: this.currentPageBackgroundColor(),
+          contentBuilder: () => { this.MainTabContents(); }
+        })
 
-      this.DataManagerProgressOverlay()
+        this.DataManagerProgressOverlay()
+        this.DesktopCompanionReminderOverlay()
+        this.SyncReminderOverlay()
       }
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.currentPageBackgroundColor())
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
   }
 }

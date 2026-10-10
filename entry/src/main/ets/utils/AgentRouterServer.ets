@@ -1,9 +1,12 @@
 import { socket } from '@kit.NetworkKit';
+import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { localVisionPromptHw } from './LocalVisionImageShape';
 
@@ -18,8 +21,6 @@ type AgentResetHandler = () => Promise<string>;
 type AgentChatHandler = (userMessage: string) => Promise<string>;
 type NativeResetHandler = () => string;
 type HdcServerUrlProvider = () => string;
-
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 type RequestKey =
   'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |
@@ -147,6 +148,8 @@ export class AgentRouterServer {
   }
 
   public submitLocalTask(task: string): void {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'local';
     this.currentTask = task;
     this.cloudTask = '';
@@ -156,6 +159,8 @@ export class AgentRouterServer {
   }
 
   public submitCloudTask(task: string): void {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'cloud';
     this.currentTask = task;
     this.cloudTask = '';
@@ -214,7 +219,8 @@ export class AgentRouterServer {
       let bridge = new HdcWorkflowBridge(hdcServerUrl, (message: string) => {
         this.log(mode, message);
       });
-      await bridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await bridge.startApp(bundleName, bundleName, false);
       this.log(mode, '>> [Cancel] returned to host app via HDC bridge before local cleanup.');
       return true;
     } catch (e) {
@@ -312,6 +318,22 @@ export class AgentRouterServer {
   private async handleRequest(client: socket.TCPSocketConnection, req: RequestMap): Promise<void> {
     let reqType = this.getString(req, 'type');
 
+    // 登录限制与隐私授权独立；始终保留任务清理和浮窗恢复消息。
+    if (!AiServiceAccess.isAllowed() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
+
+    // Keep cleanup messages available, but do not hand out tasks or model actions without consent.
+    if (!PrivacyConsent.isAccepted() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, 'Privacy consent required');
+      return;
+    }
+
     if (reqType === 'poll') {
       if (this.routeMode === 'cloud' && this.currentTask.length > 0) {
         this.log('cloud', '>> [Cloud Poll] PC fetched task: ' + this.currentTask);
@@ -357,6 +379,14 @@ export class AgentRouterServer {
     }
 
     await AgentExecutionController.waitIfPaused();
+    if (!AiServiceAccess.isAllowed()) {
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
+    if (!PrivacyConsent.isAccepted()) {
+      this.sendTerminate(client, 'Privacy consent revoked');
+      return;
+    }
     if (this.isCancellationRequested()) {
       this.log(this.routeMode, '>> [Cancel] cancellation intercepted after pause: ' + reqType);
       this.sendTerminate(client, 'Task cancelled by user');
@@ -741,7 +771,8 @@ export class AgentRouterServer {
   }
 
   private isCancellationRequested(): boolean {
-    return this.cancellationRequested || AgentExecutionController.isCancelRequested();
+    return !AiServiceAccess.isAllowed() || !PrivacyConsent.isAccepted() || this.cancellationRequested ||
+      AgentExecutionController.isCancelRequested();
   }
 
   private clearCancellationState(): void {

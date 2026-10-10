@@ -30,6 +30,12 @@ static napi_value Empty(napi_env env, napi_callback_info) {
     return MakeString(env, "");
 }
 
+static napi_value False(napi_env env, napi_callback_info) {
+    napi_value value;
+    napi_get_boolean(env, false, &value);
+    return value;
+}
+
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -38,6 +44,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"loadModel", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelChat", nullptr, Disabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isChatRunning", nullptr, False, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"restoreChatHistory", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},

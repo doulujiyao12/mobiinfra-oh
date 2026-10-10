@@ -162,6 +162,8 @@ export interface HdcBridgeResponse {
   image_b64?: string;
   width?: number;
   height?: number;
+  screen_width?: number;
+  screen_height?: number;
   action?: string;
   package_name?: string;
   current_package_name?: string;

@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <sched.h>
 #include <vector>
+#include <utility>
 #include <errno.h>
 
 #include "llm/llm.hpp"
@@ -46,13 +47,15 @@
 // NNRT header for OMC test (HarmonyOS SDK)
 #include "HIAIModelManager.h"
 #include "OfflineNpuChunkExecutor.h"
+#include "OfflineNpuProbe.h"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
 #endif
 #define LOG_TAG "MobiInfra"
-#define LOGI(fmt, ...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
-#define LOGE(fmt, ...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
+static std::atomic<bool> g_debugLoggingEnabled{false};
+#define LOGI(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
+#define LOGE(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
 
 using namespace MNN::Transformer;
 
@@ -529,6 +532,7 @@ struct LogCapture {
 
     void append(const std::string& line) {
         std::lock_guard<std::mutex> g(mu);
+        if (!g_debugLoggingEnabled.load()) return;
         ring.push_back(line);
         if (ring.size() > maxLines) ring.pop_front();
         if (file) {
@@ -547,7 +551,9 @@ static void logReader(int readFd) {
     while (true) {
         ssize_t n = read(readFd, buf, sizeof(buf));
         if (n <= 0) break;
-        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeCapture] %.*s", (int)n, buf);
+        if (g_debugLoggingEnabled.load()) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeCapture] %.*s", (int)n, buf);
+        }
         pending.append(buf, n);
         size_t pos;
         while ((pos = pending.find('\n')) != std::string::npos) {
@@ -558,8 +564,10 @@ static void logReader(int readFd) {
                 std::string status = observeNpuRuntimeLine(line);
                 if (!status.empty()) {
                     gLog.append(status);
-                    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
-                                 "[MobiInfra][NativeRuntime] %{public}s", status.c_str());
+                    if (g_debugLoggingEnabled.load()) {
+                        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
+                                     "[MobiInfra][NativeRuntime] %{public}s", status.c_str());
+                    }
                 }
             }
         }
@@ -571,20 +579,6 @@ static void initLogCapture(const std::string& path) {
     bool expected = false;
     if (!gLog.started.compare_exchange_strong(expected, true)) return;
     gLog.filePath = path;
-
-    // 读取上一次会话日志到 ring buffer，App 重启后仍能在 Runtime Logs 中看到尾部日志。
-    FILE* rf = fopen(path.c_str(), "r");
-    if (rf) {
-        char linebuf[2048];
-        while (fgets(linebuf, sizeof(linebuf), rf)) {
-            std::string line(linebuf);
-            if (!line.empty() && line.back() == '\n') line.pop_back();
-            if (!line.empty()) gLog.append(line);
-        }
-        fclose(rf);
-    }
-
-    gLog.file = fopen(path.c_str(), "a");
 
     // 同时重定向 stdout/stderr，捕获 MNN/第三方库里 printf 风格的日志。
     int pipefd[2];
@@ -598,7 +592,65 @@ static void initLogCapture(const std::string& path) {
         setvbuf(stderr, nullptr, _IOLBF, 0);
         std::thread(logReader, pipefd[0]).detach();
     }
-    gLog.append("==== session started ====");
+}
+
+static napi_value SetDebugLogging(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc != 1 || napi_get_value_bool(env, args[0], &enabled) != napi_ok) {
+        napi_throw_type_error(env, nullptr, "setDebugLogging expects a boolean");
+        return nullptr;
+    }
+    {
+        // Serialize disabling with every file/ring write. Leave old disk logs
+        // intact, but release the file and clear the visible runtime buffer.
+        std::lock_guard<std::mutex> g(gLog.mu);
+        if (enabled != g_debugLoggingEnabled.load()) {
+            if (enabled && !gLog.filePath.empty()) {
+                FILE* file = fopen(gLog.filePath.c_str(), "a");
+                if (!file) {
+                    napi_throw_error(env, nullptr, "Cannot open native Debug log file");
+                    return nullptr;
+                }
+                gLog.file = file;
+                // Restore past enabled sessions for LogView without rewriting
+                // them. Nothing is read or accumulated while Debug is off.
+                FILE* previous = fopen(gLog.filePath.c_str(), "r");
+                if (previous) {
+                    // A Debug session can contain large prompts. Bound the
+                    // synchronous history read when the switch is turned on.
+                    constexpr long maxHistoryBytes = 4 * 1024 * 1024;
+                    fseek(previous, 0, SEEK_END);
+                    if (ftell(previous) > maxHistoryBytes) {
+                        fseek(previous, -maxHistoryBytes, SEEK_END);
+                        int ch;
+                        while ((ch = fgetc(previous)) != EOF && ch != '\n') {}
+                    } else {
+                        rewind(previous);
+                    }
+                    char linebuf[2048];
+                    while (fgets(linebuf, sizeof(linebuf), previous)) {
+                        std::string line(linebuf);
+                        if (!line.empty() && line.back() == '\n') line.pop_back();
+                        if (!line.empty()) gLog.ring.push_back(line);
+                        if (gLog.ring.size() > gLog.maxLines) gLog.ring.pop_front();
+                    }
+                    fclose(previous);
+                }
+            } else if (gLog.file) {
+                fclose(gLog.file);
+                gLog.file = nullptr;
+            }
+            g_debugLoggingEnabled.store(enabled);
+            if (!enabled) gLog.ring.clear();
+        }
+    }
+    if (enabled) gLog.append("==== Debug logging enabled ====");
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
 }
 
 static napi_value InitLogFile(napi_env env, napi_callback_info info) {
@@ -644,6 +696,7 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
 }
 
 static void appendLargeLogBlock(const std::string& title, const std::string& text) {
+    if (!g_debugLoggingEnabled.load()) return;
     gLog.append("===== " + title + " BEGIN chars=" + std::to_string(text.size()) + " =====");
     size_t offset = 0;
     const size_t chunkSize = 3500;
@@ -680,6 +733,8 @@ static std::string profileSummaryPath() {
 
 static void appendProfileSummaryLine(const std::string& line) {
     std::string path = profileSummaryPath();
+    std::lock_guard<std::mutex> g(gLog.mu);
+    if (!g_debugLoggingEnabled.load()) return;
     if (path.empty()) {
         return;
     }
@@ -709,6 +764,7 @@ static std::string stripHiLogFmt(const char* fmt) {
 }
 
 static void appLog(const char* fmt, ...) {
+    if (!g_debugLoggingEnabled.load()) return;
     std::string cleanFmt = stripHiLogFmt(fmt);
     char buf[1024];
     va_list ap;
@@ -722,10 +778,12 @@ static void appLog(const char* fmt, ...) {
 #undef LOGI
 #undef LOGE
 #define LOGI(fmt, ...) do { \
+    if (!g_debugLoggingEnabled.load()) break; \
     OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog(fmt, ##__VA_ARGS__); \
 } while(0)
 #define LOGE(fmt, ...) do { \
+    if (!g_debugLoggingEnabled.load()) break; \
     OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog("[ERR] " fmt, ##__VA_ARGS__); \
 } while(0)
@@ -1796,6 +1854,91 @@ static napi_value CancelChat(napi_env env, napi_callback_info info) {
     napi_value value;
     napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
     return value;
+}
+
+static napi_value IsChatRunning(napi_env env, napi_callback_info info) {
+    (void)info;
+    // latest id 从 ChatAsync 入队时设置，并在 ChatExecute 的生命周期结束时清零。
+    // 使用它而不是 running id，可以覆盖尚在等待 g_mutex 的已入队请求。
+    bool active = g_latest_chat_request_id.load(std::memory_order_acquire) != 0;
+    napi_value value;
+    napi_get_boolean(env, active, &value);
+    return value;
+}
+
+static napi_value ChatHistoryResult(napi_env env, const char* result) {
+    napi_value value;
+    napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
+    return value;
+}
+
+static bool ReadUtf8String(napi_env env, napi_value value, std::string& output) {
+    napi_valuetype valueType;
+    if (napi_typeof(env, value, &valueType) != napi_ok || valueType != napi_string) {
+        return false;
+    }
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) {
+        return false;
+    }
+    std::vector<char> buffer(length + 1, '\0');
+    size_t copied = 0;
+    if (napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &copied) != napi_ok) {
+        return false;
+    }
+    output.assign(buffer.data(), copied);
+    return true;
+}
+
+// Restore persisted local chat context without silently regenerating every
+// historical turn. The array alternates user and assistant content.
+static napi_value RestoreChatHistory(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 1) {
+        return ChatHistoryResult(env, "error: chat history array is required");
+    }
+
+    bool isArray = false;
+    if (napi_is_array(env, args[0], &isArray) != napi_ok || !isArray) {
+        return ChatHistoryResult(env, "error: chat history must be an array");
+    }
+    uint32_t length = 0;
+    if (napi_get_array_length(env, args[0], &length) != napi_ok || length % 2 != 0) {
+        return ChatHistoryResult(env, "error: chat history must contain complete user-assistant pairs");
+    }
+
+    ChatMessages restoredMessages;
+    restoredMessages.emplace_back("system", "You are a helpful assistant.");
+    for (uint32_t i = 0; i < length; ++i) {
+        napi_value element;
+        std::string content;
+        if (napi_get_element(env, args[0], i, &element) != napi_ok ||
+            !ReadUtf8String(env, element, content) || content.empty()) {
+            return ChatHistoryResult(env, "error: chat history contains invalid content");
+        }
+        restoredMessages.emplace_back(i % 2 == 0 ? "user" : "assistant", std::move(content));
+    }
+
+    if (g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
+        return ChatHistoryResult(env, "error: chat request is active");
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
+        return ChatHistoryResult(env, "error: chat request is active");
+    }
+    if (!g_llm) {
+        return ChatHistoryResult(env, "error: model not loaded");
+    }
+    g_llm->reset();
+    g_llm->set_config("{\"reuse_kv\":false}");
+    g_llm->set_config("{\"use_template\":true}");
+    g_agent_mode = false;
+    g_prefix_pos = 0;
+    g_agent_step = 0;
+    g_messages = std::move(restoredMessages);
+    LOGI("Restored %{public}u local chat messages without inference", length);
+    return ChatHistoryResult(env, "ok");
 }
 
 // ========== 5. Agent Prefill (prefix KV cache reuse) ==========
@@ -4542,77 +4685,17 @@ static bool runOmChunkOnce(const std::string& omPath,
     using Clock = std::chrono::high_resolution_clock;
     using Ms = std::chrono::duration<double, std::milli>;
 
-    // Read OM file into buffer
-    std::ifstream file(omPath, std::ios::binary | std::ios::ate);
-    if (!file) {
-        error = "cannot open om file: " + omPath;
+    // Reuse chat's descriptor-driven input mapping and FP16/FP32 conversion.
+    OfflineNpuChunkExecutor executor;
+    if (!executor.loadChunk(0, omPath)) {
+        error = "offline model load failed: " + omPath;
         return false;
     }
-    size_t modelSize = file.tellg();
-    file.seekg(0);
-    std::vector<uint8_t> modelBuf(modelSize);
-    file.read(reinterpret_cast<char*>(modelBuf.data()), modelSize);
-    file.close();
-
-    OH_NN_ReturnCode ret = HIAIModelManager::GetInstance().LoadModelFromBuffer(modelBuf.data(), modelSize);
-    if (ret != OH_NN_SUCCESS) {
-        error = "LoadModelFromBuffer failed, ret=" + std::to_string((int)ret);
-        return false;
-    }
-
-    ret = HIAIModelManager::GetInstance().InitIOTensors();
-    if (ret != OH_NN_SUCCESS) {
-        error = "InitIOTensors failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    int nIn = HIAIModelManager::GetInstance().GetInputCount();
-    if (nIn < 3) {
-        error = "OM model expects >=3 inputs, got " + std::to_string(nIn);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    // Feed real visual_pre outputs into OM model
-    ret = HIAIModelManager::GetInstance().SetInputData(1, hiddenData.data(), hiddenData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[0] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-    ret = HIAIModelManager::GetInstance().SetInputData(0, rotaryData.data(), rotaryData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[1] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-    ret = HIAIModelManager::GetInstance().SetInputData(2, maskData.data(), maskData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[2] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
     auto t0 = Clock::now();
-    ret = HIAIModelManager::GetInstance().RunModel();
+    bool ok = executor.runChunk(0, hiddenData, rotaryData, maskData, outputs);
     latencyMs = Ms(Clock::now() - t0).count();
-
-    if (ret != OH_NN_SUCCESS) {
-        error = "RunModel failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    int nOut = HIAIModelManager::GetInstance().GetOutputCount();
-    outputs.clear();
-    outputs.resize(nOut);
-    for (int oi = 0; oi < nOut; oi++) {
-        outputs[oi] = HIAIModelManager::GetInstance().GetOutputData(oi);
-    }
-
-    HIAIModelManager::GetInstance().UnloadModel();
-    return true;
+    if (!ok) error = "offline RunSync/output conversion failed; inspect OFFLINE_NPU logs";
+    return ok;
 }
 
 static std::string findOmChunkFile(const std::string& modelDir, int chunkIndex) {
@@ -4962,6 +5045,41 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
     return log.str();
 }
 
+static std::string runW8a8Probe(const std::string& directory) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_llm) {
+        return "ERROR: unload the local model before running the W8A8 probe.\n";
+    }
+    // Retain one model at a time; every sample starts from its saved CPU input.
+    std::unique_ptr<OfflineNpuChunkExecutor> executor;
+    std::string loadedPath;
+    const auto runner = [&](const std::string& path, const std::vector<float>& hidden,
+                            const std::vector<float>& rotary, const std::vector<float>& mask,
+                            std::vector<float>& output, std::string& error) {
+        if (!executor || path != loadedPath) {
+            executor.reset();
+            executor.reset(new OfflineNpuChunkExecutor());
+            loadedPath.clear();
+            if (!executor->loadChunk(0, path)) {
+                error = "offline load failed; inspect OFFLINE_NPU logs: " + path;
+                executor.reset();
+                return false;
+            }
+            loadedPath = path;
+        }
+        std::vector<std::vector<float>> outputs;
+        if (!executor->runChunk(0, hidden, rotary, mask, outputs) || outputs.empty()) {
+            error = "offline RunSync/output conversion failed; inspect OFFLINE_NPU logs";
+            return false;
+        }
+        output = std::move(outputs[0]);
+        return true;
+    };
+    const std::string report = OfflineNpuProbe::run(directory, runner);
+    appLog("[W8A8_PROBE] %s", report.c_str());
+    return report;
+}
+
 } // namespace
 
 static void OpTestExecute(napi_env env, void* data) {
@@ -5143,6 +5261,8 @@ static void OpTestExecute(napi_env env, void* data) {
             }
         }
         result << runQwen3VlChunkModelTest(modelDir, seqLen, 1, 2);
+    } else if (cfg.rfind("w8a8_probe|", 0) == 0) {
+        result << runW8a8Probe(cfg.substr(std::string("w8a8_probe|").size()));
     } else if (cfg.rfind("om_vs_mnn_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("om_vs_mnn_chunks|").size());
         std::string modelDir = payload;
@@ -5354,6 +5474,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat",   nullptr, CancelChat,         nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isChatRunning", nullptr, IsChatRunning,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"restoreChatHistory", nullptr, RestoreChatHistory, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -5368,6 +5490,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDebugLogging", nullptr, SetDebugLogging, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLogs",      nullptr, GetLogs,            nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
     };

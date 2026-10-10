@@ -8,6 +8,7 @@ import {
   ChatMessage,
   ChatSessionSummary,
   buildCloudContextMessages,
+  chatMessageCopyContent,
   chatMessageRenderKey,
   chatMessageImagePaths,
   chatMessageStableRenderKey,
@@ -117,6 +118,14 @@ export default function chatSessionStorageUnitTest() {
 
       expect(chatMessageStableRenderKey(initial)).assertEqual(chatMessageStableRenderKey(streamed));
       expect(chatMessageRenderKey(initial) === chatMessageRenderKey(streamed)).assertFalse();
+    });
+
+    // 整条复制仅暴露用户可见正文，不能把模型思考区或工具轨迹写入系统剪贴板。
+    it('buildsCopyContentFromVisibleMessageBodyOnly', 0, () => {
+      let message = createChatMessage('assistant-copy-1', 'assistant', 'chat',
+        '<think>内部推理。</think>最终回答正文。', 1000, ['工具执行轨迹']);
+
+      expect(chatMessageCopyContent(message)).assertEqual('最终回答正文。');
     });
 
     it('updatesRenderKeyWhenSameLengthContentChangesWithoutAutoScroll', 0, () => {
@@ -265,6 +274,17 @@ export default function chatSessionStorageUnitTest() {
       expect(first.contentDelta).assertEqual('');
       expect(rendered.thinkingContent).assertEqual('先分析问题。');
       expect(rendered.content).assertEqual('');
+    });
+
+    it('keepsThinkingRenderAppendOnlyAcrossWhitespaceOnlyClosures', 0, () => {
+      let firstRound = buildAssistantStreamingRenderContent('', '第一段思考');
+      let syntheticClose = buildAssistantStreamingRenderContent('\n\n', '第一段思考');
+      let secondRound = buildAssistantStreamingRenderContent('\n\n', '第一段思考第二段思考');
+      let finalAnswer = buildAssistantStreamingRenderContent('\n\n最终回答', '第一段思考第二段思考');
+
+      expect(syntheticClose).assertEqual(firstRound);
+      expect(secondRound.indexOf(firstRound)).assertEqual(0);
+      expect(finalAnswer.indexOf(secondRound)).assertEqual(0);
     });
 
     it('streamsVisibleContentAfterSplitClosingThinkTag', 0, () => {

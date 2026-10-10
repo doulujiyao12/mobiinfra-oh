@@ -280,6 +280,9 @@ export function sourceRef(sourceDate: string, fileName: string, entryIndex: numb
 
 export function sourceDisplayName(value: string): string {
   let parts = sourceFileNameParts(value);
+  if (parts[0] === 'app-chat') {
+    return parts[1] === 'local' ? '端侧聊天' : '云端聊天';
+  }
   let name = parts.length > 0 ? parts[parts.length - 1] : '';
   let legacyName = appKeyFromTaskName(name);
   return appDisplayNameFromKey(legacyName) || normalizeFreeText(legacyName) || '未知来源';
@@ -287,6 +290,9 @@ export function sourceDisplayName(value: string): string {
 
 export function sourceAppDisplayName(value: string): string {
   let parts = sourceFileNameParts(value);
+  if (parts[0] === 'app-chat') {
+    return sourceDisplayName(value);
+  }
   let packageName = parts.length > 0 ? parts[0] : '';
   let fromPackage = appDisplayNameFromPackage(packageName);
   if (fromPackage.length > 0) {
@@ -305,7 +311,7 @@ export function sourceAppDisplayName(value: string): string {
 
 function sourceContextDisplayNames(value: string): string[] {
   let parts = sourceFileNameParts(value);
-  if (parts.length <= 2) {
+  if (parts.length <= 2 || parts[0] === 'app-chat') {
     return [];
   }
   let workflowName = normalizeLookupText(parts[1]);

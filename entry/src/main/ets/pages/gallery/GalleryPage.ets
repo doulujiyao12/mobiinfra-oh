@@ -1,4 +1,11 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
+import { applyPageStatusBar } from '../../utils/PageStatusBar';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { AiLoginGuard } from '../../components/AiLoginGuard';
+import { PrivacyConsent } from '../../utils/PrivacyConsent';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -35,7 +42,11 @@ import {
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT,
+  GALLERY_API_KEY_DEFAULT_SNAPSHOT,
   GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_MODEL_DEFAULT_SNAPSHOT,
+  galleryApiUsesLegacyDefaults,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import {
@@ -78,6 +89,15 @@ registerGallerySettingsDefaults();
 @Entry
 @Component
 struct GalleryPage {
+  private pageScroller: Scroller = new Scroller();
+  onPageShow(): void {
+    applyPageStatusBar(this.getUIContext(), '#F6F7FA');
+  }
+
+  onPageHide(): void {
+    applyPageStatusBar(this.getUIContext(), '#FFFFFF');
+  }
+
   @State analyzing: boolean = false;
   @State progress: number = 0;
   @State selectedFilter: number = 0;
@@ -190,6 +210,21 @@ struct GalleryPage {
   }
 
   private migrateGalleryDefaultValues(): void {
+    if (galleryApiUsesLegacyDefaults(this.galleryApiBaseUrl, this.galleryModel)) {
+      this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
+      this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
+      this.galleryModel = DEFAULT_GALLERY_MODEL;
+      AppStorage.setOrCreate(GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_BASE_URL);
+      AppStorage.setOrCreate(GALLERY_API_KEY_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_KEY);
+      AppStorage.setOrCreate(GALLERY_MODEL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_MODEL);
+    } else {
+      this.galleryApiBaseUrl = this.migrateGalleryDefaultValue(this.galleryApiBaseUrl,
+        DEFAULT_GALLERY_API_BASE_URL, [''], GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT);
+      this.galleryApiKey = this.migrateGalleryDefaultValue(this.galleryApiKey,
+        DEFAULT_GALLERY_API_KEY, [''], GALLERY_API_KEY_DEFAULT_SNAPSHOT);
+      this.galleryModel = this.migrateGalleryDefaultValue(this.galleryModel,
+        DEFAULT_GALLERY_MODEL, [''], GALLERY_MODEL_DEFAULT_SNAPSHOT);
+    }
     this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
       DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
     this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
@@ -228,6 +263,12 @@ struct GalleryPage {
   }
 
   private async runGalleryQuestionAnswer(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     let query = this.galleryQuestion.trim();
     if (query.length === 0) {
       showToastSafely('请输入要问的问题', 1200);
@@ -314,6 +355,12 @@ struct GalleryPage {
   }
 
   private async startManualAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -380,6 +427,12 @@ struct GalleryPage {
   }
 
   private async startAutoAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -411,6 +464,12 @@ struct GalleryPage {
   }
 
   private async continueAutoAnalyze(): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.analyzing) {
       showToastSafely('图库分析正在进行', 1200);
       return;
@@ -731,6 +790,12 @@ struct GalleryPage {
   }
 
   private async generateAiMonthlySummary(insight: GalleryMonthlyInsight): Promise<void> {
+    if (!AiLoginGuard.ensure(this.getUIContext())) {
+      return;
+    }
+    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
+      return;
+    }
     if (this.monthlyAiLoadingKey.length > 0) {
       return;
     }
@@ -1545,7 +1610,7 @@ struct GalleryPage {
                     onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
                     onValueChange: (value: string) => { this.updateSetting(1, value); }
                   })
-                  this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
+                  this.SettingInput('大模型名称', this.galleryModel, '留空则不发送 model 字段', 2)
                   this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
                   this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)
@@ -1841,6 +1906,8 @@ struct GalleryPage {
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
               .margin({ right: 12 })
+              AiGeneratedBadge({ compact: true })
+                .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
                 .fontColor('#5B68FF')
@@ -2248,6 +2315,8 @@ struct GalleryPage {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          AiGeneratedBadge({ compact: true })
+            .margin({ left: 8, right: 8 })
           Text(this.categoryLabel(item.category))
             .fontSize(11)
             .fontColor(this.categoryColor(item.category))
@@ -2760,6 +2829,9 @@ struct GalleryPage {
   }
 
   private async resolveCaptureAddressLazy(item: GalleryAnalysisResult, force: boolean): Promise<void> {
+    if (!PrivacyConsent.isAccepted() && (!force || !await PrivacyConsentDialog.show(this.getUIContext()))) {
+      return;
+    }
     let rawLocation = this.captureRawLatLng(item);
     if (!rawLocation) {
       return;
@@ -3017,6 +3089,8 @@ struct GalleryPage {
       Column() {
         Row() {
           Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+          AiGeneratedBadge({ compact: true })
+            .margin({ right: 8 })
           Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor('#7F8592')
         }.width('100%')
         Scroll() {
@@ -3257,6 +3331,8 @@ struct GalleryPage {
       }
       if (this.galleryAnswerText.length > 0) {
         Column() {
+          AiGeneratedBadge({ compact: true })
+            .margin({ bottom: 7 })
           Text(this.galleryAnswerText)
             .fontSize(13)
             .fontColor('#303746')
@@ -3324,6 +3400,7 @@ struct GalleryPage {
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
+        AiGeneratedBadge({ compact: true })
       }.width('100%')
       Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
         ForEach(this.categoryFilterItems(), (item: GalleryCategoryFilter) => {
@@ -3399,24 +3476,29 @@ struct GalleryPage {
     return String(e);
   }
 
-  build() {
-    Stack() {
-      Scroll() {
-      Column() {
-        Row() {
-          this.HeaderIconButton('<', 0)
-          Column() {
-            Text('图库分析').fontSize(24).fontWeight(FontWeight.Bold).fontColor('#11182F').maxLines(1)
-            Text('相册、截图与文档图片洞察').fontSize(13).fontColor('#717684').margin({ top: 3 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-          .margin({ left: 12 })
-          this.HeaderIconButton('⚙', 1)
-        }
-        .width('90%')
-        .margin({ top: 24 })
+  @Builder PageHeader() {
+    Row() {
+      this.HeaderIconButton('<', 0)
+      Text('图库分析')
+        .fontSize(20)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#172033')
+        .lineHeight(28)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
+        .layoutWeight(1)
+        .margin({ left: 8, right: 8 })
+      this.HeaderIconButton('⚙', 1)
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
 
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
+      Column() {
         this.ActionToolbar()
         if (this.shouldShowProgressStrip()) {
           this.ProgressStrip()
@@ -3426,11 +3508,22 @@ struct GalleryPage {
         this.ResultsPanel(this.resultRevision)
 
         Blank().height(100)
-      }.width('100%')
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#F6F7FA')
+      }.width('100%').padding({ top: APP_HEADER_CONTENT_GAP })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F6F7FA')
+    .clip(false)
+  }
+
+  build() {
+    Stack() {
+      FrostedPage({
+        pageBackgroundColor: '#F6F7FA',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       this.SettingsPanel()
       this.ResultDetailPanel()

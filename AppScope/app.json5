@@ -1,9 +1,10 @@
 {
   "app": {
-    "bundleName": "com.example.mnnllmchat",
+    // 全工程唯一的应用包名配置；ArkTS、Hvigor 和设备辅助脚本均从这里读取。
+    "bundleName": "com.coevomind.clawmate",
     "vendor": "example",
-    "versionCode": 1000000,
-    "versionName": "1.0.0",
+    "versionCode": 1000003,
+    "versionName": "1.0.2",
     "icon": "$media:Icon",
     "label": "$string:app_name"
   }

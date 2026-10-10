@@ -113,6 +113,8 @@ export struct MarkdownView {
         .fontWeight(bold ? FontWeight.Bold : FontWeight.Regular)
         .fontColor(color)
         .lineHeight(lineHeight)
+        .copyOption(CopyOptions.LocalDevice)
+        .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
         .width('100%')
     } else {
       Text() {
@@ -127,6 +129,8 @@ export struct MarkdownView {
       .fontSize(fontSize)
       .fontColor(color)
       .lineHeight(lineHeight)
+      .copyOption(CopyOptions.LocalDevice)
+      .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
       .width('100%')
     }
   }
@@ -199,6 +203,8 @@ export struct MarkdownView {
         .fontFamily('monospace')
         .fontColor(this.primaryColor())
         .lineHeight(this.baseLineHeight())
+        .copyOption(CopyOptions.LocalDevice)
+        .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
         .width('100%')
     }
     .width('100%')
@@ -224,6 +230,8 @@ export struct MarkdownView {
           .fontWeight(isHeader ? FontWeight.Bold : FontWeight.Regular)
           .fontColor(isHeader ? this.primaryColor() : this.secondaryColor())
           .lineHeight(this.baseLineHeight())
+          .copyOption(CopyOptions.LocalDevice)
+          .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
           .layoutWeight(1)
           .padding({ left: 6, right: 6, top: 5, bottom: 5 })
       }, (cell: string, index?: number) => keyPrefix + '_' + String(index === undefined ? 0 : index) + cell)

@@ -6,6 +6,10 @@ export const CHAT_COMPOSER_LINE_HEIGHT: number = 22;
 export const CHAT_COMPOSER_MAX_LINES: number = 4;
 export const CHAT_COMPOSER_CHARS_PER_LINE: number = 10;
 
+export function chatPageBackgroundColor(hasConversationContent: boolean): string {
+  return hasConversationContent ? '#FFFFFF' : '#F4F8FF';
+}
+
 export function isSupportedChatMode(mode: string): boolean {
   return mode === CHAT_MODE_CLOUD_AGENT || mode === CHAT_MODE_LOCAL_INFERENCE;
 }
@@ -37,6 +41,13 @@ export function chatDeepThinkingToggleVisible(mode: string): boolean {
 
 export function chatInputAfterAcceptedSend(currentInput: string, accepted: boolean): string {
   return accepted ? '' : currentInput;
+}
+
+// 原生请求已经结束、但 Promise 完成回调尚未清理 UI 时，允许主动释放陈旧的忙碌状态。
+// nativeRequestSubmitted 可防止模型加载阶段因尚未创建原生请求而被误判为已完成。
+export function chatLocalInferenceStateIsStale(uiRunning: boolean, nativeRequestSubmitted: boolean,
+  nativeRunning: boolean): boolean {
+  return uiRunning && nativeRequestSubmitted && !nativeRunning;
 }
 
 export type ChatComposerPrimaryActionRole = 'send' | 'busy' | 'voice_capture';

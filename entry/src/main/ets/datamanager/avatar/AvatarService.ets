@@ -178,7 +178,8 @@ export class AvatarService {
         output_format: config.outputFormat,
         sequential_image_generation: config.sequentialImageGeneration,
         stream: config.stream,
-        watermark: config.watermark
+        // 数字分身属于 AI 生成图片，始终请求服务端水印，避免历史配置关闭标识。
+        watermark: true
       };
       let model = request.mode === 'image_to_image' ? config.imageToImageModel : config.textToImageModel;
       let providerRequest: AvatarProviderRequest = {

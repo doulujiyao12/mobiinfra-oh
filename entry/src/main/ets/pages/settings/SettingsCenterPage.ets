@@ -1,5 +1,7 @@
+import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
-import { AppHeader } from '../../components/AppHeader';
+import { common } from '@kit.AbilityKit';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
@@ -25,15 +27,21 @@ import {
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT,
+  GALLERY_API_KEY_DEFAULT_SNAPSHOT,
   GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_MODEL_DEFAULT_SNAPSHOT,
+  galleryApiUsesLegacyDefaults,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
+import { APP_BACKUP_MIN_PASSWORD_LENGTH } from '../../utils/AppBackupTypes';
 import {
   hiddenDefaultSettingEditorValue,
   hiddenDefaultSettingPlaceholder,
   migrateDefaultSettingValue
 } from '../../utils/DefaultSettingVisibility';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { DEBUG_ENABLED_STORAGE_KEY, DebugSettings } from '../../utils/DebugSettings';
 import {
   MIMO_CHINESE_VOICE_PRESETS,
   VOICE_TTS_ROLE_PRESETS,
@@ -93,12 +101,21 @@ import {
   SettingsOutputPanel,
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
+import { HuaweiAccountCard } from './HuaweiAccountCard';
+import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
+import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
+import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { PERSONAL_MEMORY_A2A_STATE_KEY, PersonalMemoryAccess } from '../../agent/PersonalMemoryAccess';
 
 registerGallerySettingsDefaults();
 
 const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
 @Component
 export struct SettingsCenterPage {
+  private pageScroller: Scroller = new Scroller();
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onDebugSettingChanged') private debugEnabled: boolean = false;
+  @State private debugSwitchValue: boolean = false;
+  @StorageProp(PRIVACY_STATE_KEY) privacyConsentState: string = 'unselected';
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
@@ -179,6 +196,8 @@ export struct SettingsCenterPage {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   @State private activeSensitiveInputId: string = '';
+  @StorageLink(PERSONAL_MEMORY_A2A_STATE_KEY) private personalMemoryA2aEnabled: boolean = false;
+  @StorageLink(HUAWEI_ACCOUNT_SESSION_KEY) private huaweiAccountSessionActive: boolean = false;
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onDownloadModelScopeModel: () => Promise<void> = async () => {};
@@ -204,12 +223,36 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    try { DebugSettings.initialize(getContext(this) as common.Context); } catch (e) {
+      showToastSafely('读取 Debug 设置失败：' + (e as Error).message, 2500);
+    }
+    this.debugSwitchValue = DebugSettings.isEnabled();
+    PersonalMemoryAccess.isEnabled(getContext(this) as common.Context).then((enabled: boolean): void => {
+      this.personalMemoryA2aEnabled = enabled;
+    }).catch((): void => {
+      this.personalMemoryA2aEnabled = false;
+    });
     this.migrateGalleryDefaultValues();
     this.restoreMaskedDefaultSecrets();
     this.upgradeLegacyVoiceTtsBaseUrl();
   }
 
   private migrateGalleryDefaultValues(): void {
+    if (galleryApiUsesLegacyDefaults(this.galleryApiBaseUrl, this.galleryModel)) {
+      this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
+      this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
+      this.galleryModel = DEFAULT_GALLERY_MODEL;
+      AppStorage.setOrCreate(GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_BASE_URL);
+      AppStorage.setOrCreate(GALLERY_API_KEY_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_API_KEY);
+      AppStorage.setOrCreate(GALLERY_MODEL_DEFAULT_SNAPSHOT, DEFAULT_GALLERY_MODEL);
+    } else {
+      this.galleryApiBaseUrl = this.migrateGalleryDefaultValue(this.galleryApiBaseUrl,
+        DEFAULT_GALLERY_API_BASE_URL, [''], GALLERY_API_BASE_URL_DEFAULT_SNAPSHOT);
+      this.galleryApiKey = this.migrateGalleryDefaultValue(this.galleryApiKey,
+        DEFAULT_GALLERY_API_KEY, [''], GALLERY_API_KEY_DEFAULT_SNAPSHOT);
+      this.galleryModel = this.migrateGalleryDefaultValue(this.galleryModel,
+        DEFAULT_GALLERY_MODEL, [''], GALLERY_MODEL_DEFAULT_SNAPSHOT);
+    }
     this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
       DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
     this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
@@ -770,45 +813,133 @@ export struct SettingsCenterPage {
     .onClick(() => { this.openSection(item.id); })
   }
 
+  @Builder DesktopCompanionEntry() {
+    Row() {
+      Text('PC')
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(44)
+        .height(44)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#4F68FF')
+        .borderRadius(14)
+      Column() {
+        Text('桌面端 App')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text('查看 ClawMate 桌面端下载链接')
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 10 })
+      Text('›')
+        .fontSize(28)
+        .fontColor('#8A93A3')
+    }
+    .width('92%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(18)
+    .margin({ top: 14 })
+    .onClick(() => { router.pushUrl({ url: 'pages/settings/DesktopCompanionPage' }); })
+  }
+
+  @Builder SelfHdcTestEntry() {
+    Row() {
+      Text('HDC')
+        .fontSize(12)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(44)
+        .height(44)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#287D75')
+        .borderRadius(14)
+      Column() {
+        Text('手机 HDC')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text(this.debugEnabled ? '连接设置 · 自控测试 · 手机任务日志' : '连接设置 · 自控测试')
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 10 })
+      Text('›').fontSize(28).fontColor('#8A93A3')
+    }
+    .width('92%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(18)
+    .margin({ top: 12 })
+    .onClick(() => { router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }); })
+  }
+
+  private setDebugEnabled(enabled: boolean): void {
+    this.debugSwitchValue = enabled;
+    try { DebugSettings.setEnabled(getContext(this) as common.Context, enabled); } catch (e) {
+      showToastSafely('保存 Debug 设置失败：' + (e as Error).message, 2500);
+    }
+    this.debugSwitchValue = DebugSettings.isEnabled();
+  }
+
+  private onDebugSettingChanged(): void {
+    this.debugSwitchValue = this.debugEnabled;
+  }
+
+  @Builder DebugSwitch() {
+    Row() {
+      Column() {
+        Text('开启 Debug').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#11182F').width('100%')
+        Text('开启后显示并记录聊天和手机 HDC 日志')
+          .fontSize(12).fontColor('#7B8290').width('100%').maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 4 })
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ right: 12 })
+      Toggle({ type: ToggleType.Switch, isOn: this.debugSwitchValue })
+        .selectedColor('#4F68FF')
+        .onChange((enabled: boolean): void => { this.setDebugEnabled(enabled); })
+    }.width('92%').padding(16).backgroundColor(Color.White).borderRadius(18).margin({ top: 12 })
+  }
+
   @Builder SettingsSectionList() {
     Column() {
-      AppHeader({ title: '设置中心', icon: $r('app.media.header_settings') })
+      HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
+      this.DebugSwitch()
+      this.DesktopCompanionEntry()
+      this.SelfHdcTestEntry()
+      Text('设置与服务')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+        .width('92%')
+        .margin({ top: 22, bottom: 2 })
       ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
         this.SettingsListItem(item)
       }, (item: SettingsSectionItem) => String(item.id))
     }
     .width('100%')
-    .padding({ bottom: 110 })
+    .padding({ top: APP_HEADER_CONTENT_GAP, bottom: 110 })
   }
 
   @Builder SettingsDetailHeader() {
-    Row() {
-      Button('‹')
-        .width(42)
-        .height(42)
-        .fontSize(28)
-        .fontColor('#11182F')
-        .backgroundColor(Color.White)
-        .borderRadius(14)
-        .onClick(() => { this.closeSection(); })
-      Column() {
-        Text('设置中心')
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-        Text(this.activeSectionTitle())
-          .fontSize(12)
-          .fontColor('#7B8290')
-          .width('100%')
-          .margin({ top: 2 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12 })
-    }
-    .width('92%')
-    .margin({ top: 18, bottom: 2 })
+    AppHeader({ title: this.activeSectionTitle(), showBackButton: true,
+      onBackClick: (): void => { this.closeSection(); } })
   }
 
   @Builder SelectedSectionContent() {
@@ -831,6 +962,12 @@ export struct SettingsCenterPage {
   @Builder PrivacySection() {
     Column() {
       this.SectionTitle(SettingsSectionId.PersonalPrivacy)
+      this.PrivacyDeclarationEntry()
+      SettingsGroupCard({
+        title: '小艺读取个人记忆',
+        subtitle: '需要 API 24 或更新系统；可查询已同步的各类记忆摘要',
+        contentBuilder: () => { this.XiaoyiPersonalMemoryGroup() }
+      })
       SettingsGroupCard({
         title: 'Agent 确认策略',
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
@@ -853,6 +990,49 @@ export struct SettingsCenterPage {
       (value: boolean) => { this.autoConfirm = value; })
     this.SettingToggle('云端 Agent 自动同意', '关闭后云端模型动作需要手动确认后发给 PC', this.cloudAutoConfirm,
       (value: boolean) => { this.cloudAutoConfirm = value; })
+  }
+
+  @Builder XiaoyiPersonalMemoryGroup() {
+    this.SettingToggle('允许小艺查询个人记忆',
+      '使用已配置的云端 Agent 查询外卖、微信等记忆；需登录及联网；不提供证件号码、详细住址',
+      this.personalMemoryA2aEnabled && this.privacyConsentState === 'accepted',
+      (enabled: boolean): void => {
+        PersonalMemoryAccess.setEnabled(getContext(this) as common.Context, enabled).then((saved: boolean): void => {
+          this.personalMemoryA2aEnabled = saved;
+        }).catch((e: Error): void => {
+          this.personalMemoryA2aEnabled = false;
+          showToastSafely(e.message || '设置保存失败', 1800);
+        });
+      })
+  }
+
+  @Builder PrivacyDeclarationEntry() {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 12 }) {
+        Column({ space: 5 }) {
+          Text('隐私声明')
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('sys.color.ohos_id_color_text_primary'))
+          Text(this.privacyConsentState === 'accepted' ? '已同意 · 可随时撤回同意' :
+            (this.privacyConsentState === 'rejected' ? '已拒绝 · 任务与云端分析已关闭' : '未选择 · 阅读并管理云端分析授权'))
+            .fontSize(12)
+            .fontColor($r('sys.color.ohos_id_color_text_secondary'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Text('›').fontSize(24).fontColor($r('sys.color.ohos_id_color_text_secondary'))
+      }
+      .width('100%')
+    }
+    .width('92%')
+    .padding(18)
+    .borderRadius(20)
+    .backgroundColor($r('sys.color.ohos_id_color_dialog_bg'))
+    .margin({ top: 16 })
+    .onClick(() => { PrivacyConsentDialog.show(this.getUIContext(), true); })
   }
 
   @Builder AvatarImageServiceGroup() {
@@ -957,7 +1137,7 @@ export struct SettingsCenterPage {
     SettingInput({
       label: '图库大模型',
       value: this.galleryModel,
-      placeholder: DEFAULT_GALLERY_MODEL,
+      placeholder: '留空则不发送 model 字段',
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryModel = value; }
     })
@@ -1137,7 +1317,7 @@ export struct SettingsCenterPage {
       onValueChange: (value: string) => { this.cloudDeciderModel = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
-    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput })
+    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder CloudPlannerActionRow() {
@@ -1382,15 +1562,15 @@ export struct SettingsCenterPage {
     }
     .width('100%')
     SettingsOutputPanel({ title: '本地输出', content: this.output })
-    SettingsOutputPanel({ title: '云端输出', content: this.cloudOutput })
+    SettingsOutputPanel({ title: '云端输出', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder TaskAutomationSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.TaskAutomation)
       SettingsGroupCard({
-        title: 'Workflow 与日志',
-        subtitle: '查看 Workflow 配置、daily-log 和运行日志',
+        title: this.debugEnabled ? 'Workflow 与日志' : 'Workflow 文件',
+        subtitle: this.debugEnabled ? '查看 Workflow 配置、daily-log 和运行日志' : '查看 Workflow 配置和 daily-log',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.WorkflowLogGroup() }
       })
@@ -1415,11 +1595,13 @@ export struct SettingsCenterPage {
       kind: SettingsActionKind.Success,
       onActionClick: () => { router.pushUrl({ url: 'pages/task/WorkflowFileViewer' }); }
     })
-    SettingsActionButton({
-      label: 'Runtime Logs',
-      kind: SettingsActionKind.Success,
-      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
-    })
+    if (this.debugEnabled) {
+      SettingsActionButton({
+        label: 'Runtime Logs',
+        kind: SettingsActionKind.Success,
+        onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+      })
+    }
   }
 
   @Builder PcBackendGroup() {
@@ -1439,7 +1621,7 @@ export struct SettingsCenterPage {
       this.SectionTitle(SettingsSectionId.StorageAbout)
       SettingsGroupCard({
         title: '文件查看',
-        subtitle: '查看截图、模型文件树和运行日志',
+        subtitle: this.debugEnabled ? '查看截图、模型文件树和运行日志' : '查看截图和模型文件树',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.FileViewerGroup() }
       })
@@ -1457,7 +1639,7 @@ export struct SettingsCenterPage {
       })
       SettingsGroupCard({
         title: '关于',
-        subtitle: '当前应用与设置中心说明',
+        subtitle: '当前应用与设置说明',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AboutSettingsGroup() }
       })
@@ -1481,11 +1663,13 @@ export struct SettingsCenterPage {
       kind: SettingsActionKind.Success,
       onActionClick: () => { this.onListModelFilesTree(); }
     })
-    SettingsActionButton({
-      label: 'Runtime Logs',
-      kind: SettingsActionKind.Success,
-      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
-    })
+    if (this.debugEnabled) {
+      SettingsActionButton({
+        label: 'Runtime Logs',
+        kind: SettingsActionKind.Success,
+        onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+      })
+    }
   }
 
   @Builder CleanupActionGroup() {
@@ -1537,7 +1721,7 @@ export struct SettingsCenterPage {
   }
 
   @Builder AboutSettingsGroup() {
-    Text('MobiInfer LLM Chat')
+    Text('ClawMate')
       .fontSize(13)
       .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
       .width('100%')
@@ -1545,31 +1729,49 @@ export struct SettingsCenterPage {
       .margin({ top: 6, bottom: 4 })
   }
 
+  @Builder SettingsMainHeader() {
+    AppHeader({ title: '我的' })
+  }
+
+  @Builder SettingsMainContent() {
+    Scroll(this.pageScroller) {
+      this.SettingsSectionList()
+    }
+    .width('100%')
+    .height('100%')
+    .clip(false)
+  }
+
+  @Builder SettingsDetailContent() {
+    Scroll(this.detailScroller) {
+      Column() {
+        this.SelectedSectionContent()
+      }
+      .width('100%')
+      .constraintSize({ minHeight: '100%' })
+      .justifyContent(FlexAlign.Start)
+      .padding({ top: APP_HEADER_CONTENT_GAP })
+    }
+    .width('100%')
+    .height('100%')
+    .clip(false)
+  }
+
   build() {
     if (isSettingsSectionSelected(this.selectedSectionId)) {
-      Column() {
-        this.SettingsDetailHeader()
-        Scroll(this.detailScroller) {
-          Column() {
-            this.SelectedSectionContent()
-          }
-          .width('100%')
-          .constraintSize({ minHeight: '100%' })
-          .justifyContent(FlexAlign.Start)
-        }
-        .width('100%')
-        .layoutWeight(1)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+      FrostedPage({
+        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        scrollers: [this.detailScroller],
+        headerBuilder: (): void => { this.SettingsDetailHeader(); },
+        contentBuilder: (): void => { this.SettingsDetailContent(); }
+      })
     } else {
-      Scroll() {
-        this.SettingsSectionList()
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+      FrostedPage({
+        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.SettingsMainHeader(); },
+        contentBuilder: (): void => { this.SettingsMainContent(); }
+      })
     }
   }
 }

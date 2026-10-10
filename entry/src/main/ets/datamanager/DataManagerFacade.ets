@@ -9,6 +9,8 @@ import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { ChatMemorySync } from './ChatMemorySync';
+import { shouldOfferSyncReminder, syncSnapshotTimeMs } from './DataManagerSyncReminder';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -241,7 +243,7 @@ function emptyCollectionViewModel(index: number): CollectionViewModel {
     groups: [],
     rows: [],
     insights: defaultInsights(),
-    insightSummary: '导入 daily-log 后，这里会展示已整理的中层采集数据。',
+    insightSummary: '同步后，这里会展示采集数据和聊天中提取的相关信息。',
     empty: true
   };
 }
@@ -311,12 +313,38 @@ export class DataManagerFacade {
     return false;
   }
 
+  hasDataToSync(): boolean {
+    if (this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync()) {
+      return true;
+    }
+    let lastSyncMs = syncSnapshotTimeMs(this.loadDailyLogSnapshot().generated_at);
+    return GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir,
+      Number.isFinite(lastSyncMs) ? lastSyncMs : 0);
+  }
+
+  shouldRemindToSync(nowMs: number = Date.now(), firstOpenAt: string = ''): boolean {
+    let previous = this.loadDailyLogSnapshot();
+    let referenceTime = Number.isFinite(syncSnapshotTimeMs(previous.generated_at)) ?
+      previous.generated_at : firstOpenAt;
+    if (!shouldOfferSyncReminder(referenceTime, true, nowMs)) {
+      return false;
+    }
+    let chatSync = new ChatMemorySync(this.paths, this.storage, this.modelClient);
+    let hasNewRecords = chatSync.hasPendingMessages(nowMs) ||
+      this.hasNewDailyLogEntries(previous, this.buildDailyLogSnapshot()) ||
+      GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir, syncSnapshotTimeMs(referenceTime));
+    return shouldOfferSyncReminder(referenceTime, hasNewRecords, nowMs);
+  }
+
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
     this.ensureReady();
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
     dataManagerInfo(`DataManagerFacade refresh start: modelEnabled=${modelConfig.enabled}, groupingModelEnabled=${groupingConfig.enabled}, dailyRoot=${this.paths.dailyLogRoot}`);
     GalleryMemorySync.sync(this.paths.filesDir);
+    let chatSummary = await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, progress);
+    let chatMessage = chatSummary.processedParts > 0 ?
+      `已检查近 7 天未处理聊天，提取 ${chatSummary.factCount} 条相关信息` : '';
     let currentSnapshot = this.buildDailyLogSnapshot();
     let previousSnapshot = this.loadDailyLogSnapshot();
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
@@ -325,6 +353,10 @@ export class DataManagerFacade {
       let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
+      if (chatMessage.length > 0) {
+        skipped.skipped = false;
+        skipped.message = chatMessage;
+      }
       if (groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
         let actions: string[] = [];
         if (groups.updatedGroupDocs > 0) {
@@ -337,10 +369,10 @@ export class DataManagerFacade {
           actions.push(`清理 ${recommendations.prunedCount} 条过期待办推荐`);
         }
         skipped.skipped = false;
-        skipped.message = `daily-log 无新增，${actions.join('，')}`;
+        skipped.message = [chatMessage, `daily-log 无新增，${actions.join('，')}`].filter((text: string) => text.length > 0).join('；');
       }
       dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}, prunedRecommendations=${recommendations.prunedCount}`);
-      this.emitProgress(progress, '完成', 'daily-log 无新增', 100, 100, 100);
+      this.emitProgress(progress, '完成', skipped.message, 100, 100, 100);
       return skipped;
     }
     if (this.canRecoverIndexesFromConsolidatedOutputs(previousSnapshot, currentSnapshot)) {
@@ -361,7 +393,7 @@ export class DataManagerFacade {
         eventCount: index.eventCount,
         profileClaimCount: index.profileClaimCount,
         updatedAt: index.updatedAt,
-        message: `基于已整理日志重建 ${index.eventCount} 条索引事件`,
+        message: (chatMessage.length > 0 ? chatMessage + '；' : '') + `基于已整理日志重建 ${index.eventCount} 条索引事件`,
         skipped: false
       };
     }
@@ -383,7 +415,8 @@ export class DataManagerFacade {
       eventCount: index.eventCount,
       profileClaimCount: index.profileClaimCount,
       updatedAt: index.updatedAt,
-      message: `整理 ${consolidation.sourceEntries} 条 daily-log，生成 ${index.eventCount} 条索引事件`,
+      message: (chatMessage.length > 0 ? chatMessage + '；' : '') +
+        `整理 ${consolidation.sourceEntries} 条日志，生成 ${index.eventCount} 条索引事件`,
       skipped: false
     };
   }
@@ -430,6 +463,9 @@ export class DataManagerFacade {
     GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
       paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
     });
+    ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage).forEach((relativePath: string) => {
+      paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
+    });
     stableUnique(paths).forEach((path: string) => {
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
       let content = this.storage.readText(path, '');
@@ -469,6 +505,13 @@ export class DataManagerFacade {
 
   private writeDailyLogSnapshot(snapshot: DailyLogSnapshot): void {
     this.storage.writeJsonAtomic(this.dailyLogSnapshotPath(), snapshot as Object);
+  }
+
+  private hasNewDailyLogEntries(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+    let previousCounts: Record<string, number> = new Object() as Record<string, number>;
+    previous.files.forEach((file: DailyLogSnapshotFile) => previousCounts[file.path] = file.entry_count);
+    return current.files.some((file: DailyLogSnapshotFile): boolean =>
+      file.entry_count > (previousCounts[file.path] || 0));
   }
 
   private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {

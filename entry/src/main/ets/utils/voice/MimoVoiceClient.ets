@@ -1,3 +1,5 @@
+import { PrivacyConsent } from '../PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from '../AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { parseJsonCompat } from '../JsonCompat';
@@ -346,6 +348,7 @@ export class MimoVoiceClient {
   }
 
   async synthesizeSpeech(text: string, config: MimoVoiceConfig): Promise<MimoTtsSynthesisResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = MimoVoiceClient.buildTtsRequest(text, {
       model: config.model,
       voice: config.voice,
@@ -366,9 +369,10 @@ export class MimoVoiceClient {
       readTimeout: config.readTimeoutMs === undefined ? 120000 : config.readTimeoutMs,
       expectDataType: http.HttpDataType.STRING
     };
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(MimoVoiceClient.normalizeChatUrl(config.baseUrl), requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error('MiMO TTS HTTP ' + String(response.responseCode) + ': ' + String(response.result));
       }
@@ -379,12 +383,13 @@ export class MimoVoiceClient {
         format: 'wav'
       };
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
   async synthesizeSpeechStream(text: string, config: MimoTtsStreamConfig,
     callbacks: MimoTtsStreamCallbacks = {}): Promise<MimoTtsStreamResult> {
+    AiServiceAccess.requireAllowed();
     let requestBody = MimoVoiceClient.buildStreamingTtsRequest(text, {
       model: config.model,
       selectedVoice: config.voice,
@@ -402,7 +407,7 @@ export class MimoVoiceClient {
       connectTimeout: 10000,
       readTimeout: config.readTimeoutMs === undefined ? 120000 : config.readTimeoutMs
     };
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     return new Promise<MimoTtsStreamResult>((resolve, reject) => {
       let resolved = false;
       let responseCode = -1;
@@ -418,7 +423,7 @@ export class MimoVoiceClient {
         httpReq.off('dataReceive');
         httpReq.off('dataEnd');
         try {
-          httpReq.destroy();
+          PrivacyConsent.destroyHttp(httpReq);
         } catch (e) {
         }
       };
@@ -430,11 +435,16 @@ export class MimoVoiceClient {
         cleanup();
         reject(new Error(message));
       };
+      PrivacyConsent.onHttpCancel(httpReq, () => { finishWithError('隐私授权已撤回'); });
       callbacks.onRequest?.({
         cancel: () => { finishWithError('MiMO TTS stream cancelled'); }
       });
       let finishWithResult = (): void => {
         if (resolved) {
+          return;
+        }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
           return;
         }
         if (responseCode < 0) {
@@ -463,6 +473,10 @@ export class MimoVoiceClient {
       };
       let processStreamEvent = (lines: string[]): void => {
         if (resolved) {
+          return;
+        }
+        if (!AiServiceAccess.isAllowed()) {
+          finishWithError(AI_LOGIN_REQUIRED_MESSAGE);
           return;
         }
         try {

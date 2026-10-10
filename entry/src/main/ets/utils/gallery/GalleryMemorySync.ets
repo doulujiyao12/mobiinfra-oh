@@ -93,6 +93,12 @@ export function galleryMemorySceneIdForCategory(category: string): number {
 }
 
 export class GalleryMemorySync {
+  static hasNewValidResultsSince(filesDir: string, lastSyncMs: number): boolean {
+    let storage = new DataManagerStorage();
+    return GalleryMemorySync.loadValidResults(filesDir, storage).valid.some((item: GalleryAnalysisResult): boolean =>
+      Number.isFinite(item.createdAt) && item.createdAt > lastSyncMs);
+  }
+
   // 将图库分析结果转换为 workflows/daily-log 输入，是图库进入 DataManager 记忆管线的唯一写入入口。
   // 每次同步会先读取旧导出中的 entry index，再删除旧导出并重建，确保图库清空、重分类或分析失败时不会残留过期 mem 输入。
   static sync(filesDir: string): GalleryMemorySyncResult {

@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../components/AppHeader';
+import { FrostedPage } from '../components/FrostedPage';
 import native from 'libentry.so';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
@@ -33,6 +35,7 @@ type JsonMap = Record<string, Object | string | number | boolean | number[] | nu
 @Entry
 @Component
 struct ProfileTest {
+  private pageScroller: Scroller = new Scroller();
   @State modelConfigPath: string = '';
   @State prompt: string = '你好，简单介绍一下你自己。';
   @State topK: string = '30';
@@ -302,39 +305,14 @@ struct ProfileTest {
 
   // 顶部返回栏与设置页调试工具入口配套，提供首屏可见的返回路径。
   @Builder PageHeader() {
-    Row() {
-      Button('‹')
-        .width(42)
-        .height(42)
-        .fontSize(28)
-        .fontColor('#11182F')
-        .backgroundColor(Color.White)
-        .borderRadius(14)
-        .onClick(() => { router.back(); })
-      Column() {
-        Text('LLM Op Profile')
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#333333')
-          .width('100%')
-        Text('Profile real generate path with MNN Executor callbacks.')
-          .fontSize(13)
-          .fontColor('#666666')
-          .width('100%')
-          .margin({ top: 2 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12 })
-    }
-    .width('90%')
-    .margin({ top: 16, bottom: 12 })
+    AppHeader({ title: 'LLM Op Profile', showBackButton: true,
+      onBackClick: (): void => { router.back(); } })
   }
 
-  build() {
-    Scroll() {
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
       Column() {
-        this.PageHeader()
+        Text('Profile real generate path with MNN Executor callbacks.').fontSize(13).fontColor('#666666').width('90%').margin({ top: 14, bottom: 12 })
 
         Text('Model config path')
           .fontSize(12)
@@ -473,7 +451,21 @@ struct ProfileTest {
       }
       .width('100%')
       .alignItems(HorizontalAlign.Center)
-      .padding({ bottom: 24 })
+      .padding({ top: APP_HEADER_CONTENT_GAP, bottom: 24 })
+    }
+    .width('100%')
+    .height('100%')
+    .clip(false)
+  }
+
+  build() {
+    Column() {
+      FrostedPage({
+        pageBackgroundColor: '#FFFFFF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
     }
     .width('100%')
     .height('100%')

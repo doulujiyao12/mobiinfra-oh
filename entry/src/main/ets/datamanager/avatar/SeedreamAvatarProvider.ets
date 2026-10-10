@@ -1,3 +1,5 @@
+import { PrivacyConsent } from '../../utils/PrivacyConsent';
+import { AiServiceAccess } from '../../utils/AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { parseJsonCompat } from '../../utils/JsonCompat';
@@ -60,7 +62,8 @@ export function createSeedreamRequestBody(model: string, prompt: string, image: 
   }
   body['size'] = params.size;
   body['stream'] = params.stream;
-  body['watermark'] = params.watermark;
+  // 防御性强制开启：即使调用方传入旧配置，AI 生成图片也必须保留服务端水印。
+  body['watermark'] = true;
   let normalizedImage = image.trim();
   if (normalizedImage.length > 0) {
     body['image'] = normalizedImage;
@@ -90,6 +93,7 @@ export class SeedreamAvatarProvider {
   }
 
   async downloadImageToBase64(url: string, timeoutMs: number): Promise<string> {
+    AiServiceAccess.requireAllowed();
     let normalizedUrl = url.trim();
     if (normalizedUrl.length === 0) {
       throw new Error('Seedream image download URL is empty');
@@ -101,9 +105,10 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(normalizedUrl, requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Seedream image download HTTP ${response.responseCode}: ${response.result}`);
       }
@@ -114,12 +119,13 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 
   private async generate(config: AvatarProviderConfig, request: AvatarProviderRequest,
     image: string): Promise<AvatarProviderResult> {
+    AiServiceAccess.requireAllowed();
     let imageBaseUrl = config.imageBaseUrl.trim();
     if (imageBaseUrl.length === 0) {
       throw new Error('Seedream image base URL is empty');
@@ -154,9 +160,10 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = http.createHttp();
+    let httpReq = PrivacyConsent.createHttp();
     try {
       let response = await httpReq.request(imageBaseUrl, requestOptions);
+      AiServiceAccess.requireAllowed();
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Seedream HTTP ${response.responseCode}: ${response.result}`);
       }
@@ -190,7 +197,7 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      httpReq.destroy();
+      PrivacyConsent.destroyHttp(httpReq);
     }
   }
 }

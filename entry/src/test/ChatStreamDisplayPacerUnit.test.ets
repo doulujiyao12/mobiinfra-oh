@@ -68,5 +68,21 @@ export default function chatStreamDisplayPacerUnitTest() {
       expect(snapshot.visibleTrace[0]).assertEqual('trace2');
       expect(snapshot.active).assertTrue();
     });
+
+    it('preservesCommonPrefixWhenStreamingTargetIsRevised', 0, () => {
+      let pacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+      let firstTarget = '<think>第一段思考</think>\n\n';
+      pacer.beginFinish('s1', 'm1', firstTarget, []);
+      for (let i = 0; i < CHAT_STREAM_DISPLAY_FINISH_MAX_TICKS; i++) {
+        pacer.advanceFrame();
+      }
+
+      let snapshot: ChatStreamDisplaySnapshot =
+        pacer.setTarget('s1', 'm1', '<think>第一段思考第二段思考</think>\n\n', []);
+
+      expect(snapshot.visibleContent).assertEqual('<think>第一段思考');
+      expect(snapshot.visibleContent.length > 0).assertTrue();
+      expect(snapshot.active).assertTrue();
+    });
   });
 }

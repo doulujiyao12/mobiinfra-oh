@@ -4,14 +4,28 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE_ROOT = REPO_ROOT / "mock" / "workflows-source"
-DEFAULT_BUNDLE_NAME = "com.example.mnnllmchat"
 DEFAULT_MODULE_NAME = "entry"
+
+
+def load_app_bundle_name() -> str:
+    """Read the bundle name from the repository's single app configuration."""
+
+    app_config = REPO_ROOT / "AppScope" / "app.json5"
+    content = app_config.read_text(encoding="utf-8")
+    match = re.search(r'"bundleName"\s*:\s*"([^"]+)"', content)
+    if match is None or not match.group(1).strip():
+        raise RuntimeError(f"app.bundleName is missing in: {app_config}")
+    return match.group(1).strip()
+
+
+DEFAULT_BUNDLE_NAME = load_app_bundle_name()
 
 
 def invoke_hdc(hdc: str, args: list[str], dry_run: bool = False) -> None:
