@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
@@ -134,19 +135,19 @@ struct CollectionGroupDetailPage {
         .width(76)
         .height(76)
         .objectFit(ImageFit.Cover)
-        .backgroundColor('#EEF2F7')
+        .backgroundColor(AppTheme.background('#EEF2F7'))
         .borderRadius(10)
     } else {
       Column() {
         Text('暂无图片')
           .fontSize(12)
-          .fontColor('#8A92A3')
+          .fontColor(AppTheme.text('#8A92A3'))
           .maxLines(1)
       }
       .justifyContent(FlexAlign.Center)
       .width(76)
       .height(76)
-      .backgroundColor('#EEF2F7')
+      .backgroundColor(AppTheme.background('#EEF2F7'))
       .borderRadius(10)
     }
   }
@@ -158,7 +159,7 @@ struct CollectionGroupDetailPage {
         Text(this.readableTitle(event.summary, '未命名事件'))
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(AppTheme.text('#151A28'))
           .lineHeight(22)
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -168,13 +169,13 @@ struct CollectionGroupDetailPage {
         Row() {
           Text(event.time)
             .fontSize(12)
-            .fontColor('#7C8494')
+            .fontColor(AppTheme.text('#7C8494'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.imageCountText(event))
             .fontSize(12)
-            .fontColor('#8066FF')
+            .fontColor(AppTheme.text('#8066FF'))
             .maxLines(1)
         }
         .width('100%')
@@ -187,7 +188,7 @@ struct CollectionGroupDetailPage {
     .alignItems(VerticalAlign.Top)
     .width('100%')
     .padding(12)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(AppTheme.background('#FFFFFF'))
     .borderRadius(12)
     .margin({ bottom: 12 })
     .onClick(() => {
@@ -199,7 +200,7 @@ struct CollectionGroupDetailPage {
     Text(label)
       .fontSize(13)
       .fontWeight(FontWeight.Bold)
-      .fontColor('#202636')
+      .fontColor(AppTheme.text('#202636'))
       .width('100%')
       .margin({ top: 14 })
   }
@@ -208,12 +209,12 @@ struct CollectionGroupDetailPage {
     Row() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .width(72)
         .maxLines(1)
       Text(value.length > 0 ? value : '暂无数据')
         .fontSize(12)
-        .fontColor('#303746')
+        .fontColor(AppTheme.text('#303746'))
         .layoutWeight(1)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -239,16 +240,16 @@ struct CollectionGroupDetailPage {
         Text('图片暂不可显示')
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#596273')
+          .fontColor(AppTheme.text('#596273'))
           .maxLines(1)
         Text('图片引用暂不可显示')
           .fontSize(12)
-          .fontColor('#8A92A3')
+          .fontColor(AppTheme.text('#8A92A3'))
           .margin({ top: 5 })
           .maxLines(1)
         Text(image.ref)
           .fontSize(10)
-          .fontColor('#A0A7B5')
+          .fontColor(AppTheme.text('#A0A7B5'))
           .margin({ top: 6 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -257,7 +258,7 @@ struct CollectionGroupDetailPage {
       .width(220)
       .height(240)
       .padding(12)
-      .backgroundColor('#F7F9FC')
+      .backgroundColor(AppTheme.background('#F7F9FC'))
       .borderRadius(12)
       .margin({ right: 10 })
     }
@@ -268,13 +269,13 @@ struct CollectionGroupDetailPage {
       Column() {
         Text('暂无图片')
           .fontSize(13)
-          .fontColor('#7C8494')
+          .fontColor(AppTheme.text('#7C8494'))
           .maxLines(1)
       }
       .justifyContent(FlexAlign.Center)
       .width('100%')
       .height(86)
-      .backgroundColor('#F7F9FC')
+      .backgroundColor(AppTheme.background('#F7F9FC'))
       .borderRadius(12)
       .margin({ top: 10 })
     } else {
@@ -298,11 +299,11 @@ struct CollectionGroupDetailPage {
     Column() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .maxLines(1)
       Text(value.length > 0 ? value : '暂无数据')
         .fontSize(12)
-        .fontColor('#303746')
+        .fontColor(AppTheme.text('#303746'))
         .lineHeight(19)
         .width('100%')
         .margin({ top: 4 })
@@ -317,15 +318,15 @@ struct CollectionGroupDetailPage {
       Row() {
         Text(detail.category.length > 0 ? detail.category : '图库')
           .fontSize(11)
-          .fontColor('#8066FF')
+          .fontColor(AppTheme.text('#8066FF'))
           .maxLines(1)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor('#F0ECFF')
+          .backgroundColor(AppTheme.background('#F0ECFF'))
           .borderRadius(10)
         Text(this.readableTitle(detail.title, '图库分析详情'))
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(AppTheme.text('#151A28'))
           .layoutWeight(1)
           .margin({ left: 8 })
           .maxLines(2)
@@ -350,7 +351,7 @@ struct CollectionGroupDetailPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .padding(12)
-    .backgroundColor('#F7F9FC')
+    .backgroundColor(AppTheme.background('#F7F9FC'))
     .borderRadius(12)
     .margin({ top: 10 })
   }
@@ -371,7 +372,7 @@ struct CollectionGroupDetailPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => {
             this.closeEventDetail();
           })
@@ -383,12 +384,12 @@ struct CollectionGroupDetailPage {
                 Text(this.readableTitle(event.summary, '事件详情'))
                   .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor('#11182F')
+                  .fontColor(AppTheme.text('#11182F'))
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(event.source)
                   .fontSize(12)
-                  .fontColor('#8066FF')
+                  .fontColor(AppTheme.text('#8066FF'))
                   .margin({ top: 5 })
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -400,7 +401,7 @@ struct CollectionGroupDetailPage {
                 .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
-                .fontColor('#5B68FF')
+                .fontColor(AppTheme.text('#5B68FF'))
                 .onClick(() => {
                   this.closeEventDetail();
                 })
@@ -419,7 +420,7 @@ struct CollectionGroupDetailPage {
                 }
                   .width('100%')
                   .padding(10)
-                  .backgroundColor('#F7F9FC')
+                  .backgroundColor(AppTheme.background('#F7F9FC'))
                   .borderRadius(10)
                   .margin({ top: 8 })
 
@@ -442,9 +443,9 @@ struct CollectionGroupDetailPage {
           .width('88%')
           .height('82%')
           .padding(18)
-          .backgroundColor(Color.White)
+          .backgroundColor(AppTheme.background(Color.White))
           .borderRadius(18)
-          .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+          .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
         }, (event: CollectionEventViewModel) => event.id)
       }
       .width('100%')
@@ -456,10 +457,10 @@ struct CollectionGroupDetailPage {
     Row() {
       Text('返回')
         .fontSize(14)
-        .fontColor('#8066FF')
+        .fontColor(AppTheme.text('#8066FF'))
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor('#F0ECFF')
+        .backgroundColor(AppTheme.background('#F0ECFF'))
         .borderRadius(18)
         .onClick(() => {
           router.back();
@@ -467,7 +468,7 @@ struct CollectionGroupDetailPage {
       Text(this.title)
         .fontSize(20)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#151A28')
+        .fontColor(AppTheme.text('#151A28'))
         .layoutWeight(1)
         .margin({ left: 12 })
         .maxLines(1)
@@ -487,17 +488,17 @@ struct CollectionGroupDetailPage {
           Text('暂无已整理记录')
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
           Text('返回采集页后重新同步')
             .fontSize(12)
-            .fontColor('#7C8494')
+            .fontColor(AppTheme.text('#7C8494'))
             .margin({ top: 8 })
         }
         .width('86%')
         .height(140)
         .margin({ top: APP_HEADER_CONTENT_GAP })
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor(AppTheme.background('#FFFFFF'))
         .borderRadius(16)
       } else {
         List({ space: 0, scroller: this.pageScroller }) {
@@ -520,7 +521,7 @@ struct CollectionGroupDetailPage {
     .height('100%')
     .alignItems(HorizontalAlign.Center)
     .justifyContent(FlexAlign.Start)
-    .backgroundColor('#F4F8FF')
+    .backgroundColor(AppTheme.background('#F4F8FF'))
   }
 
   build() {

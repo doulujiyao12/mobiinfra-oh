@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AiGeneratedBadge } from '../components/AiGeneratedBadge';
 
@@ -76,7 +77,7 @@ struct FloatWindow {
                 .layoutWeight(1)
                 .fontSize(9)
                 .fontWeight(FontWeight.Bold)
-                .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
+                .fontColor(this.pauseRequested ? $r('app.color.ui_on_fill_warning') : $r('app.color.ui_on_fill_success'))
                 .textAlign(TextAlign.Start)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -91,7 +92,7 @@ struct FloatWindow {
                 .width('100%')
                 .fontSize(10)
                 .fontWeight(FontWeight.Bold)
-                .fontColor('#F0F8FAFC')
+                .fontColor(AppTheme.text('#F0F8FAFC'))
                 .textAlign(TextAlign.Start)
             }
             .width('100%')
@@ -114,7 +115,7 @@ struct FloatWindow {
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Start)
           .padding({ left: 9, right: 8 })
-          .backgroundColor('#24101827')
+          .backgroundColor(AppTheme.background('#24101827'))
           .borderRadius(16)
           .onClick(() => {
             this.togglePanel();
@@ -128,21 +129,21 @@ struct FloatWindow {
               .height(17)
               .fontSize(this.pauseRequested ? 12 : 11)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#F8FAFC')
+              .fontColor(AppTheme.text('#F8FAFC'))
               .textAlign(TextAlign.Center)
 
             Text(this.pauseRequested ? '继续' : '暂停')
               .height(14)
               .fontSize(8)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#DDE5E7EB')
+              .fontColor(AppTheme.text('#DDE5E7EB'))
               .textAlign(TextAlign.Center)
           }
           .width(50)
           .height(46)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.pauseRequested ? '#704B8BFF' : '#4A475569')
+          .backgroundColor(this.pauseRequested ? $r('app.color.ui_fill_blue') : $r('app.color.ui_surface_emphasized'))
           .borderRadius(16)
           .margin({ left: 6 })
           .hitTestBehavior(HitTestMode.Default)
@@ -155,21 +156,21 @@ struct FloatWindow {
               .height(17)
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#F8FAFC')
+              .fontColor(AppTheme.text('#F8FAFC'))
               .textAlign(TextAlign.Center)
 
             Text('终止')
               .height(14)
               .fontSize(8)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#FEE2E2')
+              .fontColor($r('app.color.ui_text_on_fill'))
               .textAlign(TextAlign.Center)
           }
           .width(52)
           .height(46)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          .backgroundColor('#666B2530')
+          .backgroundColor($r('app.color.ui_fill_red'))
           .borderRadius(16)
           .margin({ left: 6 })
           .hitTestBehavior(HitTestMode.Default)
@@ -182,8 +183,8 @@ struct FloatWindow {
         .alignItems(VerticalAlign.Center)
         .justifyContent(FlexAlign.End)
         .padding({ left: 12, right: 18, top: 10, bottom: 10 })
-        .backgroundColor('#00000000')
-        .shadow({ radius: 10, color: '#18000000', offsetX: 0, offsetY: 2 })
+        .backgroundColor(AppTheme.background('#00000000'))
+        .shadow({ radius: 10, color: AppTheme.shadow('#18000000'), offsetX: 0, offsetY: 2 })
       } else if (!this.captureOverlayHidden) {
         Row() {
           Text(this.statusLabel())
@@ -191,7 +192,7 @@ struct FloatWindow {
             .height(42)
             .fontSize(10)
             .fontWeight(FontWeight.Bold)
-            .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
+            .fontColor(this.pauseRequested ? $r('app.color.ui_on_fill_warning') : $r('app.color.ui_on_fill_success'))
             .textAlign(TextAlign.Center)
 
           Text('‹')
@@ -199,16 +200,16 @@ struct FloatWindow {
             .height(42)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#F8FAFC')
+            .fontColor(AppTheme.text('#F8FAFC'))
             .textAlign(TextAlign.Center)
         }
         .width(58)
         .height(42)
         .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
-        .backgroundColor('#4A475569')
+        .backgroundColor(AppTheme.background('#4A475569'))
         .borderRadius(16)
-        .shadow({ radius: 10, color: '#18000000', offsetX: 0, offsetY: 2 })
+        .shadow({ radius: 10, color: AppTheme.shadow('#18000000'), offsetX: 0, offsetY: 2 })
         .onClick(() => {
           this.togglePanel();
         })
@@ -219,6 +220,6 @@ struct FloatWindow {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#00000000')
+    .backgroundColor(AppTheme.background('#00000000'))
   }
 }

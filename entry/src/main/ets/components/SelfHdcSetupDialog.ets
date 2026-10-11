@@ -1,9 +1,12 @@
+import { AppTheme } from '../utils/AppTheme';
 import { ComponentContent, UIContext } from '@kit.ArkUI';
 import { AppLogger } from '../utils/AppLogger';
 import { showToastSafely } from '../utils/PromptSafe';
 import { SelfHdcSetupGuide } from './SelfHdcSetupGuide';
 
 class SelfHdcSetupDialogParams {
+  problem: string = '';
+  skipReminder: boolean = false;
   onFinish: (openSettings: boolean) => void = (_openSettings: boolean): void => {};
   onReminderChange: (skipReminder: boolean) => void = (_skipReminder: boolean): void => {};
 }
@@ -13,6 +16,10 @@ struct SelfHdcSetupDialogContent {
   params: SelfHdcSetupDialogParams = new SelfHdcSetupDialogParams();
   @State private skipReminder: boolean = false;
   private guideScroller: Scroller = new Scroller();
+
+  aboutToAppear(): void {
+    this.skipReminder = this.params.skipReminder;
+  }
 
   private changeReminder(value: boolean): void {
     if (value === this.skipReminder) { return; }
@@ -28,27 +35,35 @@ struct SelfHdcSetupDialogContent {
 
   build() {
     Column({ space: 12 }) {
-      Text('手机自控设置指南').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#172033').width('100%')
-      Text('请按图完成无线调试设置').fontSize(12).fontColor('#667085').width('100%')
+      Text(this.params.problem.length > 0 ? '请先配置手机自控' : '手机自控设置指南')
+        .fontSize(22).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
+      if (this.params.problem.length > 0) {
+        Column({ space: 4 }) {
+          Text('任务尚未开始').fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#A15C00')).width('100%')
+          Text(this.params.problem).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#A15C00')).width('100%')
+        }.width('100%').padding(12).borderRadius(12).backgroundColor(AppTheme.background('#FFF5E8'))
+      } else {
+        Text('请按图完成无线调试设置').fontSize(12).fontColor(AppTheme.text('#667085')).width('100%')
+      }
       Scroll(this.guideScroller) { SelfHdcSetupGuide() }
         .width('100%').layoutWeight(1).scrollBar(BarState.Auto)
       Row({ space: 10 }) {
         Checkbox({ name: 'selfHdcSkipSetupReminder' }).shape(CheckBoxShape.CIRCLE)
           .select(this.skipReminder).width(18).height(18).margin(0)
-          .selectedColor('#4F5FEA').unselectedColor('#98A2B3')
-          .accessibilityText('不再提醒手机自控设置')
+          .selectedColor(AppTheme.background('#4F5FEA')).unselectedColor(AppTheme.border('#98A2B3'))
+          .accessibilityText('启动时不再提醒手机自控设置，执行前仍会检查配置')
           .onChange((value: boolean): void => { this.changeReminder(value); })
-        Text('不再提醒').fontSize(14).fontColor('#667085').layoutWeight(1).height(40)
+        Text('启动时不再提醒').fontSize(14).fontColor(AppTheme.text('#667085')).layoutWeight(1).height(40)
           .onClick((): void => { this.changeReminder(!this.skipReminder); })
       }.width('100%')
       Row({ space: 12 }) {
-        Button('稍后设置').fontSize(15).height(44).layoutWeight(1).backgroundColor('#F0F2F6').fontColor('#475467')
+        Button('稍后设置').fontSize(15).height(44).layoutWeight(1).backgroundColor(AppTheme.background('#F0F2F6')).fontColor(AppTheme.text('#475467'))
           .onClick((): void => { this.params.onFinish(false); })
-        Button('去设置').fontSize(15).height(44).layoutWeight(1).backgroundColor('#4F5FEA').fontColor(Color.White)
+        Button('去设置').fontSize(15).height(44).layoutWeight(1).backgroundColor(AppTheme.filledBackground('#4F5FEA')).fontColor(AppTheme.text(Color.White))
           .onClick((): void => { this.params.onFinish(true); })
       }.width('100%')
     }.width('92%').constraintSize({ maxWidth: 420 }).height('80%').padding(20)
-      .alignItems(HorizontalAlign.Start).backgroundColor(Color.White).borderRadius(24)
+      .alignItems(HorizontalAlign.Start).backgroundColor(AppTheme.background(Color.White)).borderRadius(24)
   }
 }
 
@@ -58,8 +73,11 @@ function selfHdcSetupDialogBuilder(params: SelfHdcSetupDialogParams) {
 }
 
 export async function showSelfHdcSetupDialog(uiContext: UIContext,
-  onReminderChange: (skipReminder: boolean) => void): Promise<boolean> {
+  onReminderChange: (skipReminder: boolean) => void, problem: string = '',
+  skipReminder: boolean = false): Promise<boolean> {
   let params = new SelfHdcSetupDialogParams();
+  params.problem = problem;
+  params.skipReminder = skipReminder;
   params.onReminderChange = onReminderChange;
   let content: ComponentContent<SelfHdcSetupDialogParams> | null = null;
   let openSettings = false;

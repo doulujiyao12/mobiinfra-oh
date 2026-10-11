@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
@@ -113,12 +114,12 @@ export struct ChatSessionDrawer {
     Text('+ ' + chatModeLabel(mode))
       .fontSize(13)
       .fontWeight(FontWeight.Medium)
-      .fontColor('#111827')
+      .fontColor(AppTheme.text('#111827'))
       .height(36)
       .padding({ left: 12, right: 12 })
-      .backgroundColor('#F4F6FA')
+      .backgroundColor(AppTheme.background('#F4F6FA'))
       .borderRadius(18)
-      .border({ width: 1, color: '#E7EAF0' })
+      .border({ width: 1, color: AppTheme.border('#E7EAF0') })
       .margin({ right: 8, bottom: 8 })
       .onClick(() => {
         this.onCreateSession(mode);
@@ -132,16 +133,16 @@ export struct ChatSessionDrawer {
           Text(session.mode === CHAT_MODE_LOCAL_INFERENCE ? '本' : '云')
             .fontSize(12)
             .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
+            .fontColor(AppTheme.text(Color.White))
             .width(26)
             .height(26)
             .textAlign(TextAlign.Center)
-            .backgroundColor(session.mode === CHAT_MODE_LOCAL_INFERENCE ? '#111827' : '#5968FF')
+            .backgroundColor(AppTheme.filledBackground(session.mode === CHAT_MODE_LOCAL_INFERENCE ? '#111827' : '#5968FF'))
             .borderRadius(9)
           Text(session.title)
             .fontSize(15)
             .fontWeight(this.activeSessionId === session.id ? FontWeight.Bold : FontWeight.Medium)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -149,10 +150,10 @@ export struct ChatSessionDrawer {
           if (session.pinned === true) {
             Text('置顶')
               .fontSize(10)
-              .fontColor('#5968FF')
+              .fontColor(AppTheme.text('#5968FF'))
               .height(20)
               .padding({ left: 6, right: 6 })
-              .backgroundColor('#EEF2FF')
+              .backgroundColor(AppTheme.background('#EEF2FF'))
               .borderRadius(10)
               .margin({ left: 8 })
           }
@@ -162,7 +163,7 @@ export struct ChatSessionDrawer {
 
         Text(session.lastMessagePreview)
           .fontSize(12)
-          .fontColor('#6B7280')
+          .fontColor(AppTheme.text('#6B7280'))
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -170,7 +171,7 @@ export struct ChatSessionDrawer {
 
         Text(String(session.messageCount) + ' 条消息 · ' + this.formatSessionTime(session.updatedAt))
           .fontSize(11)
-          .fontColor('#9CA3AF')
+          .fontColor(AppTheme.text('#9CA3AF'))
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -180,9 +181,9 @@ export struct ChatSessionDrawer {
     }
     .width('100%')
     .padding(12)
-    .backgroundColor(this.activeSessionId === session.id ? '#EEF2FF' : Color.White)
+    .backgroundColor(AppTheme.background(this.activeSessionId === session.id ? '#EEF2FF' : Color.White))
     .borderRadius(16)
-    .border({ width: 1, color: this.activeSessionId === session.id ? '#C7D2FE' : '#EDF0F5' })
+    .border({ width: 1, color: AppTheme.border(this.activeSessionId === session.id ? '#C7D2FE' : '#EDF0F5') })
     .margin({ bottom: 10 })
     .onClick(async () => {
       await this.onSelectSession(session.id);
@@ -198,13 +199,13 @@ export struct ChatSessionDrawer {
         Text(chatModeLabel(mode))
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#374151')
+          .fontColor(AppTheme.text('#374151'))
         Text(String(this.sessionCount(mode)))
           .fontSize(11)
-          .fontColor('#6B7280')
+          .fontColor(AppTheme.text('#6B7280'))
           .height(22)
           .padding({ left: 8, right: 8 })
-          .backgroundColor('#F3F4F6')
+          .backgroundColor(AppTheme.background('#F3F4F6'))
           .borderRadius(11)
           .margin({ left: 8 })
       }
@@ -221,7 +222,7 @@ export struct ChatSessionDrawer {
       if (this.sessionCount(mode) === 0) {
         Text('暂无' + chatModeLabel(mode) + '会话')
           .fontSize(12)
-          .fontColor('#9CA3AF')
+          .fontColor(AppTheme.text('#9CA3AF'))
           .width('100%')
           .padding({ left: 12, right: 12, top: 10, bottom: 16 })
       }
@@ -237,29 +238,29 @@ export struct ChatSessionDrawer {
           Text(this.actionMenuSessionTitle)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .width('100%')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .margin({ bottom: 10 })
           Text(this.actionMenuSessionPinned ? '取消置顶' : '置顶')
             .fontSize(15)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .width('100%')
             .height(42)
             .textAlign(TextAlign.Center)
-            .backgroundColor('#F7F9FC')
+            .backgroundColor(AppTheme.background('#F7F9FC'))
             .borderRadius(12)
             .onClick(async () => {
               await this.toggleActionMenuPinned();
             })
           Text('重命名')
             .fontSize(15)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .width('100%')
             .height(42)
             .textAlign(TextAlign.Center)
-            .backgroundColor('#F7F9FC')
+            .backgroundColor(AppTheme.background('#F7F9FC'))
             .borderRadius(12)
             .margin({ top: 8 })
             .onClick(() => {
@@ -267,11 +268,11 @@ export struct ChatSessionDrawer {
             })
           Text('删除')
             .fontSize(15)
-            .fontColor('#EF4444')
+            .fontColor(AppTheme.text('#EF4444'))
             .width('100%')
             .height(42)
             .textAlign(TextAlign.Center)
-            .backgroundColor('#FFF1F2')
+            .backgroundColor(AppTheme.background('#FFF1F2'))
             .borderRadius(12)
             .margin({ top: 8 })
             .onClick(async () => {
@@ -279,11 +280,11 @@ export struct ChatSessionDrawer {
             })
           Text('取消')
             .fontSize(14)
-            .fontColor('#4B5563')
+            .fontColor(AppTheme.text('#4B5563'))
             .width('100%')
             .height(38)
             .textAlign(TextAlign.Center)
-            .backgroundColor('#F3F4F6')
+            .backgroundColor(AppTheme.background('#F3F4F6'))
             .borderRadius(12)
             .margin({ top: 12 })
             .onClick(() => {
@@ -292,12 +293,12 @@ export struct ChatSessionDrawer {
         }
         .width('84%')
         .padding(16)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(16)
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#66000000')
+      .backgroundColor(AppTheme.background('#66000000'))
       .zIndex(35)
     }
   }
@@ -309,14 +310,16 @@ export struct ChatSessionDrawer {
           Text('重命名会话')
             .fontSize(18)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .width('100%')
           TextInput({ placeholder: '请输入会话名称', text: this.renameDraftTitle })
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .width('100%')
             .height(42)
             .fontSize(14)
-            .fontColor('#111827')
-            .backgroundColor('#F7F9FC')
+            .fontColor(AppTheme.text('#111827'))
+            .backgroundColor(AppTheme.inputBackground())
             .borderRadius(12)
             .padding({ left: 12, right: 12 })
             .maxLength(this.renameMaxLength())
@@ -327,22 +330,22 @@ export struct ChatSessionDrawer {
           Row() {
             Text('取消')
               .fontSize(14)
-              .fontColor('#4B5563')
+              .fontColor(AppTheme.text('#4B5563'))
               .height(38)
               .layoutWeight(1)
               .textAlign(TextAlign.Center)
-              .backgroundColor('#F3F4F6')
+              .backgroundColor(AppTheme.background('#F3F4F6'))
               .borderRadius(12)
               .onClick(() => {
                 this.closeRenameOverlay();
               })
             Text('保存')
               .fontSize(14)
-              .fontColor(Color.White)
+              .fontColor(AppTheme.text(Color.White))
               .height(38)
               .layoutWeight(1)
               .textAlign(TextAlign.Center)
-              .backgroundColor('#111827')
+              .backgroundColor(AppTheme.filledBackground('#111827'))
               .borderRadius(12)
               .margin({ left: 10 })
               .onClick(async () => {
@@ -354,12 +357,12 @@ export struct ChatSessionDrawer {
         }
         .width('86%')
         .padding(16)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(16)
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#66000000')
+      .backgroundColor(AppTheme.background('#66000000'))
       .zIndex(40)
     }
   }
@@ -372,10 +375,10 @@ export struct ChatSessionDrawer {
             Text('历史会话')
               .fontSize(22)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#111827')
+              .fontColor(AppTheme.text('#111827'))
             Text(this.restoringLocalSession ? '正在恢复本地上下文' : '选择会话后由上层恢复上下文')
               .fontSize(12)
-              .fontColor(this.restoringLocalSession ? '#5968FF' : '#6B7280')
+              .fontColor(AppTheme.text(this.restoringLocalSession ? '#5968FF' : '#6B7280'))
               .margin({ top: 4 })
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -385,11 +388,11 @@ export struct ChatSessionDrawer {
 
           Text('×')
             .fontSize(24)
-            .fontColor('#4B5563')
+            .fontColor(AppTheme.text('#4B5563'))
             .width(40)
             .height(40)
             .textAlign(TextAlign.Center)
-            .backgroundColor('#F4F6FA')
+            .backgroundColor(AppTheme.background('#F4F6FA'))
             .borderRadius(20)
             .onClick(() => {
               this.onClose();
@@ -427,7 +430,7 @@ export struct ChatSessionDrawer {
     }
     .width(320)
     .height('100%')
-    .backgroundColor('#FFFFFF')
-    .shadow({ radius: 20, color: '#26000000', offsetX: 5, offsetY: 0 })
+    .backgroundColor(AppTheme.background('#FFFFFF'))
+    .shadow({ radius: 20, color: AppTheme.shadow('#26000000'), offsetX: 5, offsetY: 0 })
   }
 }

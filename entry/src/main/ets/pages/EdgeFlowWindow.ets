@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { hdsEffect } from '@kit.UIDesignKit';
 import {
   buildTransparentEdgeFlowEffect,
@@ -46,7 +47,7 @@ struct EdgeFlowWindow {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#00000000')
+    .backgroundColor(AppTheme.background('#00000000'))
     .hitTestBehavior(HitTestMode.None)
   }
 }

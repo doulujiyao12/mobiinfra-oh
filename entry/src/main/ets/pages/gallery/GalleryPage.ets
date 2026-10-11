@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
@@ -1155,11 +1156,11 @@ struct GalleryPage {
 
   @Builder StatCell(label: string, value: string, color: string) {
     Column() {
-      Text(label).fontSize(12).fontColor('#737987').maxLines(1)
+      Text(label).fontSize(12).fontColor(AppTheme.text('#737987')).maxLines(1)
       Text(value)
         .fontSize(label === '最近分析' ? 14 : 21)
         .fontWeight(FontWeight.Bold)
-        .fontColor(color)
+        .fontColor(AppTheme.text(color))
         .margin({ top: 5 })
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1199,8 +1200,8 @@ struct GalleryPage {
       title: '清空分析',
       message: '将清空已保存的图库分析结果、扫描进度、月度总结和位置缓存。此操作不可恢复。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '清空', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '清空', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -1253,20 +1254,20 @@ struct GalleryPage {
 
   @Builder PrimaryActionButton() {
     Row() {
-      Text('选择图片分析').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Color.White).layoutWeight(1).maxLines(1)
+      Text('选择图片分析').fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(Color.White)).layoutWeight(1).maxLines(1)
       Text('>')
         .fontSize(18)
-        .fontColor('#39BFA3')
+        .fontColor(AppTheme.text('#39BFA3'))
         .width(30)
         .height(30)
         .textAlign(TextAlign.Center)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(15)
     }
     .width('100%')
     .height(50)
     .padding({ left: 16, right: 14 })
-    .backgroundColor('#39BFA3')
+    .backgroundColor(AppTheme.background('#39BFA3'))
     .borderRadius(15)
     .margin({ top: 10 })
     .onClick(() => { this.runAction(1); })
@@ -1275,11 +1276,11 @@ struct GalleryPage {
   @Builder HeaderIconButton(label: string, actionId: number) {
     Text(label)
       .fontSize(18)
-      .fontColor('#2F5BEA')
+      .fontColor(AppTheme.text('#2F5BEA'))
       .width(38)
       .height(38)
       .textAlign(TextAlign.Center)
-      .backgroundColor('#EEF3FF')
+      .backgroundColor(AppTheme.background('#EEF3FF'))
       .borderRadius(10)
       .onClick(() => {
         if (actionId === 0) {
@@ -1295,8 +1296,8 @@ struct GalleryPage {
       .height(38)
       .layoutWeight(1)
       .fontSize(12)
-      .fontColor(color)
-      .backgroundColor(bg)
+      .fontColor(AppTheme.text(color))
+      .backgroundColor(AppTheme.background(bg))
       .borderRadius(9)
       .enabled(!(this.analyzing && actionId !== 3))
       .onClick(() => { this.runAction(actionId); })
@@ -1308,7 +1309,7 @@ struct GalleryPage {
         Column() {
           Row() {
             this.StatCell('已分析', this.analyzedCountText(), '#2F5BEA')
-            Divider().vertical(true).height(38).color('#E5E8F0')
+            Divider().vertical(true).height(38).color(AppTheme.border('#E5E8F0'))
             this.StatCell('最近分析', this.lastRunText, '#202636')
           }.width('100%')
 
@@ -1330,7 +1331,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(12)
     .margin({ top: 14 })
   }
@@ -1363,22 +1364,22 @@ struct GalleryPage {
             Text(this.progressTitle())
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#202636')
+              .fontColor(AppTheme.text('#202636'))
               .layoutWeight(1)
             Text(this.progressPercentText(this.progress))
               .fontSize(12)
-              .fontColor('#667085')
+              .fontColor(AppTheme.text('#667085'))
           }.width('100%')
           Stack({ alignContent: Alignment.Start }) {
             Row()
               .width('100%')
               .height(6)
-              .backgroundColor('#E8EDF7')
+              .backgroundColor(AppTheme.background('#E8EDF7'))
               .borderRadius(3)
             Row()
               .width(this.progressFillWidth(this.progress))
               .height(6)
-              .backgroundColor('#2F5BEA')
+              .backgroundColor(AppTheme.background('#2F5BEA'))
               .borderRadius(3)
           }
           .width('100%')
@@ -1390,17 +1391,17 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(12)
     .margin({ top: 10 })
   }
 
   @Builder CompactActionButton(title: string, color: string, actionId: number) {
     Row() {
-      Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#151A28')).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Text('>')
         .fontSize(15)
-        .fontColor(color)
+        .fontColor(AppTheme.text(color))
         .width(20)
         .height(20)
         .textAlign(TextAlign.Center)
@@ -1408,15 +1409,15 @@ struct GalleryPage {
     .height(44)
     .layoutWeight(1)
     .padding({ left: 12, right: 10 })
-    .backgroundColor('#F8FAFE')
+    .backgroundColor(AppTheme.background('#F8FAFE'))
     .borderRadius(13)
     .onClick(() => { this.runAction(actionId); })
   }
 
   @Builder ScanStatCell(label: string, value: number, color: string, actionId: number) {
     Column() {
-      Text(actionId === 1 && value > 0 ? label + ' >' : label).fontSize(11).fontColor('#7C8494').maxLines(1)
-      Text(value.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
+      Text(actionId === 1 && value > 0 ? label + ' >' : label).fontSize(11).fontColor(AppTheme.text('#7C8494')).maxLines(1)
+      Text(value.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(color)).margin({ top: 3 }).maxLines(1)
     }
     .layoutWeight(1)
     .alignItems(HorizontalAlign.Start)
@@ -1429,8 +1430,8 @@ struct GalleryPage {
 
   @Builder ScanStatTextCell(label: string, value: string, color: string) {
     Column() {
-      Text(label).fontSize(11).fontColor('#7C8494').maxLines(1)
-      Text(value).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
+      Text(label).fontSize(11).fontColor(AppTheme.text('#7C8494')).maxLines(1)
+      Text(value).fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(color)).margin({ top: 3 }).maxLines(1)
     }
     .layoutWeight(1)
     .alignItems(HorizontalAlign.Start)
@@ -1515,15 +1516,18 @@ struct GalleryPage {
   @Builder SettingInput(label: string, value: string, placeholder: string, fieldId: number,
     defaultValue: string = '', hideDefaultValue: boolean = false) {
     Column() {
-      Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').width('100%')
+      Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
       TextInput({
         placeholder: hideDefaultValue ? hiddenDefaultSettingPlaceholder(value, defaultValue, placeholder) : placeholder,
         text: hideDefaultValue ? hiddenDefaultSettingEditorValue(value, defaultValue) : value
       })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(42)
         .fontSize(12)
-        .backgroundColor('#F7F9FE')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .margin({ top: 8 })
@@ -1536,14 +1540,17 @@ struct GalleryPage {
   @Builder ConcurrencyInput(label: string, value: string, rangeText: string, maxValue: number, fieldId: number) {
     Column() {
       Row() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').layoutWeight(1)
-        Text(rangeText).fontSize(11).fontColor('#8A92A3')
+        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).layoutWeight(1)
+        Text(rangeText).fontSize(11).fontColor(AppTheme.text('#8A92A3'))
       }.width('100%')
       TextInput({ placeholder: value, text: value })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(42)
         .fontSize(12)
-        .backgroundColor('#F7F9FE')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .margin({ top: 8 })
@@ -1556,11 +1563,11 @@ struct GalleryPage {
   @Builder SettingToggle(label: string, desc: string, enabled: boolean, fieldId: number) {
     Row() {
       Column() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').width('100%')
-        Text(desc).fontSize(11).fontColor('#8A92A3').margin({ top: 4 }).width('100%')
+        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
+        Text(desc).fontSize(11).fontColor(AppTheme.text('#8A92A3')).margin({ top: 4 }).width('100%')
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: enabled })
-        .selectedColor('#5B68FF')
+        .selectedColor(AppTheme.background('#5B68FF'))
         .onChange((next: boolean) => { this.updateSetting(fieldId, next ? 'true' : 'false'); })
     }
     .width('100%')
@@ -1573,7 +1580,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => {
             this.activeSensitiveInputId = '';
             this.settingsOpen = false;
@@ -1582,12 +1589,12 @@ struct GalleryPage {
         Column() {
           Row() {
             Column() {
-              Text('图库采集设置').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#11182F')
-              Text('云端模型、OCR 与索引写入并发').fontSize(12).fontColor('#7B8290').margin({ top: 4 })
+              Text('图库采集设置').fontSize(18).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+              Text('云端模型、OCR 与索引写入并发').fontSize(12).fontColor(AppTheme.text('#7B8290')).margin({ top: 4 })
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
             Text('关闭')
               .fontSize(13)
-              .fontColor('#5B68FF')
+              .fontColor(AppTheme.text('#5B68FF'))
               .onClick(() => {
                 this.activeSensitiveInputId = '';
                 this.settingsOpen = false;
@@ -1655,8 +1662,8 @@ struct GalleryPage {
               .height(40)
               .layoutWeight(1)
               .fontSize(12)
-              .backgroundColor('#EEF4FF')
-              .fontColor('#4F68FF')
+              .backgroundColor(AppTheme.background('#EEF4FF'))
+              .fontColor(AppTheme.text('#4F68FF'))
               .borderRadius(12)
               .onClick(() => {
                 this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
@@ -1680,7 +1687,7 @@ struct GalleryPage {
               .height(40)
               .layoutWeight(1)
               .fontSize(12)
-              .backgroundColor('#5B68FF')
+              .backgroundColor(AppTheme.background('#5B68FF'))
               .borderRadius(12)
               .margin({ left: 10 })
               .onClick(() => {
@@ -1693,9 +1700,9 @@ struct GalleryPage {
         .width('86%')
         .height('82%')
         .padding(18)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(18)
-        .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
       }
       .width('100%')
       .height('100%')
@@ -1706,7 +1713,7 @@ struct GalleryPage {
     Text(label)
       .fontSize(13)
       .fontWeight(FontWeight.Bold)
-      .fontColor('#202636')
+      .fontColor(AppTheme.text('#202636'))
       .width('100%')
       .margin({ top: 14 })
   }
@@ -1715,12 +1722,12 @@ struct GalleryPage {
     Row() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .width(64)
         .maxLines(1)
       Text(value)
         .fontSize(12)
-        .fontColor('#303746')
+        .fontColor(AppTheme.text('#303746'))
         .layoutWeight(1)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1733,12 +1740,12 @@ struct GalleryPage {
     Row() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .width(64)
         .maxLines(1)
       Text(value)
         .fontSize(12)
-        .fontColor('#5B68FF')
+        .fontColor(AppTheme.text('#5B68FF'))
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1755,10 +1762,10 @@ struct GalleryPage {
           Text('地址解析')
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
           Text(this.captureLocationPreviewText(item))
             .fontSize(12)
-            .fontColor('#5E6678')
+            .fontColor(AppTheme.text('#5E6678'))
             .lineHeight(18)
             .margin({ top: 6 })
         }
@@ -1767,9 +1774,9 @@ struct GalleryPage {
         .margin({ right: 10 })
         Text(this.captureLocationActionText(item))
           .fontSize(12)
-          .fontColor('#5B68FF')
+          .fontColor(AppTheme.text('#5B68FF'))
           .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-          .backgroundColor('#EEF4FF')
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(10)
           .onClick(() => {
             if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
@@ -1785,7 +1792,7 @@ struct GalleryPage {
         Text(this.captureAddressText(item))
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .lineHeight(22)
           .width('100%')
           .margin({ top: 10 })
@@ -1793,7 +1800,7 @@ struct GalleryPage {
       if (this.capturePoiText(item).length > 0) {
         Text('附近：' + this.capturePoiText(item))
           .fontSize(12)
-          .fontColor('#6B7280')
+          .fontColor(AppTheme.text('#6B7280'))
           .width('100%')
           .margin({ top: 6 })
       }
@@ -1803,13 +1810,13 @@ struct GalleryPage {
           .height(138)
           .objectFit(ImageFit.Cover)
           .borderRadius(12)
-          .backgroundColor('#EDF1F7')
+          .backgroundColor(AppTheme.background('#EDF1F7'))
           .margin({ top: 10 })
       }
       Row() {
         Text('查看地图标注')
           .fontSize(12)
-          .fontColor('#5B68FF')
+          .fontColor(AppTheme.text('#5B68FF'))
           .onClick(() => {
             this.openCaptureMap(item);
           })
@@ -1820,16 +1827,16 @@ struct GalleryPage {
     .width('100%')
     .padding(12)
     .borderRadius(14)
-    .backgroundColor('#F7F9FC')
+    .backgroundColor(AppTheme.background('#F7F9FC'))
     .margin({ top: 10 })
   }
 
   @Builder DetailTag(label: string) {
     Text(label)
       .fontSize(11)
-      .fontColor('#596273')
+      .fontColor(AppTheme.text('#596273'))
       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-      .backgroundColor('#F1F4FA')
+      .backgroundColor(AppTheme.background('#F1F4FA'))
       .borderRadius(8)
       .margin({ right: 7, top: 7 })
   }
@@ -1837,7 +1844,7 @@ struct GalleryPage {
   @Builder DetailBullet(detail: string) {
     Text('· ' + detail)
       .fontSize(12)
-      .fontColor('#4D5566')
+      .fontColor(AppTheme.text('#4D5566'))
       .lineHeight(18)
       .width('100%')
       .margin({ top: 6 })
@@ -1884,7 +1891,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => { this.closeResultDetail(); })
 
         ForEach(this.selectedDetailItems(), (item: GalleryAnalysisResult) => {
@@ -1894,12 +1901,12 @@ struct GalleryPage {
                 Text(item.title)
                   .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor('#11182F')
+                  .fontColor(AppTheme.text('#11182F'))
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(this.categoryLabel(item.category))
                   .fontSize(12)
-                  .fontColor(this.categoryColor(item.category))
+                  .fontColor(AppTheme.text(this.categoryColor(item.category)))
                   .margin({ top: 5 })
                   .maxLines(1)
               }
@@ -1910,7 +1917,7 @@ struct GalleryPage {
                 .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
-                .fontColor('#5B68FF')
+                .fontColor(AppTheme.text('#5B68FF'))
                 .onClick(() => { this.closeResultDetail(); })
             }
             .width('100%')
@@ -1921,13 +1928,13 @@ struct GalleryPage {
                   .width('100%')
                   .height(220)
                   .objectFit(ImageFit.Contain)
-                  .backgroundColor('#F2F4F7')
+                  .backgroundColor(AppTheme.background('#F2F4F7'))
                   .borderRadius(12)
                   .margin({ top: 14 })
 
                 Text(item.summary)
                   .fontSize(13)
-                  .fontColor('#4D5566')
+                  .fontColor(AppTheme.text('#4D5566'))
                   .lineHeight(20)
                   .width('100%')
                   .margin({ top: 12 })
@@ -1975,11 +1982,11 @@ struct GalleryPage {
                   this.DetailSectionTitle('OCR 文本')
                   Text(item.ocrText)
                     .fontSize(12)
-                    .fontColor('#4D5566')
+                    .fontColor(AppTheme.text('#4D5566'))
                     .lineHeight(18)
                     .width('100%')
                     .padding(10)
-                    .backgroundColor('#F7F9FC')
+                    .backgroundColor(AppTheme.background('#F7F9FC'))
                     .borderRadius(10)
                     .margin({ top: 8 })
                 }
@@ -1988,11 +1995,11 @@ struct GalleryPage {
                   this.DetailSectionTitle('错误信息')
                   Text(item.error)
                     .fontSize(12)
-                    .fontColor('#B42318')
+                    .fontColor(AppTheme.text('#B42318'))
                     .lineHeight(18)
                     .width('100%')
                     .padding(10)
-                    .backgroundColor('#FFF4F2')
+                    .backgroundColor(AppTheme.background('#FFF4F2'))
                     .borderRadius(10)
                     .margin({ top: 8 })
                 }
@@ -2007,9 +2014,9 @@ struct GalleryPage {
           .width('88%')
           .height('82%')
           .padding(18)
-          .backgroundColor(Color.White)
+          .backgroundColor(AppTheme.background(Color.White))
           .borderRadius(18)
-          .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+          .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
         }, (item: GalleryAnalysisResult) => item.id)
       }
       .width('100%')
@@ -2023,23 +2030,23 @@ struct GalleryPage {
         .width(72)
         .height(72)
         .objectFit(ImageFit.Cover)
-        .backgroundColor('#F2F4F7')
+        .backgroundColor(AppTheme.background('#F2F4F7'))
         .borderRadius(10)
       Column() {
         Text(this.skippedReason(item))
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(AppTheme.text('#151A28'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(item.date)
           .fontSize(12)
-          .fontColor('#7C8494')
+          .fontColor(AppTheme.text('#7C8494'))
           .margin({ top: 6 })
           .maxLines(1)
         Text(item.id)
           .fontSize(11)
-          .fontColor('#9AA3B2')
+          .fontColor(AppTheme.text('#9AA3B2'))
           .margin({ top: 5 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2050,7 +2057,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#F7F9FC')
+    .backgroundColor(AppTheme.background('#F7F9FC'))
     .borderRadius(14)
     .margin({ top: 10 })
   }
@@ -2061,7 +2068,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => { this.closeSkippedPanel(); })
 
         Column() {
@@ -2070,11 +2077,11 @@ struct GalleryPage {
               Text('跳过图片')
                 .fontSize(18)
                 .fontWeight(FontWeight.Bold)
-                .fontColor('#11182F')
+                .fontColor(AppTheme.text('#11182F'))
                 .maxLines(1)
               Text('OCR 关键词预筛未命中的图片会计入跳过')
                 .fontSize(12)
-                .fontColor('#717684')
+                .fontColor(AppTheme.text('#717684'))
                 .margin({ top: 5 })
                 .maxLines(2)
             }
@@ -2083,7 +2090,7 @@ struct GalleryPage {
             .margin({ right: 12 })
             Text('关闭')
               .fontSize(13)
-              .fontColor('#5B68FF')
+              .fontColor(AppTheme.text('#5B68FF'))
               .onClick(() => { this.closeSkippedPanel(); })
           }
           .width('100%')
@@ -2104,9 +2111,9 @@ struct GalleryPage {
         .width('88%')
         .height('72%')
         .padding(18)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(18)
-        .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
       }
       .width('100%')
       .height('100%')
@@ -2117,11 +2124,11 @@ struct GalleryPage {
     Text(this.categoryChipText(item))
       .fontSize(13)
       .fontWeight(this.selectedFilter === item.index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.selectedFilter === item.index ? Color.White : '#596071')
+      .fontColor(AppTheme.text(this.selectedFilter === item.index ? Color.White : '#596071'))
       .height(36)
       .padding({ left: 14, right: 14 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.selectedFilter === item.index ? '#5B68FF' : '#F1F4FA')
+      .backgroundColor(AppTheme.background(this.selectedFilter === item.index ? '#5B68FF' : '#F1F4FA'))
       .borderRadius(18)
       .margin({ right: 8, bottom: 8 })
       .onClick(() => {
@@ -2252,11 +2259,11 @@ struct GalleryPage {
   @Builder TagChip(label: string) {
     Text(label)
       .fontSize(10)
-      .fontColor('#596273')
+      .fontColor(AppTheme.text('#596273'))
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
       .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-      .backgroundColor('#F4F6FA')
+      .backgroundColor(AppTheme.background('#F4F6FA'))
       .borderRadius(7)
       .margin({ right: 6, top: 6 })
   }
@@ -2265,7 +2272,7 @@ struct GalleryPage {
     if (this.detailAt(item, index).length > 0) {
       Text('· ' + this.detailAt(item, index))
         .fontSize(11)
-        .fontColor('#667085')
+        .fontColor(AppTheme.text('#667085'))
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .margin({ top: index === 0 ? 0 : 2 })
@@ -2311,7 +2318,7 @@ struct GalleryPage {
           Text(item.title)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2319,14 +2326,14 @@ struct GalleryPage {
             .margin({ left: 8, right: 8 })
           Text(this.categoryLabel(item.category))
             .fontSize(11)
-            .fontColor(this.categoryColor(item.category))
+            .fontColor(AppTheme.text(this.categoryColor(item.category)))
             .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-            .backgroundColor(this.categoryBg(item.category))
+            .backgroundColor(AppTheme.background(this.categoryBg(item.category)))
             .borderRadius(8)
         }.width('100%')
         Text(item.summary)
           .fontSize(12)
-          .fontColor('#596273')
+          .fontColor(AppTheme.text('#596273'))
           .margin({ top: 7 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2339,15 +2346,15 @@ struct GalleryPage {
         Row() {
           Text(this.resultTime(item))
             .fontSize(10)
-            .fontColor('#858C99')
+            .fontColor(AppTheme.text('#858C99'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.resultStatus(item))
             .fontSize(10)
-            .fontColor(this.statusColor(this.resultStatus(item)))
+            .fontColor(AppTheme.text(this.statusColor(this.resultStatus(item))))
             .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-            .backgroundColor(this.statusBg(this.resultStatus(item)))
+            .backgroundColor(AppTheme.background(this.statusBg(this.resultStatus(item))))
             .borderRadius(7)
             .maxLines(1)
         }.width('100%').margin({ top: 4 })
@@ -2355,7 +2362,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(12)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(AppTheme.background('#FFFFFF'))
     .borderRadius(12)
     .margin({ top: 10 })
     .onClick(() => { this.showResultDetail(item); })
@@ -3007,18 +3014,18 @@ struct GalleryPage {
       Text(insight.label)
         .fontSize(12)
         .fontWeight(FontWeight.Bold)
-        .fontColor(this.selectedMonthKey === insight.key ? Color.White : '#4C5260')
+        .fontColor(AppTheme.text(this.selectedMonthKey === insight.key ? Color.White : '#4C5260'))
         .maxLines(1)
       Text(insight.totalCount.toString() + ' 张')
         .fontSize(11)
-        .fontColor(this.selectedMonthKey === insight.key ? '#EAF1FF' : '#7C8494')
+        .fontColor(AppTheme.text(this.selectedMonthKey === insight.key ? '#EAF1FF' : '#7C8494'))
         .margin({ top: 3 })
         .maxLines(1)
     }
     .justifyContent(FlexAlign.Center)
     .height(48)
     .padding({ left: 13, right: 13 })
-    .backgroundColor(this.selectedMonthKey === insight.key ? '#4B8BFF' : '#F1F4FA')
+    .backgroundColor(AppTheme.background(this.selectedMonthKey === insight.key ? '#4B8BFF' : '#F1F4FA'))
     .borderRadius(12)
     .margin({ right: 8 })
     .onClick(() => {
@@ -3032,24 +3039,24 @@ struct GalleryPage {
         Text(item.label)
           .fontSize(12)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#2F3645')
+          .fontColor(AppTheme.text('#2F3645'))
           .layoutWeight(1)
           .maxLines(1)
         Text(item.count.toString() + ' 张')
           .fontSize(12)
-          .fontColor('#7C8494')
+          .fontColor(AppTheme.text('#7C8494'))
           .maxLines(1)
       }.width('100%')
       Stack({ alignContent: Alignment.Start }) {
         Row()
           .width('100%')
           .height(7)
-          .backgroundColor('#EEF0F5')
+          .backgroundColor(AppTheme.background('#EEF0F5'))
           .borderRadius(4)
         Row()
           .width(this.monthlyCategoryPercent(item.count, total))
           .height(7)
-          .backgroundColor(this.monthlyCategoryColor(item.label))
+          .backgroundColor(AppTheme.background(this.monthlyCategoryColor(item.label)))
           .borderRadius(4)
       }
       .width('100%')
@@ -3063,12 +3070,12 @@ struct GalleryPage {
   @Builder MonthlyCategoryChip(item: GalleryMonthlyCategoryCount) {
     Text(item.label + ' ' + item.count.toString())
       .fontSize(11)
-      .fontColor(this.monthlyCategoryColor(item.label))
+      .fontColor(AppTheme.text(this.monthlyCategoryColor(item.label)))
       .fontWeight(FontWeight.Bold)
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
       .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-      .backgroundColor(this.monthlyCategoryBg(item.label))
+      .backgroundColor(AppTheme.background(this.monthlyCategoryBg(item.label)))
       .borderRadius(8)
       .margin({ right: 7, top: 7 })
       .constraintSize({ maxWidth: 132 })
@@ -3088,10 +3095,10 @@ struct GalleryPage {
     if (this.monthlyInsights().length > 0) {
       Column() {
         Row() {
-          Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+          Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F')).layoutWeight(1)
           AiGeneratedBadge({ compact: true })
             .margin({ right: 8 })
-          Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor('#7F8592')
+          Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor(AppTheme.text('#7F8592'))
         }.width('100%')
         Scroll() {
           Row() {
@@ -3111,7 +3118,7 @@ struct GalleryPage {
       }
       .width('86%')
       .padding(18)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(18)
       .margin({ top: 18 })
     }
@@ -3124,12 +3131,12 @@ struct GalleryPage {
           Text(this.monthlyTitle(insight))
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(insight.totalCount.toString() + ' 张分析结果')
             .fontSize(12)
-            .fontColor('#7C8494')
+            .fontColor(AppTheme.text('#7C8494'))
             .margin({ top: 3 })
             .maxLines(1)
         }
@@ -3140,8 +3147,8 @@ struct GalleryPage {
           .height(34)
           .width(74)
           .fontSize(12)
-          .fontColor('#4B8BFF')
-          .backgroundColor('#EEF4FF')
+          .fontColor(AppTheme.text('#4B8BFF'))
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(10)
           .enabled(this.monthlyAiLoadingKey.length === 0)
           .onClick(() => {
@@ -3153,7 +3160,7 @@ struct GalleryPage {
 
       Text(this.monthlySummaryText(insight))
         .fontSize(13)
-        .fontColor('#596273')
+        .fontColor(AppTheme.text('#596273'))
         .lineHeight(20)
         .margin({ top: 10 })
         .width('100%')
@@ -3162,10 +3169,10 @@ struct GalleryPage {
       if (this.monthlySuggestionText(insight).length > 0) {
         Text('整理建议：' + this.monthlySuggestionText(insight))
           .fontSize(12)
-          .fontColor('#4B5F9F')
+          .fontColor(AppTheme.text('#4B5F9F'))
           .lineHeight(18)
           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-          .backgroundColor('#F2F6FF')
+          .backgroundColor(AppTheme.background('#F2F6FF'))
           .borderRadius(10)
           .margin({ top: 10 })
           .width('100%')
@@ -3175,7 +3182,7 @@ struct GalleryPage {
       if (this.monthlyAiError(insight).length > 0) {
         Text('AI 总结失败：' + this.monthlyAiError(insight))
           .fontSize(12)
-          .fontColor('#B42318')
+          .fontColor(AppTheme.text('#B42318'))
           .margin({ top: 8 })
           .width('100%')
       }
@@ -3225,33 +3232,33 @@ struct GalleryPage {
           Text(hit.item.title)
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.categoryLabel(hit.item.category))
             .fontSize(10)
-            .fontColor(this.categoryColor(hit.item.category))
+            .fontColor(AppTheme.text(this.categoryColor(hit.item.category)))
             .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-            .backgroundColor(this.categoryBg(hit.item.category))
+            .backgroundColor(AppTheme.background(this.categoryBg(hit.item.category)))
             .borderRadius(7)
         }.width('100%')
         Text(hit.item.summary)
           .fontSize(11)
-          .fontColor('#596273')
+          .fontColor(AppTheme.text('#596273'))
           .margin({ top: 5 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row() {
           Text(hit.reason)
             .fontSize(10)
-            .fontColor('#4B5F9F')
+            .fontColor(AppTheme.text('#4B5F9F'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.groupDate(hit.item))
             .fontSize(10)
-            .fontColor('#8A92A3')
+            .fontColor(AppTheme.text('#8A92A3'))
             .margin({ left: 8 })
             .maxLines(1)
         }.width('100%').margin({ top: 5 })
@@ -3262,7 +3269,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#F8FAFE')
+    .backgroundColor(AppTheme.background('#F8FAFE'))
     .borderRadius(12)
     .margin({ top: 8 })
     .onClick(() => { this.showResultDetail(hit.item); })
@@ -3273,18 +3280,21 @@ struct GalleryPage {
       Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
       Row() {
         Column() {
-          Text('图库问答').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
-          Text(this.gallerySearchMessage).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+          Text('图库问答').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+          Text(this.gallerySearchMessage).fontSize(12).fontColor(AppTheme.text('#7F8592')).margin({ top: 3 })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
       }.width('100%')
       Row() {
         TextInput({ placeholder: '例如：找一下外卖订单、停车缴费、会议安排', text: this.galleryQuestion })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .height(42)
           .layoutWeight(1)
           .fontSize(12)
-          .backgroundColor('#F7F9FE')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(12)
           .padding({ left: 12, right: 12 })
           .onChange((value: string) => { this.galleryQuestion = value; })
@@ -3292,7 +3302,7 @@ struct GalleryPage {
           .width(64)
           .height(42)
           .fontSize(12)
-          .backgroundColor('#5B68FF')
+          .backgroundColor(AppTheme.background('#5B68FF'))
           .borderRadius(12)
           .margin({ left: 8 })
           .onClick(() => { this.runGalleryKeywordSearch(); })
@@ -3300,7 +3310,7 @@ struct GalleryPage {
           .width(70)
           .height(42)
           .fontSize(12)
-          .backgroundColor('#2F5BEA')
+          .backgroundColor(AppTheme.background('#2F5BEA'))
           .borderRadius(12)
           .margin({ left: 8 })
           .enabled(!this.galleryAnswerLoading)
@@ -3309,11 +3319,11 @@ struct GalleryPage {
       .width('100%')
       .margin({ top: 12 })
       Row() {
-        Text('关键词检索').fontSize(11).fontColor('#8A92A3').layoutWeight(1)
+        Text('关键词检索').fontSize(11).fontColor(AppTheme.text('#8A92A3')).layoutWeight(1)
         if (this.galleryQuestion.length > 0 || this.gallerySearchHits.length > 0) {
           Text('清空')
             .fontSize(12)
-            .fontColor('#5B68FF')
+            .fontColor(AppTheme.text('#5B68FF'))
             .onClick(() => { this.clearGalleryQuestion(); })
         }
       }
@@ -3322,10 +3332,10 @@ struct GalleryPage {
       if (this.galleryAnswerLoading) {
         Text('正在基于检索结果生成回答...')
           .fontSize(12)
-          .fontColor('#667085')
+          .fontColor(AppTheme.text('#667085'))
           .width('100%')
           .padding(10)
-          .backgroundColor('#F7F9FC')
+          .backgroundColor(AppTheme.background('#F7F9FC'))
           .borderRadius(10)
           .margin({ top: 10 })
       }
@@ -3335,13 +3345,13 @@ struct GalleryPage {
             .margin({ bottom: 7 })
           Text(this.galleryAnswerText)
             .fontSize(13)
-            .fontColor('#303746')
+            .fontColor(AppTheme.text('#303746'))
             .lineHeight(20)
             .width('100%')
           if (this.galleryAnswerMeta.length > 0) {
             Text(this.galleryAnswerMeta)
               .fontSize(11)
-              .fontColor('#7F8592')
+              .fontColor(AppTheme.text('#7F8592'))
               .margin({ top: 6 })
               .width('100%')
           }
@@ -3349,14 +3359,14 @@ struct GalleryPage {
         .alignItems(HorizontalAlign.Start)
         .width('100%')
         .padding(12)
-        .backgroundColor('#F2F6FF')
+        .backgroundColor(AppTheme.background('#F2F6FF'))
         .borderRadius(12)
         .margin({ top: 10 })
       }
       if (this.galleryAnswerError.length > 0) {
         Text('问答失败：' + this.galleryAnswerError)
           .fontSize(12)
-          .fontColor('#B42318')
+          .fontColor(AppTheme.text('#B42318'))
           .width('100%')
           .margin({ top: 8 })
       }
@@ -3368,7 +3378,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(16)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
     .margin({ top: 14 })
   }
@@ -3377,11 +3387,11 @@ struct GalleryPage {
     Text(label)
       .fontSize(13)
       .fontWeight(this.selectedTimeFilter === index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.selectedTimeFilter === index ? '#151A28' : '#596071')
+      .fontColor(AppTheme.text(this.selectedTimeFilter === index ? '#151A28' : '#596071'))
       .height(34)
       .padding({ left: 12, right: 12 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.selectedTimeFilter === index ? '#E8EEFF' : '#F1F4FA')
+      .backgroundColor(AppTheme.background(this.selectedTimeFilter === index ? '#E8EEFF' : '#F1F4FA'))
       .borderRadius(17)
       .margin({ right: 8 })
       .onClick(() => {
@@ -3395,8 +3405,8 @@ struct GalleryPage {
     Column() {
       Row() {
         Column() {
-          Text('图库结果').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
-          Text(this.resultPanelCountText()).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+          Text('图库结果').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+          Text(this.resultPanelCountText()).fontSize(12).fontColor(AppTheme.text('#7F8592')).margin({ top: 3 })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
@@ -3424,7 +3434,7 @@ struct GalleryPage {
       ForEach(this.displayedResults(this.visibleResults()), (item: GalleryAnalysisResult, index: number) => {
         if (this.shouldShowDateHeader(this.displayedResults(this.visibleResults()), index)) {
           Row() {
-            Text(this.groupDate(item)).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#4C5260').layoutWeight(1)
+            Text(this.groupDate(item)).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#4C5260')).layoutWeight(1)
           }
           .width('100%')
           .height(28)
@@ -3437,16 +3447,16 @@ struct GalleryPage {
           Text(this.results.length === 0 ? '暂无图库分析结果' : '当前筛选无结果')
             .fontSize(15)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#303746')
+            .fontColor(AppTheme.text('#303746'))
           Text(this.results.length === 0 ? '选择图片或启动全库分析后，这里会展示图片洞察。' : '换一个分类或时间范围看看。')
             .fontSize(12)
-            .fontColor('#7B8393')
+            .fontColor(AppTheme.text('#7B8393'))
             .textAlign(TextAlign.Center)
             .margin({ top: 8 })
         }
         .width('100%')
         .padding({ top: 28, bottom: 24, left: 18, right: 18 })
-        .backgroundColor('#F7F9FC')
+        .backgroundColor(AppTheme.background('#F7F9FC'))
         .borderRadius(12)
         .margin({ top: 16 })
       }
@@ -3455,8 +3465,8 @@ struct GalleryPage {
           .height(40)
           .width('100%')
           .fontSize(13)
-          .fontColor('#4F68FF')
-          .backgroundColor('#EEF4FF')
+          .fontColor(AppTheme.text('#4F68FF'))
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(12)
           .margin({ top: 12 })
           .onClick(() => { this.resultDisplayLimit += GALLERY_RESULT_PAGE_SIZE; })
@@ -3464,7 +3474,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor('#F2F5FA')
+    .backgroundColor(AppTheme.background('#F2F5FA'))
     .borderRadius(12)
     .margin({ top: 14 })
   }
@@ -3482,7 +3492,7 @@ struct GalleryPage {
       Text('图库分析')
         .fontSize(20)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#172033')
+        .fontColor(AppTheme.text('#172033'))
         .lineHeight(28)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -3512,7 +3522,7 @@ struct GalleryPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F6F7FA')
+    .backgroundColor(AppTheme.background('#F6F7FA'))
     .clip(false)
   }
 

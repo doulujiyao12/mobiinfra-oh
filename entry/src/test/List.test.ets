@@ -5,6 +5,7 @@ import huaweiAccountSessionUnitTest from './HuaweiAccountSessionUnit.test';
 import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
+import workflowCancellationUnitTest from './WorkflowCancellationUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
@@ -56,6 +57,7 @@ export default function testsuite() {
   dataManagerUnitTest();
   workflowStorageUnitTest();
   workflowDateContextUnitTest();
+  workflowCancellationUnitTest();
   mainTabConfigUnitTest();
   firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();

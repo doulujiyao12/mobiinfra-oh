@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
@@ -123,8 +124,12 @@ struct SelfHdcInputTestPage {
     Column({ space: 14 }) {
       Text('先点测试输入框一次，再点开始。运行时不要手动操作输入框；测试使用任务的同一桥接，并检查实际收到的点击、文字和回车。')
         .fontSize(13).lineHeight(21).width('90%')
-      Text(this.pointText).fontSize(12).fontColor('#667085').height(26)
-      TextInput({ text: this.text, placeholder: '测试输入框' }).width('90%').height(48)
+      Text(this.pointText).fontSize(12).fontColor(AppTheme.text('#667085')).height(26)
+      TextInput({ text: this.text, placeholder: '测试输入框' })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
+        .backgroundColor($r('app.color.ui_input_background')).width('90%').height(48)
         .enterKeyType(EnterKeyType.Done)
         .onClick((event: ClickEvent): void => {
           this.x = Math.floor(vp2px(event.displayX));

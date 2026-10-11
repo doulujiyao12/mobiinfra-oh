@@ -1,3 +1,4 @@
+import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
@@ -38,6 +39,7 @@ const COLLECTION_SECTION_GAP: number = 18;
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
+  @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   private pageScroller: Scroller = new Scroller();
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
@@ -183,8 +185,8 @@ export struct CollectionPage {
       .height(38)
       .layoutWeight(1)
       .fontSize(13)
-      .fontColor(this.wechatMode === mode ? Color.White : '#4F68FF')
-      .backgroundColor(this.wechatMode === mode ? '#4F68FF' : '#EEF3FF')
+      .fontColor(AppTheme.text(this.wechatMode === mode ? Color.White : '#4F68FF'))
+      .backgroundColor(AppTheme.background(this.wechatMode === mode ? '#4F68FF' : '#EEF3FF'))
       .borderRadius(10)
       .onClick(() => {
         if (this.wechatAutoSummaryRunning) {
@@ -198,15 +200,17 @@ export struct CollectionPage {
     Column() {
       Text(label)
         .fontSize(12)
-        .fontColor('#6F7684')
+        .fontColor(AppTheme.text('#6F7684'))
         .width('100%')
         .maxLines(1)
       TextInput({ placeholder: placeholder, text: value })
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .height(42)
         .width('100%')
         .fontSize(13)
-        .fontColor('#161B28')
-        .backgroundColor('#F2F5FC')
+        .fontColor(AppTheme.text('#161B28'))
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .enabled(!this.wechatAutoSummaryRunning)
@@ -223,19 +227,19 @@ export struct CollectionPage {
         Text('微信消息自动汇总')
           .fontSize(18)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(AppTheme.text('#151A28'))
           .width('100%')
           .maxLines(1)
         Text('调用 PC 侧采集服务读取微信会话，保存原始产物并写入 daily-log。')
           .fontSize(12)
-          .fontColor('#6F7684')
+          .fontColor(AppTheme.text('#6F7684'))
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 6 })
         Text(this.wechatDefaultSummaryText())
           .fontSize(12)
-          .fontColor('#4F68FF')
+          .fontColor(AppTheme.text('#4F68FF'))
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -264,8 +268,8 @@ export struct CollectionPage {
           .height(44)
           .width('100%')
           .fontSize(15)
-          .fontColor(Color.White)
-          .backgroundColor(this.wechatAutoSummaryRunning ? '#A9B0C2' : '#4F68FF')
+          .fontColor(AppTheme.text(Color.White))
+          .backgroundColor(AppTheme.filledBackground(this.wechatAutoSummaryRunning ? '#A9B0C2' : '#4F68FF'))
           .borderRadius(12)
           .enabled(!this.wechatAutoSummaryRunning)
           .margin({ top: 16 })
@@ -283,7 +287,7 @@ export struct CollectionPage {
         if (this.wechatAutoSummaryStatus.length > 0) {
           Text(this.wechatAutoSummaryStatus)
             .fontSize(12)
-            .fontColor(this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#52606D')
+            .fontColor(AppTheme.text(this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#52606D'))
             .width('100%')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -294,8 +298,8 @@ export struct CollectionPage {
       .width('92%')
       .constraintSize({ maxWidth: 720 })
       .padding(18)
-      .backgroundColor(Color.White)
-      .border({ width: 1, color: '#E8ECF3' })
+      .backgroundColor(AppTheme.background(Color.White))
+      .border({ width: 1, color: AppTheme.border('#E8ECF3') })
       .borderRadius(20)
       .margin({ top: COLLECTION_SECTION_GAP })
     }
@@ -307,14 +311,14 @@ export struct CollectionPage {
       Text(scene.label)
         .fontSize(14)
         .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Medium)
-        .fontColor(this.isActiveCollectionScene(scene) ? '#6657E8' : '#4E5668')
+        .fontColor(AppTheme.text(this.isActiveCollectionScene(scene) ? '#6657E8' : '#4E5668'))
         .height(34)
         .textAlign(TextAlign.Center)
         .maxLines(1)
       Row()
         .width(this.isActiveCollectionScene(scene) ? 26 : 0)
         .height(3)
-        .backgroundColor('#7669FF')
+        .backgroundColor(AppTheme.background('#7669FF'))
         .borderRadius(2)
     }
       .justifyContent(FlexAlign.End)
@@ -333,22 +337,22 @@ export struct CollectionPage {
         .width(60)
         .height(60)
         .objectFit(ImageFit.Cover)
-        .backgroundColor('#F0F3F8')
+        .backgroundColor(AppTheme.background('#F0F3F8'))
         .borderRadius(14)
-        .border({ width: 1, color: '#E7EBF2' })
+        .border({ width: 1, color: AppTheme.border('#E7EBF2') })
     } else {
       Column() {
         Text('暂无图片')
           .fontSize(10)
-          .fontColor('#8A92A3')
+          .fontColor(AppTheme.text('#8A92A3'))
           .maxLines(1)
       }
       .justifyContent(FlexAlign.Center)
       .width(60)
       .height(60)
-      .backgroundColor('#F0F3F8')
+      .backgroundColor(AppTheme.background('#F0F3F8'))
       .borderRadius(14)
-      .border({ width: 1, color: '#E7EBF2' })
+      .border({ width: 1, color: AppTheme.border('#E7EBF2') })
     }
   }
 
@@ -358,14 +362,14 @@ export struct CollectionPage {
         .vertical(true)
         .height(86)
         .strokeWidth(1)
-        .color('#D9DDEA')
+        .color(AppTheme.border('#D9DDEA'))
       Row()
         .width(10)
         .height(10)
         .borderRadius(5)
-        .backgroundColor('#8173FF')
-        .border({ width: 2, color: Color.White })
-        .shadow({ radius: 4, color: '#307669FF', offsetX: 0, offsetY: 1 })
+        .backgroundColor(AppTheme.background('#8173FF'))
+        .border({ width: 2, color: AppTheme.border(Color.White) })
+        .shadow({ radius: 4, color: AppTheme.shadow('#307669FF'), offsetX: 0, offsetY: 1 })
     }
     .width(20)
     .height(86)
@@ -379,12 +383,12 @@ export struct CollectionPage {
         Text(group.title)
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#161C2D')
+          .fontColor(AppTheme.text('#161C2D'))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.groupSubtitle(group))
           .fontSize(12)
-          .fontColor('#7A8292')
+          .fontColor(AppTheme.text('#7A8292'))
           .margin({ top: 6 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -397,11 +401,11 @@ export struct CollectionPage {
       Row() {
         Text(group.meta)
           .fontSize(14)
-          .fontColor('#242A38')
+          .fontColor(AppTheme.text('#242A38'))
           .maxLines(1)
         Text('›')
           .fontSize(25)
-          .fontColor('#A2A8B5')
+          .fontColor(AppTheme.text('#A2A8B5'))
           .margin({ left: 9 })
       }
       .alignItems(VerticalAlign.Center)
@@ -423,9 +427,9 @@ export struct CollectionPage {
   @Builder CollectionRows() {
     if (this.groupCount() === 0) {
       Column() {
-        Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#151A28')
+        Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#151A28'))
         Text('点击同步，整理采集数据及近 7 天未处理的聊天信息')
-          .fontSize(12).fontColor('#7C8494').textAlign(TextAlign.Center).margin({ top: 6 })
+          .fontSize(12).fontColor(AppTheme.text('#7C8494')).textAlign(TextAlign.Center).margin({ top: 6 })
       }.width('100%').height(92).justifyContent(FlexAlign.Center)
     } else {
       Column() {
@@ -434,7 +438,7 @@ export struct CollectionPage {
           if (index < this.currentPageGroups().length - 1) {
             Divider()
               .strokeWidth(1)
-              .color('#E8EBF1')
+              .color(AppTheme.border('#E8EBF1'))
               .margin({ left: 94 })
           }
         }, (group: CollectionGroupViewModel) => group.id)
@@ -448,26 +452,26 @@ export struct CollectionPage {
       Row() {
         Button('上一页')
           .fontSize(12)
-          .fontColor(this.currentGroupPageIndex() > 0 ? '#8066FF' : '#A7ADBA')
+          .fontColor(AppTheme.text(this.currentGroupPageIndex() > 0 ? '#8066FF' : '#A7ADBA'))
           .height(32)
           .padding({ left: 14, right: 14 })
-          .backgroundColor(Color.Transparent)
+          .backgroundColor(AppTheme.background(Color.Transparent))
           .enabled(this.currentGroupPageIndex() > 0)
           .onClick(() => {
             this.setGroupPage(this.currentGroupPageIndex() - 1);
           })
         Text(`${this.currentGroupPageIndex() + 1}/${this.groupPageCount()}`)
           .fontSize(13)
-          .fontColor('#6D7481')
+          .fontColor(AppTheme.text('#6D7481'))
           .textAlign(TextAlign.Center)
           .layoutWeight(1)
           .maxLines(1)
         Button('下一页')
           .fontSize(12)
-          .fontColor(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#8066FF' : '#A7ADBA')
+          .fontColor(AppTheme.text(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#8066FF' : '#A7ADBA'))
           .height(32)
           .padding({ left: 14, right: 14 })
-          .backgroundColor(Color.Transparent)
+          .backgroundColor(AppTheme.background(Color.Transparent))
           .enabled(this.currentGroupPageIndex() < this.groupPageCount() - 1)
           .onClick(() => {
             this.setGroupPage(this.currentGroupPageIndex() + 1);
@@ -481,7 +485,7 @@ export struct CollectionPage {
   @Builder GroupRangeLabel() {
     Text(`共${this.groupCount()}组`)
       .fontSize(13)
-      .fontColor('#7F8592')
+      .fontColor(AppTheme.text('#7F8592'))
       .maxLines(1)
   }
 
@@ -491,22 +495,22 @@ export struct CollectionPage {
       Text(icon)
         .fontSize(16)
         .fontWeight(FontWeight.Bold)
-        .fontColor(accentColor)
+        .fontColor(AppTheme.text(accentColor))
         .width(38)
         .height(38)
         .textAlign(TextAlign.Center)
-        .backgroundColor(softColor)
+        .backgroundColor(AppTheme.background(softColor))
         .borderRadius(12)
       Column() {
         Text(title)
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#172033')
+          .fontColor(AppTheme.text('#172033'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(description)
           .fontSize(11)
-          .fontColor('#747C8C')
+          .fontColor(AppTheme.text('#747C8C'))
           .margin({ top: 4 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -516,7 +520,7 @@ export struct CollectionPage {
       .margin({ left: 12 })
       Text('›')
         .fontSize(22)
-        .fontColor('#A0A6B2')
+        .fontColor(AppTheme.text('#A0A6B2'))
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
@@ -532,23 +536,23 @@ export struct CollectionPage {
           Text('足迹概览')
             .fontSize(13)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#535C70')
+            .fontColor(AppTheme.text('#535C70'))
             .maxLines(1)
           Row() {
             Text(this.getCollectionCount())
               .fontSize(32)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#6C5CE7')
+              .fontColor(AppTheme.text('#6C5CE7'))
               .maxLines(1)
             Divider()
               .vertical(true)
               .height(32)
-              .color('#DCE0EA')
+              .color(AppTheme.border('#DCE0EA'))
               .margin({ left: 15, right: 15 })
             Text(this.groupCount().toString() + ' 个主题')
               .fontSize(15)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#232939')
+              .fontColor(AppTheme.text('#232939'))
               .maxLines(1)
           }
           .alignItems(VerticalAlign.Center)
@@ -558,11 +562,11 @@ export struct CollectionPage {
               .width(7)
               .height(7)
               .borderRadius(4)
-              .backgroundColor('#39C2B3')
+              .backgroundColor(AppTheme.background('#39C2B3'))
               .margin({ right: 8 })
             Text('最近同步 ' + this.getCollectionSyncTime())
               .fontSize(12)
-              .fontColor('#727A8B')
+              .fontColor(AppTheme.text('#727A8B'))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
@@ -577,14 +581,14 @@ export struct CollectionPage {
               LoadingProgress()
                 .width(22)
                 .height(22)
-                .color('#7669FF')
+                .color(AppTheme.text('#7669FF'))
             } else {
               Text('⟳')
                 .width(32)
                 .height(28)
                 .fontSize(26)
                 .lineHeight(28)
-                .fontColor('#7669FF')
+                .fontColor(AppTheme.text('#7669FF'))
                 .textAlign(TextAlign.Center)
             }
           }
@@ -596,17 +600,17 @@ export struct CollectionPage {
             .height(18)
             .fontSize(12)
             .lineHeight(18)
-            .fontColor('#5F6575')
+            .fontColor(AppTheme.text('#5F6575'))
             .textAlign(TextAlign.Center)
         }
         .alignItems(HorizontalAlign.Center)
         .justifyContent(FlexAlign.Center)
         .width(64)
         .height(64)
-        .backgroundColor('#DFFFFFFF')
+        .backgroundColor(AppTheme.background('#DFFFFFFF'))
         .borderRadius(32)
-        .border({ width: 1, color: '#C9D3DDF2' })
-        .shadow({ radius: 10, color: '#141E2A58', offsetX: 0, offsetY: 4 })
+        .border({ width: 1, color: AppTheme.border('#C9D3DDF2') })
+        .shadow({ radius: 10, color: AppTheme.shadow('#141E2A58'), offsetX: 0, offsetY: 4 })
         .onClick(() => {
           dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
           if (this.refreshing) {
@@ -621,13 +625,13 @@ export struct CollectionPage {
     .width('92%')
     .constraintSize({ maxWidth: 720 })
     .height(128)
-    .backgroundColor('#F2F6FF')
-    .backgroundImage($r('app.media.home_overview_background_compact'), ImageRepeat.NoRepeat)
+    .backgroundColor(AppTheme.background('#F2F6FF'))
+    .backgroundImage(this.darkMode ? '' : $r('app.media.home_overview_background_compact'), ImageRepeat.NoRepeat)
     .backgroundImageSize(ImageSize.Cover)
     .borderRadius(24)
-    .border({ width: 1, color: '#B8FFFFFF' })
+    .border({ width: 1, color: AppTheme.border('#B8FFFFFF') })
     .clip(true)
-    .shadow({ radius: 16, color: '#120D2A63', offsetX: 0, offsetY: 6 })
+    .shadow({ radius: 16, color: AppTheme.shadow('#120D2A63'), offsetX: 0, offsetY: 6 })
     .margin({ top: 16 })
   }
 
@@ -658,7 +662,7 @@ export struct CollectionPage {
             Text(this.getCollectionTitle())
               .fontSize(20)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#151A28')
+              .fontColor(AppTheme.text('#151A28'))
               .layoutWeight(1)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -681,7 +685,7 @@ export struct CollectionPage {
               this.onOpenDataCollectionSettings();
             })
           Divider()
-            .color('#E8EBF2')
+            .color(AppTheme.border('#E8EBF2'))
             .margin({ left: 64 })
           this.CollectionActionRow('图', '图库分析', '相册、截图 OCR 与分类整理',
             '#3F7FEF', '#EDF4FF', () => {
@@ -690,8 +694,8 @@ export struct CollectionPage {
         }
         .width('92%')
         .constraintSize({ maxWidth: 720 })
-        .backgroundColor(Color.White)
-        .border({ width: 1, color: '#E8ECF3' })
+        .backgroundColor(AppTheme.background(Color.White))
+        .border({ width: 1, color: AppTheme.border('#E8ECF3') })
         .borderRadius(20)
         .clip(true)
         .margin({ top: COLLECTION_SECTION_GAP })
@@ -702,7 +706,7 @@ export struct CollectionPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F7FAFE')
+    .backgroundColor(AppTheme.background('#F7FAFE'))
     .clip(false)
   }
 

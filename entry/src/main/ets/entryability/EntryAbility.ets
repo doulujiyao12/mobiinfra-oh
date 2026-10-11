@@ -1,4 +1,6 @@
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
+import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
+import { AppTheme } from '../utils/AppTheme';
+import { clearPageStatusBarContext, refreshPageStatusBarAppearance } from '../utils/PageStatusBar';
 import { AppLogger } from '../utils/AppLogger';
 import { DebugSettings } from '../utils/DebugSettings';
 import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
@@ -64,6 +66,7 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       AppLogger.error('Ability', 'Failed to set colorMode. Cause: ' + JSON.stringify(err));
     }
+    AppTheme.syncSystemMode(this.context);
     // AgentExecutionController 统一管理本地/云端 Agent 的执行态、取消态和浮窗同步。
     AgentExecutionController.initialize();
     AgentExecutionController.setFloatWindowSyncHandler(() => {
@@ -97,6 +100,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    clearPageStatusBarContext();
     AgentExecutionController.setFloatWindowSyncHandler(null);
     AgentExecutionController.setFloatPanelLayoutHandler(null);
     AgentExecutionController.setFloatPanelMoveHandler(null);
@@ -118,6 +122,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageDestroy(): void {
+    clearPageStatusBarContext();
     AppLogger.info('Ability', 'Ability onWindowStageDestroy');
   }
 
@@ -145,6 +150,8 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    AppTheme.syncSystemMode(this.context);
+    refreshPageStatusBarAppearance();
     AppLogger.info('Ability', 'Ability onForeground');
     AppStorage.setOrCreate('selfHdcSetupForegroundEpoch', (AppStorage.get<number>('selfHdcSetupForegroundEpoch') || 0) + 1);
     // Runs for both a cold launch and returning to the App; never blocks the first screen.
@@ -165,6 +172,11 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       AppLogger.error('BackgroundTask', 'stopBackgroundRunning error: ' + JSON.stringify(err));
     }
+  }
+
+  onConfigurationUpdate(newConfig: Configuration): void {
+    AppTheme.syncSystemMode(this.context, newConfig);
+    refreshPageStatusBarAppearance();
   }
 
   onBackground(): void {

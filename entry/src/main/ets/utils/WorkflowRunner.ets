@@ -4,6 +4,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { WorkflowCancellation } from './WorkflowCancellation';
 import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
@@ -375,6 +376,7 @@ export class WorkflowRunner {
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: () => CloudModelConfig;
   private hdcBridge: HdcWorkflowBridge;
+  private cancellation: WorkflowCancellation | null = null;
   private logHandler: (message: string) => void;
   private workflow: WorkflowDefinition | null = null;
   private contextValues: WorkflowJsonMap = {};
@@ -414,10 +416,25 @@ export class WorkflowRunner {
     return runRootOverride.length > 0 ? runRootOverride : WorkflowStorage.runsDir(filesDir);
   }
 
-  // Opt-in device injection for task-page phone control. The default PC constructor and execution path are unchanged.
-  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void {
+  // Opt-in injection; other callers retain the default PC bridge.
+  useDeviceBridge(bridge: HdcWorkflowBridge): void {
     if (this.runningTask !== null) { throw new Error('Cannot switch device backend during a workflow'); }
     this.hdcBridge = bridge;
+  }
+
+  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void { this.useDeviceBridge(bridge); }
+
+  useCancellation(cancellation: WorkflowCancellation): void {
+    if (this.runningTask !== null) { throw new Error('Cannot switch cancellation signal during a workflow'); }
+    this.cancellation = cancellation;
+  }
+
+  private isCancellationRequested(): boolean {
+    return this.cancellation?.isCancelled() === true || AgentExecutionController.isCancelRequested();
+  }
+
+  private ensureNotCancelled(): void {
+    if (this.isCancellationRequested()) { throw new Error('用户取消 workflow'); }
   }
 
   private workflowJsonForRun(task: WorkflowTask): string {
@@ -426,6 +443,7 @@ export class WorkflowRunner {
   }
 
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
+    this.cancellation?.throwIfCancelled();
     AiServiceAccess.requireAllowed();
     PrivacyConsent.requireAccepted();
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
@@ -467,21 +485,21 @@ export class WorkflowRunner {
       let steps = this.normalizeSteps(this.workflow.steps);
       this.debug('run normalized steps=' + steps.length);
       await this.executeSteps(steps, '', {});
-      if (AgentExecutionController.isCancelRequested()) {
+      if (this.isCancellationRequested()) {
         status = 'cancelled';
         message = '用户取消 workflow';
       }
     } catch (e) {
       let err = e as Error;
-      status = AgentExecutionController.isCancelRequested() ? 'cancelled' : 'failed';
-      message = err.message || String(e);
-      this.log('Workflow 失败：' + message);
+      status = this.isCancellationRequested() ? 'cancelled' : 'failed';
+      message = status === 'cancelled' ? '用户取消 workflow' : (err.message || String(e));
+      this.log((status === 'cancelled' ? 'Workflow 已取消：' : 'Workflow 失败：') + message);
     }
 
-    if (status !== 'cancelled' && !AgentExecutionController.isCancelRequested()) {
+    if (status !== 'cancelled' && !this.isCancellationRequested()) {
       try {
         await this.flushPendingSummaryJobs();
-        if (AgentExecutionController.isCancelRequested()) {
+        if (this.isCancellationRequested()) {
           status = 'cancelled';
           message = '用户取消 workflow';
         }
@@ -489,7 +507,7 @@ export class WorkflowRunner {
         let err = e as Error;
         let flushMessage = err.message || String(e);
         this.log('Workflow deferred summary flush failed: ' + flushMessage);
-        if (AgentExecutionController.isCancelRequested()) {
+        if (this.isCancellationRequested()) {
           status = 'cancelled';
           message = '用户取消 workflow';
         } else if (status === 'success') {
@@ -502,6 +520,11 @@ export class WorkflowRunner {
     this.writeRunSummary(status);
 
     returnedToApp = await this.returnToHostApp();
+    if (this.isCancellationRequested()) {
+      status = 'cancelled';
+      message = '用户取消 workflow';
+      this.writeRunSummary(status);
+    }
     if (returnedToApp) {
       this.log('Workflow 收尾：已切回 ClawMate App。');
     } else {
@@ -631,11 +654,11 @@ export class WorkflowRunner {
     this.pushRuntimeValues(runtimeValues);
     try {
       for (let i = 0; i < steps.length; i++) {
-        if (AgentExecutionController.isCancelRequested()) {
+        if (this.isCancellationRequested()) {
           throw new Error('用户取消 workflow');
         }
         await AgentExecutionController.waitIfPaused();
-        if (AgentExecutionController.isCancelRequested()) {
+        if (this.isCancellationRequested()) {
           throw new Error('用户取消 workflow');
         }
         let localId = String(steps[i].id);
@@ -661,12 +684,13 @@ export class WorkflowRunner {
       ', on_error=' + (step.on_error || 'stop'));
     AgentExecutionController.updateFloatText(this.buildStepFloatText(step, actualId));
     await AgentExecutionController.waitIfPaused();
-    if (AgentExecutionController.isCancelRequested()) {
+    if (this.isCancellationRequested()) {
       throw new Error('用户取消 workflow');
     }
     try {
       let resolved = this.shouldDeferNestedResolution(step) ? step : this.resolveStep(step);
       let output = await this.executeStep(resolved, actualId);
+      this.ensureNotCancelled();
       let result = this.buildStepResult(actualId, 'success', started, output, '');
       this.stepResults[actualId] = result;
       aliases[localId] = actualId;
@@ -676,14 +700,15 @@ export class WorkflowRunner {
       return false;
     } catch (e) {
       let err = e as Error;
-      let result = this.buildStepResult(actualId, 'failed', started, {}, err.message || String(e));
+      let status = this.isCancellationRequested() ? 'cancelled' : 'failed';
+      let result = this.buildStepResult(actualId, status, started, {}, err.message || String(e));
       this.stepResults[actualId] = result;
       aliases[localId] = actualId;
-      this.log('Step ' + actualId + ' failed: ' + result.error);
+      this.log('Step ' + actualId + ' ' + status + ': ' + result.error);
       this.debugStep('step finished stepId=' + actualId + ', type=' + step.type +
-        ', on_error=' + (step.on_error || 'stop') + ', status=failed, durationMs=' + this.elapsedMs(startedMs) +
+        ', on_error=' + (step.on_error || 'stop') + ', status=' + status + ', durationMs=' + this.elapsedMs(startedMs) +
         ', error=' + result.error);
-      return step.on_error !== 'continue';
+      return status === 'cancelled' || step.on_error !== 'continue';
     }
   }
 
@@ -728,9 +753,11 @@ export class WorkflowRunner {
   }
 
   private async runGuiTask(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
+    this.ensureNotCancelled();
     let taskDescription = step.task_description || '';
     if (actualId === '1') {
       let planner = await this.runPlanner(taskDescription);
+      this.ensureNotCancelled();
       this.currentAppName = planner.appName;
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
@@ -740,6 +767,7 @@ export class WorkflowRunner {
         ', resetFirst=true');
       try {
         await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
+        this.ensureNotCancelled();
         this.debug('hdcBridge.startApp success appName=' + planner.appName + ', packageName=' + planner.packageName +
           ', durationMs=' + this.elapsedMs(startAppStartedAt));
       } catch (e) {
@@ -798,7 +826,9 @@ export class WorkflowRunner {
   }
 
   private async runPlanner(taskDescription: string): Promise<PlannerResult> {
+    this.ensureNotCancelled();
     let prompt = await this.buildPlannerPrompt(taskDescription);
+    this.ensureNotCancelled();
     let config = this.cloudConfigProvider();
     let plannerStartedAt = new Date().getTime();
     this.debug('Planner request start promptLength=' + prompt.length +
@@ -807,6 +837,7 @@ export class WorkflowRunner {
     let response = '';
     try {
       response = await this.cloudClient.chatPlanner(prompt, config);
+      this.ensureNotCancelled();
       this.debug('Planner response received responseLength=' + response.length +
         ', durationMs=' + this.elapsedMs(plannerStartedAt));
     } catch (e) {
@@ -872,7 +903,9 @@ export class WorkflowRunner {
   }
 
   private async captureWorkflowScreenshot(source: string): Promise<WorkflowScreenshotCache> {
+    this.ensureNotCancelled();
     let shot = await this.hdcBridge.screenshot();
+    this.ensureNotCancelled();
     let screenshot = this.normalizeWorkflowScreenshot(shot, source);
     this.latestWorkflowScreenshot = screenshot;
     return screenshot;
@@ -960,11 +993,11 @@ export class WorkflowRunner {
       recentScreenshots: []
     };
     for (let i = 0; i < maxSteps; i++) {
-      if (AgentExecutionController.isCancelRequested()) {
+      if (this.isCancellationRequested()) {
         throw new Error('用户取消 workflow');
       }
       await AgentExecutionController.waitIfPaused();
-      if (AgentExecutionController.isCancelRequested()) {
+      if (this.isCancellationRequested()) {
         throw new Error('用户取消 workflow');
       }
       AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps + ': 识别屏幕并决策');
@@ -976,10 +1009,12 @@ export class WorkflowRunner {
         resultExtractionScreenshotCount);
       this.log('Decider 截图完成：' + width + 'x' + height);
       let parsedAction = await AgentActionParseRetry.request(async (): Promise<string> => {
+        this.ensureNotCancelled();
         let candidate = '';
         try {
           candidate = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64,
             this.cloudConfigProvider());
+          this.ensureNotCancelled();
         } catch (e) {
           let err = e as Error;
           throw new Error('Decider request failed: ' + (err.message || String(e)));
@@ -992,6 +1027,7 @@ export class WorkflowRunner {
         AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps +
           ': JSON解析失败，同屏重试 ' + String(info.retryNumber) + '/' + String(info.maxRetries));
       });
+      this.ensureNotCancelled();
       let response = parsedAction.raw;
       let parsed = parsedAction.data;
       let action = parsedAction.action;
@@ -1011,7 +1047,9 @@ export class WorkflowRunner {
       }
       let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
       this.clearWorkflowScreenshotCache();
+      this.ensureNotCancelled();
       await this.hdcBridge.guiAction(hdcPayload);
+      this.ensureNotCancelled();
       history.push(ArkJSON.stringify(parsed));
     }
     return result;
@@ -1046,8 +1084,10 @@ export class WorkflowRunner {
     let response = '';
     try {
       this.log('GUI 任务结果提取开始，截图数：' + String(imageBase64List.length));
+      this.ensureNotCancelled();
       response = await this.cloudClient.chatImagesQuestion(prompt, imageBase64List,
         this.cloudConfigProvider());
+      this.ensureNotCancelled();
       if (response.trim().length === 0) {
         throw new Error('empty VLM result extraction response');
       }
@@ -1059,6 +1099,7 @@ export class WorkflowRunner {
       this.log('GUI 任务结果提取完成：' + this.workflowResultSummary);
       this.log('GUI 任务结果提取诊断：' + guiTaskResultExtractionDiagnosticsText(normalized, response));
     } catch (e) {
+      this.ensureNotCancelled();
       let err = e as Error;
       let message = err.message || String(e);
       this.log('GUI 任务结果提取失败：' + message);
@@ -1073,6 +1114,7 @@ export class WorkflowRunner {
   }
 
   private async runGuiAction(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
+    this.ensureNotCancelled();
     let action = step.action || '';
     let output: GuiActionOutput = {
       step_dir: this.stepDir(actualId),
@@ -1133,11 +1175,13 @@ export class WorkflowRunner {
     }
     this.clearWorkflowScreenshotCache();
     let response = await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
+    this.ensureNotCancelled();
     output.result = response.message || 'ok';
     return output as Object as WorkflowJsonMap;
   }
 
   private async runTool(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
+    this.ensureNotCancelled();
     let toolName = step.tool_name || '';
     if (toolName !== 'vlm_qa') {
       throw new Error('Unsupported workflow tool: ' + toolName);
@@ -1175,6 +1219,7 @@ export class WorkflowRunner {
     }
     this.log('VLM QA request started: ' + actualId);
     let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
+    this.ensureNotCancelled();
     this.log('VLM QA response:\n' + response);
     let output: ToolOutput = {
       step_dir: this.stepDir(actualId),
@@ -1208,7 +1253,9 @@ export class WorkflowRunner {
 
   private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
+      this.ensureNotCancelled();
       let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
+      this.ensureNotCancelled();
       return this.normalizeSummaryJobResult({
         ok: true,
         actual_id: actualId,
@@ -1241,7 +1288,7 @@ export class WorkflowRunner {
   private async resolveSummaryJob(job: PendingSummaryJob): Promise<SummaryJobResult> {
     let result = await job.promise;
     let retries = 0;
-    while (!result.ok && retries < SUMMARY_JOB_RETRY_LIMIT && !AgentExecutionController.isCancelRequested()) {
+    while (!result.ok && retries < SUMMARY_JOB_RETRY_LIMIT && !this.isCancellationRequested()) {
       retries++;
       this.log('VLM QA deferred retry (' + job.actual_id + ') #' + String(retries) + ': ' + result.error);
       result = await this.startSummaryJob(job.actual_id, job.prompt, job.image);
@@ -1260,7 +1307,7 @@ export class WorkflowRunner {
     let failures: string[] = [];
     for (let i = 0; i < jobs.length; i++) {
       let result = await this.resolveSummaryJob(jobs[i]);
-      if (AgentExecutionController.isCancelRequested()) {
+      if (this.isCancellationRequested()) {
         this.log('用户取消 workflow，停止等待后台 summary 写入');
         break;
       }

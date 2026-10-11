@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../components/AppHeader';
 import { FrostedPage } from '../components/FrostedPage';
 import native from 'libentry.so';
@@ -104,7 +105,7 @@ struct LogView {
       if (this.debugEnabled) {
         Button(this.autoRefresh ? 'Auto ON' : 'Auto OFF')
           .fontSize(12).height(36)
-          .backgroundColor(this.autoRefresh ? '#4CAF50' : '#888888')
+          .backgroundColor(AppTheme.background(this.autoRefresh ? '#4CAF50' : '#888888'))
           .onClick(() => { this.autoRefresh = !this.autoRefresh })
       }
     }
@@ -118,21 +119,21 @@ struct LogView {
         Row() {
           Button('Native')
             .fontSize(12).height(34).flexGrow(1)
-            .backgroundColor(this.logSource === 0 ? '#5B68FF' : '#888888')
+            .backgroundColor(AppTheme.background(this.logSource === 0 ? '#5B68FF' : '#888888'))
             .onClick(() => {
               this.logSource = 0
               this.reload()
             })
           Button('Cloud')
             .fontSize(12).height(34).flexGrow(1).margin({ left: 8 })
-            .backgroundColor(this.logSource === 1 ? '#5B68FF' : '#888888')
+            .backgroundColor(AppTheme.background(this.logSource === 1 ? '#5B68FF' : '#888888'))
             .onClick(() => {
               this.logSource = 1
               this.reload()
             })
           Button('Gallery')
             .fontSize(12).height(34).flexGrow(1).margin({ left: 8 })
-            .backgroundColor(this.logSource === 2 ? '#5B68FF' : '#888888')
+            .backgroundColor(AppTheme.background(this.logSource === 2 ? '#5B68FF' : '#888888'))
             .onClick(() => {
               this.logSource = 2
               this.reload()
@@ -145,13 +146,13 @@ struct LogView {
             .onClick(() => this.reload())
           Button(this.autoScroll ? 'Scroll ON' : 'Scroll OFF')
             .fontSize(12).height(36).flexGrow(1).margin({ left: 8 })
-            .backgroundColor(this.autoScroll ? '#2196F3' : '#888888')
+            .backgroundColor(AppTheme.background(this.autoScroll ? '#2196F3' : '#888888'))
             .onClick(() => {
               this.autoScroll = !this.autoScroll
               if (this.autoScroll) this.scroller.scrollEdge(Edge.Bottom)
             })
           Button('Copy').fontSize(14).height(36).flexGrow(1).margin({ left: 8 })
-            .backgroundColor('#FF9800')
+            .backgroundColor(AppTheme.background('#FF9800'))
             .onClick(() => {
               const pb = pasteboard.getSystemPasteboard()
               pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.copyText()))
@@ -162,7 +163,7 @@ struct LogView {
                 })
             })
           Button('Clear').fontSize(14).height(36).flexGrow(1).margin({ left: 8 })
-            .backgroundColor('#F44336')
+            .backgroundColor(AppTheme.background('#F44336'))
             .onClick(() => {
               try {
                 if (this.logSource === 0) {
@@ -184,27 +185,27 @@ struct LogView {
         Scroll(this.scroller) {
           Text(this.logs)
             .fontSize(11)
-            .fontColor('#E0E0E0')
+            .fontColor(AppTheme.text('#E0E0E0'))
             .fontFamily('monospace')
             .textAlign(TextAlign.Start)
             .width('100%')
             .padding(8)
         }
         .scrollable(ScrollDirection.Vertical)
-        .backgroundColor('#0D1117')
+        .backgroundColor(AppTheme.background('#0D1117'))
         .borderRadius(8)
         .width('95%')
         .flexGrow(1)
         .margin({ bottom: 10 })
       } else {
         Text('Debug 已关闭，请在“我的”页面开启后查看日志。')
-          .fontSize(14).fontColor('#667085').padding(20)
+          .fontSize(14).fontColor(AppTheme.text('#667085')).padding(20)
       }
     }
     .width('100%')
     .height('100%')
     .padding({ top: APP_HEADER_CONTENT_GAP })
-    .backgroundColor('#F0F0F0')
+    .backgroundColor(AppTheme.background('#F0F0F0'))
   }
 
   build() {

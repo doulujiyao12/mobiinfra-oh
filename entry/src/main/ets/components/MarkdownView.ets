@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import {
   MarkdownBlock,
   MarkdownInline,
@@ -111,7 +112,7 @@ export struct MarkdownView {
       Text(fallback)
         .fontSize(fontSize)
         .fontWeight(bold ? FontWeight.Bold : FontWeight.Regular)
-        .fontColor(color)
+        .fontColor(AppTheme.text(color))
         .lineHeight(lineHeight)
         .width('100%')
     } else {
@@ -120,12 +121,12 @@ export struct MarkdownView {
           Span(inline.text)
             .fontSize(fontSize)
             .fontWeight(bold || inline.type === 'strong' ? FontWeight.Bold : FontWeight.Regular)
-            .fontColor(inline.type === 'link' ? this.accentColor() : color)
+            .fontColor(AppTheme.text(inline.type === 'link' ? this.accentColor() : color))
             .fontFamily(inline.type === 'code' ? 'monospace' : 'HarmonyOS Sans')
         }, (inline: MarkdownInline, index?: number) => String(index === undefined ? 0 : index) + inline.type + inline.text)
       }
       .fontSize(fontSize)
-      .fontColor(color)
+      .fontColor(AppTheme.text(color))
       .lineHeight(lineHeight)
       .width('100%')
     }
@@ -157,7 +158,7 @@ export struct MarkdownView {
     .padding({ left: 10 })
     .border({
       width: { left: 3, right: 0, top: 0, bottom: 0 },
-      color: this.quoteBorderColor()
+      color: AppTheme.border(this.quoteBorderColor())
     })
     .margin({ top: this.blockTopMargin(index) })
   }
@@ -168,7 +169,7 @@ export struct MarkdownView {
         Row() {
           Text(block.ordered && item.marker.length > 0 ? item.marker : '•')
             .fontSize(this.baseFontSize())
-            .fontColor(this.secondaryColor())
+            .fontColor(AppTheme.text(this.secondaryColor()))
             .width(22)
             .lineHeight(this.baseLineHeight())
           Column() {
@@ -190,20 +191,20 @@ export struct MarkdownView {
       if (block.language.length > 0) {
         Text(block.language)
           .fontSize(10)
-          .fontColor(this.secondaryColor())
+          .fontColor(AppTheme.text(this.secondaryColor()))
           .width('100%')
           .margin({ bottom: 6 })
       }
       Text(block.text.length > 0 ? block.text : ' ')
         .fontSize(this.baseFontSize() - 1)
         .fontFamily('monospace')
-        .fontColor(this.primaryColor())
+        .fontColor(AppTheme.text(this.primaryColor()))
         .lineHeight(this.baseLineHeight())
         .width('100%')
     }
     .width('100%')
     .padding(10)
-    .backgroundColor(this.codeBackgroundColor())
+    .backgroundColor(AppTheme.background(this.codeBackgroundColor()))
     .borderRadius(8)
     .margin({ top: this.blockTopMargin(index) })
   }
@@ -212,7 +213,7 @@ export struct MarkdownView {
     Column()
       .width('100%')
       .height(1)
-      .backgroundColor(this.variant === 'chat_user' ? '#4B5563' : '#E5E7EB')
+      .backgroundColor(AppTheme.background(this.variant === 'chat_user' ? '#4B5563' : '#E5E7EB'))
       .margin({ top: this.blockTopMargin(index) + 3, bottom: 3 })
   }
 
@@ -222,14 +223,14 @@ export struct MarkdownView {
         Text(cell.length > 0 ? cell : ' ')
           .fontSize(this.baseFontSize() - 1)
           .fontWeight(isHeader ? FontWeight.Bold : FontWeight.Regular)
-          .fontColor(isHeader ? this.primaryColor() : this.secondaryColor())
+          .fontColor(AppTheme.text(isHeader ? this.primaryColor() : this.secondaryColor()))
           .lineHeight(this.baseLineHeight())
           .layoutWeight(1)
           .padding({ left: 6, right: 6, top: 5, bottom: 5 })
       }, (cell: string, index?: number) => keyPrefix + '_' + String(index === undefined ? 0 : index) + cell)
     }
     .width('100%')
-    .backgroundColor(isHeader ? this.codeBackgroundColor() : '#00000000')
+    .backgroundColor(AppTheme.background(isHeader ? this.codeBackgroundColor() : '#00000000'))
   }
 
   @Builder TableBlock(block: MarkdownBlock, index: number) {
@@ -240,7 +241,7 @@ export struct MarkdownView {
       }, (row: string[], rowIndex?: number) => String(rowIndex === undefined ? 0 : rowIndex) + row.join('|'))
     }
     .width('100%')
-    .border({ width: 1, color: this.variant === 'chat_user' ? '#4B5563' : '#E5E7EB' })
+    .border({ width: 1, color: AppTheme.border(this.variant === 'chat_user' ? '#4B5563' : '#E5E7EB') })
     .borderRadius(8)
     .clip(true)
     .margin({ top: this.blockTopMargin(index) })

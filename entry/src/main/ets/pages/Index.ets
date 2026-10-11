@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { promptAction, router, window } from '@kit.ArkUI';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -187,6 +188,8 @@ import {
 import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
 import { normalizeVoiceTtsPreset } from '../utils/voice/VoiceTtsPresets';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
+import { WorkflowCancellation } from '../utils/WorkflowCancellation';
+import { CancellableWorkflowHdcBridge } from '../utils/CancellableWorkflowHdcBridge';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
@@ -670,6 +673,7 @@ struct Index {
   private pcServerConnectedPromptShown: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
+  private activeTaskWorkflowCancellation: WorkflowCancellation | null = null;
   private activePhoneRunSession: PhoneHdcRunSession | null = null;
   @StorageProp('selfHdcSetupForegroundEpoch') @Watch('showPhoneSetupForForeground')
   private phoneSetupForegroundEpoch: number = 0;
@@ -1571,8 +1575,8 @@ struct Index {
         title: '删除会话',
         message: '将删除“' + session.title + '”及其对应文件，此操作不可恢复。',
         buttons: [
-          { text: '取消', color: '#666666' },
-          { text: '删除', color: '#FF4D4F' }
+          { text: '取消', color: AppTheme.dialogText('#666666') },
+          { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         resolve(data.index === 1);
@@ -1748,8 +1752,8 @@ struct Index {
         title: '大模型返回确认',
         message: ensureAiGeneratedTextNotice('模型推理结果：\n' + response + '\n\n是否同意执行？'),
         buttons: [
-          { text: '拒绝', color: '#ff0000' },
-          { text: '同意', color: '#00cc00' }
+          { text: '拒绝', color: AppTheme.dialogText('#ff0000') },
+          { text: '同意', color: AppTheme.dialogText('#00cc00') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         resolve(data.index === 1);
@@ -1770,8 +1774,8 @@ struct Index {
         title: '云端模型返回确认',
         message: ensureAiGeneratedTextNotice('模型推理结果:\n' + response + '\n\n是否同意执行？'),
         buttons: [
-          { text: '拒绝', color: '#ff0000' },
-          { text: '同意', color: '#00cc00' }
+          { text: '拒绝', color: AppTheme.dialogText('#ff0000') },
+          { text: '同意', color: AppTheme.dialogText('#00cc00') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         let approved = data.index === 1;
@@ -1793,8 +1797,8 @@ struct Index {
         title: '确认手机 GUI 任务',
         message: detailLines.join('\n') + '\n\n确认后 App 将通过 HDC bridge 执行该任务。',
         buttons: [
-          { text: '拒绝', color: '#ff0000' },
-          { text: '执行', color: '#00cc00' }
+          { text: '拒绝', color: AppTheme.dialogText('#ff0000') },
+          { text: '执行', color: AppTheme.dialogText('#00cc00') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         let approved = data.index === 1;
@@ -2003,8 +2007,8 @@ struct Index {
         title: '画像未变化',
         message: '当前画像内容与上次生成数字分身时一致，继续生成可能会得到相似结果。是否仍要重新生成？',
         buttons: [
-          { text: '取消', color: '#666666' },
-          { text: '继续生成', color: '#8066FF' }
+          { text: '取消', color: AppTheme.dialogText('#666666') },
+          { text: '继续生成', color: AppTheme.dialogText('#8066FF') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         resolve(data.index === 1);
@@ -2977,6 +2981,7 @@ struct Index {
     this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.cancelActiveTaskWorkflow()) { return; }
       if (this.activePhoneRunSession !== null) {
         await this.activePhoneRunSession.requestCancellation();
         return;
@@ -3006,6 +3011,7 @@ struct Index {
       }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.cancelActiveTaskWorkflow()) { return; }
       if (this.activePhoneRunSession !== null) {
         await this.activePhoneRunSession.requestCancellation();
         return;
@@ -3235,7 +3241,7 @@ struct Index {
       title: '已连接 PC Server',
       message: '手机 App 已连接到 PC Server，事件通道已建立。',
       buttons: [
-        { text: '知道了', color: '#5968FF' }
+        { text: '知道了', color: AppTheme.dialogText('#5968FF') }
       ]
     }).catch(() => {});
   }
@@ -6557,8 +6563,40 @@ struct Index {
     }
   }
 
-  private async runPhoneWorkflowTask(task: WorkflowTask): Promise<void> {
+  private bindTaskWorkflowCancellation(cancellation: WorkflowCancellation): void {
+    cancellation.throwIfCancelled();
+    this.activeTaskWorkflowCancellation = cancellation;
+    cancellation.setHandler((): void => {
+      if (this.activeTaskWorkflowCancellation !== cancellation) { return; }
+      this.activePhoneWorkflowBridge?.cancel();
+      this.cloudClient.cancelActiveRequests();
+      // Wake a paused runner without releasing its busy state before cleanup settles.
+      AgentExecutionController.resumeExecution();
+      AgentExecutionController.updateFloatText('正在停止任务，后续任务不再下发…');
+    });
+  }
+
+  private cancelActiveTaskWorkflow(): boolean {
+    if (this.activeTaskWorkflowCancellation === null) { return false; }
+    let bridge = this.activePhoneWorkflowBridge;
+    if (bridge !== null && bridge.hasExpired()) {
+      bridge.cancel();
+      this.cloudClient.cancelActiveRequests();
+      return true;
+    }
+    this.activeTaskWorkflowCancellation.cancel();
+    return true;
+  }
+
+  private clearTaskWorkflowCancellation(cancellation: WorkflowCancellation): void {
+    cancellation.setHandler(null);
+    if (this.activeTaskWorkflowCancellation === cancellation) { this.activeTaskWorkflowCancellation = null; }
+  }
+
+  private async runPhoneWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation): Promise<void> {
+    cancellation.throwIfCancelled();
     if (!this.ensureAiServiceLogin() || !await this.ensurePrivacyConsent()) { return; }
+    cancellation.throwIfCancelled();
     let hub = SelfHdcTestRunner.shared();
     let bridge: PhoneHdcWorkflowBridge | null = null;
     let ownsLog = false;
@@ -6573,11 +6611,12 @@ struct Index {
       let settingsError = '';
       try { settings = await SelfHdcTaskSettings.refreshLocalIp(this.filesDir, 'phone-workflow'); }
       catch (e) { settingsError = (e as Error).message; }
+      cancellation.throwIfCancelled();
       if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
         throw new Error('已有手机测试或 GUI 任务正在执行');
       }
       hub.beginExternal(this.filesDir, task.title, settings.ip + ':' + settings.port, (): void => {
-        AgentExecutionController.requestCancellation();
+        cancellation.cancel();
       });
       ownsLog = true;
       if (settingsError) { throw new Error('PHONE_HDC_SETTINGS: ' + settingsError); }
@@ -6589,10 +6628,13 @@ struct Index {
         (): void => { AgentExecutionController.requestCancellation(); });
       this.activePhoneWorkflowBridge = bridge;
       AgentExecutionController.beginExecution('手机 GUI 任务连接中：' + task.title);
+      this.bindTaskWorkflowCancellation(cancellation);
       await bridge.open();
+      cancellation.throwIfCancelled();
       let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(), '',
         (event: string): void => { hub.recordExternal(event); });
       runner.useDeviceBridgeForPhone(bridge);
+      runner.useCancellation(cancellation);
       let result = await runner.runTask(task);
       outcome = bridge.hasExpired() ? 'failed' : result.status;
       message = bridge.hasExpired() ? 'PHONE_HDC_BACKGROUND_EXPIRED: 系统后台额度到期' : result.message;
@@ -6600,9 +6642,12 @@ struct Index {
       hub.recordExternal('WORKFLOW_SUMMARY runDir=' + result.runDir + ' returnedToApp=' + result.returnedToApp);
     } catch (e) {
       outcome = bridge?.hasExpired() ? 'failed' :
-        (bridge !== null && AgentExecutionController.isCancelRequested() ? 'cancelled' : 'failed');
+        (cancellation.isCancelled() || (bridge !== null && AgentExecutionController.isCancelRequested()) ?
+          'cancelled' : 'failed');
       message = (e as Error).message;
-      if (ownsLog) { hub.recordExternal('WORKFLOW_FAILED error=' + message); }
+      if (ownsLog) {
+        hub.recordExternal((outcome === 'cancelled' ? 'WORKFLOW_CANCELLED' : 'WORKFLOW_FAILED') + ' error=' + message);
+      }
       else { this.appendCloudLog('手机 Workflow 无法启动：' + message); }
     } finally {
       if (bridge) {
@@ -6612,7 +6657,12 @@ struct Index {
         }
         bridge.close();
       }
+      if (cancellation.isCancelled() && !bridge?.hasExpired()) {
+        outcome = 'cancelled';
+        message = '用户取消 workflow，后续任务不再下发';
+      }
       this.activePhoneWorkflowBridge = null;
+      this.clearTaskWorkflowCancellation(cancellation);
       try {
         if (message.length > 0) { WorkflowStorage.updateTaskRun(this.filesDir, task.id, outcome, message); }
       } finally {
@@ -6624,19 +6674,23 @@ struct Index {
     }
   }
 
-  private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+  private async runWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation): Promise<void> {
+    cancellation.throwIfCancelled();
     if (!this.ensureAiServiceLogin()) {
       return;
     }
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
+    cancellation.throwIfCancelled();
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
       return;
     }
-    if (!await this.ensureHdcServerReadyForTask(true)) {
+    let hdcReady = await this.ensureHdcServerReadyForTask(true);
+    cancellation.throwIfCancelled();
+    if (!hdcReady) {
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', 'HDC Server auto-discovery failed');
       return;
     }
@@ -6646,13 +6700,20 @@ struct Index {
       return;
     }
 
-    this.currentTab = MainTabIndex.Chat;
+    if (AgentExecutionController.isExecutionActive() || SelfHdcTestRunner.shared().snapshot().running) {
+      throw new Error('已有手机测试或 GUI 任务正在执行');
+    }
+
     this.resetCloudLog('准备执行 Workflow：' + task.title);
     this.appendCloudLog('Workflow 编排将在 App 沙箱内执行；PC 端仅负责 HDC 截图和动作桥接。');
     this.appendCloudLog('HDC Server=' + this.hdcServerIp);
     let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
       this.hdcServerIp, (msg: string) => { this.appendCloudLog(msg); });
+    runner.useDeviceBridge(new CancellableWorkflowHdcBridge(this.hdcServerIp,
+      (msg: string): void => { this.appendCloudLog(msg); }, cancellation));
+    runner.useCancellation(cancellation);
     try {
+      this.bindTaskWorkflowCancellation(cancellation);
       let result: WorkflowRunResult = await runner.runTask(task);
       let message = result.message;
       if (result.dailyLogPath.length > 0) {
@@ -6662,9 +6723,12 @@ struct Index {
       this.appendCloudLog('Workflow 运行摘要：' + result.runDir);
     } catch (e) {
       let err = e as Error;
-      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', err.message);
+      let status = cancellation.isCancelled() ? 'cancelled' : 'failed';
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, status, err.message);
       this.appendCloudLog('Workflow 执行异常：' + err.message);
-      AgentExecutionController.finishExecution('Workflow failed');
+      AgentExecutionController.finishExecution('Workflow ' + status);
+    } finally {
+      this.clearTaskWorkflowCancellation(cancellation);
     }
   }
 
@@ -6875,8 +6939,8 @@ struct Index {
         message: '未检测到可加载的本地 Agent 模型（' + modelStatus + '）。\n\n是否前往设置页，从 ModelScope 仓库“' +
           this.modelScopeMnnRepo + '”下载？',
         buttons: [
-          { text: '暂不前往', color: '#666666' },
-          { text: '前往设置', color: '#4F68FF' }
+          { text: '暂不前往', color: AppTheme.dialogText('#666666') },
+          { text: '前往设置', color: AppTheme.dialogText('#4F68FF') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         resolve(data.index === 1);
@@ -7071,11 +7135,11 @@ struct Index {
       .layoutMode(LayoutMode.VERTICAL)
       .labelStyle({
         font: { size: 12, weight: FontWeight.Medium },
-        selectedColor: '#5B5CE2',
-        unselectedColor: '#747B87',
+        selectedColor: AppTheme.text('#5B5CE2'),
+        unselectedColor: AppTheme.text('#747B87'),
         maxLines: 1
       })
-      .iconStyle({ selectedColor: '#5B5CE2', unselectedColor: '#747B87' })
+      .iconStyle({ selectedColor: AppTheme.text('#5B5CE2'), unselectedColor: AppTheme.text('#747B87') })
       .padding({ left: 2, right: 2, top: 6, bottom: 6 });
   }
 
@@ -7086,26 +7150,26 @@ struct Index {
           Text(this.dataManagerProgressStage)
             .fontSize(18)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .maxLines(1)
           Progress({ value: this.dataManagerProgressPercent, total: 100, type: ProgressType.Linear })
             .width('100%')
             .height(8)
-            .color(this.dataManagerSyncFailed ? '#D94F4F' : '#4F68FF')
-            .backgroundColor('#E7EBF5')
+            .color(AppTheme.text(this.dataManagerSyncFailed ? '#D94F4F' : '#4F68FF'))
+            .backgroundColor(AppTheme.background('#E7EBF5'))
             .margin({ top: 18 })
           Row() {
             Text(`${Math.round(this.dataManagerProgressPercent)}%`)
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#4F68FF')
+              .fontColor(AppTheme.text('#4F68FF'))
           }
           .width('100%')
           .margin({ top: 10 })
           if (this.dataManagerProgressMessage.length > 0) {
             Text(this.dataManagerProgressMessage)
               .fontSize(14)
-              .fontColor(this.dataManagerSyncFailed ? '#B63E3E' : '#657086')
+              .fontColor(AppTheme.text(this.dataManagerSyncFailed ? '#B63E3E' : '#657086'))
               .maxLines(8)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .width('100%')
@@ -7114,22 +7178,22 @@ struct Index {
           if (this.dataManagerSyncFailed && !this.dataManagerRefreshing) {
             Text('已保存的处理结果会保留，可重新同步继续整理。')
               .fontSize(12)
-              .fontColor('#657086')
+              .fontColor(AppTheme.text('#657086'))
               .width('100%')
               .margin({ top: 10 })
             Row() {
               Button('关闭')
                 .layoutWeight(1)
-                .backgroundColor('#E7EBF5')
-                .fontColor('#414D65')
+                .backgroundColor(AppTheme.background('#E7EBF5'))
+                .fontColor(AppTheme.text('#414D65'))
                 .onClick(() => {
                   this.dataManagerSyncFailed = false;
                 })
               Button('重新同步')
                 .layoutWeight(1)
                 .margin({ left: 12 })
-                .backgroundColor('#4F68FF')
-                .fontColor(Color.White)
+                .backgroundColor(AppTheme.filledBackground('#4F68FF'))
+                .fontColor(AppTheme.text(Color.White))
                 .onClick(() => {
                   this.dataManagerSyncFailed = false;
                   this.refreshDataManager().catch((e: Error) => {
@@ -7143,13 +7207,13 @@ struct Index {
         }
         .width('78%')
         .padding({ left: 22, right: 22, top: 24, bottom: 22 })
-        .backgroundColor('#FFFFFFFF')
+        .backgroundColor(AppTheme.background('#FFFFFFFF'))
         .borderRadius(18)
-        .shadow({ radius: 22, color: '#33000000', offsetX: 0, offsetY: 8 })
+        .shadow({ radius: 22, color: AppTheme.shadow('#33000000'), offsetX: 0, offsetY: 8 })
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#66000000')
+      .backgroundColor(AppTheme.background('#66000000'))
       .zIndex(99)
       .onClick(() => {})
     }
@@ -7162,25 +7226,25 @@ struct Index {
           Text('需要配合桌面端 App 使用')
             .fontSize(20)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .width('100%')
           Text('任务执行和聊天中的“下发任务”功能需要连接 ClawMate 桌面端 App。请先在电脑上下载安装并启动桌面端 App，再继续执行任务。')
             .fontSize(14)
             .lineHeight(21)
-            .fontColor('#555D70')
+            .fontColor(AppTheme.text('#555D70'))
             .width('100%')
             .margin({ top: 12 })
           Column() {
             Text(DESKTOP_COMPANION_APP_NAME)
               .fontSize(14)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#30384C')
+              .fontColor(AppTheme.text('#30384C'))
               .width('100%')
               .maxLines(2)
             Text(DESKTOP_COMPANION_DOWNLOAD_URL)
               .fontSize(12)
               .lineHeight(18)
-              .fontColor('#4F68FF')
+              .fontColor(AppTheme.text('#4F68FF'))
               .width('100%')
               .maxLines(3)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -7190,7 +7254,7 @@ struct Index {
           .width('100%')
           .alignItems(HorizontalAlign.Start)
           .padding(12)
-          .backgroundColor('#F4F7FF')
+          .backgroundColor(AppTheme.background('#F4F7FF'))
           .borderRadius(12)
           .margin({ top: 14 })
 
@@ -7199,8 +7263,8 @@ struct Index {
               .layoutWeight(1)
               .height(42)
               .fontSize(13)
-              .fontColor('#4F68FF')
-              .backgroundColor('#EEF1FF')
+              .fontColor(AppTheme.text('#4F68FF'))
+              .backgroundColor(AppTheme.background('#EEF1FF'))
               .borderRadius(13)
               .onClick(async () => { await this.openDesktopCompanionDownloadPage(); })
             Button('知道了，继续')
@@ -7208,8 +7272,8 @@ struct Index {
               .height(42)
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .backgroundColor('#4F68FF')
+              .fontColor(AppTheme.text(Color.White))
+              .backgroundColor(AppTheme.filledBackground('#4F68FF'))
               .borderRadius(13)
               .onClick(() => { this.finishDesktopCompanionReminder(true); })
           }
@@ -7224,7 +7288,7 @@ struct Index {
                   Row()
                     .width(9)
                     .height(9)
-                    .backgroundColor('#4F68FF')
+                    .backgroundColor(AppTheme.background('#4F68FF'))
                     .borderRadius(5)
                 }
               }
@@ -7233,11 +7297,11 @@ struct Index {
               .borderRadius(10)
               .border({
                 width: 2,
-                color: this.desktopCompanionDontRemindAgain ? '#4F68FF' : '#A7AEBC'
+                color: AppTheme.border(this.desktopCompanionDontRemindAgain ? '#4F68FF' : '#A7AEBC')
               })
               Text('不再提醒')
                 .fontSize(12)
-                .fontColor('#687083')
+                .fontColor(AppTheme.text('#687083'))
             }
             .padding({ left: 6, right: 2, top: 6, bottom: 2 })
             .onClick(() => { this.toggleDesktopCompanionReminderSuppressed(); })
@@ -7247,13 +7311,13 @@ struct Index {
         }
         .width('86%')
         .padding({ left: 22, right: 22, top: 24, bottom: 18 })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(22)
-        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#33000000'), offsetX: 0, offsetY: 8 })
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#73000000')
+      .backgroundColor(AppTheme.background('#73000000'))
       .zIndex(120)
       .onClick(() => {})
     }
@@ -7266,12 +7330,12 @@ struct Index {
           Text('有新记录待同步')
             .fontSize(20)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#20263A')
+            .fontColor(AppTheme.text('#20263A'))
             .width('100%')
           Text('已有至少 3 天未同步，发现了新保存的记录。现在同步，更新汇总和聊天记忆吗？')
             .fontSize(14)
             .lineHeight(22)
-            .fontColor('#555D70')
+            .fontColor(AppTheme.text('#555D70'))
             .width('100%')
             .maxLines(4)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -7281,8 +7345,8 @@ struct Index {
               .layoutWeight(1)
               .height(42)
               .fontSize(14)
-              .fontColor('#4F68FF')
-              .backgroundColor('#EEF1FF')
+              .fontColor(AppTheme.text('#4F68FF'))
+              .backgroundColor(AppTheme.background('#EEF1FF'))
               .borderRadius(13)
               .onClick(() => { this.dismissSyncReminder(false); })
             Button('立即同步')
@@ -7290,8 +7354,8 @@ struct Index {
               .height(42)
               .fontSize(14)
               .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .backgroundColor('#4F68FF')
+              .fontColor(AppTheme.text(Color.White))
+              .backgroundColor(AppTheme.filledBackground('#4F68FF'))
               .borderRadius(13)
               .onClick(() => { this.dismissSyncReminder(true); })
           }
@@ -7305,17 +7369,17 @@ struct Index {
                   Row()
                     .width(9)
                     .height(9)
-                    .backgroundColor('#4F68FF')
+                    .backgroundColor(AppTheme.background('#4F68FF'))
                     .borderRadius(5)
                 }
               }
               .width(19)
               .height(19)
               .borderRadius(10)
-              .border({ width: 2, color: this.syncReminderDontRemindAgain ? '#4F68FF' : '#A7AEBC' })
+              .border({ width: 2, color: AppTheme.border(this.syncReminderDontRemindAgain ? '#4F68FF' : '#A7AEBC') })
               Text('不再提醒')
                 .fontSize(12)
-                .fontColor('#687083')
+                .fontColor(AppTheme.text('#687083'))
             }
             .padding({ left: 6, right: 2, top: 6, bottom: 2 })
             .onClick(() => { this.toggleSyncReminderSuppressed(); })
@@ -7325,13 +7389,13 @@ struct Index {
         }
         .width('86%')
         .padding({ left: 22, right: 22, top: 24, bottom: 18 })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(22)
-        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#33000000'), offsetX: 0, offsetY: 8 })
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#73000000')
+      .backgroundColor(AppTheme.background('#73000000'))
       .zIndex(130)
       .onClick(() => {})
     }
@@ -7348,6 +7412,10 @@ struct Index {
         taskSuggestionError: this.homeTaskSuggestionError,
         onRefreshTaskSuggestions: async (): Promise<void> => {
           await this.refreshHomeTaskSuggestions(true);
+        },
+        onOpenTasks: (): void => {
+          this.taskConfigViewOpen = false;
+          this.currentTab = MainTabIndex.Task;
         },
         comfortConcerns: this.homeComfortConcerns,
         comfortConcernsLoading: this.homeComfortConcernsLoading ||
@@ -7413,8 +7481,6 @@ struct Index {
         sessions: this.chatSessions,
         activeSessionId: this.activeChatSessionId,
         messages: this.chatMessagesForDisplay(),
-        avatarForegroundUri: this.homeProfile.avatarForegroundUri,
-        avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
         pendingImageAttachmentUris: this.activePendingChatImageUris(),
         sessionDrawerOpen: this.chatSessionDrawerOpen,
         restoringLocalSession: this.restoringLocalSession,
@@ -7466,8 +7532,12 @@ struct Index {
         onEnsureDesktopCompanion: async (): Promise<boolean> => {
           return await this.ensureDesktopCompanionReminder();
         },
-        onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
-        onRunPhoneWorkflow: async (task: WorkflowTask) => { await this.runPhoneWorkflowTask(task); }
+        onRunWorkflow: async (task: WorkflowTask, cancellation: WorkflowCancellation) => {
+          await this.runWorkflowTask(task, cancellation);
+        },
+        onRunPhoneWorkflow: async (task: WorkflowTask, cancellation: WorkflowCancellation) => {
+          await this.runPhoneWorkflowTask(task, cancellation);
+        }
       })
     }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .tabBar(this.tabBarStyle(MainTabIndex.Task))
@@ -7546,7 +7616,7 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.currentPageBackgroundColor())
+    .backgroundColor(AppTheme.pageBackground(this.currentPageBackgroundColor()))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
   }
 }

@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import {
   FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT,
   FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR,
@@ -49,7 +50,7 @@ export struct FirstLaunchOnboarding {
           .width(148)
           .height(148)
           .borderRadius(74)
-          .backgroundColor(slide.softBackgroundColor)
+          .backgroundColor(AppTheme.background(slide.softBackgroundColor))
           .opacity(0.78)
       }
       .width('100%')
@@ -76,7 +77,7 @@ export struct FirstLaunchOnboarding {
     .width('100%')
     .aspectRatio(1)
     .padding(10)
-    .backgroundColor(ONBOARDING_CARD_BACKGROUND)
+    .backgroundColor(AppTheme.background(ONBOARDING_CARD_BACKGROUND))
     .borderRadius(28)
   }
 
@@ -88,14 +89,14 @@ export struct FirstLaunchOnboarding {
       Text(slide.title)
         .fontSize(34)
         .fontWeight(FontWeight.Bold)
-        .fontColor(ONBOARDING_TEXT_PRIMARY)
+        .fontColor(AppTheme.text(ONBOARDING_TEXT_PRIMARY))
         .textAlign(TextAlign.Center)
         .margin({ top: 30 })
 
       Text(slide.description)
         .fontSize(18)
         .lineHeight(28)
-        .fontColor(ONBOARDING_TEXT_SECONDARY)
+        .fontColor(AppTheme.text(ONBOARDING_TEXT_SECONDARY))
         .textAlign(TextAlign.Center)
         .maxLines(4)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -115,40 +116,40 @@ export struct FirstLaunchOnboarding {
         Text(item.iconText)
           .fontSize(18)
           .fontWeight(FontWeight.Bold)
-          .fontColor(item.accentColor)
+          .fontColor(AppTheme.text(item.accentColor))
       }
       .width(42)
       .height(42)
       .borderRadius(14)
-      .backgroundColor(item.softBackgroundColor)
+      .backgroundColor(AppTheme.background(item.softBackgroundColor))
       .justifyContent(FlexAlign.Center)
 
       Column({ space: 5 }) {
         Text(item.title)
           .fontSize(20)
           .fontWeight(FontWeight.Bold)
-          .fontColor(ONBOARDING_TEXT_PRIMARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_PRIMARY))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
 
         Text(item.entryLabel)
           .fontSize(14)
           .fontWeight(FontWeight.Medium)
-          .fontColor(item.accentColor)
+          .fontColor(AppTheme.text(item.accentColor))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
 
         Text(item.configLabel)
           .fontSize(14)
           .lineHeight(20)
-          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_SECONDARY))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
 
         Text(item.description)
           .fontSize(14)
           .lineHeight(20)
-          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_SECONDARY))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
@@ -157,7 +158,7 @@ export struct FirstLaunchOnboarding {
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 15, bottom: 15 })
-    .backgroundColor(ONBOARDING_CARD_BACKGROUND)
+    .backgroundColor(AppTheme.background(ONBOARDING_CARD_BACKGROUND))
     .borderRadius(22)
     .alignItems(VerticalAlign.Top)
   }
@@ -169,14 +170,14 @@ export struct FirstLaunchOnboarding {
         Text(slide.title)
           .fontSize(32)
           .fontWeight(FontWeight.Bold)
-          .fontColor(ONBOARDING_TEXT_PRIMARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_PRIMARY))
           .textAlign(TextAlign.Center)
           .width('100%')
 
         Text(slide.description)
           .fontSize(17)
           .lineHeight(25)
-          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_SECONDARY))
           .textAlign(TextAlign.Center)
           .maxLines(4)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -214,7 +215,7 @@ export struct FirstLaunchOnboarding {
       .width(this.currentIndex === index ? 24 : 8)
       .height(8)
       .borderRadius(4)
-      .backgroundColor(this.currentIndex === index ? slide.accentColor : ONBOARDING_DOT_INACTIVE)
+      .backgroundColor(AppTheme.background(this.currentIndex === index ? slide.accentColor : ONBOARDING_DOT_INACTIVE))
       .margin({ left: 4, right: 4 })
   }
 
@@ -235,13 +236,13 @@ export struct FirstLaunchOnboarding {
         Text('ClawMate')
           .fontSize(18)
           .fontWeight(FontWeight.Bold)
-          .fontColor(ONBOARDING_TEXT_PRIMARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_PRIMARY))
 
         Blank()
 
         Text(String(this.currentIndex + 1) + '/' + String(FIRST_LAUNCH_ONBOARDING_SLIDES.length))
           .fontSize(15)
-          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .fontColor(AppTheme.text(ONBOARDING_TEXT_SECONDARY))
       }
       .width('100%')
       .padding({ left: 30, right: 30, top: 28 })
@@ -267,8 +268,8 @@ export struct FirstLaunchOnboarding {
         .height(56)
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .backgroundColor(this.currentSlide().accentColor)
+        .fontColor(AppTheme.text(Color.White))
+        .backgroundColor(AppTheme.filledBackground(this.currentSlide().accentColor))
         .borderRadius(18)
         .margin({ top: 26, bottom: 34 })
         .onClick(() => {
@@ -277,6 +278,6 @@ export struct FirstLaunchOnboarding {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(ONBOARDING_PAGE_BACKGROUND)
+    .backgroundColor(AppTheme.background(ONBOARDING_PAGE_BACKGROUND))
   }
 }

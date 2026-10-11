@@ -50,6 +50,10 @@
     "pages": "$profile:main_pages",
     "metadata": [
       {
+        "name": "configColorModeChangePerformanceInArkUI",
+        "value": "true"
+      },
+      {
         "name": "shareType",
         "value": "sharekitModel"
       },
