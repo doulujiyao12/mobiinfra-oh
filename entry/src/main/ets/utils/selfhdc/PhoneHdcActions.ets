@@ -111,7 +111,14 @@ export class PhoneHdcActions {
           end = this.point(this.width * (direction === 'left' ? 0.3 : 0.7), this.height * 0.5);
         } else { throw new Error('PHONE_HDC_ARGUMENT: unknown swipe direction ' + direction); }
       }
-      commands.push(this.command('uitest uiInput swipe ' + start.x + ' ' + start.y + ' ' + end.x + ' ' + end.y,
+      // 与 PC 端保持一致：0 表示不追加速度参数，正数直接传给 HDC swipe。
+      let speedValue = payload['swipe_speed'];
+      let speed = speedValue === undefined ? 0 : numberField(payload, 'swipe_speed');
+      if (speed < 0 || speed > 20000) {
+        throw new Error('PHONE_HDC_ARGUMENT: swipe_speed must be 0..20000');
+      }
+      let speedSuffix = speed > 0 ? ' ' + String(Math.floor(speed)) : '';
+      commands.push(this.command('uitest uiInput swipe ' + start.x + ' ' + start.y + ' ' + end.x + ' ' + end.y + speedSuffix,
         'swipe', 700));
     } else if (action === 'keyevent') {
       let key = phoneHdcString(payload, 'key', 'BACK').toUpperCase();

@@ -225,6 +225,7 @@ import {
   ProfileShareReceivedEvent
 } from '../utils/ProfileKnockShareService';
 import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
+import { PhoneWechatCollector } from '../utils/wechat/PhoneWechatCollector';
 import {
   renderWechatAutoSummaryMarkdown,
   WechatAutoSummaryStorage,
@@ -2847,6 +2848,13 @@ struct Index {
   }
 
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    // 手机模式直接复用自控 HDC 会话：dumpLayout 和规则解析都在设备侧完成，不启动 PC bridge。
+    let phoneSettings = SelfHdcTaskSettings.load(this.filesDir);
+    if (this.wechatAutoSummaryEnabled === 'true' && phoneSettings.mode === 'phone' &&
+      phoneSettings.ip.trim().length > 0 && phoneSettings.port.trim().length > 0) {
+      await this.runPhoneWechatAutoSummary(request);
+      return;
+    }
     if (!this.ensureAiServiceLogin()) {
       return;
     }
@@ -2911,6 +2919,45 @@ struct Index {
       this.wechatAutoSummaryStatus = '采集失败：' + err.message;
       dataManagerError('runWechatAutoSummary failed: ' + err.message);
       showToastSafely('微信采集失败：' + err.message, 2200);
+    } finally {
+      this.wechatAutoSummaryRunning = false;
+    }
+  }
+
+  /** 手机独立微信采集入口；失败时由 UI 展示原因，PC 模式仍保留原有实现。 */
+  private async runPhoneWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (!await this.ensurePrivacyConsent()) { return; }
+    if (this.wechatAutoSummaryRunning) { showToastSafely('微信采集正在进行', 1200); return; }
+    this.wechatAutoSummaryRunning = true;
+    this.wechatAutoSummaryStatus = '正在手机侧采集微信消息';
+    let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-wechat-collect',
+      async (): Promise<void> => {});
+    try {
+      let response = await session.run<WechatAutoSummaryResponse>('手机微信结构化采集',
+        async (bridge: PhoneHdcWorkflowBridge): Promise<WechatAutoSummaryResponse> => {
+          return await new PhoneWechatCollector(bridge, (message: string): void => {
+            this.appendCloudLog(message);
+          }).collect(request);
+        });
+      let runId = response.run_id || `${currentLocalDateKey()}-wechat-phone`;
+      let storage = new WechatAutoSummaryStorage(this.filesDir);
+      storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(response as Object, 2));
+      storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(response));
+      storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(response as Object, 2));
+      if (response.conversations !== undefined) {
+        storage.writeRawArtifact(runId, 'wechat_conversations.json', stringifyJsonCompat(response.conversations as Object, 2));
+      }
+      let entries = wechatAutoSummaryDailyEntries(response);
+      storage.writeDailyLog(runId, response.mode || request.mode, response.days || request.days,
+        currentLocalDateKey(), entries);
+      let count = response.contacts_collected || (response.conversations || []).length;
+      this.wechatAutoSummaryStatus = '手机采集完成：' + count.toString() + ' 个联系人';
+      showToastSafely('手机侧微信采集完成，可点击同步整理', 1800);
+    } catch (e) {
+      let err = e as Error;
+      this.wechatAutoSummaryStatus = '采集失败：手机侧 ' + err.message;
+      dataManagerError('runPhoneWechatAutoSummary failed: ' + err.message);
+      showToastSafely('手机微信采集失败：' + err.message, 2200);
     } finally {
       this.wechatAutoSummaryRunning = false;
     }

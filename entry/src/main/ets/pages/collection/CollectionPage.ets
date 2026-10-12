@@ -226,7 +226,7 @@ export struct CollectionPage {
           .fontColor('#151A28')
           .width('100%')
           .maxLines(1)
-        Text('调用 PC 侧采集服务读取微信会话，保存原始产物并写入 daily-log。')
+        Text('按设置选择手机侧 UI dump 或 PC 侧采集服务，保存原始产物并写入 daily-log。')
           .fontSize(12)
           .fontColor('#6F7684')
           .width('100%')

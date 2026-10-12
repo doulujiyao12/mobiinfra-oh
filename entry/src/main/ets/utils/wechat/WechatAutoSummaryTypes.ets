@@ -48,6 +48,9 @@ export interface WechatAutoSummaryMessage {
   kind: string;
   text: string | null;
   sender?: string | null;
+  bounds?: number[];
+  text_bounds?: number[];
+  image_bounds?: number[][];
 }
 
 // 服务端会标注采集覆盖的时间语义；visible_page_only 表示只汇总本次可见页采集结果。
