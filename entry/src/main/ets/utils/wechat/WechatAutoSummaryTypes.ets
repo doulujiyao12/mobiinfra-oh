@@ -43,11 +43,17 @@ export interface WechatAutoSummaryRequest {
   output_dir?: string;
 }
 
-// 单条聊天消息的结构，sender 仅在服务端能识别发言人时返回。
+// 单条聊天消息的结构；手机/PC 解析器会尽量区分本人、联系人和无法确认的消息方向。
 export interface WechatAutoSummaryMessage {
   kind: string;
   text: string | null;
   sender?: string | null;
+  // sender_role 保留 self/other/unknown，sender_basis 用于诊断方向判断依据。
+  sender_role?: string;
+  sender_basis?: string;
+  bounds?: number[];
+  text_bounds?: number[];
+  image_bounds?: number[][];
 }
 
 // 服务端会标注采集覆盖的时间语义；visible_page_only 表示只汇总本次可见页采集结果。

@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
-import { util } from '@kit.ArkTS';
+import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { HdcWorkflowBridge } from '../HdcWorkflowBridge';
 import { HdcBridgeResponse, WorkflowJsonMap } from '../WorkflowTypes';
 import { AgentExecutionController } from '../AgentExecutionController';
@@ -191,6 +191,31 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
 
   async screenshot(): Promise<HdcBridgeResponse> {
     return await this.screenshotWithFactor(0.5);
+  }
+
+  /**
+   * 在手机本机执行 uitest dumpLayout，并直接把 JSON 读回 ArkTS。
+   * 这样结构化采集不需要经过 PC 文件接收或视觉 Agent。
+   */
+  async dumpUiTree(label: string = 'wechat-ui-dump'): Promise<Record<string, Object>> {
+    this.check();
+    let runId = SelfHdcTestRunner.shared().snapshot().runId;
+    let remote = '/data/local/tmp/self_hdc_' + runId + '_ui_' + String(++this.actionSequence) + '.json';
+    try {
+      await this.execute('uitest dumpLayout -p ' + selfHdcShellQuote(remote), label);
+      let encoded = (await this.execute('base64 ' + selfHdcShellQuote(remote), label + '-read', true, false)).replace(/\s/g, '');
+      if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+        throw new Error('PHONE_HDC_UI_DUMP: invalid Base64');
+      }
+      let bytes = new util.Base64Helper().decodeSync(encoded);
+      let text = util.TextDecoder.create('utf-8').decodeWithStream(bytes);
+      let parsed = ArkJSON.parse(text) as Record<string, Object>;
+      return parsed;
+    } finally {
+      try { await this.execute('rm -f ' + selfHdcShellQuote(remote), label + '-cleanup'); } catch (e) {
+        this.phoneLog('CLEANUP ui dump=' + remote + ' error=' + (e as Error).message);
+      }
+    }
   }
 
   async screenshotWithFactor(factor: number): Promise<HdcBridgeResponse> {
