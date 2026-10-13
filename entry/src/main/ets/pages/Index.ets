@@ -225,7 +225,7 @@ import {
   ProfileShareReceivedEvent
 } from '../utils/ProfileKnockShareService';
 import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
-import { PhoneWechatCollector } from '../utils/wechat/PhoneWechatCollector';
+import { PhoneWechatCollector, PhoneWechatConversationProgress } from '../utils/wechat/PhoneWechatCollector';
 import {
   renderWechatAutoSummaryMarkdown,
   WechatAutoSummaryStorage,
@@ -253,9 +253,17 @@ import {
   WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY,
   WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY,
   WECHAT_AUTO_SUMMARY_WAIT_KEY,
+  WechatAutoSummaryConversation,
   WechatAutoSummaryRequest,
   WechatAutoSummaryResponse
 } from '../utils/wechat/WechatAutoSummaryTypes';
+
+interface PhoneWechatErrorArtifact {
+  status: string;
+  run_id: string;
+  message: string;
+  contacts_collected: number;
+}
 
 // 首页总入口：负责把 ClawMate 业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
@@ -2930,6 +2938,35 @@ struct Index {
     if (this.wechatAutoSummaryRunning) { showToastSafely('微信采集正在进行', 1200); return; }
     this.wechatAutoSummaryRunning = true;
     this.wechatAutoSummaryStatus = '正在手机侧采集微信消息';
+    let runId = 'wechat-phone-' + Date.now().toString();
+    let startedAt = new Date().toISOString();
+    let dateKey = currentLocalDateKey();
+    let storage = new WechatAutoSummaryStorage(this.filesDir);
+    let partialConversations: WechatAutoSummaryConversation[] = [];
+    let persistProgress: PhoneWechatConversationProgress =
+      (conversation: WechatAutoSummaryConversation,
+        collectedCount: number): void => {
+        partialConversations.push(conversation);
+        let partial: WechatAutoSummaryResponse = {
+          status: 'partial',
+          message: '手机侧已完成 ' + collectedCount.toString() + ' 个联系人',
+          run_id: runId,
+          started_at: startedAt,
+          mode: request.mode,
+          days: request.days,
+          target_contact: request.target_contact,
+          contacts_requested: request.mode === 'target_contact' ? 1 : request.max_contacts,
+          contacts_collected: collectedCount,
+          conversations: partialConversations
+        };
+        let entries = wechatAutoSummaryDailyEntries(partial);
+        storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(partial as Object, 2));
+        storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(partial as Object, 2));
+        storage.writeRawArtifact(runId, 'wechat_conversations.json', stringifyJsonCompat(partialConversations as Object, 2));
+        storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(partial));
+        storage.writeDailyLog(runId, request.mode, request.days, dateKey, entries);
+        this.wechatAutoSummaryStatus = '手机侧已采集 ' + collectedCount.toString() + ' 个联系人';
+      };
     let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-wechat-collect',
       async (): Promise<void> => {});
     try {
@@ -2937,10 +2974,9 @@ struct Index {
         async (bridge: PhoneHdcWorkflowBridge): Promise<WechatAutoSummaryResponse> => {
           return await new PhoneWechatCollector(bridge, (message: string): void => {
             this.appendCloudLog(message);
-          }).collect(request);
+          }).collect(request, persistProgress, runId);
         });
-      let runId = response.run_id || `${currentLocalDateKey()}-wechat-phone`;
-      let storage = new WechatAutoSummaryStorage(this.filesDir);
+      runId = response.run_id || runId;
       storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(response as Object, 2));
       storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(response));
       storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(response as Object, 2));
@@ -2949,13 +2985,22 @@ struct Index {
       }
       let entries = wechatAutoSummaryDailyEntries(response);
       storage.writeDailyLog(runId, response.mode || request.mode, response.days || request.days,
-        currentLocalDateKey(), entries);
+        dateKey, entries);
       let count = response.contacts_collected || (response.conversations || []).length;
       this.wechatAutoSummaryStatus = '手机采集完成：' + count.toString() + ' 个联系人';
       showToastSafely('手机侧微信采集完成，可点击同步整理', 1800);
     } catch (e) {
       let err = e as Error;
-      this.wechatAutoSummaryStatus = '采集失败：手机侧 ' + err.message;
+      if (partialConversations.length > 0) {
+        this.wechatAutoSummaryStatus = '采集部分完成：' + partialConversations.length.toString() + ' 个联系人；' + err.message;
+      } else {
+        this.wechatAutoSummaryStatus = '采集失败：手机侧 ' + err.message;
+      }
+      let errorArtifact: PhoneWechatErrorArtifact = {
+        status: 'error', run_id: runId, message: err.message,
+        contacts_collected: partialConversations.length
+      };
+      storage.writeRawArtifact(runId, 'wechat_collect_error.json', stringifyJsonCompat(errorArtifact as Object, 2));
       dataManagerError('runPhoneWechatAutoSummary failed: ' + err.message);
       showToastSafely('手机微信采集失败：' + err.message, 2200);
     } finally {

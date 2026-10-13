@@ -1,5 +1,6 @@
 import { PhoneHdcWorkflowBridge } from '../selfhdc/PhoneHdcWorkflowBridge';
 import { WorkflowJsonMap } from '../WorkflowTypes';
+import { wechatAutoSummaryDailyEntries } from './WechatAutoSummaryStorage';
 import {
   WechatAutoSummaryConversation,
   WechatAutoSummaryJsonMap,
@@ -13,7 +14,17 @@ type UiNode = Record<string, Object>;
 interface Bounds { x1: number; y1: number; x2: number; y2: number; }
 interface PhoneContact { name: string; preview: string; x: number; y: number; }
 interface Point { x: number; y: number; }
-interface ChatEntry { kind: string; text: string; sender: string; bounds: Bounds | null; textBounds: Bounds | null; images: Bounds[]; }
+interface SenderInference { role: string; basis: string; }
+interface ChatEntry {
+  kind: string;
+  text: string;
+  sender: string;
+  senderRole: string;
+  senderBasis: string;
+  bounds: Bounds | null;
+  textBounds: Bounds | null;
+  images: Bounds[];
+}
 interface GuiSleep { action: string; seconds: number; }
 interface GuiClick { action: string; x: number; y: number; }
 interface GuiInput { action: string; x: number; y: number; text: string; submit_enter: boolean; }
@@ -136,25 +147,37 @@ function contacts(root: UiNode): PhoneContact[] {
   return result;
 }
 
-function avatar(images: Bounds[]): Bounds | null {
+// 内容图片不应被当成头像：只在屏幕边缘的小尺寸近方形节点中选择头像。
+function avatar(images: Bounds[], screenWidth: number): Bounds | null {
   let candidates: Bounds[] = images.filter((value: Bounds): boolean => {
     let width = value.x2 - value.x1; let height = value.y2 - value.y1;
-    return width >= 40 && height >= 40 && Math.abs(width - height) <= Math.max(width, height) * 0.35;
+    let centerX = (value.x1 + value.x2) / 2;
+    let nearEdge = centerX <= screenWidth * 0.2 || centerX >= screenWidth * 0.8;
+    return width >= 40 && height >= 40 && width <= 180 && height <= 180 && nearEdge &&
+      Math.abs(width - height) <= Math.max(width, height) * 0.35;
   });
   if (candidates.length === 0) { return null; }
   candidates.sort((a: Bounds, b: Bounds): number => (a.x2 - a.x1) * (a.y2 - a.y1) - (b.x2 - b.x1) * (b.y2 - b.y1));
   return candidates[0];
 }
 
-function inferSender(images: Bounds[], textBounds: Bounds | null, screenCenter: number): string {
-  let avatarBounds = avatar(images);
-  if (avatarBounds !== null) { return center(avatarBounds).x > screenCenter ? 'self' : 'other'; }
-  if (textBounds === null) { return 'other'; }
-  return center(textBounds).x > screenCenter ? 'self' : 'other';
+// 无法可靠识别方向时保留 unknown，避免把本人或系统消息错误归到联系人名下。
+function inferSender(images: Bounds[], textBounds: Bounds | null, screenCenter: number,
+  screenWidth: number): SenderInference {
+  let avatarBounds = avatar(images, screenWidth);
+  if (avatarBounds !== null) {
+    return { role: center(avatarBounds).x > screenCenter ? 'self' : 'other', basis: 'avatar' };
+  }
+  if (textBounds === null) { return { role: 'unknown', basis: 'unresolved' }; }
+  let textCenter = center(textBounds).x;
+  let margin = screenWidth * 0.08;
+  if (textCenter > screenCenter + margin) { return { role: 'self', basis: 'text_bounds' }; }
+  if (textCenter < screenCenter - margin) { return { role: 'other', basis: 'text_bounds' }; }
+  return { role: 'unknown', basis: 'ambiguous_text_bounds' };
 }
 
-function mediaPlaceholder(images: Bounds[]): string {
-  let avatarBounds = avatar(images);
+function mediaPlaceholder(images: Bounds[], screenWidth: number): string {
+  let avatarBounds = avatar(images, screenWidth);
   return images.filter((value: Bounds): boolean => avatarBounds === null || value !== avatarBounds).length > 0 ? '[图片]' : '[文件]';
 }
 
@@ -178,10 +201,13 @@ function extractChatEntries(root: UiNode, fallback: string): ChatEntry[] {
     }
     if (values.length === 0 && images.length === 0) { continue; }
     if (isTimeSeparator(values, textBounds, images, screenCenter)) {
-      result.push({ kind: 'time', text: values[0], sender: '', bounds: itemBounds, textBounds: textBounds, images: images });
+      result.push({ kind: 'time', text: values[0], sender: '', senderRole: 'unknown', senderBasis: 'time_separator',
+        bounds: itemBounds, textBounds: textBounds, images: images });
     } else {
-      result.push({ kind: 'message', text: values.length > 0 ? values.join('\n') : mediaPlaceholder(images),
-        sender: inferSender(images, textBounds, screenCenter), bounds: itemBounds, textBounds: textBounds, images: images });
+      let inference = inferSender(images, textBounds, screenCenter, screenWidth);
+      result.push({ kind: 'message', text: values.length > 0 ? values.join('\n') : mediaPlaceholder(images, screenWidth),
+        sender: inference.role, senderRole: inference.role, senderBasis: inference.basis,
+        bounds: itemBounds, textBounds: textBounds, images: images });
     }
   }
   return result;
@@ -190,7 +216,9 @@ function extractChatEntries(root: UiNode, fallback: string): ChatEntry[] {
 function chatMessages(root: UiNode, fallback: string): WechatAutoSummaryMessage[] {
   return extractChatEntries(root, fallback).map((entry: ChatEntry): WechatAutoSummaryMessage => {
     let imageValues: number[][] = entry.images.map((value: Bounds): number[] => asArray(value) as number[]);
-    let item: WechatAutoSummaryMessage = { kind: entry.kind, text: entry.text, sender: entry.sender === 'other' ? fallback : entry.sender };
+    let item: WechatAutoSummaryMessage = { kind: entry.kind, text: entry.text,
+      sender: entry.sender === 'other' ? fallback : entry.sender, sender_role: entry.senderRole,
+      sender_basis: entry.senderBasis };
     let itemBounds = asArray(entry.bounds); let textBounds = asArray(entry.textBounds);
     if (itemBounds !== undefined) { item.bounds = itemBounds; }
     if (textBounds !== undefined) { item.text_bounds = textBounds; }
@@ -300,7 +328,8 @@ function mergeSnapshots(roots: UiNode[], title: string, days: number, reference:
       let fullKey = entryKey(entry, effective); if (seen.indexOf(fullKey) >= 0) { continue; }
       seen.push(fullKey);
       let item: WechatAutoSummaryMessage = { kind: entry.kind, text: entry.text,
-        sender: entry.sender === 'other' ? title : entry.sender };
+        sender: entry.sender === 'other' ? title : entry.sender, sender_role: entry.senderRole,
+        sender_basis: entry.senderBasis };
       let itemBounds = asArray(entry.bounds); let textBounds = asArray(entry.textBounds);
       if (itemBounds !== undefined) { item.bounds = itemBounds; }
       if (textBounds !== undefined) { item.text_bounds = textBounds; }
@@ -334,6 +363,15 @@ export function mergePhoneWechatSnapshotsForTest(roots: Object[], title: string,
   referenceIso: string): WechatAutoSummaryMessage[] {
   return mergeSnapshots(roots as UiNode[], title, days, new Date(referenceIso));
 }
+
+// 以最小 UI 树校验发送方向和导出字段，不依赖设备或云端模型。
+export function extractPhoneWechatMessagesForTest(root: Object, title: string): WechatAutoSummaryMessage[] {
+  return chatMessages(root as UiNode, title);
+}
+
+// 每个联系人解析完成后同步回调；调用方应完成落盘后再允许继续操作下一个联系人。
+export type PhoneWechatConversationProgress =
+  (conversation: WechatAutoSummaryConversation, collectedCount: number) => void;
 
 /** 手机侧微信结构化采集器：只依赖 HDC + dumpLayout + 规则解析，不调用 Agent/VLM。 */
 export class PhoneWechatCollector {
@@ -423,7 +461,9 @@ export class PhoneWechatCollector {
     return candidates.length > 0 ? candidates[0] : null;
   }
 
-  async collect(request: WechatAutoSummaryRequest): Promise<WechatAutoSummaryResponse> {
+  async collect(request: WechatAutoSummaryRequest,
+    onConversation: PhoneWechatConversationProgress = (_conversation: WechatAutoSummaryConversation,
+      _collectedCount: number): void => {}, runId: string = ''): Promise<WechatAutoSummaryResponse> {
     let started = new Date().toISOString();
     let referenceNow = new Date();
     await this.bridge.startApp('微信', 'com.tencent.wechat', true);
@@ -489,19 +529,17 @@ export class PhoneWechatCollector {
         contact: contact as Object as WechatAutoSummaryJsonMap, messages: messages,
         history_mode: roots.length > 1 ? 'history_scrolled' : 'visible_page_only', time_range: timeRange };
       conversations.push(conversation as WechatAutoSummaryConversation);
+      onConversation(conversation as WechatAutoSummaryConversation, conversations.length);
       await this.back(); await this.wait(request.wait);
     }
-    let entries: string[] = conversations.map((item: WechatAutoSummaryConversation): string => {
-      let lines: string[] = ['## 微信联系人「' + (item.title || '') + '」当前可见页面消息采集', '',
-        '- 采集范围：手机侧 UI dump 当前可见页面', '- 消息数：' + item.messages.length.toString(), '', '### 完整消息摘录', ''];
-      for (let message of item.messages) { if (message.text) { lines.push('- ' + message.sender + '：' + message.text); } }
-      return lines.join('\n');
-    });
     this.log('PHONE_WECHAT_COLLECT conversations=' + conversations.length + ' mode=' + request.mode);
-    return { status: 'ok', message: 'phone collected ' + conversations.length + ' conversations',
-      run_id: 'wechat-phone-' + Date.now().toString(), started_at: started, finished_at: new Date().toISOString(),
+    let response: WechatAutoSummaryResponse = { status: 'ok', message: 'phone collected ' + conversations.length + ' conversations',
+      run_id: runId.length > 0 ? runId : 'wechat-phone-' + Date.now().toString(), started_at: started, finished_at: new Date().toISOString(),
       mode: request.mode, days: request.days, target_contact: request.target_contact,
       contacts_requested: request.mode === 'target_contact' ? 1 : request.max_contacts,
-      contacts_collected: conversations.length, conversations: conversations, daily_log_entries: entries };
+      contacts_collected: conversations.length, conversations: conversations };
+    // 最终与增量产物使用同一个渲染器，避免完成时把“本人”标签覆盖回 self。
+    response.daily_log_entries = wechatAutoSummaryDailyEntries(response);
+    return response;
   }
 }

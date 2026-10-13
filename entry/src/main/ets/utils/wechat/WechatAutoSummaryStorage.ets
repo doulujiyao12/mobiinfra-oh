@@ -83,6 +83,13 @@ function wechatMessageLine(message: WechatAutoSummaryMessage, fallbackSender: st
   }
   let senderText = wechatSafeText(message.sender).trim();
   let sender = senderText.length > 0 ? senderText : fallbackSender;
+  if (message.sender_role === 'self' || sender === 'self') {
+    sender = '本人';
+  } else if (message.sender_role === 'unknown' || sender === 'unknown') {
+    sender = '发送方未确认';
+  } else if (sender === 'other') {
+    sender = fallbackSender;
+  }
   return sender + ': ' + text;
 }
 
