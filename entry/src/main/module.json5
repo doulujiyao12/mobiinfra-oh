@@ -15,6 +15,9 @@
         "name": "ohos.permission.GET_NETWORK_INFO"
       },
       {
+        "name": "ohos.permission.PUBLISH_AGENT_REMINDER"
+      },
+      {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {

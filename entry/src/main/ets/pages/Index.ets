@@ -1,4 +1,5 @@
 import { AppTheme } from '../utils/AppTheme';
+import { COLLECTION_REMINDER_REQUEST_KEY, CollectionReminderService } from '../utils/CollectionReminderService';
 import { promptAction, router, window } from '@kit.ArkUI';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -535,7 +536,7 @@ struct Index {
   @State threadNumInput: string = '4';
   @State @Watch('onCurrentTabChanged') currentTab: number = 0;
   private readonly floatingMainTabsEnabled: boolean = supportsFloatingMainTabs();
-  private pageVisible: boolean = false;
+  @State private pageVisible: boolean = false;
   private appliedPageBackgroundColor: string = '';
   private appliedNavigationBarColor: string = '';
   @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onDebugEnabledChanged') private debugEnabled: boolean = false;
@@ -677,6 +678,8 @@ struct Index {
   private activePhoneRunSession: PhoneHdcRunSession | null = null;
   @StorageProp('selfHdcSetupForegroundEpoch') @Watch('showPhoneSetupForForeground')
   private phoneSetupForegroundEpoch: number = 0;
+  @StorageProp(COLLECTION_REMINDER_REQUEST_KEY) @Watch('openCollectionReminderTask')
+  private collectionReminderRequest: string = '';
   private phoneSetupShownForegroundEpoch: number = -1;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
@@ -2818,7 +2821,8 @@ struct Index {
   }
 
   private maybeShowSyncReminder(): void {
-    if (this.syncReminderShownThisSession || this.syncReminderSuppressed || this.dataManagerRefreshing ||
+    if (this.collectionReminderRequest.length > 0 || AppStorage.get<boolean>('collectionReminderActiveBatch') === true ||
+      this.syncReminderShownThisSession || this.syncReminderSuppressed || this.dataManagerRefreshing ||
       this.shouldDisplayFirstLaunchOnboarding() || this.dataManagerFacade === null) {
       return;
     }
@@ -3048,6 +3052,7 @@ struct Index {
 
   onPageShow(): void {
     this.pageVisible = true;
+    this.openCollectionReminderTask();
     this.onCurrentTabChanged();
     this.initializePrivacyConsent();
     this.reloadHomeViewModelIfDateChanged();
@@ -3057,8 +3062,19 @@ struct Index {
     this.showPhoneSetupForForeground();
   }
 
+  private openCollectionReminderTask(): void {
+    if (!this.pageVisible || this.filesDir.length === 0 || this.collectionReminderRequest.length === 0) { return; }
+    if (CollectionReminderService.pendingIntent(this.collectionReminderRequest) === null) {
+      CollectionReminderService.clearRequest(this.collectionReminderRequest);
+      return;
+    }
+    this.taskConfigViewOpen = false;
+    this.currentTab = MainTabIndex.Task;
+  }
+
   private showPhoneSetupForForeground(): void {
-    if (this.pageVisible && this.phoneSetupShownForegroundEpoch !== this.phoneSetupForegroundEpoch && this.filesDir.length > 0 &&
+    if (this.pageVisible && this.collectionReminderRequest.length === 0 &&
+      this.phoneSetupShownForegroundEpoch !== this.phoneSetupForegroundEpoch && this.filesDir.length > 0 &&
       !AgentExecutionController.isExecutionActive() && !SelfHdcTestRunner.shared().snapshot().running) {
       this.phoneSetupShownForegroundEpoch = this.phoneSetupForegroundEpoch;
       // Remind only while the saved HDC port is empty and the user has not opted out.
@@ -6619,6 +6635,8 @@ struct Index {
         cancellation.cancel();
       });
       ownsLog = true;
+      hub.recordExternal('TRIGGER source=' +
+        (AppStorage.get<boolean>('collectionReminderActiveBatch') === true ? 'daily-collection-reminder' : 'manual'));
       if (settingsError) { throw new Error('PHONE_HDC_SETTINGS: ' + settingsError); }
       hub.recordExternal('CONNECTION ipMode=' + (settings.autoIp ? 'auto-wifi' : 'manual') + ' ip=' + settings.ip +
         ' portSource=manual；连接设置位于 我的 → 手机 HDC');
@@ -7527,6 +7545,7 @@ struct Index {
     .tabBar(this.tabBarStyle(MainTabIndex.Chat))
     TabContent() {
       TaskPage({
+        active: this.pageVisible && this.currentTab === MainTabIndex.Task,
         taskScene: $taskScene,
         configViewOpen: $taskConfigViewOpen,
         onEnsureDesktopCompanion: async (): Promise<boolean> => {

@@ -28,6 +28,11 @@ import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
 import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
 import { WorkflowCancellation } from '../../utils/WorkflowCancellation';
 import { AppLogger } from '../../utils/AppLogger';
+import { CollectionReminderPanel } from '../../components/CollectionReminderPanel';
+import {
+  COLLECTION_REMINDER_READY_KEY, COLLECTION_REMINDER_REQUEST_KEY, CollectionReminderService
+} from '../../utils/CollectionReminderService';
+import { HuaweiAccountSession } from '../../utils/HuaweiAccountSession';
 
 interface WorkflowNodeTemplate {
   key: string;
@@ -112,6 +117,11 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 @Component
 export struct TaskPage {
   private pageScroller: Scroller = new Scroller();
+  @Prop @Watch('onCollectionReminderChanged') active: boolean = false;
+  @StorageProp(COLLECTION_REMINDER_REQUEST_KEY) @Watch('onCollectionReminderChanged')
+  private reminderRequest: string = '';
+  @StorageProp(COLLECTION_REMINDER_READY_KEY) @Watch('onCollectionReminderChanged')
+  private reminderWindowReady: boolean = false;
   @Link taskScene: number;
   onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation) => Promise<void> =
@@ -183,6 +193,10 @@ export struct TaskPage {
   private pendingConfigTaskId: string = '';
   private configScrollTimerId: number = -1;
   private batchCancellation: WorkflowCancellation | null = null;
+  @State private batchPreparing: boolean = false;
+  private reminderHandling: boolean = false;
+  private lastAutomaticReminderRequest: string = '';
+  private reminderStartTimerId: number = -1;
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -195,14 +209,48 @@ export struct TaskPage {
     } catch (e) {
     }
     this.reloadTasks();
+    this.onCollectionReminderChanged();
   }
 
   aboutToDisappear(): void {
+    if (this.reminderStartTimerId >= 0) { clearTimeout(this.reminderStartTimerId); this.reminderStartTimerId = -1; }
     this.cancelConfigTaskScroll();
     if (this.filesDir.length > 0) {
       this.flushTaskContextDrafts();
     }
     this.clearAllTaskContextSaveTimers();
+  }
+
+  private onCollectionReminderChanged(): void {
+    if (!this.active || !this.reminderWindowReady || this.filesDir.length === 0 || this.reminderRequest.length === 0 ||
+      this.reminderHandling || this.batchPreparing || this.isTaskExecutionBusy() ||
+      this.lastAutomaticReminderRequest === this.reminderRequest) { return; }
+    if (this.reminderStartTimerId >= 0) { clearTimeout(this.reminderStartTimerId); }
+    this.reminderStartTimerId = setTimeout((): void => {
+      this.reminderStartTimerId = -1;
+      this.startCollectionFromReminder().catch((e: Error): void => {
+        AppLogger.errorCause('CollectionReminder', 'Reminder dispatch failed', e);
+        showToastSafely('提醒采集无法开始：' + e.message, 2200);
+      });
+    }, 0);
+  }
+
+  private async startCollectionFromReminder(): Promise<void> {
+    let request = this.reminderRequest;
+    if (!this.active || !this.reminderWindowReady || this.reminderHandling || request.length === 0 ||
+      this.lastAutomaticReminderRequest === request) { return; }
+    if (CollectionReminderService.pendingIntent(request) === null) {
+      CollectionReminderService.clearRequest(request);
+      return;
+    }
+    this.reminderHandling = true;
+    try {
+      // Cold notification launches may precede restoration of the Huawei login session.
+      await HuaweiAccountSession.refresh(getContext(this) as common.UIAbilityContext);
+      if (!this.active || !this.reminderWindowReady || this.reminderRequest !== request) { return; }
+      this.lastAutomaticReminderRequest = request;
+      await this.runEnabledTasks(request, true);
+    } finally { this.reminderHandling = false; }
   }
 
   private reloadTasks(): void {
@@ -577,7 +625,7 @@ export struct TaskPage {
 
   private batchRunButtonEnabled(): boolean {
     return this.batchRunning ? !this.batchStopRequested :
-      this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy();
+      this.enabledTaskCount() > 0 && !this.batchPreparing && !this.isTaskExecutionBusy();
   }
 
   private stopEnabledTasks(): void {
@@ -813,7 +861,24 @@ export struct TaskPage {
     }
   }
 
-  private async runEnabledTasks(): Promise<void> {
+  private async runEnabledTasks(reminderRequest: string = '', automatic: boolean = false): Promise<void> {
+    if (this.batchPreparing) { return; }
+    // An explicit button tap remains usable if an old reminder expired or window-state detection is unavailable.
+    if (!automatic && reminderRequest.length > 0 && CollectionReminderService.pendingIntent(reminderRequest) === null) {
+      CollectionReminderService.clearRequest(reminderRequest);
+      reminderRequest = '';
+    }
+    this.batchPreparing = true;
+    try { await this.executeEnabledTasks(reminderRequest, automatic); }
+    finally { this.batchPreparing = false; }
+  }
+
+  private async executeEnabledTasks(reminderRequest: string, automatic: boolean): Promise<void> {
+    if (reminderRequest.length > 0 &&
+      (!this.active || (automatic && !this.reminderWindowReady) ||
+        CollectionReminderService.pendingIntent(reminderRequest) === null)) {
+      return;
+    }
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
@@ -845,6 +910,10 @@ export struct TaskPage {
       return;
     }
     if (this.isTaskExecutionBusy()) { return; }
+    if (reminderRequest.length > 0) {
+      if (!this.active || (automatic && !this.reminderWindowReady) || !CollectionReminderService.claim(reminderRequest)) { return; }
+      AppStorage.setOrCreate('collectionReminderActiveBatch', true);
+    }
     let cancellation = new WorkflowCancellation();
     this.batchCancellation = cancellation;
     this.batchStopRequested = false;
@@ -903,6 +972,7 @@ export struct TaskPage {
       this.batchRunning = false;
       this.runningTaskId = '';
       this.batchRunStatusText = '';
+      AppStorage.setOrCreate('collectionReminderActiveBatch', false);
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
       this.refreshStatsText();
     }
@@ -920,6 +990,12 @@ export struct TaskPage {
         }
       }
     } else { await this.onRunWorkflow(task, cancellation); }
+    let savedTask = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
+    if (!cancellation.isCancelled() && savedTask !== undefined && savedTask.lastStatus === 'success') {
+      CollectionReminderService.recordSuccessfulCollection().catch((e: Error): void => {
+        AppLogger.errorCause('CollectionReminder', 'Collection history save failed', e);
+      });
+    }
   }
 
   private copyWorkflowTask(task: WorkflowTask): void {
@@ -3894,7 +3970,13 @@ export struct TaskPage {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ bottom: 10 })
       }
-      Button(this.batchRunButtonText())
+      if (!this.batchRunning && this.reminderRequest.length > 0) {
+        Text('采集提醒已就绪，完成设置后点击下方开始')
+          .fontSize(12)
+          .fontColor(AppTheme.text('#276EF1'))
+          .margin({ bottom: 10 })
+      }
+      Button(this.batchPreparing && !this.batchRunning ? '正在准备…' : this.batchRunButtonText())
         .width('100%')
         .height(46)
         .fontSize(15)
@@ -3906,7 +3988,7 @@ export struct TaskPage {
         .enabled(this.batchRunButtonEnabled())
         .onClick(async (): Promise<void> => {
           if (this.batchRunning) { this.stopEnabledTasks(); return; }
-          try { await this.runEnabledTasks(); } catch (e) {
+          try { await this.runEnabledTasks(this.reminderRequest); } catch (e) {
             showToastSafely('批量任务无法执行：' + (e as Error).message, 2200);
           }
         })
@@ -4432,6 +4514,7 @@ export struct TaskPage {
           TaskDeviceControlPanel({ mode: this.taskControlMode,
             busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
             onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
+          CollectionReminderPanel()
           this.TaskExecutionList()
           this.BatchRunPanel()
         }

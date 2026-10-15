@@ -113,6 +113,10 @@ App 内的 HDC 客户端通过 TCP 连接**本机无线调试端口**，完成�
 
 执行结果、截图和 daily-log 可在 Workflow 文件查看入口中查看。JSON 配置的步骤类型为 `gui_task`、`gui_action`、`tool`、`if`、`loop`，字段定义见 [WorkflowTypes.ets](entry/src/main/ets/utils/WorkflowTypes.ets)。
 
+**每日采集提醒**：在任务页的「采集提醒」中开启通知，点击时间可修改，默认 **21:00**。到点由系统发出提醒；点击通知并解锁手机后，执行当前已开启的任务，仍可点击「停止执行」。同一天的提醒不会重复启动任务；登录、隐私授权或 HDC 配置未完成时，先完成设置，再点击一键执行。未来两周的通知会显示连续未成功采集的天数；更远期的每日提醒显示上次采集日期，每次打开 App 或成功采集后更新文案。
+
+开发者接入系统提醒时，需要声明 `ohos.permission.PUBLISH_AGENT_REMINDER`，在 **AGC → 项目设置 → 开放能力管理 → 代理提醒** 申请并开启能力，按华为要求更新调试/发布签名 Profile；用户还需要允许 App 发通知。缺少授权或能力时，任务页会显示提醒未生效及重试入口。参考 [华为代理提醒指南](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/agent-powered-reminder)。
+
 ### 3. 建立个人记忆库
 
 个人记忆来自你授权采集和提供的信息。可以从以下来源逐步建立：

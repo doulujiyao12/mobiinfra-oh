@@ -10,6 +10,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { getAppBundleName } from '../utils/AppIdentity';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
+import { COLLECTION_REMINDER_READY_KEY, CollectionReminderService } from '../utils/CollectionReminderService';
 import {
   CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
   captureOverlayWindowTransition,
@@ -38,6 +39,9 @@ interface DisplaySize {
 // 应用主 Ability：加载 Index 页面，并在 Agent 执行期间协调后台浮窗、
 // 长时任务权限和“从浮窗回到主应用”的能力。
 export default class EntryAbility extends UIAbility {
+  private reminderMainWindow: window.Window | null = null;
+  private reminderAbilityForeground: boolean = false;
+  private reminderWindowCallback: ((event: window.WindowEventType) => void) | null = null;
   private edgeFlowWindow: window.Window | null = null;
   private floatWindow: window.Window | null = null;
   private floatPanelX: number = 0;
@@ -67,6 +71,12 @@ export default class EntryAbility extends UIAbility {
       AppLogger.error('Ability', 'Failed to set colorMode. Cause: ' + JSON.stringify(err));
     }
     AppTheme.syncSystemMode(this.context);
+    AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
+    AppStorage.setOrCreate('collectionReminderActiveBatch', false);
+    try {
+      CollectionReminderService.initialize(this.context);
+      CollectionReminderService.enqueueWant(want);
+    } catch (e) { AppLogger.errorCause('CollectionReminder', 'Reminder launch initialization failed', e as Error); }
     // AgentExecutionController 统一管理本地/云端 Agent 的执行态、取消态和浮窗同步。
     AgentExecutionController.initialize();
     AgentExecutionController.setFloatWindowSyncHandler(() => {
@@ -100,6 +110,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    this.releaseReminderWindow();
     clearPageStatusBarContext();
     AgentExecutionController.setFloatWindowSyncHandler(null);
     AgentExecutionController.setFloatPanelLayoutHandler(null);
@@ -111,6 +122,16 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
     AppLogger.info('Ability', 'Ability onWindowStageCreate');
+    // The ordinary main window is not displayed above the secure lock screen. Wait for it to be visible and focused.
+    try {
+      this.reminderMainWindow = windowStage.getMainWindowSync();
+      this.reminderWindowCallback = (event: window.WindowEventType): void => {
+        if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
+          AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
+        } else { this.syncReminderWindowReady(); }
+      };
+      this.reminderMainWindow.on('windowEvent', this.reminderWindowCallback);
+    } catch (e) { AppLogger.errorCause('CollectionReminder', 'Window readiness subscription failed', e as Error); }
 
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
@@ -118,10 +139,12 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       AppLogger.info('Ability', 'Succeeded in loading the content.');
+      this.syncReminderWindowReady();
     });
   }
 
   onWindowStageDestroy(): void {
+    this.releaseReminderWindow();
     clearPageStatusBarContext();
     AppLogger.info('Ability', 'Ability onWindowStageDestroy');
   }
@@ -130,6 +153,28 @@ export default class EntryAbility extends UIAbility {
     AppLogger.info('Ability', 'Ability onNewWant launchReason=' + String(launchParam.launchReason) +
       ', want=' + this.wantBrief(want));
     ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
+    try { CollectionReminderService.enqueueWant(want); }
+    catch (e) { AppLogger.errorCause('CollectionReminder', 'Reminder Want rejected', e as Error); }
+    this.syncReminderWindowReady();
+  }
+
+  private syncReminderWindowReady(): void {
+    let ready = false;
+    try {
+      ready = this.reminderAbilityForeground && this.reminderMainWindow !== null && this.reminderMainWindow.isWindowShowing() &&
+        this.reminderMainWindow.isFocused();
+    } catch (e) { AppLogger.warnCause('CollectionReminder', 'Window readiness unavailable', e as Error); }
+    AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, ready);
+  }
+
+  private releaseReminderWindow(): void {
+    if (this.reminderMainWindow !== null && this.reminderWindowCallback !== null) {
+      try { this.reminderMainWindow.off('windowEvent', this.reminderWindowCallback); }
+      catch (e) { AppLogger.warnCause('CollectionReminder', 'Window listener cleanup failed', e as Error); }
+    }
+    this.reminderMainWindow = null;
+    this.reminderWindowCallback = null;
+    AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
   }
 
   private isProfileShareRelatedWant(want: Want, launchParam: AbilityConstant.LaunchParam): boolean {
@@ -150,9 +195,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    this.reminderAbilityForeground = true;
     AppTheme.syncSystemMode(this.context);
     refreshPageStatusBarAppearance();
     AppLogger.info('Ability', 'Ability onForeground');
+    this.syncReminderWindowReady();
+    CollectionReminderService.refresh().catch((e: Error): void => {
+      AppLogger.errorCause('CollectionReminder', 'Foreground reminder refresh failed', e);
+    });
     AppStorage.setOrCreate('selfHdcSetupForegroundEpoch', (AppStorage.get<number>('selfHdcSetupForegroundEpoch') || 0) + 1);
     // Runs for both a cold launch and returning to the App; never blocks the first screen.
     SelfHdcTaskSettings.refreshLocalIp(this.context.filesDir, 'app-foreground').catch((error: Error): void => {
@@ -180,6 +230,8 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    this.reminderAbilityForeground = false;
+    AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
     AppLogger.info('Ability', 'Ability onBackground');
     this.syncFloatWindow();
     if (!AgentExecutionController.isExecutionActive()) {
