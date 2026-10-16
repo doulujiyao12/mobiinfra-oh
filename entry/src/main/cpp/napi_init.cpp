@@ -48,6 +48,8 @@
 #include "HIAIModelManager.h"
 #include "OfflineNpuChunkExecutor.h"
 #include "OfflineNpuProbe.h"
+#include "full_npu/FullNpuRuntime.hpp"
+#include "full_npu/NnrtBackend.hpp"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -62,6 +64,8 @@ using namespace MNN::Transformer;
 // 原生侧全局模型状态。所有 load/generate/chat/agentStep 都通过 g_mutex 串行化，
 // 避免 ArkTS 多次点击或 PC Agent 并发请求时同时访问 MNN Llm 实例。
 static std::unique_ptr<Llm> g_llm = nullptr;
+static std::unique_ptr<KirinFullNpu::Runtime> g_fullNpu;
+static std::string g_fullNpuAgentPrefix;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
@@ -376,13 +380,14 @@ static std::string resetNpuRuntimeDiagnostics(const std::string& requestedBacken
 
 static std::string observeNpuRuntimeLine(const std::string& line) {
     const std::string lower = lowerAscii(line);
+    const bool fullNpu = lower.find("[full_npu]") != std::string::npos;
     bool offlineReady = lower.find("[offline_npu]") != std::string::npos &&
                         lower.find("level=ready") != std::string::npos;
     bool offlineExecuteSuccess = lower.find("[offline_npu]") != std::string::npos &&
                                  lower.find("level=exec_ok") != std::string::npos;
     bool offlineError = lower.find("[offline_npu]") != std::string::npos &&
                         lower.find("level=error") != std::string::npos;
-    bool graphReady = offlineReady ||
+    bool graphReady = (fullNpu && lower.find("level=graph_ready") != std::string::npos) || offlineReady ||
                       lower.find("buildirmodel ok") != std::string::npos ||
                       lower.find("loadmodelsync ok") != std::string::npos ||
                       lower.find("onresizeend: ok") != std::string::npos ||
@@ -392,7 +397,7 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
                         lower.find("oncreate fail:") != std::string::npos) ||
                        (lower.find("[hiai delegate]") != std::string::npos &&
                         lower.find("falling back") != std::string::npos);
-    bool npuError = offlineError ||
+    bool npuError = (fullNpu && lower.find("level=error") != std::string::npos) || offlineError ||
                     lower.find("aimodelmngerclient unavailable") != std::string::npos ||
                     lower.find("aimodelmngerclient init failed") != std::string::npos ||
                     lower.find("buildirmodel failed") != std::string::npos ||
@@ -404,7 +409,7 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
                       lower.find("unavailable") != std::string::npos ||
                       lower.find("make_shared error") != std::string::npos ||
                       lower.find("model not compiled") != std::string::npos));
-    bool npuExecuteSuccess = offlineExecuteSuccess;
+    bool npuExecuteSuccess = (fullNpu && lower.find("level=exec_ok") != std::string::npos) || offlineExecuteSuccess;
     const std::string processToken = "onexecuteend: process ret=";
     size_t processPos = lower.find(processToken);
     if (processPos != std::string::npos) {
@@ -432,7 +437,7 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
     if (npuError) ++g_npuDiagnostics.npuErrorSignals;
 
     if (npuExecuteSuccess) {
-        g_npuDiagnostics.lastEvidence = offlineExecuteSuccess ?
+        g_npuDiagnostics.lastEvidence = (offlineExecuteSuccess || fullNpu) ?
             "offline NNRT RunSync returned success" : "HiAI process returned 0";
     } else if (cpuFallback) {
         g_npuDiagnostics.lastEvidence = "HiAI backend reported CPU fallback";
@@ -1275,6 +1280,27 @@ private:
 };
 
 // ========== 1. 拷贝模型到沙箱 (不耗时太多，可保留同步) ==========
+static bool runFullNpuRequest(AsyncData* data, const std::string& input, const char* tag) {
+    dumpLlmRequest(tag, data->inputStr, input);
+    std::string error;
+    auto cancel = [data]() { return isChatRequestCancelled(data->chatRequestId); };
+    auto emit = [data](const std::string& piece) {
+        if (!data->tsfn) return;
+        auto* value = new std::string(piece);
+        if (napi_call_threadsafe_function(data->tsfn, value, napi_tsfn_blocking) != napi_ok) delete value;
+    };
+    bool ok = g_fullNpu->response(input, cancel, emit, data->outputStr, error);
+    if (!ok && error != "cancelled") {
+        LOGE("[FULL_NPU] level=error %{public}s", error.c_str());
+        data->outputStr = "error: full NPU: " + error;
+        data->success = false;
+        return false;
+    }
+    dumpLlmResponse(tag, data->outputStr);
+    data->success = true;
+    return true;
+}
+
 static napi_value CopyModel(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2];
@@ -1304,6 +1330,31 @@ static void LoadModelExecute(napi_env env, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_currentModelConfigPath = asyncData->inputStr;
     resetNpuRuntimeDiagnostics("config unavailable", false);
+    g_fullNpu.reset();
+    g_fullNpuAgentPrefix.clear();
+    if (asyncData->npuMode == "full_npu") {
+        g_llm.reset();
+        g_messages.clear();
+        g_agent_mode = false;
+        resetNpuRuntimeDiagnostics("npu_execution_mode=full_npu, all model graphs offline", true);
+        auto log = [](const std::string& line) {
+            if (g_debugLoggingEnabled.load()) { std::printf("%s\n", line.c_str()); std::fflush(stdout); }
+        };
+        std::unique_ptr<KirinFullNpu::Runtime> runtime(new KirinFullNpu::Runtime(
+            KirinFullNpu::createNnrtBackend(log), log, []() { return g_debugLoggingEnabled.load(); }));
+        std::string error;
+        asyncData->success = runtime->load(asyncData->inputStr, error);
+        asyncData->outputStr = asyncData->success ? "ok" : "error: full NPU: " + error;
+        if (asyncData->success) g_fullNpu = std::move(runtime);
+        else LOGE("[FULL_NPU] level=error %{public}s", error.c_str());
+        return;
+    }
+    if (readTextFileLocal(asyncData->inputStr).find("kirin_full_npu_runtime_v1") != std::string::npos) {
+        g_llm.reset();
+        asyncData->success = false;
+        asyncData->outputStr = "error: this model package requires the full NPU execution mode";
+        return;
+    }
     g_llm.reset(Llm::createLLM(asyncData->inputStr));
     if (!g_llm) {
         asyncData->success = false;
@@ -1424,7 +1475,7 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
         }
     }
     if (asyncData->npuMode != "cpu" && asyncData->npuMode != "online" &&
-        asyncData->npuMode != "offline") {
+        asyncData->npuMode != "offline" && asyncData->npuMode != "full_npu") {
         asyncData->npuMode = "cpu";
     }
 
@@ -1443,6 +1494,10 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
 static void GenerateExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) {
+        runFullNpuRequest(asyncData, KirinFullNpu::Runtime::chatTemplate({{"user", asyncData->inputStr}}), "GenerateFullNpu");
+        return;
+    }
     
     if (!g_llm) {
         asyncData->success = false;
@@ -1607,6 +1662,13 @@ static std::string formatProfileReport(const std::map<std::string, OpProfileStat
 static void ProfileGenerateExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) {
+        auto prompt = asyncData->inputStr;
+        auto sep = prompt.rfind("|top=");
+        if (sep != std::string::npos) prompt.erase(sep);
+        runFullNpuRequest(asyncData, KirinFullNpu::Runtime::chatTemplate({{"user", prompt}}), "ProfileFullNpu");
+        return;
+    }
 
     if (!g_llm) {
         asyncData->success = false;
@@ -1719,6 +1781,27 @@ static void ChatExecute(napi_env env, void* data) {
     ChatRequestLifetime requestLifetime(asyncData->chatRequestId);
     g_running_chat_request_id.store(asyncData->chatRequestId, std::memory_order_release);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) {
+        if (asyncData->inputStr == "/reset") {
+            g_fullNpu->reset(); g_messages.clear();
+            asyncData->success = true; asyncData->outputStr = "reset done"; return;
+        }
+        if (isChatRequestCancelled(asyncData->chatRequestId)) {
+            asyncData->success = true; asyncData->outputStr.clear(); return;
+        }
+        auto messages = g_messages;
+        if (messages.empty()) messages.emplace_back("system", "You are a helpful assistant.");
+        messages.emplace_back("user", asyncData->inputStr);
+        if (runFullNpuRequest(asyncData, KirinFullNpu::Runtime::chatTemplate(messages), "ChatFullNpu")) {
+            if (asyncData->outputStr.empty() && !isChatRequestCancelled(asyncData->chatRequestId)) {
+                asyncData->success = false; asyncData->outputStr = "error: empty full NPU response";
+            } else {
+                messages.emplace_back("assistant", asyncData->outputStr.empty() ? "[Generation stopped by user]" : asyncData->outputStr);
+                g_messages = std::move(messages);
+            }
+        }
+        return;
+    }
     
     if (!g_llm) {
         asyncData->success = false;
@@ -1927,6 +2010,12 @@ static napi_value RestoreChatHistory(napi_env env, napi_callback_info info) {
     if (g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
         return ChatHistoryResult(env, "error: chat request is active");
     }
+    if (g_fullNpu) {
+        g_fullNpu->reset(); g_fullNpuAgentPrefix.clear();
+        g_agent_mode = false; g_prefix_pos = 0; g_agent_step = 0;
+        g_messages = std::move(restoredMessages);
+        return ChatHistoryResult(env, "ok");
+    }
     if (!g_llm) {
         return ChatHistoryResult(env, "error: model not loaded");
     }
@@ -1945,6 +2034,13 @@ static napi_value RestoreChatHistory(napi_env env, napi_callback_info info) {
 static void AgentPrefillExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) {
+        g_fullNpu->reset(); g_fullNpuAgentPrefix = asyncData->inputStr;
+        g_agent_mode = true; g_agent_step = 0;
+        asyncData->success = true;
+        asyncData->outputStr = "ok: full NPU prefix stored; prefill executes with each step";
+        return;
+    }
 
     if (!g_llm) {
         asyncData->success = false;
@@ -2005,6 +2101,11 @@ static napi_value AgentPrefillAsync(napi_env env, napi_callback_info info) {
 static void AgentStepExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) {
+        if (!g_agent_mode) { asyncData->success = false; asyncData->outputStr = "error: call agentPrefill first"; return; }
+        if (runFullNpuRequest(asyncData, g_fullNpuAgentPrefix + asyncData->inputStr, "AgentStepFullNpu")) ++g_agent_step;
+        return;
+    }
 
     if (!g_llm) {
         asyncData->success = false;
@@ -2097,6 +2198,7 @@ static napi_value AgentStepAsync(napi_env env, napi_callback_info info) {
 static void AgentResetExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) { g_fullNpu->reset(); g_fullNpuAgentPrefix.clear(); }
 
     if (g_llm) {
         g_llm->reset();
@@ -2131,6 +2233,7 @@ static napi_value AgentResetAsync(napi_env env, napi_callback_info info) {
 // ========== 8. 重置对话 ==========
 static napi_value Reset(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_fullNpu) g_fullNpu->reset();
     if (g_llm) {
         g_llm->reset();
     }
@@ -2144,6 +2247,7 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
 
 static napi_value UnloadModel(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_fullNpu.reset(); g_fullNpuAgentPrefix.clear();
     g_llm.reset();
     g_agent_mode = false;
     g_prefix_pos = 0;
@@ -5047,7 +5151,7 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
 
 static std::string runW8a8Probe(const std::string& directory) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_llm) {
+    if (g_llm || g_fullNpu) {
         return "ERROR: unload the local model before running the W8A8 probe.\n";
     }
     // Retain one model at a time; every sample starts from its saved CPU input.

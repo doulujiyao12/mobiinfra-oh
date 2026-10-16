@@ -419,7 +419,7 @@ const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
-type LocalNpuExecutionMode = 'cpu' | 'online' | 'offline';
+type LocalNpuExecutionMode = 'cpu' | 'online' | 'offline' | 'full_npu';
 
 const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
 const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
@@ -890,7 +890,8 @@ struct Index {
   }
 
   private normalizedLocalNpuExecutionMode(): LocalNpuExecutionMode {
-    if (this.localNpuExecutionMode === 'online' || this.localNpuExecutionMode === 'offline') {
+    if (this.localNpuExecutionMode === 'online' || this.localNpuExecutionMode === 'offline' ||
+      this.localNpuExecutionMode === 'full_npu') {
       return this.localNpuExecutionMode;
     }
     return 'cpu';
@@ -907,7 +908,7 @@ struct Index {
   }
 
   private switchLocalNpuExecutionMode(mode: string): void {
-    let normalized: LocalNpuExecutionMode = mode === 'online' || mode === 'offline' ? mode : 'cpu';
+    let normalized: LocalNpuExecutionMode = mode === 'online' || mode === 'offline' || mode === 'full_npu' ? mode : 'cpu';
     if (normalized === this.normalizedLocalNpuExecutionMode()) {
       return;
     }
@@ -918,6 +919,8 @@ struct Index {
     this.localNpuExecutionMode = normalized;
     if (normalized === 'cpu') {
       this.output = '已切换为全 CPU。下次加载模型时，LLM、VIT、视觉分块及其他本地模型模块都会使用 CPU。';
+    } else if (normalized === 'full_npu') {
+      this.output = '已切换为全图 NPU。请下载专用全图模型包；ViT 和 LLM 均使用预编译图，最大上下文 2048 token，缺失或不兼容时直接报错。';
     } else if (normalized === 'offline') {
       this.output = '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。';
     } else {
@@ -4034,7 +4037,7 @@ struct Index {
 
   private isModelWeightFile(path: string): boolean {
     let lower = path.toLowerCase();
-    return lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.safetensors') ||
+    return lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.omc') || lower.endsWith('.safetensors') ||
       lower.endsWith('.weight');
   }
 
