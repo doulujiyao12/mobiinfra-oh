@@ -273,7 +273,9 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     error.clear();
     rapidjson::Document doc;
     doc.Parse(readText(configPath).c_str());
-    if (doc.HasParseError() || !doc.IsObject() || stringField(doc, "format") != "kirin_full_npu_runtime_v1") {
+    const auto format = stringField(doc, "format");
+    if (doc.HasParseError() || !doc.IsObject() ||
+        (format != "kirin_full_npu_runtime_v1" && format != "kirin_full_npu_runtime_v2")) {
         error = "Select a dedicated full-NPU model package (config format mismatch)"; return false;
     }
     s.root = configPath.substr(0, configPath.find_last_of('/') + 1);
@@ -282,6 +284,14 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     p.capacity = number(r, "capacity"); p.prefill = number(r, "prefill"); p.layers = number(r, "layers");
     p.hidden = number(r, "hidden"); p.heads = number(r, "kv_heads"); p.dim = number(r, "head_dim");
     p.group = number(r, "kv_group"); p.recent = number(r, "kv_recent"); p.sink = number(r, "kv_sink");
+    if (r.HasMember("kv_dtype")) {
+        auto type = stringField(r, "kv_dtype");
+        if (type != "int8" && type != "fp16") { error = "Invalid KV dtype"; return false; }
+        p.kvType = type == "fp16" ? DType::F16 : DType::I8;
+    } else if (format == "kirin_full_npu_runtime_v2") { error = "Missing KV dtype"; return false; }
+    if (p.kvType == DType::F16 && (p.sink || p.recent)) {
+        error = "FP16 KV must not declare INT8 protected windows"; return false;
+    }
     p.imageWidth = number(r, "image_width"); p.imageHeight = number(r, "image_height");
     p.patch = number(r, "patch"); p.merge = number(r, "merge"); p.temporal = number(r, "temporal");
     p.visionHidden = number(r, "vision_hidden"); p.visionHeads = number(r, "vision_heads");
@@ -341,6 +351,22 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
         Graph g; g.name = stringField(value, "name"); auto path = stringField(value, "file");
         if (g.name.empty() || !safePath(path) || s.graphs.count(g.name)) { error = "Invalid graph name/path"; return false; }
         g.path = s.root + path; g.start = number(value, "layer_start"); g.end = number(value, "layer_end");
+        if (value.HasMember("external_weights")) {
+            const auto& weights = value["external_weights"];
+            auto directory = stringField(weights, "directory");
+            if (!safePath(directory) || !weights.HasMember("files") || !weights["files"].IsArray() ||
+                weights["files"].Empty() || weights["files"].Size() > 64 || value.HasMember("embedding_slices")) {
+                error = "Invalid external weight contract"; return false;
+            }
+            g.weightDir = s.root + directory;
+            for (const auto& file : weights["files"].GetArray()) {
+                if (!file.IsString() || !safePath(file.GetString()) || std::string(file.GetString()).find('/') != std::string::npos ||
+                    std::find(g.weightFiles.begin(), g.weightFiles.end(), file.GetString()) != g.weightFiles.end()) {
+                    error = "Invalid external weight filename"; return false;
+                }
+                g.weightFiles.emplace_back(file.GetString());
+            }
+        }
         if (value.HasMember("embedding_slices")) {
             if (!value["embedding_slices"].IsArray()) { error = "Invalid embedding slices"; return false; }
             for (const auto& entry : value["embedding_slices"].GetArray()) {
@@ -396,7 +422,8 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     }
     s.cache.reset(new Cache(p));
     s.trace("level=ready graphs=" + std::to_string(s.graphs.size()) + " context=" + std::to_string(p.capacity) +
-            " kv_bytes=" + std::to_string(s.cache->bytes()) + " kv_dtype=int8 cpu_fallback=disabled");
+            " kv_bytes=" + std::to_string(s.cache->bytes()) +
+            (p.kvType == DType::F16 ? " kv_dtype=fp16" : " kv_dtype=int8") + " cpu_fallback=disabled");
     return true;
 }
 

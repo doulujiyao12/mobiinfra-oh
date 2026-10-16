@@ -42,6 +42,9 @@ struct BackendOptions {
 
 struct Graph {
     std::string name, path;
+    // OMG external-data mode; InitWeights takes the containing directory.
+    std::string weightDir;
+    std::vector<std::string> weightFiles;
     std::vector<Port> inputs, outputs;
     std::map<std::string, std::string> aliases;
     int start = 0, end = 0;
@@ -74,6 +77,7 @@ public:
 
 struct Profile {
     BackendOptions backend;
+    DType kvType = DType::I8; // v1 packages default to the original INT8 protocol.
     int capacity = 0, prefill = 0, layers = 0, hidden = 0, heads = 0, dim = 0;
     int group = 0, recent = 0, sink = 0, imageWidth = 0, imageHeight = 0;
     int patch = 0, merge = 0, temporal = 0, visionHidden = 0, visionHeads = 0, positionSide = 0;
@@ -97,6 +101,7 @@ private:
     Profile p;
     uint64_t epoch = 0;
     struct Layer {
+        std::vector<uint16_t> fullKey, fullValue;
         std::vector<int8_t> key, value;
         std::vector<float> keyScale, valueScale;
         std::vector<uint16_t> sinkKey, sinkValue, recentKey, recentValue;

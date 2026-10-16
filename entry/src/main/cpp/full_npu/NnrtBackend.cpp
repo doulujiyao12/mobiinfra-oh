@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <dlfcn.h>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -54,6 +55,7 @@ struct Tensor {
 };
 struct DeviceGraph {
     OH_NNExecutor* executor = nullptr;
+    OH_NNCompilation* compilation = nullptr;
     std::vector<Tensor> inputs, outputs;
     std::vector<size_t> inputMap, outputMap;
     size_t modelBytes = 0;
@@ -62,6 +64,7 @@ struct DeviceGraph {
     ~DeviceGraph() {
         inputs.clear(); outputs.clear();
         if (executor) OH_NNExecutor_Destroy(&executor);
+        if (compilation) OH_NNCompilation_Destroy(&compilation);
     }
 };
 
@@ -214,14 +217,38 @@ private:
             trace("level=error " + error);
             return nullptr;
         }
-        if (size_t(fileInfo.st_size) > options.residentModelBytes) {
+        using InitWeights = OH_NN_ReturnCode (*)(OH_NNExecutor*, const char*);
+        InitWeights initWeights = nullptr;
+        size_t modelBytes = size_t(fileInfo.st_size), weightBytes = 0;
+        if (!g.weightDir.empty()) {
+            if (g.weightFiles.empty()) { error = "External weight file list is empty"; return nullptr; }
+            // Foundation is already linked for the HiAI options above. Resolve
+            // this newer API lazily so embedded-weight packages still load on
+            // older device libraries, as in MindSpore Lite's NNRT wrapper.
+            initWeights = reinterpret_cast<InitWeights>(dlsym(RTLD_DEFAULT, "HMS_HiAIExecutor_InitWeights"));
+            if (!initWeights) {
+                error = "External-weight model requires HMS_HiAIExecutor_InitWeights; device API unavailable";
+                trace("level=error " + error); return nullptr;
+            }
+            for (const auto& name : g.weightFiles) {
+                const auto path = g.weightDir + "/" + name;
+                struct stat weights {};
+                if (stat(path.c_str(), &weights) != 0 || !S_ISREG(weights.st_mode) || weights.st_size <= 0 ||
+                    uint64_t(weights.st_size) > std::numeric_limits<size_t>::max() - modelBytes) {
+                    error = "External weight file missing, empty or oversized: " + path;
+                    trace("level=error " + error); return nullptr;
+                }
+                modelBytes += size_t(weights.st_size); weightBytes += size_t(weights.st_size);
+            }
+        } else if (!g.weightFiles.empty()) { error = "External weight directory is missing"; return nullptr; }
+        if (modelBytes > options.residentModelBytes) {
             error = "Offline graph exceeds the configured model-file budget: " + g.path;
             trace("level=error " + error); return nullptr;
         }
         // Reserve room before Build. Keep frequently reused LLM stages/head;
         // a pure LRU cache thrashes on a decoder cycle larger than its budget.
         while (!resident.empty() && (resident.size() >= size_t(effectiveGraphs) ||
-               residentBytes() + size_t(fileInfo.st_size) > options.residentModelBytes)) {
+               residentBytes() + modelBytes > options.residentModelBytes)) {
             auto victim = std::min_element(resident.begin(), resident.end(), [](const auto& a, const auto& b) {
                 return a.second->priority != b.second->priority ? a.second->priority < b.second->priority :
                        a.second->used < b.second->used;
@@ -231,6 +258,7 @@ private:
         }
         const char* version = HMS_HiAI_GetVersion();
         trace("level=load_begin path=" + g.path + " file_bytes=" + std::to_string(fileInfo.st_size) +
+              " external_weight_bytes=" + std::to_string(weightBytes) +
               " hiai_version=" + (version ? version : "unavailable") +
               " resident_models=" + std::to_string(resident.size()) + " resident_policy=bounded_priority" + resourceSnapshot());
         auto compatibility = HMS_HiAICompatibility_CheckFromFile(g.path.c_str());
@@ -294,14 +322,31 @@ private:
         trace("level=load_step step=OH_NNExecutor_Construct state=begin resident_models=" +
               std::to_string(resident.size()) + resourceSnapshot());
         device->executor = OH_NNExecutor_Construct(compilation);
-        OH_NNCompilation_Destroy(&compilation);
+        if (initWeights) device->compilation = compilation;
+        else OH_NNCompilation_Destroy(&compilation);
         trace(std::string("level=load_step step=OH_NNExecutor_Construct result=") +
               (device->executor ? "success" : "nullptr"));
         if (!device->executor) {
             error = "step=OH_NNExecutor_Construct result=nullptr path=" + g.path;
+            device.reset();
             if (backoff(g, error)) { error.clear(); return load(g, error, cacheKv); }
             trace("level=error " + error + " resident_models=" + std::to_string(resident.size()) + resourceSnapshot());
             return nullptr;
+        }
+        if (initWeights) {
+            auto weightBegin = std::chrono::steady_clock::now();
+            ret = initWeights(device->executor, g.weightDir.c_str());
+            traceStep("HMS_HiAIExecutor_InitWeights", ret);
+            trace("level=load_timing step=HMS_HiAIExecutor_InitWeights elapsed_ms=" + std::to_string(
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - weightBegin).count()));
+            if (ret != OH_NN_SUCCESS) {
+                error = "step=HMS_HiAIExecutor_InitWeights ret=" + returnCode(ret) + " directory=" + g.weightDir;
+                device.reset();
+                if ((ret == OH_NN_MEMORY_ERROR || ret == OH_NN_FAILED) && backoff(g, error)) {
+                    error.clear(); return load(g, error, cacheKv);
+                }
+                trace("level=error " + error); return nullptr;
+            }
         }
         for (bool input : {true, false}) {
             size_t count = 0;
@@ -370,7 +415,7 @@ private:
             !bindPorts(g.outputs, outputPorts, g.aliases, device->outputMap, error)) return nullptr;
         trace("level=graph_ready cpu_fallback=disabled load_ms=" + std::to_string(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()));
-        device->modelBytes = size_t(fileInfo.st_size); device->used = ++clock; device->priority = priority(g);
+        device->modelBytes = modelBytes; device->used = ++clock; device->priority = priority(g);
         auto* result = device.get(); resident[g.name] = std::move(device); return result;
     }
 };

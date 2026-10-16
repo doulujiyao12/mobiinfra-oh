@@ -69,8 +69,8 @@ inline bool validateRuntimeGraphs(const Profile& p, const std::map<std::string, 
             for (int layer = g.start; layer < g.end; ++layer) {
                 auto id = std::to_string(layer);
                 for (const char* name : {"past_key_", "past_value_"})
-                    inputs.push_back({name + id, DType::I8, {1, p.heads, p.capacity, p.dim}});
-                for (const char* name : {"past_key_scale_", "past_value_scale_"})
+                    inputs.push_back({name + id, p.kvType, {1, p.heads, p.capacity, p.dim}});
+                if (p.kvType == DType::I8) for (const char* name : {"past_key_scale_", "past_value_scale_"})
                     inputs.push_back({name + id, DType::F32, {1, p.heads, p.capacity, p.dim / p.group}});
                 if (p.sink) for (const char* name : {"sink_key_", "sink_value_"})
                     inputs.push_back({name + id, DType::F16, {1, p.heads, p.sink, p.dim}});

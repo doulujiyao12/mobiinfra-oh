@@ -64,6 +64,10 @@ float fromHalf(uint16_t value) {
 
 Cache::Cache(const Profile& profile) : p(profile), layers(p.layers) {
     for (auto& l : layers) {
+        if (p.kvType == DType::F16) {
+            l.fullKey.resize(size_t(p.heads) * p.capacity * p.dim); l.fullValue.resize(l.fullKey.size());
+            continue;
+        }
         l.key.resize(size_t(p.heads) * p.capacity * p.dim); l.value.resize(l.key.size());
         l.keyScale.resize(l.key.size() / p.group); l.valueScale.resize(l.keyScale.size());
         l.sinkKey.resize(size_t(p.heads) * p.sink * p.dim); l.sinkValue.resize(l.sinkKey.size());
@@ -77,13 +81,19 @@ void Cache::reset() {
     for (auto& l : layers) {
         std::fill(l.key.begin(), l.key.end(), 0); std::fill(l.value.begin(), l.value.end(), 0);
         std::fill(l.keyScale.begin(), l.keyScale.end(), 1); std::fill(l.valueScale.begin(), l.valueScale.end(), 1);
-        for (auto* v : {&l.sinkKey, &l.sinkValue, &l.recentKey, &l.recentValue}) std::fill(v->begin(), v->end(), 0);
+        for (auto* v : {&l.fullKey, &l.fullValue, &l.sinkKey, &l.sinkValue, &l.recentKey, &l.recentValue})
+            std::fill(v->begin(), v->end(), 0);
     }
 }
 std::vector<View> Cache::inputs(int start, int count) const {
     std::vector<View> result;
     for (int i = start; i < start + count; ++i) {
         const auto& l = layers.at(i);
+        if (p.kvType == DType::F16) {
+            for (const auto* v : {&l.fullKey, &l.fullValue})
+                result.push_back({DType::F16, v->data(), v->size(), epoch, length, false});
+            continue;
+        }
         result.push_back({DType::I8, l.key.data(), l.key.size()});
         result.push_back({DType::I8, l.value.data(), l.value.size()});
         result.push_back({DType::F32, l.keyScale.data(), l.keyScale.size()});
@@ -108,7 +118,7 @@ bool Cache::append(int start, const std::vector<std::vector<float>>& out, int re
         if (v.size() != size_t(p.heads) * width * p.dim) { error = "KV delta shape mismatch"; return false; }
         for (int h = 0; h < p.heads; ++h) for (int t = 0; t < real; ++t) for (int d = 0; d < p.dim; ++d) {
             float x = v[(size_t(h) * width + t) * p.dim + d];
-            if (!std::isfinite(x) || ((p.recent || length + t < p.sink) && std::abs(x) > 65504)) {
+            if (!std::isfinite(x) || ((p.kvType == DType::F16 || p.recent || length + t < p.sink) && std::abs(x) > 65504)) {
                 error = "Nonfinite or FP16-overflowing KV delta"; return false;
             }
         }
@@ -120,6 +130,13 @@ bool Cache::append(int start, const std::vector<std::vector<float>>& out, int re
         auto& sink = k ? l.sinkValue : l.sinkKey;
         auto& recent = k ? l.recentValue : l.recentKey;
         const auto& values = out[2 * i + k];
+        if (p.kvType == DType::F16) {
+            auto& dst = k ? l.fullValue : l.fullKey;
+            for (int h = 0; h < p.heads; ++h) for (int t = 0; t < real; ++t) for (int d = 0; d < p.dim; ++d)
+                dst[(size_t(h) * p.capacity + length + t) * p.dim + d] =
+                    toHalf(values[(size_t(h) * width + t) * p.dim + d]);
+            continue;
+        }
         for (int h = 0; h < p.heads; ++h) for (int t = 0; t < real; ++t) {
             int position = length + t;
             const float* src = values.data() + (size_t(h) * width + t) * p.dim;
@@ -161,7 +178,7 @@ size_t Cache::bytes() const {
     size_t result = 0;
     for (const auto& l : layers) result += l.key.size() + l.value.size() +
         4 * (l.keyScale.size() + l.valueScale.size()) +
-        2 * (l.sinkKey.size() + l.sinkValue.size() + l.recentKey.size() + l.recentValue.size());
+        2 * (l.fullKey.size() + l.fullValue.size() + l.sinkKey.size() + l.sinkValue.size() + l.recentKey.size() + l.recentValue.size());
     return result;
 }
 } // namespace KirinFullNpu

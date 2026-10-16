@@ -1,5 +1,59 @@
 # 全图 NPU（实验）
 
+## 当前候选：外置 W4 权重与 FP16 KV
+
+2026-10-16 新增 `kirin_full_npu_runtime_v2` 加载支持。它需要**重新构建 App，
+并使用新的外置权重模型包**；下面的 ModelScope `embsplit` 地址属于旧包，
+仅更新 App 后继续打开旧包，不会自动变成此结构。
+
+新模型仓库：
+https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_kv16_external
+
+远端 40 个文件已校验大小及 SHA256，完整模型约 2.59 GiB。在 App 设置中将
+模型下载地址换成该仓库，下载到独立目录，再选择 **全图 NPU** 并加载。
+本工作区 App 源码已包含新格式、外置权重初始化和 FP16 增量 KV 支持；需要在
+DevEco 重新构建并安装，手机上的现有 App 不会因源码更新而自动升级。
+
+新构建采用 13 张 OMC：28 层主干 prefill/decode 各一张，embedding 各一张，
+共用 head 及八张视觉图。OMC 本体与 `SubGraph_0.weight` 分离；顺序参考
+MindSpore Lite 的 Build → Construct executor → `HMS_HiAIExecutor_InitWeights`
+→ tensor 接口检查。缺少该设备 API 会明确报错；不能仅凭本机编译推定设备库支持。
+
+主要矩阵权重仍为 SDK W4/group64 GPTQ，embedding、位置表等保留 FP16。
+不是将浮点权重改名为 `.weight`。量化使用 SDK INT16 激活；新候选只扩大输出
+范围 4 倍以缓解已复现的截断，输入和 W4 权重的量化范围不变。
+
+解码目标为 embedding、整段 LLM、head 三个模型常驻，热身之后不再每 token
+重建图。最多四图、模型文件与外置权重总预算 2048 MiB；该预算不是设备实际
+内存占用。prefill 转 decode 时释放旧阶段。只按文件名及 SHA256 完全一致的
+权重做磁盘去重，不宣称跨 executor 共享设备权重。
+
+FP16 KV 宿主 224 MiB，独立 NNRT 输入池另需 224 MiB，配置池上限 256 MiB。
+首次同步整份；随后 28 层每新增 token 写入约 112 KiB。`run_timing` 的字节数
+只反映宿主写 NNRT 缓冲区，固定容量 attention 和设备内部开销仍存在。
+
+文本十条和非校准图片三张已做 CPU 参考审计，相关性有改善，仍存在事实、OCR
+及细节错误。三张图片首 token logits 相对浮点参考的 L2 约 0.53–0.57，不能
+称为精度对齐。FP16 KV 长上下文检查中逐层 KV L2 约 0.2759，原门槛 0.05
+**未通过**，即使此例九次贪心 token 都一致也保留失败状态。
+
+需要同时检查正确性及速度。新包日志应出现 `external_weight_bytes`、
+`step=HMS_HiAIExecutor_InitWeights ret=OH_NN_SUCCESS(0)`，热身后三个解码
+组件均为 `cache_hit`。若 `cache_backoff` 出现，已退回单图/完整同步，不能
+按三图常驻评价性能。初始化逐图 probe 与首次切换阶段仍有加载开销。
+
+主机完整验证：13/13 图纯 NPU 编译、301 个矩阵 UINT4/LUT 逐值核对、
+32 项 Python（含 SDK）和六组 C++ 测试通过。实际 App 复制源码构建的主机
+调度器在五个文本/图片场景中通过 2985 项独立 tensor 检查；该检查使用 CPU
+ONNX 参考，不是 OMC 数值或端侧速度验收。
+
+模型审计和复现命令见 MobiInfer 的
+`transformers/llm/export/kirin_llm_offline/README.md` 与
+`evidence_external_w4_kv16/`。本机未构建 HAP、未操作手机，真机 InitWeights、
+常驻峰值内存、吞吐和数值结果待验证；`libMNN.so` 未替换。
+
+## 旧内嵌权重包与既往验证记录
+
 此模式独立于原来的全 CPU、在线 NPU 和离线 OM（ViT）模式。需重新构建并安装
 包含本次源码的 App；`libMNN.so` 不需要替换。x86_64 云端 UI 构建不执行本地推理。
 

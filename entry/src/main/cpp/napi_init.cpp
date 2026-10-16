@@ -1349,7 +1349,7 @@ static void LoadModelExecute(napi_env env, void* data) {
         else LOGE("[FULL_NPU] level=error %{public}s", error.c_str());
         return;
     }
-    if (readTextFileLocal(asyncData->inputStr).find("kirin_full_npu_runtime_v1") != std::string::npos) {
+    if (readTextFileLocal(asyncData->inputStr).find("kirin_full_npu_runtime_v") != std::string::npos) {
         g_llm.reset();
         asyncData->success = false;
         asyncData->outputStr = "error: this model package requires the full NPU execution mode";

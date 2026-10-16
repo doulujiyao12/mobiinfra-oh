@@ -32,6 +32,7 @@ else()
         librawfile.z.so
         libneural_network_core.so
         ${cann-lib}
+        ${CMAKE_DL_LIBS}
         MNN
     )
 endif()
