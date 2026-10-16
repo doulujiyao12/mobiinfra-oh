@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "NnrtBackend.hpp"
 #include "PortBinding.hpp"
 #include "EmbeddingSlices.hpp"
@@ -71,6 +74,10 @@ struct DeviceGraph {
 class NnrtBackend final : public Backend {
 public:
     explicit NnrtBackend(Log log) : log(std::move(log)) {}
+    ~NnrtBackend() override {
+        release();
+        if (hiaiLibrary) dlclose(hiaiLibrary);
+    }
     void configure(const BackendOptions& value) override {
         release(); options = value;
         effectiveGraphs = std::max(1, value.maxResidentGraphs);
@@ -176,13 +183,63 @@ public:
         return true;
     }
 private:
+    using InitWeights = OH_NN_ReturnCode (*)(OH_NNExecutor*, const char*);
     Log log;
+    void* hiaiLibrary = nullptr;
+    InitWeights weightInit = nullptr;
+    std::string weightApiEvidence;
     BackendOptions options;
     int effectiveGraphs = 1; // A standalone backend remains conservative until configured.
     size_t effectiveKvBytes = 0, kvBytes = 0;
     uint64_t clock = 0;
     std::map<std::string, std::unique_ptr<DeviceGraph>> resident;
     std::map<std::string, std::shared_ptr<TensorStorage>> kvBuffers;
+
+    InitWeights externalWeightApi(std::string& evidence) {
+        if (weightInit) {
+            evidence = weightApiEvidence + " cached=1";
+            return weightInit;
+        }
+        const char* version = HMS_HiAI_GetVersion();
+        evidence = "hiai_version=" + std::string(version ? version : "unavailable");
+        auto loaderError = []() {
+            const char* value = dlerror();
+            return std::string(value ? value : "symbol returned nullptr");
+        };
+        // HiAI may be local to the App's native module/loader namespace.
+        // Match Lite's explicit library lookup; RTLD_DEFAULT alone misses
+        // functions in RTLD_LOCAL libraries. Keep the handle until all
+        // executors/compilations are destroyed, including on load failures.
+        dlerror();
+        if (!hiaiLibrary) hiaiLibrary = dlopen("libhiai_foundation.so", RTLD_LAZY | RTLD_LOCAL);
+        if (hiaiLibrary) {
+            evidence += " dlopen=success library=libhiai_foundation.so";
+            dlerror();
+            weightInit = reinterpret_cast<InitWeights>(dlsym(hiaiLibrary, "HMS_HiAIExecutor_InitWeights"));
+            if (weightInit) evidence += " lookup=library_handle";
+            else evidence += " library_symbol_error={" + loaderError() + "}";
+        } else {
+            evidence += " dlopen=failed loader_error={" + loaderError() + "}";
+        }
+        if (!weightInit) {
+            // Supports runtimes exposing this API from the global scope and
+            // the existing host call substitutes, without widening visibility.
+            dlerror();
+            weightInit = reinterpret_cast<InitWeights>(dlsym(RTLD_DEFAULT, "HMS_HiAIExecutor_InitWeights"));
+            if (weightInit) evidence += " lookup=global_fallback";
+            else evidence += " global_symbol_error={" + loaderError() + "}";
+        }
+        if (weightInit) {
+            Dl_info provider {};
+            if (dladdr(reinterpret_cast<void*>(weightInit), &provider) && provider.dli_fname)
+                evidence += " provider=" + std::string(provider.dli_fname);
+            evidence += " result=success";
+            weightApiEvidence = evidence;
+        } else {
+            evidence += " result=unresolved";
+        }
+        return weightInit;
+    }
 
     int priority(const Graph& g) const {
         if (g.name == "lm_head") return 100000;
@@ -217,17 +274,15 @@ private:
             trace("level=error " + error);
             return nullptr;
         }
-        using InitWeights = OH_NN_ReturnCode (*)(OH_NNExecutor*, const char*);
         InitWeights initWeights = nullptr;
         size_t modelBytes = size_t(fileInfo.st_size), weightBytes = 0;
         if (!g.weightDir.empty()) {
             if (g.weightFiles.empty()) { error = "External weight file list is empty"; return nullptr; }
-            // Foundation is already linked for the HiAI options above. Resolve
-            // this newer API lazily so embedded-weight packages still load on
-            // older device libraries, as in MindSpore Lite's NNRT wrapper.
-            initWeights = reinterpret_cast<InitWeights>(dlsym(RTLD_DEFAULT, "HMS_HiAIExecutor_InitWeights"));
+            std::string evidence;
+            initWeights = externalWeightApi(evidence);
+            trace("level=load_step step=resolve_HMS_HiAIExecutor_InitWeights " + evidence);
             if (!initWeights) {
-                error = "External-weight model requires HMS_HiAIExecutor_InitWeights; device API unavailable";
+                error = "External-weight model requires HMS_HiAIExecutor_InitWeights; symbol lookup failed; " + evidence;
                 trace("level=error " + error); return nullptr;
             }
             for (const auto& name : g.weightFiles) {

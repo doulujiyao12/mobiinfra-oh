@@ -2,6 +2,25 @@
 
 ## 当前候选：外置 W4 权重与 FP16 KV
 
+### 首图提示 InitWeights 接口未找到
+
+用户日志在首张 `embedding_decode` 的 Build 前失败，尚未执行模型或 KV。
+旧代码只查 `RTLD_DEFAULT` 全局符号表，不能据此确定设备库没有该函数。
+已改为先打开 `libhiai_foundation.so`，从库句柄查符号，再尝试全局兼容路径，
+并将句柄保留到 executor/compilation 都销毁后。模型包、量化参数无需更换。
+
+重新构建并安装本次 App。Debug 日志会新增：
+`step=resolve_HMS_HiAIExecutor_InitWeights`，包含 `hiai_version`、`dlopen`、
+`lookup`、`provider` 和动态加载器错误。若找到接口，继续观察
+`step=HMS_HiAIExecutor_InitWeights ret=OH_NN_SUCCESS(0)`。
+若仍是 `result=unresolved`，需要保留该行和后续错误；显式库查找也失败后，
+当前 App 可访问的库无法初始化该外置权重模型，不会通过跳过 API 假装加载成功。
+
+主机使用真实 RTLD_LOCAL 共享库复现了旧实现失败、新实现通过；包含局部库、
+缺符号、缺库场景的九组 C++ 检查通过，另编译验证 App 中同步的源文件。
+手机是否真正导出接口仍待新日志确认；没有执行真机或 HAP 构建。
+
+
 2026-10-16 新增 `kirin_full_npu_runtime_v2` 加载支持。它需要**重新构建 App，
 并使用新的外置权重模型包**；下面的 ModelScope `embsplit` 地址属于旧包，
 仅更新 App 后继续打开旧包，不会自动变成此结构。

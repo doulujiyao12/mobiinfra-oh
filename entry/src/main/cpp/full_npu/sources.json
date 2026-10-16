@@ -37,7 +37,7 @@
   {
     "path": "NnrtBackend.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/NnrtBackend.cpp",
-    "sha256": "4483deb25f8f225868e4fadd2c71fbde11619d14e980b66b4c71952dcdf462f9"
+    "sha256": "39a5883bdec245ab9a5739d7eb7d68f1a5cbdf7f14cfb646ef5c41de79e8e9bd"
   },
   {
     "path": "FullNpuRuntime.hpp",
