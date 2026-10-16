@@ -8,7 +8,8 @@ https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_
 
 此为 embedding 分片包，必须使用包含 `embedding_slices` 支持的新 App。
 用户最新日志确认全部图逐图加载通过，实际推理在 `llm_prefill_5` 创建 executor
-失败；下文说明单图常驻修正及复验步骤。
+失败；单图版本已能继续生成，但用户反馈速度很慢、回答不相关。
+当前改用有界常驻及 KV 增量同步，方案及验证见文末。
 原始未分片全图包在用户设备的第一张 `embedding_decode` Build 时失败。
 
 在设置的模型下载地址中清空旧内容，填写上述仓库地址，下载到独立模型目录。
@@ -30,9 +31,9 @@ https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_
 
 模型结构的 embedding、ViT、LLM、LM head 全部由离线 NPU 图计算；CPU 负责
 tokenizer、图片解码/缩放、位置/mask、KV 编码和贪心采样。完整模型被拆为静态
-图调度，prefill 每块 128 token，decode 每次 1 token。当前 NNRT 后端最多保留
-一张图，切换图前释放旧图及其设备缓冲区，宿主 KV/结果独立保存。代价是 decode
-每步重新加载各段模型，速度待测；不改变 OMC、量化参数或上下文容量。
+图调度，prefill 每块 128 token，decode 每次 1 token。当前后端按数量及模型文件
+预算保留部分图，KV 输入张量独立持有并按新增行同步；资源压力时退回单图及完整
+同步。不改变 OMC、量化参数或上下文容量，速度和正确性须真机复验。
 
 权重为 W4A16/group64/GPTQ；KV 为 INT8/group32、FP32 scale，首 4 和最近 128
 token 另存 FP16。KV 常驻存储约 140.44 MiB。固定最大上下文 **2048 token**，
@@ -124,7 +125,7 @@ NNRT 调用替身；用户已确认逐图加载通过，完整执行、精度和
 这与之前大 embedding 在 Build 失败不同，当前证据指向多图常驻的资源压力或
 服务调度限制，具体系统原因还需 HiLog。App RSS/CmaFree 不能代表全部 NPU 占用。
 
-已修正 `NnrtBackend.cpp`：切换图时先释放上一张图的设备 tensors/executor，
+上一版修正 `NnrtBackend.cpp`：切换图时先释放上一张图的设备 tensors/executor，
 再 Build/创建新图，prefill/decode/embedding/head 都最多常驻一张。宿主 KV 和
 中间输出保留，W4A16、KV8 和模型文件均未改变。此方式会增加模型加载耗时。
 新增 `resident_evict`、`resident_policy=single_graph` 和
@@ -144,3 +145,58 @@ NNRT 调用替身；用户已确认逐图加载通过，完整执行、精度和
    decode 和 `lm_head`，最终应出现 `level=request_complete`，`npu_error=0`。
 5. 如果仍失败，导出完整 App Runtime Logs，并保留同一时刻不按 App/PID 过滤的
    NNRT、HiAI、dllite 系统日志，重点关注 executor 创建/准备、调度及内存分配失败。
+
+
+## 有界常驻与 KV 增量同步（当前版本）
+
+单图版本已由用户运行到 `past=198` 的 decode，并反馈能生成、但很慢且答非所问。
+当前改动仅优化调度和 KV 输入拷贝，原有量化精度问题仍未解决。已更新 MobiInfer
+和 App 的 full_npu 源码，模型文件及 libMNN.so 未改变；重新构建安装 App 即可，
+继续使用现有 embsplit 包，不必重新下载。
+
+默认最多保留 4 个 executor、模型文件总量预算 640 MiB。优先保留 LM head 和
+靠前的 LLM 段，给其余图留出流式加载位置；当前模型稳态可保留 head、decode_0、
+decode_1，模型加载从每 token 16 次降至 13 次。此为调用次数，真实速度尚待实测。
+文件预算不是实际 NPU 内存；另有 KV 输入、激活和驱动工作区。
+
+KV 输入张量独立于 executor 持有，上限默认 192 MiB；本模型约需 140.44 MiB，
+宿主仍保留原压缩 KV，因此这会增加常驻内存。首次完整同步；随后只复制新增历史
+行及 recent 环形槽位。prefill/decode 的 KV 端口在设备、格式、dtype、shape
+一致时复用。完整请求结束、重置及取消会释放池，缓存世代变化和错误重试会重新同步。
+
+稳态每个 4 层 LLM 图的 `kv_copied_bytes` 应约为 25600（25 KiB），7 段合计
+179200（175 KiB），而 `kv_full_bytes` 每段约为 21037056。首次同步和 prefill
+尾块追赶会更大。此数值是宿主写入 NNRT 缓冲区的字节数，不是 SDK 内部总流量。
+固定长度 attention 和图内反量化没有改变。
+
+Build、executor 创建或 tensor 分配在已有资源时失败，会清理模型及 KV 输入池，
+退回单图/完整同步后重试一次；有 `level=cache_backoff` 记录，并持续到模型重新
+加载。此回退始终使用离线 NPU，不转 CPU；永久错误仍返回，不会无限重试。
+
+运行配置的 `runtime` 可选参数（旧包缺省即采用以下配置）：
+
+```json
+"npu_max_resident_graphs": 4,
+"npu_resident_model_mib": 640,
+"npu_persistent_kv_mib": 192,
+"npu_incremental_kv": true
+```
+
+可用 `1 / 640 / 0 / false` 做单图完整同步对照。修改测试配置时保留下载包校验要求，
+避免原地修改受下载清单管理的文件；默认配置测试不需要改模型包。
+
+复验步骤：
+
+1. 重新构建并安装 App，开启 Debug，选择现有全图模型并加载。
+2. 新建短文本聊天，再新建图片聊天，先确认完整请求结束及记录实际回答。
+3. 稳态应看到 `level=cache_hit`，尤其 head、decode_0、decode_1；同时看
+   `level=run_timing` 的 `input_copy_ms`、`run_sync_ms` 和 KV 字节数。
+4. 若出现 `cache_backoff`，保留其前后完整日志：该请求后续可能已恢复单图模式，
+   不能再按 4 图命中或 175 KiB 评价性能。未发生回退但部分端口不能持久化时，
+   `kv_copied_bytes` 也会更大，应结合 `persistent_kv_bytes` 判断。
+5. 测试停止、清空聊天后重试，确认缓存没有串用；关闭 Debug 再测端到端速度。
+6. 测速和回答相关性分别记录；本次优化不代表此前答非所问已经修复。
+
+6 组 C++ 检查和短文本/图片共 4484 项 CPU 参考回放通过；包含受限 executor、
+创建/分配失败、不同 tensor 格式隔离、窗口环绕、长跳、重置及完整缓冲区逐字节
+对照。调用替身验证不能代替真实 HiAI SDK；本机未构建 HAP，也未操作手机。

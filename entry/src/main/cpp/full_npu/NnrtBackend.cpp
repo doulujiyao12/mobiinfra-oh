@@ -1,6 +1,7 @@
 #include "NnrtBackend.hpp"
 #include "PortBinding.hpp"
 #include "EmbeddingSlices.hpp"
+#include "KvTransfer.hpp"
 #include "CANNKit/hiai_helper.h"
 #include "CANNKit/hiai_options.h"
 #include "neural_network_runtime/neural_network_core.h"
@@ -40,18 +41,26 @@ std::string resourceSnapshot() {
     return result;
 }
 
-struct Tensor {
+struct TensorStorage {
     NN_Tensor* handle = nullptr;
+    InputSync sync;
+    ~TensorStorage() { if (handle) OH_NNTensor_Destroy(&handle); }
+};
+struct Tensor {
+    std::shared_ptr<TensorStorage> storage;
     Port port;
     size_t bytes = 0;
+    bool persistent = false;
 };
 struct DeviceGraph {
     OH_NNExecutor* executor = nullptr;
     std::vector<Tensor> inputs, outputs;
     std::vector<size_t> inputMap, outputMap;
+    size_t modelBytes = 0;
+    uint64_t used = 0;
+    int priority = 0;
     ~DeviceGraph() {
-        for (auto& t : inputs) if (t.handle) OH_NNTensor_Destroy(&t.handle);
-        for (auto& t : outputs) if (t.handle) OH_NNTensor_Destroy(&t.handle);
+        inputs.clear(); outputs.clear();
         if (executor) OH_NNExecutor_Destroy(&executor);
     }
 };
@@ -59,6 +68,14 @@ struct DeviceGraph {
 class NnrtBackend final : public Backend {
 public:
     explicit NnrtBackend(Log log) : log(std::move(log)) {}
+    void configure(const BackendOptions& value) override {
+        release(); options = value;
+        effectiveGraphs = std::max(1, value.maxResidentGraphs);
+        effectiveKvBytes = value.incrementalKv ? value.persistentKvBytes : 0;
+        if (log) log("[FULL_NPU] level=cache_config max_graphs=" + std::to_string(effectiveGraphs) +
+                     " model_budget_bytes=" + std::to_string(options.residentModelBytes) +
+                     " kv_budget_bytes=" + std::to_string(effectiveKvBytes));
+    }
     bool probe(const Graph& g, std::string& error) override {
         if (g.embeddingSlices.empty()) return load(g, error) != nullptr;
         std::vector<Graph> slices;
@@ -70,7 +87,8 @@ public:
         }
         return true;
     }
-    void release() override { resident.clear(); }
+    void releaseGraphs() override { resident.clear(); }
+    void release() override { releaseGraphs(); kvBuffers.clear(); kvBytes = 0; }
     bool run(const Graph& g, const std::vector<View>& inputs,
              std::vector<std::vector<float>>& outputs, std::string& error) override {
         outputs.clear();
@@ -106,41 +124,40 @@ public:
             outputs.push_back(std::move(assembled));
             return true;
         }
-        auto* device = load(g, error);
+        auto* device = load(g, error, true);
         if (!device) return false;
+        size_t kvWritten = 0, kvFull = 0;
+        auto copyBegin = std::chrono::steady_clock::now();
         for (size_t i = 0; i < inputs.size(); ++i) {
             auto& dst = device->inputs[device->inputMap[i]];
-            auto* buffer = OH_NNTensor_GetDataBuffer(dst.handle);
+            auto* buffer = OH_NNTensor_GetDataBuffer(dst.storage->handle);
             size_t allocated = 0;
-            if (!buffer || OH_NNTensor_GetSize(dst.handle, &allocated) != OH_NN_SUCCESS || allocated < dst.bytes) {
+            if (!buffer || OH_NNTensor_GetSize(dst.storage->handle, &allocated) != OH_NN_SUCCESS || allocated < dst.bytes) {
                 error = "Missing or undersized device input buffer"; return false;
             }
             const auto& src = inputs[i];
-            if (src.dtype == dst.port.dtype) std::memcpy(buffer, src.data, dst.bytes);
-            else if (src.dtype == DType::F32 && dst.port.dtype == DType::F16) {
-                auto* target = static_cast<uint16_t*>(buffer); auto* values = static_cast<const float*>(src.data);
-                for (size_t j = 0; j < src.elements; ++j) {
-                    target[j] = toHalf(values[j]);
-                    if (!std::isfinite(values[j]) || (target[j] & 0x7fff) == 0x7c00) {
-                        error = "Device FP16 input overflow: " + dst.port.name; return false;
-                    }
-                }
-            } else if (src.dtype == DType::F16 && dst.port.dtype == DType::F32) {
-                auto* target = static_cast<float*>(buffer); auto* values = static_cast<const uint16_t*>(src.data);
-                for (size_t j = 0; j < src.elements; ++j) target[j] = fromHalf(values[j]);
-            } else { error = "Integer device dtype differs from compiled interface"; return false; }
+            size_t written = 0;
+            if (!syncInput(src, g.inputs[i], dst.port.dtype, buffer, dst.persistent && options.incrementalKv,
+                           dst.storage->sync, written, error)) return false;
+            if (src.cacheEpoch) { kvWritten += written; kvFull += dst.bytes; }
         }
+        double copyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyBegin).count();
         std::vector<NN_Tensor*> in, out;
-        for (auto& t : device->inputs) in.push_back(t.handle);
-        for (auto& t : device->outputs) out.push_back(t.handle);
+        for (auto& t : device->inputs) in.push_back(t.storage->handle);
+        for (auto& t : device->outputs) out.push_back(t.storage->handle);
+        auto runBegin = std::chrono::steady_clock::now();
         auto ret = OH_NNExecutor_RunSync(device->executor, in.data(), in.size(), out.data(), out.size());
-        if (ret != OH_NN_SUCCESS) { error = "NNRT RunSync returned " + std::to_string(int(ret)); return false; }
+        double runMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - runBegin).count();
+        if (ret != OH_NN_SUCCESS) {
+            for (auto& t : device->inputs) t.storage->sync = {};
+            error = "NNRT RunSync returned " + std::to_string(int(ret)); return false;
+        }
         outputs.clear();
         for (size_t index : device->outputMap) {
             auto& src = device->outputs[index];
-            const void* buffer = OH_NNTensor_GetDataBuffer(src.handle);
+            const void* buffer = OH_NNTensor_GetDataBuffer(src.storage->handle);
             size_t allocated = 0;
-            if (!buffer || OH_NNTensor_GetSize(src.handle, &allocated) != OH_NN_SUCCESS || allocated < src.bytes) {
+            if (!buffer || OH_NNTensor_GetSize(src.storage->handle, &allocated) != OH_NN_SUCCESS || allocated < src.bytes) {
                 error = "Missing or undersized device output buffer"; return false;
             }
             outputs.emplace_back(src.port.elements()); auto& values = outputs.back();
@@ -150,15 +167,45 @@ public:
                 for (size_t j = 0; j < values.size(); ++j) values[j] = fromHalf(raw[j]);
             } else { error = "Unsupported integer output boundary"; return false; }
         }
+        if (log) log("[FULL_NPU] graph=" + g.name + " level=run_timing input_copy_ms=" + std::to_string(copyMs) +
+                     " run_sync_ms=" + std::to_string(runMs) + " kv_copied_bytes=" + std::to_string(kvWritten) +
+                     " kv_full_bytes=" + std::to_string(kvFull) + " persistent_kv_bytes=" + std::to_string(kvBytes));
         return true;
     }
 private:
     Log log;
+    BackendOptions options;
+    int effectiveGraphs = 1; // A standalone backend remains conservative until configured.
+    size_t effectiveKvBytes = 0, kvBytes = 0;
+    uint64_t clock = 0;
     std::map<std::string, std::unique_ptr<DeviceGraph>> resident;
+    std::map<std::string, std::shared_ptr<TensorStorage>> kvBuffers;
 
-    DeviceGraph* load(const Graph& g, std::string& error) {
+    int priority(const Graph& g) const {
+        if (g.name == "lm_head") return 100000;
+        if (g.name.find("llm_decode_") == 0 || g.name.find("llm_prefill_") == 0) return 10000 - g.start;
+        return 0;
+    }
+    size_t residentBytes() const {
+        size_t bytes = 0;
+        for (const auto& item : resident) bytes += item.second->modelBytes;
+        return bytes;
+    }
+    bool backoff(const Graph& g, const std::string& reason) {
+        if (resident.empty() && kvBuffers.empty()) return false;
+        if (log) log("[FULL_NPU] graph=" + g.name + " level=cache_backoff reason=" + reason +
+                     " max_graphs=1 persistent_kv_bytes=0; retrying_after_release");
+        release(); effectiveGraphs = 1; effectiveKvBytes = 0;
+        return true;
+    }
+
+    DeviceGraph* load(const Graph& g, std::string& error, bool cacheKv = false) {
         auto previous = resident.find(g.name);
-        if (previous != resident.end()) return previous->second.get();
+        if (previous != resident.end()) {
+            previous->second->used = ++clock;
+            if (log) log("[FULL_NPU] graph=" + g.name + " level=cache_hit resident_models=" + std::to_string(resident.size()));
+            return previous->second.get();
+        }
         auto trace = [&](const std::string& text) { if (log) log("[FULL_NPU] graph=" + g.name + " " + text); };
         auto begin = std::chrono::steady_clock::now();
         struct stat fileInfo {};
@@ -167,17 +214,25 @@ private:
             trace("level=error " + error);
             return nullptr;
         }
-        // All executions are synchronous and outputs/KV are host-owned.
-        // Bound device residency to one graph, including across LLM stages.
-        // Evict BEFORE building the next model: Build may succeed while
-        // executor preparation fails with several earlier models resident.
-        for (const auto& item : resident)
-            trace("level=resident_evict previous_graph=" + item.first + " policy=single_graph");
-        release();
+        if (size_t(fileInfo.st_size) > options.residentModelBytes) {
+            error = "Offline graph exceeds the configured model-file budget: " + g.path;
+            trace("level=error " + error); return nullptr;
+        }
+        // Reserve room before Build. Keep frequently reused LLM stages/head;
+        // a pure LRU cache thrashes on a decoder cycle larger than its budget.
+        while (!resident.empty() && (resident.size() >= size_t(effectiveGraphs) ||
+               residentBytes() + size_t(fileInfo.st_size) > options.residentModelBytes)) {
+            auto victim = std::min_element(resident.begin(), resident.end(), [](const auto& a, const auto& b) {
+                return a.second->priority != b.second->priority ? a.second->priority < b.second->priority :
+                       a.second->used < b.second->used;
+            });
+            trace("level=resident_evict previous_graph=" + victim->first + " policy=bounded_priority");
+            resident.erase(victim);
+        }
         const char* version = HMS_HiAI_GetVersion();
         trace("level=load_begin path=" + g.path + " file_bytes=" + std::to_string(fileInfo.st_size) +
               " hiai_version=" + (version ? version : "unavailable") +
-              " resident_models=0 resident_policy=single_graph" + resourceSnapshot());
+              " resident_models=" + std::to_string(resident.size()) + " resident_policy=bounded_priority" + resourceSnapshot());
         auto compatibility = HMS_HiAICompatibility_CheckFromFile(g.path.c_str());
         trace("level=load_step step=HMS_HiAICompatibility_CheckFromFile result=" + std::to_string(int(compatibility)));
         if (compatibility != HIAI_COMPATIBILITY_COMPATIBLE) {
@@ -227,19 +282,25 @@ private:
         }
         if (ret != OH_NN_SUCCESS) {
             error = "step=" + std::string(step) + " ret=" + returnCode(ret) + " path=" + g.path;
-            trace("level=error " + error + resourceSnapshot());
             OH_NNCompilation_Destroy(&compilation);
+            if (std::string(step) == "OH_NNCompilation_Build" &&
+                (ret == OH_NN_FAILED || ret == OH_NN_MEMORY_ERROR) && backoff(g, error)) {
+                error.clear(); return load(g, error, cacheKv);
+            }
+            trace("level=error " + error + resourceSnapshot());
             return nullptr;
         }
         std::unique_ptr<DeviceGraph> device(new DeviceGraph);
-        trace("level=load_step step=OH_NNExecutor_Construct state=begin resident_models=0" + resourceSnapshot());
+        trace("level=load_step step=OH_NNExecutor_Construct state=begin resident_models=" +
+              std::to_string(resident.size()) + resourceSnapshot());
         device->executor = OH_NNExecutor_Construct(compilation);
         OH_NNCompilation_Destroy(&compilation);
         trace(std::string("level=load_step step=OH_NNExecutor_Construct result=") +
               (device->executor ? "success" : "nullptr"));
         if (!device->executor) {
             error = "step=OH_NNExecutor_Construct result=nullptr path=" + g.path;
-            trace("level=error " + error + " resident_models=0" + resourceSnapshot());
+            if (backoff(g, error)) { error.clear(); return load(g, error, cacheKv); }
+            trace("level=error " + error + " resident_models=" + std::to_string(resident.size()) + resourceSnapshot());
             return nullptr;
         }
         for (bool input : {true, false}) {
@@ -264,9 +325,40 @@ private:
                     else valid = false;
                     valid = valid && tensor.port.elements() && bytes == tensor.port.elements() * elementSize(tensor.port.dtype);
                 }
-                if (valid) tensor.handle = OH_NNTensor_Create(deviceId, desc);
+                if (valid) {
+                    std::string cacheKey;
+                    if (input && cacheKv && effectiveKvBytes) {
+                        OH_NN_Format format{};
+                        bool knownFormat = OH_NNTensorDesc_GetFormat(desc, &format) == OH_NN_SUCCESS;
+                        for (const auto& logical : g.inputs) {
+                            const auto& name = logical.name;
+                            bool kv = name.find("past_key_") == 0 || name.find("past_value_") == 0 ||
+                                      name.find("sink_key_") == 0 || name.find("sink_value_") == 0 ||
+                                      name.find("recent_key_") == 0 || name.find("recent_value_") == 0;
+                            if (kv && knownFormat && logical.shape.size() == 4 && named(tensor.port.name, name)) {
+                                auto canonical = tensor.port; canonical.name = name;
+                                cacheKey = std::to_string(deviceId) + " format=" + std::to_string(int(format)) + " " + description(canonical);
+                                break;
+                            }
+                        }
+                        auto found = kvBuffers.find(cacheKey);
+                        if (found != kvBuffers.end()) { tensor.storage = found->second; tensor.persistent = true; }
+                    }
+                    if (!tensor.storage) {
+                        tensor.storage = std::make_shared<TensorStorage>();
+                        tensor.storage->handle = OH_NNTensor_Create(deviceId, desc);
+                        if (tensor.storage->handle && !cacheKey.empty() && bytes <= effectiveKvBytes - kvBytes) {
+                            kvBuffers[cacheKey] = tensor.storage; kvBytes += bytes; tensor.persistent = true;
+                        }
+                    }
+                }
                 if (desc) OH_NNTensorDesc_Destroy(&desc);
-                if (!valid || !tensor.handle) { error = "Invalid device tensor descriptor/allocation"; return nullptr; }
+                if (!valid || !tensor.storage || !tensor.storage->handle) {
+                    error = "Invalid device tensor descriptor/allocation";
+                    device.reset();
+                    if (valid && backoff(g, error)) { error.clear(); return load(g, error, cacheKv); }
+                    return nullptr;
+                }
                 tensor.bytes = bytes; tensors.push_back(tensor);
                 trace(std::string("level=tensor_desc direction=") + (input ? "input " : "output ") + description(tensor.port) + " bytes=" + std::to_string(bytes));
             }
@@ -278,6 +370,7 @@ private:
             !bindPorts(g.outputs, outputPorts, g.aliases, device->outputMap, error)) return nullptr;
         trace("level=graph_ready cpu_fallback=disabled load_ms=" + std::to_string(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()));
+        device->modelBytes = size_t(fileInfo.st_size); device->used = ++clock; device->priority = priority(g);
         auto* result = device.get(); resident[g.name] = std::move(device); return result;
     }
 };

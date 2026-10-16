@@ -1,11 +1,15 @@
 #include "FullNpuRuntime.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
 
 namespace KirinFullNpu {
+namespace {
+std::atomic<uint64_t> cacheEpoch{0};
+}
 
 size_t elementSize(DType t) { return t == DType::I8 ? 1 : t == DType::F16 ? 2 : 4; }
 size_t Port::elements() const {
@@ -68,6 +72,7 @@ Cache::Cache(const Profile& profile) : p(profile), layers(p.layers) {
     reset();
 }
 void Cache::reset() {
+    epoch = ++cacheEpoch; // Distinguish a new cache even if its allocation reuses an old address.
     length = 0;
     for (auto& l : layers) {
         std::fill(l.key.begin(), l.key.end(), 0); std::fill(l.value.begin(), l.value.end(), 0);
@@ -85,6 +90,12 @@ std::vector<View> Cache::inputs(int start, int count) const {
         result.push_back({DType::F32, l.valueScale.data(), l.valueScale.size()});
         if (p.sink) for (const auto* v : {&l.sinkKey, &l.sinkValue}) result.push_back({DType::F16, v->data(), v->size()});
         if (p.recent) for (const auto* v : {&l.recentKey, &l.recentValue}) result.push_back({DType::F16, v->data(), v->size()});
+        const size_t stride = 4 + 2 * bool(p.sink) + 2 * bool(p.recent);
+        for (size_t j = result.size() - stride; j < result.size(); ++j) {
+            result[j].cacheEpoch = epoch;
+            result[j].cacheTokens = length;
+            result[j].cacheRing = p.recent && j >= result.size() - 2;
+        }
     }
     return result;
 }

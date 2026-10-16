@@ -1,13 +1,18 @@
 [
   {
+    "path": "KvTransfer.hpp",
+    "source": "transformers/llm/export/kirin_llm_offline/runtime/KvTransfer.hpp",
+    "sha256": "e98165bd2236d56fb63db34dee097e8b800ed640755f7b92b4ca41f6fc920b0f"
+  },
+  {
     "path": "FullNpuRuntime.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuRuntime.cpp",
-    "sha256": "234ccbe911c5f6616e741347d70a94f49f2fae8ed6e2fe0c77d96d80e64461ad"
+    "sha256": "92f635e89cdf1eb61592d9aadb17aafb9722cdd3c6a5b7fe93a3b3ca726ba6f5"
   },
   {
     "path": "FullNpuCache.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuCache.cpp",
-    "sha256": "e64c76b7ca05c63c7e1594b6740d66626e6cfa1f6823ba6ab88c4326c406ca67"
+    "sha256": "f175c863f6de0a3bcefdda789af82f2319132884d2c6eeea1d814ae100097360"
   },
   {
     "path": "Utf8Stream.hpp",
@@ -32,12 +37,12 @@
   {
     "path": "NnrtBackend.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/NnrtBackend.cpp",
-    "sha256": "fb331d92398332c1917cf91bbfc6e86d7a423201e9f36531f2da5a80dc89537e"
+    "sha256": "437f53e5aff462407ddd9c4a5cb7a13ae5235117ed5e6f3ec08d9f916153f5ec"
   },
   {
     "path": "FullNpuRuntime.hpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuRuntime.hpp",
-    "sha256": "545eed54a00c67261ad0ce4c08140a5fe5a61bc5023ea0f0da976159fcaf6a40"
+    "sha256": "7e11683f16b59f377acfb9b6639c12cdb10ad3acd05360a879b89cef783b7b0c"
   },
   {
     "path": "PortBinding.hpp",

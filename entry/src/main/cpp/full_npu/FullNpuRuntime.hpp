@@ -27,6 +27,17 @@ struct View {
     DType dtype;
     const void* data;
     size_t elements;
+    // Optional append-only KV metadata; ordinary inputs leave epoch at zero.
+    uint64_t cacheEpoch = 0;
+    int cacheTokens = -1;
+    bool cacheRing = false;
+};
+
+struct BackendOptions {
+    int maxResidentGraphs = 4;
+    size_t residentModelBytes = size_t(640) << 20;
+    size_t persistentKvBytes = size_t(192) << 20;
+    bool incrementalKv = true;
 };
 
 struct Graph {
@@ -52,13 +63,17 @@ using Emit = std::function<void(const std::string&)>;
 class Backend {
 public:
     virtual ~Backend() = default;
+    virtual void configure(const BackendOptions&) {}
     virtual bool probe(const Graph& graph, std::string& error) = 0;
     virtual bool run(const Graph& graph, const std::vector<View>& inputs,
                      std::vector<std::vector<float>>& outputs, std::string& error) = 0;
     virtual void release() = 0;
+    // Phase boundary: discard model sessions, retaining reusable KV tensors.
+    virtual void releaseGraphs() { release(); }
 };
 
 struct Profile {
+    BackendOptions backend;
     int capacity = 0, prefill = 0, layers = 0, hidden = 0, heads = 0, dim = 0;
     int group = 0, recent = 0, sink = 0, imageWidth = 0, imageHeight = 0;
     int patch = 0, merge = 0, temporal = 0, visionHidden = 0, visionHeads = 0, positionSide = 0;
@@ -80,6 +95,7 @@ public:
     int length = 0;
 private:
     Profile p;
+    uint64_t epoch = 0;
     struct Layer {
         std::vector<int8_t> key, value;
         std::vector<float> keyScale, valueScale;

@@ -286,6 +286,21 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     p.patch = number(r, "patch"); p.merge = number(r, "merge"); p.temporal = number(r, "temporal");
     p.visionHidden = number(r, "vision_hidden"); p.visionHeads = number(r, "vision_heads");
     p.imageToken = number(r, "image_token"); p.padToken = number(r, "pad_token"); p.maxNewTokens = number(r, "max_new_tokens");
+    for (const char* key : {"npu_max_resident_graphs", "npu_resident_model_mib", "npu_persistent_kv_mib"}) {
+        if (r.HasMember(key) && (!r[key].IsInt() || r[key].GetInt() < 0 || r[key].GetInt() > 4096)) {
+            error = "Invalid NNRT memory option: " + std::string(key); return false;
+        }
+    }
+    if (r.HasMember("npu_max_resident_graphs")) p.backend.maxResidentGraphs = number(r, "npu_max_resident_graphs");
+    if (r.HasMember("npu_resident_model_mib")) p.backend.residentModelBytes = size_t(number(r, "npu_resident_model_mib")) << 20;
+    if (r.HasMember("npu_persistent_kv_mib")) p.backend.persistentKvBytes = size_t(number(r, "npu_persistent_kv_mib")) << 20;
+    if (r.HasMember("npu_incremental_kv")) {
+        if (!r["npu_incremental_kv"].IsBool()) { error = "Invalid npu_incremental_kv"; return false; }
+        p.backend.incrementalKv = r["npu_incremental_kv"].GetBool();
+    }
+    if (p.backend.maxResidentGraphs < 1 || p.backend.maxResidentGraphs > 16 || !p.backend.residentModelBytes) {
+        error = "Invalid NNRT residency budget"; return false;
+    }
     if (!r.HasMember("rope_theta") || !r["rope_theta"].IsNumber() || !r.HasMember("mrope_section") || !r["mrope_section"].IsArray()) {
         error = "Missing M-RoPE configuration"; return false;
     }
@@ -365,6 +380,7 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     for (const char* name : {"vision_pre", "vision_post", "embedding_prefill", "embedding_decode", "lm_head"})
         if (!s.graphs.count(name)) { error = "Missing full model component"; return false; }
     if (!validateRuntimeGraphs(p, s.graphs, s.llmPrefill, s.llmDecode, s.vision, error)) return false;
+    s.backend->configure(p.backend);
     // Probe sequentially, freeing each graph. Do not retain both LLM phases.
     // Allocate the persistent KV only after all model probes finish, leaving
     // more memory available for the driver's initial model-loading peak.
@@ -445,7 +461,7 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
         if (!s.block(ids, offset, std::min(s.p.prefill, int(ids.size()) - offset), false,
                      cos, sin, offsets, images, hidden, cancel, error)) return fail();
     double prefillMs = elapsed(begin);
-    s.backend->release(); // Drop all prefill weights/buffers before decode.
+    s.backend->releaseGraphs(); // Drop prefill models; reuse their KV tensors in decode.
     int maximum = std::min(limit < 0 ? s.p.maxNewTokens : limit, s.p.capacity - int(ids.size()));
     int generated = 0; std::string pending;
     begin = std::chrono::steady_clock::now();
