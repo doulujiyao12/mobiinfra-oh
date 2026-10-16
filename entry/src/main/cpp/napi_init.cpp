@@ -2103,7 +2103,14 @@ static void AgentStepExecute(napi_env env, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_fullNpu) {
         if (!g_agent_mode) { asyncData->success = false; asyncData->outputStr = "error: call agentPrefill first"; return; }
-        if (runFullNpuRequest(asyncData, g_fullNpuAgentPrefix + asyncData->inputStr, "AgentStepFullNpu")) ++g_agent_step;
+        if (runFullNpuRequest(asyncData, g_fullNpuAgentPrefix + asyncData->inputStr, "AgentStepFullNpu")) {
+            if (asyncData->outputStr.empty()) {
+                asyncData->success = false;
+                asyncData->outputStr = "error: empty agent response";
+            } else {
+                ++g_agent_step;
+            }
+        }
         return;
     }
 

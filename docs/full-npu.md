@@ -52,3 +52,33 @@ python transformers/llm/export/kirin_llm_offline/sync_app_runtime.py \
 ```
 
 该命令只同步 `full_npu/`，不会改 App 的旧执行器、配置入口或 `libMNN.so`。
+
+## 加载错误 `Offline NNRT build failed: 1`
+
+这份旧错误信息把设备设置、执行设备/回退选项和 Build 的失败合并成了同一句话。
+不能据此判断量化参数错误。按源码顺序第一张检查的是约 594 MiB 的
+`embedding_decode` 浮点图；实际失败图须以更新后的日志为准。
+
+更新源码后重新构建安装 App，保留现有下载的模型，开启 Debug 再加载。
+保留从 `level=probe_begin` / `level=load_begin` 到错误的整段记录：新日志包含
+图名、文件大小、HiAI 版本、各 API 返回码、以及 Build 前后内存信息。
+例如 `graph=embedding_decode step=OH_NNCompilation_Build ret=OH_NN_FAILED(1)`
+才明确表示该图在 Build 步骤失败；如果是选项设置失败，会记录对应 API。
+
+初始化增加与原 ViT 执行器一致的 NORMAL 带宽设置，KV 存储延后到图检查完成后
+分配。这些调整尚未在设备验证，不能宣称已经解决加载问题。不需要重新下载模型。
+
+## 源码复核补充（2026-10-16）
+
+全图运行时现在在调用 NNRT 前检查配置与全部图接口的一致性，包括 KV/视觉输出
+尺寸、DeepStack 和端口顺序，避免配置不一致时特征拷贝越界。流式输出补充 UTF-8
+续字节检查和结束时残留字节处理。NNRT 输入还会检查元素数及 dtype，拒绝 FP16
+溢出。Agent 若生成空响应会明确报错。
+
+LLM Op Profile 页面会按模型格式选择全图模式，直接加载原始 `config.json`，
+不再写入 CPU 预设副本。全图模型不参与 CPU 线程预设扫描；单次 Profile 的分图
+耗时需开启 Debug 并查看 Runtime Logs，没有 OMC 内部逐算子的排名。
+
+这些修正需要重新构建 App，不需要重新编译或下载模型。固定图片尺寸可能拉伸
+横图；本地聊天没有自动压缩历史，达到 2048 token 后请新建/清空聊天。
+此前 `ret=1` 仍待设备日志确认，源码检查与主机参考测试不能证明设备加载已修复。

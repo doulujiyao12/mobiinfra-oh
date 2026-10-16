@@ -75,7 +75,7 @@ struct ProfileTest {
       let stat = fs.statSync(path);
       if (stat.isFile()) {
         let lower = path.toLowerCase();
-        return stat.size > 0 && (lower.endsWith('.mnn') || lower.endsWith('.om') ||
+        return stat.size > 0 && (lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.omc') ||
           lower.endsWith('.safetensors') || lower.endsWith('.weight'));
       }
       if (!stat.isDirectory()) {
@@ -142,6 +142,15 @@ struct ProfileTest {
       fs.writeSync(file.fd, bytes.buffer);
     } finally {
       fs.closeSync(file);
+    }
+  }
+
+  private isFullNpuConfig(path: string): boolean {
+    try {
+      let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
+      return config['format'] === 'kirin_full_npu_runtime_v1';
+    } catch (e) {
+      return false;
     }
   }
 
@@ -212,9 +221,11 @@ struct ProfileTest {
   }
 
   private async loadAndProfile(configPath: string, label: string, topK: number): Promise<string> {
-    let loadRes: string = await native.loadModel(configPath);
+    let fullNpu = this.isFullNpuConfig(configPath);
+    let loadRes: string = await native.loadModel(configPath, fullNpu ? 'full_npu' : 'cpu');
     let profileRes: string = await native.profileGenerate(this.prompt, topK);
-    return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + '\n' + profileRes;
+    let note = fullNpu ? '\n全图 NPU 的分图耗时请开启 Debug 后查看 Runtime Logs；此处不提供 OMC 内部算子排名。\n' : '\n';
+    return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + note + profileRes;
   }
 
   private loadModel() {
@@ -223,7 +234,7 @@ struct ProfileTest {
     }
     this.running = true;
     this.result = 'Loading model...\n' + this.modelConfigPath;
-    native.loadModel(this.modelConfigPath)
+    native.loadModel(this.modelConfigPath, this.isFullNpuConfig(this.modelConfigPath) ? 'full_npu' : 'cpu')
       .then((res: string) => {
         this.loaded = true;
         this.result = 'loadModel: ' + res;
@@ -242,10 +253,12 @@ struct ProfileTest {
     }
     const k = Math.max(1, parseInt(this.topK || '30') || 30);
     let preset = PROFILE_CPU_PRESETS[this.selectedPresetIndex];
+    let fullNpu = this.isFullNpuConfig(this.modelConfigPath);
+    let label = fullNpu ? 'Full NPU' : this.presetSummary(preset);
     this.running = true;
-    this.result = 'Profiling ' + this.presetSummary(preset) + '...';
-    let configPath = this.writePresetConfig(this.modelConfigPath, preset);
-    this.loadAndProfile(configPath, this.presetSummary(preset), k)
+    this.result = 'Profiling ' + label + '...';
+    let configPath = fullNpu ? this.modelConfigPath : this.writePresetConfig(this.modelConfigPath, preset);
+    this.loadAndProfile(configPath, label, k)
       .then((res: string) => {
         this.loaded = true;
         this.result = res;
@@ -259,6 +272,10 @@ struct ProfileTest {
 
   private runPresetSweep() {
     if (this.running) {
+      return;
+    }
+    if (this.isFullNpuConfig(this.modelConfigPath)) {
+      this.result = 'CPU 线程预设不适用于全图 NPU，请使用单次 Profile，并开启 Debug 查看 Runtime Logs。';
       return;
     }
     const k = Math.max(1, parseInt(this.topK || '30') || 30);

@@ -8,12 +8,37 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <sstream>
+#include <sys/stat.h>
 
 namespace KirinFullNpu {
 namespace {
+std::string returnCode(OH_NN_ReturnCode ret) {
+    const char* name = ret == OH_NN_SUCCESS ? "OH_NN_SUCCESS" :
+                       ret == OH_NN_FAILED ? "OH_NN_FAILED" :
+                       ret == OH_NN_INVALID_PARAMETER ? "OH_NN_INVALID_PARAMETER" :
+                       ret == OH_NN_MEMORY_ERROR ? "OH_NN_MEMORY_ERROR" :
+                       ret == OH_NN_OPERATION_FORBIDDEN ? "OH_NN_OPERATION_FORBIDDEN" : "OH_NN_RETURN_CODE";
+    return std::string(name) + "(" + std::to_string(int(ret)) + ")";
+}
+
+std::string resourceSnapshot() {
+    std::string result;
+    for (const char* path : {"/proc/self/status", "/proc/meminfo"}) {
+        std::ifstream stream(path);
+        std::string line;
+        while (std::getline(stream, line)) {
+            for (const char* key : {"VmRSS:", "VmSize:", "MemAvailable:", "CmaFree:"}) {
+                if (line.compare(0, std::strlen(key), key) == 0) result += " " + line;
+            }
+        }
+    }
+    return result;
+}
+
 struct Tensor {
     NN_Tensor* handle = nullptr;
     Port port;
@@ -37,6 +62,14 @@ public:
     void release() override { resident.clear(); }
     bool run(const Graph& g, const std::vector<View>& inputs,
              std::vector<std::vector<float>>& outputs, std::string& error) override {
+        outputs.clear();
+        if (inputs.size() != g.inputs.size()) { error = "NNRT input count mismatch"; return false; }
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (!inputs[i].data || inputs[i].dtype != g.inputs[i].dtype || inputs[i].elements != g.inputs[i].elements()) {
+                error = "NNRT input view mismatch: " + g.inputs[i].name;
+                return false;
+            }
+        }
         auto* device = load(g, error);
         if (!device) return false;
         for (size_t i = 0; i < inputs.size(); ++i) {
@@ -52,7 +85,7 @@ public:
                 auto* target = static_cast<uint16_t*>(buffer); auto* values = static_cast<const float*>(src.data);
                 for (size_t j = 0; j < src.elements; ++j) {
                     target[j] = toHalf(values[j]);
-                    if ((target[j] & 0x7fff) == 0x7c00 && std::isfinite(values[j]) && values[j] != std::numeric_limits<float>::lowest()) {
+                    if (!std::isfinite(values[j]) || (target[j] & 0x7fff) == 0x7c00) {
                         error = "Device FP16 input overflow: " + dst.port.name; return false;
                     }
                 }
@@ -92,7 +125,17 @@ private:
         if (previous != resident.end()) return previous->second.get();
         auto trace = [&](const std::string& text) { if (log) log("[FULL_NPU] graph=" + g.name + " " + text); };
         auto begin = std::chrono::steady_clock::now();
+        struct stat fileInfo {};
+        if (stat(g.path.c_str(), &fileInfo) != 0 || !S_ISREG(fileInfo.st_mode) || fileInfo.st_size <= 0) {
+            error = "Offline graph file missing or empty: " + g.path;
+            trace("level=error " + error);
+            return nullptr;
+        }
+        const char* version = HMS_HiAI_GetVersion();
+        trace("level=load_begin path=" + g.path + " file_bytes=" + std::to_string(fileInfo.st_size) +
+              " hiai_version=" + (version ? version : "unavailable") + resourceSnapshot());
         auto compatibility = HMS_HiAICompatibility_CheckFromFile(g.path.c_str());
+        trace("level=load_step step=HMS_HiAICompatibility_CheckFromFile result=" + std::to_string(int(compatibility)));
         if (compatibility != HIAI_COMPATIBILITY_COMPATIBLE) {
             error = "Offline graph incompatible with this device: " + g.name; return nullptr;
         }
@@ -105,15 +148,41 @@ private:
                 }
             }
         if (!selected) { error = "HIAI_F NPU device not found"; return nullptr; }
+        trace("level=load_step step=select_device name=HIAI_F id=" + std::to_string(deviceId));
         OH_NNCompilation* compilation = OH_NNCompilation_ConstructWithOfflineModelFile(g.path.c_str());
         if (!compilation) { error = "Cannot construct offline model: " + g.name; return nullptr; }
+        const char* step = "OH_NNCompilation_SetDevice";
         auto ret = OH_NNCompilation_SetDevice(compilation, deviceId);
+        auto traceStep = [&](const char* name, OH_NN_ReturnCode value) {
+            trace("level=load_step step=" + std::string(name) + " ret=" + returnCode(value));
+        };
+        traceStep(step, ret);
         HiAI_ExecuteDevice order[] = {HiAI_ExecuteDevice::HIAI_EXECUTE_DEVICE_NPU};
-        if (ret == OH_NN_SUCCESS) ret = HMS_HiAIOptions_SetModelDeviceOrder(compilation, order, 1);
-        if (ret == OH_NN_SUCCESS) ret = HMS_HiAIOptions_SetFallbackMode(compilation, HIAI_FALLBACK_DISABLED);
-        if (ret == OH_NN_SUCCESS) ret = OH_NNCompilation_Build(compilation);
+        if (ret == OH_NN_SUCCESS) {
+            step = "HMS_HiAIOptions_SetModelDeviceOrder";
+            ret = HMS_HiAIOptions_SetModelDeviceOrder(compilation, order, 1);
+            traceStep(step, ret);
+        }
+        if (ret == OH_NN_SUCCESS) {
+            step = "HMS_HiAIOptions_SetFallbackMode";
+            ret = HMS_HiAIOptions_SetFallbackMode(compilation, HIAI_FALLBACK_DISABLED);
+            traceStep(step, ret);
+        }
+        if (ret == OH_NN_SUCCESS) {
+            // Match the existing working ViT executor. Bandwidth preference is
+            // advisory there too; it must not replace a Build failure/success.
+            auto bandRet = HMS_HiAIOptions_SetBandMode(compilation, HIAI_BANDMODE_NORMAL);
+            traceStep("HMS_HiAIOptions_SetBandMode_NORMAL", bandRet);
+            step = "OH_NNCompilation_Build";
+            trace("level=load_step step=" + std::string(step) + " state=begin" + resourceSnapshot());
+            ret = OH_NNCompilation_Build(compilation);
+            traceStep(step, ret);
+        }
         if (ret != OH_NN_SUCCESS) {
-            OH_NNCompilation_Destroy(&compilation); error = "Offline NNRT build failed: " + std::to_string(int(ret)); return nullptr;
+            error = "step=" + std::string(step) + " ret=" + returnCode(ret) + " path=" + g.path;
+            trace("level=error " + error + resourceSnapshot());
+            OH_NNCompilation_Destroy(&compilation);
+            return nullptr;
         }
         std::unique_ptr<DeviceGraph> device(new DeviceGraph);
         device->executor = OH_NNExecutor_Construct(compilation); OH_NNCompilation_Destroy(&compilation);

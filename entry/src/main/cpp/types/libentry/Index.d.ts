@@ -38,7 +38,7 @@ export interface LibEntryNative extends AgentLoopNativeApi {
 declare const native: LibEntryNative;
 export default native;
 
-export const loadModel: (configPath: string, executionMode?: 'cpu' | 'online' | 'offline') => Promise<string>;
+export const loadModel: (configPath: string, executionMode?: 'cpu' | 'online' | 'offline' | 'full_npu') => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
 export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
 export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;

@@ -1,4 +1,6 @@
 #include "FullNpuRuntime.hpp"
+#include "RuntimeContracts.hpp"
+#include "Utf8Stream.hpp"
 #include "tokenizer/tokenizer.hpp"
 #include "rapidjson/document.h"
 
@@ -89,16 +91,6 @@ std::string decodePiece(MNN::Transformer::Tokenizer* tokenizer, int token) {
     if (text.size() == 6 && text.substr(0, 3) == "<0x" && text[5] == '>')
         text = char(std::strtoul(text.substr(3, 2).c_str(), nullptr, 16));
     return text;
-}
-size_t completeUtf8(const std::string& s) {
-    size_t i = 0;
-    while (i < s.size()) {
-        unsigned char c = s[i];
-        size_t width = c < 128 ? 1 : (c & 224) == 192 ? 2 : (c & 240) == 224 ? 3 : (c & 248) == 240 ? 4 : 1;
-        if (i + width > s.size()) break;
-        i += width;
-    }
-    return i;
 }
 } // namespace
 
@@ -274,6 +266,11 @@ std::string Runtime::chatTemplate(const std::vector<std::pair<std::string, std::
 
 bool Runtime::load(const std::string& configPath, std::string& error) {
     auto& s = *impl;
+    reset();
+    s.cache.reset(); s.tokenizer.reset(); s.graphs.clear(); s.p = Profile{};
+    s.llmPrefill.clear(); s.llmDecode.clear(); s.vision.clear();
+    s.indices.clear(); s.weights.clear(); s.visionCos.clear(); s.visionSin.clear();
+    error.clear();
     rapidjson::Document doc;
     doc.Parse(readText(configPath).c_str());
     if (doc.HasParseError() || !doc.IsObject() || stringField(doc, "format") != "kirin_full_npu_runtime_v1") {
@@ -293,13 +290,19 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
         error = "Missing M-RoPE configuration"; return false;
     }
     p.ropeTheta = r["rope_theta"].GetFloat();
-    for (const auto& v : r["mrope_section"].GetArray()) { if (!v.IsInt()) return false; p.mrope.push_back(v.GetInt()); }
+    for (const auto& v : r["mrope_section"].GetArray()) {
+        if (!v.IsInt() || v.GetInt() < 0 || v.GetInt() > p.dim / 2) { error = "Invalid M-RoPE section"; return false; }
+        p.mrope.push_back(v.GetInt());
+    }
     if (p.capacity < 1 || p.capacity > 32768 || p.prefill < 1 || p.prefill > p.capacity || p.layers < 1 || p.layers > 128 ||
         p.hidden < 1 || p.hidden > 16384 || p.heads < 1 || p.heads > 128 || p.dim < 2 || p.dim > 512 || p.dim % 2 ||
         p.group < 1 || p.dim % p.group || p.sink < 0 || p.sink > p.capacity || p.recent < 0 || p.recent > p.capacity ||
-        p.patch < 1 || p.merge < 1 || p.temporal != 2 || p.imageWidth < 1 || p.imageHeight < 1 ||
+        p.patch < 1 || p.patch > 128 || p.merge < 1 || p.merge > 16 || p.temporal != 2 || p.imageWidth < 1 || p.imageHeight < 1 ||
         p.imageWidth > 4096 || p.imageHeight > 4096 || p.imageWidth % (p.patch * p.merge) || p.imageHeight % (p.patch * p.merge) ||
-        p.mrope.size() != 3 || p.ropeTheta <= 0 || p.maxNewTokens < 1 ||
+        p.visionHidden < 1 || p.visionHidden > 16384 || p.visionHeads < 1 || p.visionHeads > 128 ||
+        p.visionHidden % p.visionHeads || (p.imageWidth / p.patch) * (p.imageHeight / p.patch) > 4096 ||
+        p.mrope.size() != 3 || !std::isfinite(p.ropeTheta) || p.ropeTheta <= 0 || p.maxNewTokens < 1 ||
+        p.padToken < 0 || p.imageToken < 0 ||
         size_t(p.layers) * p.heads * p.capacity * p.dim > (size_t(1) << 29)) {
         error = "Invalid or excessive static runtime dimensions"; return false;
     }
@@ -352,12 +355,21 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     }
     for (const char* name : {"vision_pre", "vision_post", "embedding_prefill", "embedding_decode", "lm_head"})
         if (!s.graphs.count(name)) { error = "Missing full model component"; return false; }
-    s.cache.reset(new Cache(p));
+    if (!validateRuntimeGraphs(p, s.graphs, s.llmPrefill, s.llmDecode, s.vision, error)) return false;
     // Probe sequentially, freeing each graph. Do not retain both LLM phases.
+    // Allocate the persistent KV only after all model probes finish, leaving
+    // more memory available for the driver's initial model-loading peak.
     for (const auto& item : s.graphs) {
-        if (!s.backend->probe(item.second, error)) { s.backend->release(); return false; }
+        s.trace("level=probe_begin graph=" + item.first);
+        if (!s.backend->probe(item.second, error)) {
+            error = "graph=" + item.first + " " + error;
+            s.trace("level=error " + error);
+            s.backend->release();
+            return false;
+        }
         s.backend->release();
     }
+    s.cache.reset(new Cache(p));
     s.trace("level=ready graphs=" + std::to_string(s.graphs.size()) + " context=" + std::to_string(p.capacity) +
             " kv_bytes=" + std::to_string(s.cache->bytes()) + " kv_dtype=int8 cpu_fallback=disabled");
     return true;
@@ -382,7 +394,9 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
             if (hwEnd == std::string::npos || hwEnd < hwStart) { error = "Malformed image size tag"; return fail(); }
             path.erase(hwStart, hwEnd + 5 - hwStart);
         }
-        if (path.empty() || paths.size() >= 8) { error = "Missing image or too many images"; return fail(); }
+        if (path.empty() || paths.size() >= size_t(s.p.capacity / imageTokens)) {
+            error = "Missing image or images exceed the context capacity"; return fail();
+        }
         paths.push_back(path);
         std::string placeholder = "<|vision_start|>";
         for (int i = 0; i < imageTokens; ++i) placeholder += "<|image_pad|>";
@@ -395,6 +409,11 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
     auto ids = s.tokenizer->encode(text);
     if (ids.empty() || ids.size() >= size_t(s.p.capacity)) {
         error = "Full NPU context limit exceeded (includes image and response tokens): " + std::to_string(s.p.capacity); return fail();
+    }
+    int vocabulary = s.graphs.at("lm_head").outputs[0].shape[2];
+    for (int token : ids) if (token < 0 || token >= vocabulary) {
+        error = "Tokenizer emitted an ID outside the compiled embedding vocabulary";
+        return fail();
     }
     std::vector<int> offsets;
     for (size_t i = 0; i < ids.size();) {
@@ -427,10 +446,8 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
         int token = int(std::max_element(logits[0].begin(), logits[0].end()) - logits[0].begin());
         if (s.tokenizer->is_stop(token)) break;
         pending += decodePiece(s.tokenizer.get(), token); ++generated;
-        size_t complete = completeUtf8(pending);
-        if (complete) {
-            auto piece = pending.substr(0, complete); output += piece; if (emit) emit(piece); pending.erase(0, complete);
-        }
+        auto piece = takeUtf8(pending);
+        output += piece; if (emit && !piece.empty()) emit(piece);
         if (cancel && cancel()) { error = "cancelled"; return fail(); }
         if (step + 1 >= maximum) break;
         std::vector<int> single{token};
@@ -442,6 +459,8 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
         }
         if (!s.block(single, 0, 1, true, cos, sin, {}, {}, hidden, cancel, error)) return fail();
     }
+    auto tail = takeUtf8(pending, true);
+    output += tail; if (emit && !tail.empty()) emit(tail);
     s.trace("level=request_complete prompt_tokens=" + std::to_string(ids.size()) + " decode_tokens=" + std::to_string(generated) +
             " vision_ms=" + std::to_string(visionMs) + " prefill_ms=" + std::to_string(prefillMs) +
             " decode_ms=" + std::to_string(elapsed(begin)) + " kv_length=" + std::to_string(s.cache->length));

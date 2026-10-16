@@ -2,7 +2,7 @@
   {
     "path": "FullNpuRuntime.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuRuntime.cpp",
-    "sha256": "40aba59377158a74faabc469986f9395ca9fe73f2e3046bb583df1fb173d7995"
+    "sha256": "c29bf025253f655f2be6a50c3d727a3801534ff6aa8450ac28c3bf5c767712f8"
   },
   {
     "path": "FullNpuCache.cpp",
@@ -10,14 +10,24 @@
     "sha256": "e64c76b7ca05c63c7e1594b6740d66626e6cfa1f6823ba6ab88c4326c406ca67"
   },
   {
+    "path": "Utf8Stream.hpp",
+    "source": "transformers/llm/export/kirin_llm_offline/runtime/Utf8Stream.hpp",
+    "sha256": "9e145fec6079e12de83e7ff50d06049a6110a8f5ce9b85db06393b32ff48d0b0"
+  },
+  {
     "path": "NnrtBackend.hpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/NnrtBackend.hpp",
     "sha256": "5527e5733759baad254e2c4e7f0ff6c785f39279ad409ec953a3ed88f535d763"
   },
   {
+    "path": "RuntimeContracts.hpp",
+    "source": "transformers/llm/export/kirin_llm_offline/runtime/RuntimeContracts.hpp",
+    "sha256": "a8ecd6c0f6bfba7452b192d8d7352e9204313cf1f32600f39af9fef180a99bd7"
+  },
+  {
     "path": "NnrtBackend.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/NnrtBackend.cpp",
-    "sha256": "347684b20e4579426d2caafa52b1d95f18ad5b1dda23bc7f56bcbb4b7adad432"
+    "sha256": "69d777f60052eebb6ae42ff795a6fc83cca99e35dd7dd57125ce63c4de7aea90"
   },
   {
     "path": "FullNpuRuntime.hpp",
