@@ -6,7 +6,9 @@
 模型仓库：
 https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_kv8_embsplit
 
-此为 embedding 分片修复候选，必须使用包含 `embedding_slices` 支持的新 App。
+此为 embedding 分片包，必须使用包含 `embedding_slices` 支持的新 App。
+用户最新日志确认全部图逐图加载通过，实际推理在 `llm_prefill_5` 创建 executor
+失败；下文说明单图常驻修正及复验步骤。
 原始未分片全图包在用户设备的第一张 `embedding_decode` Build 时失败。
 
 在设置的模型下载地址中清空旧内容，填写上述仓库地址，下载到独立模型目录。
@@ -28,9 +30,9 @@ https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_
 
 模型结构的 embedding、ViT、LLM、LM head 全部由离线 NPU 图计算；CPU 负责
 tokenizer、图片解码/缩放、位置/mask、KV 编码和贪心采样。完整模型被拆为静态
-图调度，prefill 每块 128 token，decode 每次 1 token。先释放视觉图，再运行
-prefill；切换 decode 前释放 prefill，避免两阶段权重同时常驻。实际 NPU 内存
-峰值、速度和设备 tensor 接口仍需要真机日志确认。
+图调度，prefill 每块 128 token，decode 每次 1 token。当前 NNRT 后端最多保留
+一张图，切换图前释放旧图及其设备缓冲区，宿主 KV/结果独立保存。代价是 decode
+每步重新加载各段模型，速度待测；不改变 OMC、量化参数或上下文容量。
 
 权重为 W4A16/group64/GPTQ；KV 为 INT8/group32、FP32 scale，首 4 和最近 128
 token 另存 FP16。KV 常驻存储约 140.44 MiB。固定最大上下文 **2048 token**，
@@ -44,7 +46,7 @@ prefill，不复用或擦写旧 prefix KV。保留了旧模式的 Agent KV 复�
 主机 C++ 调度已与相同冻结权重的 ONNX 参考检查 token、M-RoPE、mask、DeepStack
 和实际 INT8/FP16 KV 输入；短文本和图片通过。JPEG 解码/缩放与 PIL 有小差异。
 原 INT8 KV 长上下文相对 L2 门槛 0.05 **没有通过**，发布包保留原始失败报告。
-这次没有真机测试，不能把主机检查或编译成功当作设备精度已对齐。
+用户真机已通过逐图加载并执行部分 prefill，尚未完成回答；不能据此认定设备精度已对齐。
 
 源文件位于 `entry/src/main/cpp/full_npu/`；来自 MobiInfer 的同步清单在
 `sources.json`。修改 MobiInfer 的 portable runtime 后可运行：
@@ -97,13 +99,13 @@ OpenHarmony NNRT 公开源码在模型超过 200 MiB 时会进入额外鉴权路
 没有修改、跳过系统鉴权，也没有启用 CPU embedding fallback。
 
 修复候选将原 embedding 表按 hidden 切成 8 片，prefill/decode 各 8 张 NPU
-Gather 图，每张约 74.20 MiB。CPU 按行拼接结果，每片用后单独释放，保留已加载
-的 decoder/head。其余 23 张 OMC 和量化参数不变，最大图为约 177.44 MiB 的
+Gather 图，每张约 74.20 MiB。CPU 按行拼接结果，每片用后单独释放；当前修正
+同时限制 decoder/head 的常驻数量。其余 23 张 OMC 和量化参数不变，最大图为约 177.44 MiB 的
 LM head。代价是每个 decode token 会多次加载 embedding 子图，设备速度待测。
 
 每片全部权重核对一致、Torch/ORT 相对 L2 为 0，16 图均编译成纯 NPU；新包
 短文本/图片主机回放通过 4484 项张量检查，5 组 C++ 测试通过。主机测试使用
-NNRT 调用替身，设备加载是否解决、精度和性能均未确认；本机未构建 HAP。
+NNRT 调用替身；用户已确认逐图加载通过，完整执行、精度和性能仍未确认；本机未构建 HAP。
 
 这次必须同时重建安装 App，并从页首的新仓库下载到独立目录。不要覆盖旧包的
 已下载文件；只更新 App 再打开旧包仍会加载原来的 594 MiB 图。无需更换 libMNN。
@@ -113,3 +115,32 @@ NNRT 调用替身，设备加载是否解决、精度和性能均未确认；本
 `AuthenticateModel`、`Authentication failed`、`CheckExceedRamLimit`、内存分配失败。
 
 本次没有操控手机，原有 CPU/在线/ViT 离线执行分支不变。
+
+
+## 推理时 `llm_prefill_5: Cannot construct NNRT executor`
+
+最新用户日志中全部 39 张 OMC 逐图检查成功；实际请求的 ViT、embedding、
+`llm_prefill_0` 至 `_4` 执行成功，第五号图的 Build 也成功，但 executor 创建失败。
+这与之前大 embedding 在 Build 失败不同，当前证据指向多图常驻的资源压力或
+服务调度限制，具体系统原因还需 HiLog。App RSS/CmaFree 不能代表全部 NPU 占用。
+
+已修正 `NnrtBackend.cpp`：切换图时先释放上一张图的设备 tensors/executor，
+再 Build/创建新图，prefill/decode/embedding/head 都最多常驻一张。宿主 KV 和
+中间输出保留，W4A16、KV8 和模型文件均未改变。此方式会增加模型加载耗时。
+新增 `resident_evict`、`resident_policy=single_graph` 和
+`step=OH_NNExecutor_Construct result=success/nullptr` 日志；失败记录资源快照。
+
+主机 5 组 C++ 测试通过，新增 NNRT 替身测试在只允许一个 executor 的条件下
+连续完成两块 prefill、四步 decode（每块 7 段）；也检查创建失败清理与重试。
+这不代表真实 SDK 或真机已经修复。本机没有构建 HAP，也没有操控手机。
+
+这次只需重新编译安装 App，继续选择已下载的 `embsplit` 模型，无需重新下载。
+
+1. 完全关闭旧 App，再启动新构建的 App，开启 Debug，选择全图 NPU 并加载模型。
+2. 新建聊天，先测短文本；再新建聊天，测试图片问题，等待完整回答。
+3. 日志中切换 LLM 图前应有 `resident_evict`；加载时应有
+   `resident_models=0 resident_policy=single_graph`，随后 executor 创建成功。
+4. 检查 `llm_prefill_5` 和 `_6` 的 `exec_ok`、图片请求后续 `past=128` 的 prefill、
+   decode 和 `lm_head`，最终应出现 `level=request_complete`，`npu_error=0`。
+5. 如果仍失败，导出完整 App Runtime Logs，并保留同一时刻不按 App/PID 过滤的
+   NNRT、HiAI、dllite 系统日志，重点关注 executor 创建/准备、调度及内存分配失败。

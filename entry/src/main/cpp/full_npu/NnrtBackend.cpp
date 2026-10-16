@@ -90,8 +90,8 @@ public:
             for (size_t i = 0; i < slices.size(); ++i) {
                 std::vector<std::vector<float>> partOutputs;
                 bool ok = run(slices[i], inputs, partOutputs, error);
-                // Release only this Gather model. Keep decoder/head residents;
-                // clearing all models here would reload the LLM every token.
+                // The host owns the copied output, so the Gather model and
+                // its device buffers are no longer needed for concatenation.
                 resident.erase(slices[i].name);
                 if (!ok) { error = slices[i].name + ": " + error; return false; }
                 const int width = slices[i].outputs[0].shape[2];
@@ -167,9 +167,17 @@ private:
             trace("level=error " + error);
             return nullptr;
         }
+        // All executions are synchronous and outputs/KV are host-owned.
+        // Bound device residency to one graph, including across LLM stages.
+        // Evict BEFORE building the next model: Build may succeed while
+        // executor preparation fails with several earlier models resident.
+        for (const auto& item : resident)
+            trace("level=resident_evict previous_graph=" + item.first + " policy=single_graph");
+        release();
         const char* version = HMS_HiAI_GetVersion();
         trace("level=load_begin path=" + g.path + " file_bytes=" + std::to_string(fileInfo.st_size) +
-              " hiai_version=" + (version ? version : "unavailable") + resourceSnapshot());
+              " hiai_version=" + (version ? version : "unavailable") +
+              " resident_models=0 resident_policy=single_graph" + resourceSnapshot());
         auto compatibility = HMS_HiAICompatibility_CheckFromFile(g.path.c_str());
         trace("level=load_step step=HMS_HiAICompatibility_CheckFromFile result=" + std::to_string(int(compatibility)));
         if (compatibility != HIAI_COMPATIBILITY_COMPATIBLE) {
@@ -224,8 +232,16 @@ private:
             return nullptr;
         }
         std::unique_ptr<DeviceGraph> device(new DeviceGraph);
-        device->executor = OH_NNExecutor_Construct(compilation); OH_NNCompilation_Destroy(&compilation);
-        if (!device->executor) { error = "Cannot construct NNRT executor"; return nullptr; }
+        trace("level=load_step step=OH_NNExecutor_Construct state=begin resident_models=0" + resourceSnapshot());
+        device->executor = OH_NNExecutor_Construct(compilation);
+        OH_NNCompilation_Destroy(&compilation);
+        trace(std::string("level=load_step step=OH_NNExecutor_Construct result=") +
+              (device->executor ? "success" : "nullptr"));
+        if (!device->executor) {
+            error = "step=OH_NNExecutor_Construct result=nullptr path=" + g.path;
+            trace("level=error " + error + " resident_models=0" + resourceSnapshot());
+            return nullptr;
+        }
         for (bool input : {true, false}) {
             size_t count = 0;
             ret = input ? OH_NNExecutor_GetInputCount(device->executor, &count) : OH_NNExecutor_GetOutputCount(device->executor, &count);
