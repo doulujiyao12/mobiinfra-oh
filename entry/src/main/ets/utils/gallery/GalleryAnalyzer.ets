@@ -6,6 +6,7 @@ import { DebugSettings } from '../DebugSettings';
 import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryStorage } from './GalleryStorage';
+import { GalleryImageStore } from './GalleryImageStore';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import { GalleryExifUtils } from './GalleryExifUtils';
 import { GalleryReverseGeocoder } from './GalleryReverseGeocoder';
@@ -124,10 +125,32 @@ export class GalleryAnalyzer {
       if (options && options.shouldPause && options.shouldPause()) {
         return false;
       }
+      if (options && options.prepareInput) {
+        try { await options.prepareInput(input); }
+        catch (e) {
+          // A paused transfer remains queued; a read failure is retriable without creating a bogus analysis result.
+          if (options.shouldPause && options.shouldPause()) { return false; }
+          let message = (e as Error).message;
+          this.logError('input preparation failed: ' + message);
+          progress.processed += 1;
+          progress.failed += 1;
+          progress.pending = Math.max(0, progress.selected - progress.processed);
+          if (options.onPrepareError) { options.onPrepareError(input, message); }
+          onProgress(progress);
+          return true;
+        }
+      }
+      if (options && options.shouldPause && options.shouldPause()) { return false; }
       progress.current = '分析第 ' + (index + 1) + '/' + inputs.length + ' 张';
       onProgress(progress);
       let outcome = await this.analyzeOne(input, config, gates, progress, onProgress);
-      let result = outcome.result;
+      // Persist the thumbnail and original reference before removing our full-size staging copy.
+      // Cache hits need this too, so legacy results are repaired without calling the model again.
+      this.logInfo('cache result start id=' + outcome.result.id);
+      let cacheStartedAt = new Date().getTime();
+      let result = await GalleryImageStore.persist(this.filesDir, input, outcome.result);
+      this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
+      outcome.result = result;
       results.push(result);
       if (outcome.cached) {
         // 缓存命中代表该图片已有可用分析结果，仍应计入已完成；只有关键词预筛命中时才计入跳过。
@@ -145,10 +168,7 @@ export class GalleryAnalyzer {
         }
         return true;
       }
-      this.logInfo('cache result start id=' + result.id);
-      let cacheStartedAt = new Date().getTime();
-      let normalized = GalleryStorage.writeResult(this.filesDir, result);
-      this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
+      let normalized = result;
       progress.processed += 1;
       progress.pending = Math.max(0, progress.selected - progress.processed);
       onProgress(progress);
@@ -280,9 +300,21 @@ export class GalleryAnalyzer {
           };
         }
       }
-      pixelMap = await imageSource.createPixelMap();
+      if (input.hdcSourcePath !== undefined) {
+        // Decode large originals directly to analysis resolution instead of allocating a full-resolution bitmap first.
+        let info = await imageSource.getImageInfo();
+        if (info.size.width <= 0 || info.size.height <= 0) { throw new Error('HDC 原图尺寸无效'); }
+        let factor = Math.min(Math.max(0.1, Math.min(1, config.imageScale)),
+          Math.sqrt(8 * 1024 * 1024 / (info.size.width * info.size.height)));
+        let width = Math.max(1, Math.floor(info.size.width * factor));
+        let height = Math.max(1, Math.floor(info.size.height * factor));
+        pixelMap = await imageSource.createPixelMap({ desiredSize: { width: width, height: height } });
+        this.logInfo('HDC decode desiredSize=' + width + 'x' + height + ' original=' + info.size.width + 'x' + info.size.height);
+      } else {
+        pixelMap = await imageSource.createPixelMap();
+        await this.scaleForAnalysis(pixelMap, config.imageScale, id);
+      }
       this.logInfo('decode done id=' + id + ' elapsedMs=' + this.elapsed(decodeStartedAt));
-      await this.scaleForAnalysis(pixelMap, config.imageScale, id);
       locationRecord = await this.resolveLocationForCoordinates(resultLatitude, resultLongitude, config, id);
 
       await gates.ocr.acquire();

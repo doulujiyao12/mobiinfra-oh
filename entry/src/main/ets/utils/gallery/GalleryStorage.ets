@@ -273,7 +273,10 @@ export class GalleryStorage {
     GalleryStorage.ensureWorkspace(filesDir);
     let normalized = GalleryStorage.normalizeResult(result);
     GalleryStorage.ensureDirectory(GalleryStorage.itemDateDir(filesDir, normalized.date));
-    GalleryStorage.writeText(GalleryStorage.itemPath(filesDir, normalized), ArkJSON.stringify(normalized, null, 2));
+    // Commit references atomically before the image store can discard a full-size cache file.
+    let path = GalleryStorage.itemPath(filesDir, normalized);
+    GalleryStorage.writeText(path + '.tmp', ArkJSON.stringify(normalized, null, 2));
+    fs.renameSync(path + '.tmp', path);
     return normalized;
   }
 
@@ -405,6 +408,10 @@ export class GalleryStorage {
       id: result.id,
       uri: result.uri,
       thumbnailUri: result.thumbnailUri ? result.thumbnailUri : '',
+      hdcSourcePath: result.hdcSourcePath,
+      hdcSourceSize: result.hdcSourceSize,
+      hdcModifiedAt: result.hdcModifiedAt,
+      hdcChecksum: result.hdcChecksum,
       title: result.title,
       category: category,
       summary: result.summary,

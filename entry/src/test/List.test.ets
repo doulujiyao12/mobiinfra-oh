@@ -7,6 +7,7 @@ import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import workflowCancellationUnitTest from './WorkflowCancellationUnit.test';
 import collectionReminderUnitTest from './CollectionReminderUnit.test';
+import galleryHdcPolicyUnitTest from './GalleryHdcPolicyUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
@@ -60,6 +61,7 @@ export default function testsuite() {
   workflowDateContextUnitTest();
   workflowCancellationUnitTest();
   collectionReminderUnitTest();
+  galleryHdcPolicyUnitTest();
   mainTabConfigUnitTest();
   firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();
