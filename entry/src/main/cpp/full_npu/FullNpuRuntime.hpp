@@ -34,6 +34,13 @@ struct Graph {
     std::vector<Port> inputs, outputs;
     std::map<std::string, std::string> aliases;
     int start = 0, end = 0;
+    struct EmbeddingSlice {
+        std::string path;
+        int begin = 0, end = 0;
+    };
+    // Optional physical Gather models partitioned along the hidden dimension.
+    // Their outputs concatenate to this graph's original logical interface.
+    std::vector<EmbeddingSlice> embeddingSlices;
 };
 
 using Log = std::function<void(const std::string&)>;

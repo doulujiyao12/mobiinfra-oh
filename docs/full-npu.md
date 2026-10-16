@@ -4,10 +4,13 @@
 包含本次源码的 App；`libMNN.so` 不需要替换。x86_64 云端 UI 构建不执行本地推理。
 
 模型仓库：
-https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_kv8
+https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_kv8_embsplit
+
+此为 embedding 分片修复候选，必须使用包含 `embedding_slices` 支持的新 App。
+原始未分片全图包在用户设备的第一张 `embedding_decode` Build 时失败。
 
 在设置的模型下载地址中清空旧内容，填写上述仓库地址，下载到独立模型目录。
-保持原模型目录，以便切回原来的三种模式。新包约 3.18 GiB，包含 25 个 `.omc`
+保持原模型目录，以便切回原来的三种模式。新包约 3.18 GiB，包含 39 个 `.omc`
 文件、tokenizer 和静态视觉常量，不包含 CPU `.mnn` 模型。请勿混用两类模型包。
 
 1. 在 App 设置中开启 **Debug**，然后选择新下载的全图模型和 **全图 NPU**。
@@ -82,3 +85,31 @@ LLM Op Profile 页面会按模型格式选择全图模式，直接加载原始 `
 这些修正需要重新构建 App，不需要重新编译或下载模型。固定图片尺寸可能拉伸
 横图；本地聊天没有自动压缩历史，达到 2048 token 后请新建/清空聊天。
 此前 `ret=1` 仍待设备日志确认，源码检查与主机参考测试不能证明设备加载已修复。
+
+## embedding 分片加载候选
+
+用户新日志已确认：HiAI `109.636.120.010` 上，622337527 字节的
+`embedding_decode` 通过兼容性检查和全部选项设置，随后
+`OH_NNCompilation_Build` 返回 `OH_NN_FAILED(1)`。此时尚未运行 KV、LLM 或 ViT。
+
+OpenHarmony NNRT 公开源码在模型超过 200 MiB 时会进入额外鉴权路径；这提供了
+大 embedding 失败的具体线索，不能代替本机私有 HiAI 后端的系统日志。
+没有修改、跳过系统鉴权，也没有启用 CPU embedding fallback。
+
+修复候选将原 embedding 表按 hidden 切成 8 片，prefill/decode 各 8 张 NPU
+Gather 图，每张约 74.20 MiB。CPU 按行拼接结果，每片用后单独释放，保留已加载
+的 decoder/head。其余 23 张 OMC 和量化参数不变，最大图为约 177.44 MiB 的
+LM head。代价是每个 decode token 会多次加载 embedding 子图，设备速度待测。
+
+每片全部权重核对一致、Torch/ORT 相对 L2 为 0，16 图均编译成纯 NPU；新包
+短文本/图片主机回放通过 4484 项张量检查，5 组 C++ 测试通过。主机测试使用
+NNRT 调用替身，设备加载是否解决、精度和性能均未确认；本机未构建 HAP。
+
+这次必须同时重建安装 App，并从页首的新仓库下载到独立目录。不要覆盖旧包的
+已下载文件；只更新 App 再打开旧包仍会加载原来的 594 MiB 图。无需更换 libMNN。
+开启 Debug，加载日志应出现 `embedding_decode_slice_0` 到 `_7`，之后继续检查
+其余模型。若仍失败，请导出 App Runtime Logs，并在 DevEco 的 HiLog 窗口取消
+仅本 App/PID 的过滤，保留相同时间的 NNRT、HiAI、dllite 等系统日志；重点查找
+`AuthenticateModel`、`Authentication failed`、`CheckExceedRamLimit`、内存分配失败。
+
+本次没有操控手机，原有 CPU/在线/ViT 离线执行分支不变。

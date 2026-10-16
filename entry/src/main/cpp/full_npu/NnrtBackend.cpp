@@ -1,5 +1,6 @@
 #include "NnrtBackend.hpp"
 #include "PortBinding.hpp"
+#include "EmbeddingSlices.hpp"
 #include "CANNKit/hiai_helper.h"
 #include "CANNKit/hiai_options.h"
 #include "neural_network_runtime/neural_network_core.h"
@@ -58,7 +59,17 @@ struct DeviceGraph {
 class NnrtBackend final : public Backend {
 public:
     explicit NnrtBackend(Log log) : log(std::move(log)) {}
-    bool probe(const Graph& g, std::string& error) override { return load(g, error) != nullptr; }
+    bool probe(const Graph& g, std::string& error) override {
+        if (g.embeddingSlices.empty()) return load(g, error) != nullptr;
+        std::vector<Graph> slices;
+        if (!embeddingSliceGraphs(g, slices, error)) return false;
+        for (const auto& part : slices) {
+            bool ok = load(part, error) != nullptr;
+            resident.erase(part.name);
+            if (!ok) { error = part.name + ": " + error; return false; }
+        }
+        return true;
+    }
     void release() override { resident.clear(); }
     bool run(const Graph& g, const std::vector<View>& inputs,
              std::vector<std::vector<float>>& outputs, std::string& error) override {
@@ -69,6 +80,31 @@ public:
                 error = "NNRT input view mismatch: " + g.inputs[i].name;
                 return false;
             }
+        }
+        if (!g.embeddingSlices.empty()) {
+            std::vector<Graph> slices;
+            if (!embeddingSliceGraphs(g, slices, error)) return false;
+            std::vector<float> assembled(g.outputs[0].elements());
+            const int hidden = g.outputs[0].shape[2];
+            const size_t rows = assembled.size() / hidden;
+            for (size_t i = 0; i < slices.size(); ++i) {
+                std::vector<std::vector<float>> partOutputs;
+                bool ok = run(slices[i], inputs, partOutputs, error);
+                // Release only this Gather model. Keep decoder/head residents;
+                // clearing all models here would reload the LLM every token.
+                resident.erase(slices[i].name);
+                if (!ok) { error = slices[i].name + ": " + error; return false; }
+                const int width = slices[i].outputs[0].shape[2];
+                if (partOutputs.size() != 1 || partOutputs[0].size() != rows * width) {
+                    error = slices[i].name + ": embedding output size mismatch";
+                    return false;
+                }
+                for (size_t row = 0; row < rows; ++row)
+                    std::copy_n(partOutputs[0].data() + row * width, width,
+                                assembled.data() + row * hidden + g.embeddingSlices[i].begin);
+            }
+            outputs.push_back(std::move(assembled));
+            return true;
         }
         auto* device = load(g, error);
         if (!device) return false;
@@ -175,8 +211,11 @@ private:
             traceStep("HMS_HiAIOptions_SetBandMode_NORMAL", bandRet);
             step = "OH_NNCompilation_Build";
             trace("level=load_step step=" + std::string(step) + " state=begin" + resourceSnapshot());
+            auto buildBegin = std::chrono::steady_clock::now();
             ret = OH_NNCompilation_Build(compilation);
             traceStep(step, ret);
+            trace("level=load_timing step=" + std::string(step) + " elapsed_ms=" + std::to_string(
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildBegin).count()));
         }
         if (ret != OH_NN_SUCCESS) {
             error = "step=" + std::string(step) + " ret=" + returnCode(ret) + " path=" + g.path;

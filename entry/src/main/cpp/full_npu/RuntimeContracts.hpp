@@ -1,5 +1,6 @@
 #pragma once
 #include "FullNpuRuntime.hpp"
+#include "EmbeddingSlices.hpp"
 #include <algorithm>
 #include <set>
 
@@ -41,6 +42,11 @@ inline bool validateRuntimeGraphs(const Profile& p, const std::map<std::string, 
     if (graphs.size() != prefill.size() + decode.size() + vision.size() + 5) {
         error = "Unused, missing or nonconsecutive full-NPU graph";
         return false;
+    }
+    for (const auto& item : graphs) {
+        if (item.second.embeddingSlices.empty()) continue;
+        std::vector<Graph> slices;
+        if (!embeddingSliceGraphs(item.second, slices, error)) return false;
     }
     const int n = (p.imageHeight / p.patch) * (p.imageWidth / p.patch);
     const int imageTokens = n / (p.merge * p.merge);

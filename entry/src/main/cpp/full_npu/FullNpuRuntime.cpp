@@ -326,6 +326,15 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
         Graph g; g.name = stringField(value, "name"); auto path = stringField(value, "file");
         if (g.name.empty() || !safePath(path) || s.graphs.count(g.name)) { error = "Invalid graph name/path"; return false; }
         g.path = s.root + path; g.start = number(value, "layer_start"); g.end = number(value, "layer_end");
+        if (value.HasMember("embedding_slices")) {
+            if (!value["embedding_slices"].IsArray()) { error = "Invalid embedding slices"; return false; }
+            for (const auto& entry : value["embedding_slices"].GetArray()) {
+                auto relative = stringField(entry, "file");
+                if (!safePath(relative)) { error = "Unsafe embedding slice path"; return false; }
+                g.embeddingSlices.push_back({s.root + relative, number(entry, "hidden_start"), number(entry, "hidden_end")});
+            }
+            if (g.embeddingSlices.empty()) { error = "Empty embedding slices"; return false; }
+        }
         for (const char* key : {"inputs", "output_info"}) {
             if (!value.HasMember(key) || !value[key].IsArray()) { error = "Missing graph ports"; return false; }
             for (const auto& entry : value[key].GetArray()) {
