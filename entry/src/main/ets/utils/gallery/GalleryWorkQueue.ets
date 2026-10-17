@@ -20,5 +20,5 @@ export async function runGalleryWorkQueue(count: number, limit: number,
     })());
   }
   await Promise.all(workers);
-  if (failure !== null) { throw failure; }
+  if (failure !== null) { throw failure as Error; }
 }
