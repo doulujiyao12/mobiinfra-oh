@@ -7,6 +7,7 @@ import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryStorage } from './GalleryStorage';
 import { GalleryImageStore } from './GalleryImageStore';
+import { runGalleryWorkQueue } from './GalleryWorkQueue';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import { GalleryExifUtils } from './GalleryExifUtils';
 import { GalleryReverseGeocoder } from './GalleryReverseGeocoder';
@@ -120,94 +121,57 @@ export class GalleryAnalyzer {
       model: new GallerySemaphore(config.modelConcurrency)
     };
     let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency);
-    await this.runWithLimit(inputs, limit, async (input: GalleryPhotoInput, index: number): Promise<boolean> => {
-      // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
-      if (options && options.shouldPause && options.shouldPause()) {
-        return false;
-      }
-      if (options && options.prepareInput) {
-        try { await options.prepareInput(input); }
-        catch (e) {
-          // A paused transfer remains queued; a read failure is retriable without creating a bogus analysis result.
-          if (options.shouldPause && options.shouldPause()) { return false; }
-          let message = (e as Error).message;
-          this.logError('input preparation failed: ' + message);
-          progress.processed += 1;
-          progress.failed += 1;
-          progress.pending = Math.max(0, progress.selected - progress.processed);
-          if (options.onPrepareError) { options.onPrepareError(input, message); }
-          onProgress(progress);
-          return true;
+    try {
+      await runGalleryWorkQueue(inputs.length, limit, async (index: number): Promise<boolean> => {
+        let input = inputs[index];
+        // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
+        if (options && options.shouldPause && options.shouldPause()) {
+          return false;
         }
-      }
-      if (options && options.shouldPause && options.shouldPause()) { return false; }
-      progress.current = '分析第 ' + (index + 1) + '/' + inputs.length + ' 张';
-      onProgress(progress);
-      let outcome = await this.analyzeOne(input, config, gates, progress, onProgress);
-      // Persist the thumbnail and original reference before removing our full-size staging copy.
-      // Cache hits need this too, so legacy results are repaired without calling the model again.
-      this.logInfo('cache result start id=' + outcome.result.id);
-      let cacheStartedAt = new Date().getTime();
-      let result = await GalleryImageStore.persist(this.filesDir, input, outcome.result);
-      this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
-      outcome.result = result;
-      results.push(result);
-      if (outcome.cached) {
-        // 缓存命中代表该图片已有可用分析结果，仍应计入已完成；只有关键词预筛命中时才计入跳过。
+        if (options && options.prepareInput) {
+          try { await options.prepareInput(input); }
+          catch (e) {
+            // A paused transfer remains queued; a read failure is retriable without creating a bogus analysis result.
+            if (options.shouldPause && options.shouldPause()) { return false; }
+            let message = (e as Error).message;
+            this.logError('input preparation failed: ' + message);
+            progress.processed += 1;
+            progress.failed += 1;
+            progress.pending = Math.max(0, progress.selected - progress.processed);
+            if (options.onPrepareError) { options.onPrepareError(input, message); }
+            onProgress(progress);
+            return true;
+          }
+        }
+        if (options && options.shouldPause && options.shouldPause()) { return false; }
+        progress.current = '分析第 ' + (index + 1) + '/' + inputs.length + ' 张';
+        onProgress(progress);
+        let outcome = await this.analyzeOne(input, config, gates, progress, onProgress);
+        // Persist the thumbnail and original reference before removing our full-size staging copy.
+        // Cache hits need this too, so legacy results are repaired without calling the model again.
+        this.logInfo('cache result start id=' + outcome.result.id);
+        let cacheStartedAt = new Date().getTime();
+        let result = await GalleryImageStore.persist(this.filesDir, input, outcome.result);
+        this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
+        outcome.result = result;
+        results.push(result);
+        // Cache hits and new results share the same completion/commit path.
         progress.processed += 1;
         progress.pending = Math.max(0, progress.selected - progress.processed);
-        if (outcome.skippedByKeyword === true) {
-          progress.skipped += 1;
-        }
+        if (outcome.skippedByKeyword === true) { progress.skipped += 1; }
         onProgress(progress);
-        if (options && options.onItemDone) {
-          options.onItemDone(input, outcome);
-        }
-        if (onResult && outcome.skippedByKeyword !== true) {
-          onResult(result);
-        }
+        if (options && options.onItemDone) { options.onItemDone(input, outcome); }
+        if (onResult && outcome.skippedByKeyword !== true) { onResult(result); }
         return true;
-      }
-      let normalized = result;
-      progress.processed += 1;
-      progress.pending = Math.max(0, progress.selected - progress.processed);
-      onProgress(progress);
-      if (options && options.onItemDone) {
-        options.onItemDone(input, {
-          result: normalized,
-          cached: false
-        });
-      }
-      if (onResult) {
-        onResult(normalized);
-      }
-      return true;
-    });
-    await this.ocrService.release();
+      });
+    } finally {
+      await this.ocrService.release();
+    }
     this.logInfo('batch done selected=' + inputs.length +
       ' results=' + results.length +
       ' failed=' + progress.failed +
       ' elapsedMs=' + this.elapsed(batchStartedAt));
     return GalleryStorage.loadResults(this.filesDir);
-  }
-
-  private async runWithLimit(items: GalleryPhotoInput[], limit: number, worker: (item: GalleryPhotoInput, index: number) => Promise<boolean>): Promise<void> {
-    let nextIndex = 0;
-    let workers: Promise<void>[] = [];
-    let count = Math.min(limit, items.length);
-    for (let i = 0; i < count; i++) {
-      workers.push((async () => {
-        while (nextIndex < items.length) {
-          let index = nextIndex;
-          nextIndex += 1;
-          let keepGoing = await worker(items[index], index);
-          if (!keepGoing) {
-            return;
-          }
-        }
-      })());
-    }
-    await Promise.all(workers);
   }
 
   private async analyzeOne(input: GalleryPhotoInput, config: GalleryAnalyzerConfig, gates: GalleryStageGates, progress: GalleryProgress,
