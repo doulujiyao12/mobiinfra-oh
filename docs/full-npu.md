@@ -1,5 +1,33 @@
 # 全图 NPU（实验）
 
+## 单张视觉图候选 fusedvision_v1（2026-10-17）
+
+模型已发布：
+https://www.modelscope.cn/models/fengerhu1/mobi_2B_full_npu_kirin9030_w4a16_g64_kv16_fusedvision_v1
+
+24 个文件、2,782,486,376 字节已核对远端 SHA256 和大小。请在模型下载地址
+填入新仓库，下载到独立目录；旧仓库保留。
+
+已将 `vision_pre + vision_blocks_0..5 + vision_post` 八图合成 `vision_full` 一张，
+全 VLM 由 13 张变为 6 张 OMC。单张视觉图包含 patch/位置处理、24 层 blocks、
+最终 merger 与三个独立 DeepStack merger；第 5、11、17 层 block 后取值，
+分别投影后按顺序注入语言第 0、1、2 层，顺序和形状保持原协议。
+
+新包使用 `kirin_full_npu_runtime_v3`。本机 App 已增加格式识别、单图调度和
+严格的输入输出/DeepStack 检查，仍兼容旧分图包，并保留此前 16 图、4 GiB
+App 常驻预算及增量 FP16 KV。源码更新后须在 DevEco 重新编译安装；本轮没有
+安装或修改手机 App，也未构建 HAP。
+
+主干矩阵仍是冻结 W4/group64 GPTQ，KV 为 FP16；图与外部 `.weight` 文件分离。
+三张非校准图片的 CPU ONNX 对照中，图像 embedding 与每路 DeepStack 在合并
+前后逐元素一致。六张图完成纯 NPU 编译。真实 App portable C++ 源码的主机
+检查通过，两条文本、三张单图和一组双图的 CPU ONNX 调度回放均通过，共 3112 项独立张量检查。
+
+本轮没有执行真机 OMC，不能据此断言设备加载、峰值内存或速度通过。
+合并减少视觉阶段的图切换，解码时的反复 InitWeights 问题仍需后续优化；
+此前完整模型 W4 质量与长上下文 FP16 KV 验收失败没有被宣称解决。
+
+
 ## 本地 App 常驻预算调整（2026-10-17）
 
 当前 App 的全图 NPU 加载入口显式使用 **16 张图、4096 MiB（4 GiB）模型文件预算**，

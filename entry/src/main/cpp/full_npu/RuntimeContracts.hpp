@@ -39,7 +39,7 @@ inline bool validateRuntimeGraphs(const Profile& p, const std::map<std::string, 
         }
         return true;
     };
-    if (graphs.size() != prefill.size() + decode.size() + vision.size() + 5) {
+    if (graphs.size() != prefill.size() + decode.size() + vision.size() + (p.fusedVision ? 4 : 5)) {
         error = "Unused, missing or nonconsecutive full-NPU graph";
         return false;
     }
@@ -90,6 +90,20 @@ inline bool validateRuntimeGraphs(const Profile& p, const std::map<std::string, 
     }
     if (!check(head, {{"hidden_states", DType::F32, {1, 1, p.hidden}}},
                {{"logits", DType::F32, {1, 1, head.outputs[0].shape[2]}}})) return false;
+    if (p.fusedVision) {
+        const auto& g = graphs.at("vision_full");
+        if (g.start != 0 || g.end != p.visionLayers || !vision.empty() || !g.aliases.empty()) {
+            error = "Invalid fused visual graph coverage or aliases"; return false;
+        }
+        return check(g,
+            {{"patches", DType::F32, {n, 3 * p.temporal * p.patch * p.patch}},
+             {"position_indices", DType::I32, {n, 4}}, {"position_weights", DType::F32, {n, 4}},
+             {"rope_cos", DType::F32, {1, 1, n, visionDim}},
+             {"rope_sin", DType::F32, {1, 1, n, visionDim}},
+             {"attention_mask", DType::F32, {1, 1, n, n}}},
+            {{"image_embeddings", DType::F32, {1, imageTokens, p.hidden}},
+             {"deepstack_features", DType::F32, {int(p.visionDeepstack.size()), 1, imageTokens, p.hidden}}});
+    }
     if (!check(graphs.at("vision_pre"),
                {{"patches", DType::F32, {n, 3 * p.temporal * p.patch * p.patch}},
                 {"position_indices", DType::I32, {n, 4}}, {"position_weights", DType::F32, {n, 4}}},

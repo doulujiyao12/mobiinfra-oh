@@ -166,10 +166,18 @@ struct Runtime::Impl {
             patches.push_back((v - .5f) / .5f);
         }
         std::vector<std::vector<float>> out, deep;
+        std::vector<float> mask(size_t(gh) * gw * gh * gw, 0);
+        if (p.fusedVision) {
+            // DeepStack taps and their individual mergers are inside this graph.
+            // Output order remains [image_embeddings, projected DeepStack stack].
+            if (!run("vision_full", {floats(patches), {DType::I32, indices.data(), indices.size()},
+                     floats(weights), floats(visionCos), floats(visionSin), floats(mask)}, features, cancel, error)) return false;
+            backend->release();
+            return true;
+        }
         if (!run("vision_pre", {floats(patches), {DType::I32, indices.data(), indices.size()}, floats(weights)}, out, cancel, error)) return false;
         backend->release();
         auto hidden = std::move(out[0]);
-        std::vector<float> mask(size_t(gh) * gw * gh * gw, 0);
         for (const auto& name : vision) {
             if (!run(name, {floats(hidden), floats(visionCos), floats(visionSin), floats(mask)}, out, cancel, error)) return false;
             hidden = std::move(out[0]);
@@ -275,7 +283,7 @@ bool Runtime::load(const std::string& configPath, std::string& error, ResidencyB
     doc.Parse(readText(configPath).c_str());
     const auto format = stringField(doc, "format");
     if (doc.HasParseError() || !doc.IsObject() ||
-        (format != "kirin_full_npu_runtime_v1" && format != "kirin_full_npu_runtime_v2")) {
+        (format != "kirin_full_npu_runtime_v1" && format != "kirin_full_npu_runtime_v2" && format != "kirin_full_npu_runtime_v3")) {
         error = "Select a dedicated full-NPU model package (config format mismatch)"; return false;
     }
     s.root = configPath.substr(0, configPath.find_last_of('/') + 1);
@@ -288,7 +296,23 @@ bool Runtime::load(const std::string& configPath, std::string& error, ResidencyB
         auto type = stringField(r, "kv_dtype");
         if (type != "int8" && type != "fp16") { error = "Invalid KV dtype"; return false; }
         p.kvType = type == "fp16" ? DType::F16 : DType::I8;
-    } else if (format == "kirin_full_npu_runtime_v2") { error = "Missing KV dtype"; return false; }
+    } else if (format != "kirin_full_npu_runtime_v1") { error = "Missing KV dtype"; return false; }
+    p.fusedVision = format == "kirin_full_npu_runtime_v3";
+    if (p.fusedVision) {
+        p.visionLayers = number(r, "vision_layers");
+        if (p.visionLayers < 1 || p.visionLayers > 128 || !r.HasMember("vision_deepstack_layers") ||
+            !r["vision_deepstack_layers"].IsArray() || r["vision_deepstack_layers"].Empty() ||
+            r["vision_deepstack_layers"].Size() > unsigned(p.layers)) {
+            error = "Invalid fused visual DeepStack configuration"; return false;
+        }
+        for (const auto& v : r["vision_deepstack_layers"].GetArray()) {
+            if (!v.IsInt() || v.GetInt() < 0 || v.GetInt() >= p.visionLayers ||
+                (!p.visionDeepstack.empty() && v.GetInt() <= p.visionDeepstack.back())) {
+                error = "Invalid fused visual DeepStack layer order"; return false;
+            }
+            p.visionDeepstack.push_back(v.GetInt());
+        }
+    }
     if (p.kvType == DType::F16 && (p.sink || p.recent)) {
         error = "FP16 KV must not declare INT8 protected windows"; return false;
     }
@@ -405,6 +429,7 @@ bool Runtime::load(const std::string& configPath, std::string& error, ResidencyB
         s.graphs.emplace(g.name, std::move(g));
     }
     for (const char* prefix : {"llm_prefill_", "llm_decode_", "vision_blocks_"}) {
+        if (p.fusedVision && std::string(prefix) == "vision_blocks_") continue;
         auto& names = std::string(prefix) == "llm_prefill_" ? s.llmPrefill : std::string(prefix) == "llm_decode_" ? s.llmDecode : s.vision;
         int end = 0;
         for (int i = 0; s.graphs.count(std::string(prefix) + std::to_string(i)); ++i) {
@@ -416,8 +441,11 @@ bool Runtime::load(const std::string& configPath, std::string& error, ResidencyB
         }
         if (names.empty() || (std::string(prefix) != "vision_blocks_" && end != p.layers)) { error = "Incomplete graph coverage"; return false; }
     }
-    for (const char* name : {"vision_pre", "vision_post", "embedding_prefill", "embedding_decode", "lm_head"})
+    for (const char* name : {"embedding_prefill", "embedding_decode", "lm_head"})
         if (!s.graphs.count(name)) { error = "Missing full model component"; return false; }
+    for (const auto& name : p.fusedVision ? std::vector<std::string>{"vision_full"} :
+                                           std::vector<std::string>{"vision_pre", "vision_post"})
+        if (!s.graphs.count(name)) { error = "Missing visual model component"; return false; }
     if (!validateRuntimeGraphs(p, s.graphs, s.llmPrefill, s.llmDecode, s.vision, error)) return false;
     s.backend->configure(p.backend);
     // Probe sequentially, freeing each graph. Do not retain both LLM phases.

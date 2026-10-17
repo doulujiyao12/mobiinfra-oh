@@ -149,7 +149,8 @@ struct ProfileTest {
     try {
       let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
       return config['format'] === 'kirin_full_npu_runtime_v1' ||
-        config['format'] === 'kirin_full_npu_runtime_v2';
+        config['format'] === 'kirin_full_npu_runtime_v2' ||
+        config['format'] === 'kirin_full_npu_runtime_v3';
     } catch (e) {
       return false;
     }

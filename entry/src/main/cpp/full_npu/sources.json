@@ -7,7 +7,7 @@
   {
     "path": "FullNpuRuntime.cpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuRuntime.cpp",
-    "sha256": "a83754a35bfc69de1d018eb52912d692d32b67b98867b69298711bdd4771aa91"
+    "sha256": "489d0bd306d4d30b0669ed15a82a35df73a3d776a60d075a97eef79af76bdaf6"
   },
   {
     "path": "FullNpuCache.cpp",
@@ -32,7 +32,7 @@
   {
     "path": "RuntimeContracts.hpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/RuntimeContracts.hpp",
-    "sha256": "66121b10727561561711f12f46ae3bb2384ae95b10b7d3f9efcc0adf74c64954"
+    "sha256": "2a4cc5b03aab30058fcb1eb3d17f98b57c426d6723c70f5a6214a3dbad7bb4e7"
   },
   {
     "path": "NnrtBackend.cpp",
@@ -42,7 +42,7 @@
   {
     "path": "FullNpuRuntime.hpp",
     "source": "transformers/llm/export/kirin_llm_offline/runtime/FullNpuRuntime.hpp",
-    "sha256": "473c4c9899cb6169ae9ca1226b6443fdb9e4c9f974d6e72afbc9e6eabf154964"
+    "sha256": "4a4318f24ab4f0a6f8a649525aef7894b06af671e43ac098587508fe5bae1c3f"
   },
   {
     "path": "PortBinding.hpp",

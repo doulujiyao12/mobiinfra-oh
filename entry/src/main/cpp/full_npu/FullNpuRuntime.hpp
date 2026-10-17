@@ -88,6 +88,9 @@ struct Profile {
     int group = 0, recent = 0, sink = 0, imageWidth = 0, imageHeight = 0;
     int patch = 0, merge = 0, temporal = 0, visionHidden = 0, visionHeads = 0, positionSide = 0;
     int imageToken = 0, padToken = 0, maxNewTokens = 0;
+    bool fusedVision = false;
+    int visionLayers = 0;
+    std::vector<int> visionDeepstack;
     float ropeTheta = 0, visionTheta = 0;
     std::vector<int> mrope;
 };
