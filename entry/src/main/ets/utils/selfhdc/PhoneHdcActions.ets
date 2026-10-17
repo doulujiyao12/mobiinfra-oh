@@ -71,7 +71,11 @@ export class PhoneHdcActions {
       if (!point || (action !== 'input' && !hasX)) {
         throw new Error('PHONE_HDC_FOCUS: input needs coordinates or a prior input-field click; refusing unknown focus');
       }
-      commands.push(this.command('uitest uiInput click ' + point.x + ' ' + point.y, 'activate/click', 500));
+      // A coordinate-free input follows a verified field click. The keyboard can move that field;
+      // use its current focus instead of clicking the stale pre-keyboard coordinates again.
+      if (action !== 'input' || hasX) {
+        commands.push(this.command('uitest uiInput click ' + point.x + ' ' + point.y, 'activate/click', 500));
+      }
       if (action === 'click') {
         inputTarget = null;
         let target = phoneHdcString(payload, 'target_element', phoneHdcString(payload, 'targetElement')).toLowerCase();

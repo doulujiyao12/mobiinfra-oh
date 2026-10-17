@@ -12,6 +12,15 @@ import { decodeUtf8Compat } from './TextEncodingCompat';
 import { parseJsonCompat } from './JsonCompat';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { GalleryModelJson } from './gallery/GalleryTypes';
+import {
+  PHONE_AGENT_ACTION_OUTPUT_RULES, PHONE_AGENT_MAX_ACTION_TOKENS,
+  phoneAgentActionTokenBudget, phoneAgentOutputWasTruncated
+} from './selfhdc/PhoneAgentPolicy';
+
+export interface PhoneAgentCloudOptions {
+  onDiagnostic: (message: string) => void;
+  ensureActive: () => void;
+}
 
 // OpenAI-compatible 云端模型客户端。Planner 和 Decider 可以指向不同 base URL，
 // 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
@@ -331,12 +340,13 @@ export class CloudModelClient {
       .replace('{history}', this.buildQwenHistoryText(historyItems));
   }
 
-  formatQwenDeciderPromptForLog(task: string, historyItems: string[], imageBase64: string): string {
+  formatQwenDeciderPromptForLog(task: string, historyItems: string[], imageBase64: string,
+    phoneExecution: boolean = false): string {
     // 日志中只展示 base64 前缀，既能确认图像被传入，又不会把完整截图刷进日志。
     let imagePrefixLength = imageBase64.length > 48 ? 48 : imageBase64.length;
     let imagePrefix = imageBase64.substring(0, imagePrefixLength);
     return '[0] role=system\n' +
-      CLOUD_DECIDER_SYSTEM_PROMPT +
+      CLOUD_DECIDER_SYSTEM_PROMPT + (phoneExecution ? PHONE_AGENT_ACTION_OUTPUT_RULES : '') +
       '\n\n[1] role=user / content[0] type=text\n' +
       this.buildQwenContextText(task, historyItems) +
       '\n\n[1] role=user / content[1] type=image_url\n' +
@@ -1002,6 +1012,32 @@ export class CloudModelClient {
     return result.content;
   }
 
+  // Opt-in phone path. Preserve the existing PC response budget/protocol and expose metadata to phone run logs.
+  private async chatPhoneAgentMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
+    model: string, task: string, phoneOptions: PhoneAgentCloudOptions): Promise<string> {
+    let options: CloudChatCompletionOptions = {
+      baseUrl: baseUrl, apiKey: apiKey, messages: messages, model: model,
+      temperature: 0, maxTokens: phoneAgentActionTokenBudget(task)
+    };
+    while (true) {
+      phoneOptions.ensureActive();
+      phoneOptions.onDiagnostic('MODEL_REQUEST phone-action maxTokens=' + String(options.maxTokens));
+      let result = await this.chatCompletion(options);
+      phoneOptions.ensureActive();
+      phoneOptions.onDiagnostic('MODEL_OUTPUT maxTokens=' + String(options.maxTokens) +
+        ' finishReason=' + (result.finishReason || 'unspecified') + ' chars=' + String(result.content.length));
+      if (!phoneAgentOutputWasTruncated(result.finishReason)) { return result.content; }
+      let budget = options.maxTokens || PHONE_AGENT_MAX_ACTION_TOKENS;
+      if (budget >= PHONE_AGENT_MAX_ACTION_TOKENS) {
+        throw new Error('PHONE_AGENT_OUTPUT_TRUNCATED: 模型动作输出达到 ' + String(budget) +
+          ' tokens 后仍被截断，未执行该动作；请缩短需求或检查模型服务的输出上限');
+      }
+      options.maxTokens = Math.min(PHONE_AGENT_MAX_ACTION_TOKENS, budget * 2);
+      phoneOptions.onDiagnostic('MODEL_OUTPUT_TRUNCATED same-screen retry; nextMaxTokens=' +
+        String(options.maxTokens) + '; no device action executed');
+    }
+  }
+
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
     model?: string, maxTokens?: number, readTimeout?: number,
     chatOptions?: CloudChatOptions): Promise<string> {
@@ -1277,7 +1313,8 @@ export class CloudModelClient {
     }
   }
 
-  async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+  async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig,
+    phoneOptions?: PhoneAgentCloudOptions): Promise<string> {
     // 通用图文 Decider：完整 prompt 与当前截图作为同一条 user 消息发送。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
@@ -1288,8 +1325,12 @@ export class CloudModelClient {
     };
     let textPart: CloudTextPart = {
       type: 'text',
-      text: prompt
+      text: phoneOptions === undefined ? prompt : prompt + PHONE_AGENT_ACTION_OUTPUT_RULES
     };
+    if (phoneOptions !== undefined) {
+      return this.chatPhoneAgentMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+        cloudDeciderApiKey(config), config.deciderModel, prompt, phoneOptions);
+    }
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       cloudDeciderApiKey(config), config.deciderModel, 256);
   }
@@ -1450,7 +1491,8 @@ export class CloudModelClient {
     }
   }
 
-  async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {
+  async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig,
+    phoneOptions?: PhoneAgentCloudOptions): Promise<string> {
     // Qwen 专用 Decider：system、任务/历史、截图、当前步输出约束分开组织，输出更稳定。
     let contextText = this.buildQwenContextText(task, historyItems);
     let imageUrl: CloudImageUrl = {
@@ -1470,13 +1512,17 @@ export class CloudModelClient {
     };
     let systemMessage: CloudChatMessage = {
       role: 'system',
-      content: CLOUD_DECIDER_SYSTEM_PROMPT
+      content: CLOUD_DECIDER_SYSTEM_PROMPT + (phoneOptions === undefined ? '' : PHONE_AGENT_ACTION_OUTPUT_RULES)
     };
     let userMessage: CloudChatMessage = {
       role: 'user',
       content: [contextPart, imagePart, stepPart]
     };
     let messages: CloudChatMessage[] = [systemMessage, userMessage];
+    if (phoneOptions !== undefined) {
+      return this.chatPhoneAgentMessages(config.deciderBaseUrl, messages, cloudDeciderApiKey(config),
+        config.deciderModel, task, phoneOptions);
+    }
     return this.chatMessages(config.deciderBaseUrl, messages, cloudDeciderApiKey(config), config.deciderModel, 256);
   }
 

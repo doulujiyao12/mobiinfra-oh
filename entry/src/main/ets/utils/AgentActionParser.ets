@@ -136,6 +136,43 @@ export class AgentActionParser {
     return normalized === 'done' || normalized === 'stop' || normalized === 'terminate' || normalized === 'abort';
   }
 
+  // Phone execution must not invent missing text/coordinates by closing a truncated response.
+  // Keep the existing syntax repairs for complete responses and the legacy PC parsing path.
+  static parseExecutable(raw: string): ParsedAgentAction {
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
+    let inString = false;
+    let escaped = false;
+    let objects = 0;
+    let arrays = 0;
+    for (let i = 0; i < text.length; i++) {
+      let ch = text.charAt(i);
+      if (inString) {
+        if (escaped) { escaped = false; }
+        else if (ch === '\\') { escaped = true; }
+        else if (ch === '"') { inString = false; }
+      } else if (ch === '"') { inString = true; }
+      else if (ch === '{') { objects += 1; }
+      else if (ch === '}') { objects -= 1; }
+      else if (ch === '[') { arrays += 1; }
+      else if (ch === ']') { arrays -= 1; }
+    }
+    if (inString || objects > 0 || arrays > 0) {
+      throw new Error('Agent action response is truncated: incomplete JSON; no action was executed');
+    }
+    let parsed = AgentActionParser.parse(raw, true);
+    if (parsed.action === 'input' || parsed.action === 'click_input') {
+      let input = parsed.parameters['text'];
+      if (typeof input !== 'string' || input.length === 0) {
+        throw new Error('Agent input action missing required nonempty text');
+      }
+    }
+    if (!AgentActionParser.isTerminal(parsed.action) && parsed.action !== 'error') {
+      // Pure validation: catches a complete JSON object with absent bbox/coords before HDC is called.
+      AgentActionParser.buildHdcActionPayload(parsed, 1000, 1000);
+    }
+    return parsed;
+  }
+
   static buildHdcActionPayload(parsed: ParsedAgentAction, width: number, height: number): WorkflowJsonMap {
     let action = parsed.action;
     let params = parsed.parameters;

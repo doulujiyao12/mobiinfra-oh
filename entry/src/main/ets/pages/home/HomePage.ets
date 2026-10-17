@@ -18,8 +18,14 @@ import { ensureAiGeneratedTextNotice } from '../../utils/AiGeneratedContent';
 import {
   HomeTaskSuggestion,
   HomeTaskSuggestionEvidence,
-  homeTaskSuggestionCategoryLabel
+  homeTaskSuggestionCategoryLabel,
+  buildHomeTaskExecutionRequest,
+  buildQwenTaskHandoff,
+  homeTaskShortDraft,
+  homeTaskExecutionDescription,
+  HOME_TASK_DESCRIPTION_LIMIT
 } from './HomeTaskSuggestion';
+import { HomeTaskExecutionSheet } from '../../components/HomeTaskExecutionSheet';
 import { HomeComfortChatMessage, HomeComfortConcern } from './HomeEmotionalSupport';
 import { HomeComfortSection } from './HomeComfortSection';
 import { HomeComfortChatStore } from './HomeComfortChatStore';
@@ -61,6 +67,8 @@ export struct HomePage {
   @State agentTaskDraft: string = '';
   @State agentTaskSubmitting: boolean = false;
   @State agentTaskSubmittingAction: string = '';
+  @State private executionSheetOpen: boolean = false;
+  @State private executionCandidate: HomeTaskSuggestion = { id: '', title: '', task: '', reason: '', category: 'life', evidence: [] };
   @State showAllRecommendations: boolean = false;
   @State avatarGenerationOpen: boolean = false;
   @State avatarGenerating: boolean = false;
@@ -1087,7 +1095,7 @@ export struct HomePage {
     this.selectedRecommendationId = item.id;
     this.selectedRecommendationCompletedOverrideId = item.id;
     this.selectedRecommendationCompletedOverrideValue = item.completed;
-    this.agentTaskDraft = item.agentTask;
+    this.agentTaskDraft = homeTaskShortDraft(item.agentTask, item.title);
   }
 
   private closeRecommendationDetail(): void {
@@ -1249,7 +1257,7 @@ export struct HomePage {
   }
 
   private buildQwenCollaborationTask(task: string): string {
-    return '打开千问，在下方输入框中输入：' + task + '。然后点击输入框右下角的黑色向上箭头发送按钮';
+    return buildQwenTaskHandoff(task);
   }
 
   private agentTaskButtonLabel(action: string, idleLabel: string): string {
@@ -1257,14 +1265,14 @@ export struct HomePage {
   }
 
   private async submitAgentTask(taskDescription: string, keepTargetAppAfterFinish: boolean,
-    submittingAction: string): Promise<void> {
+    submittingAction: string): Promise<boolean> {
     let task = taskDescription.trim();
     if (task.length === 0) {
       showToastSafely('请输入要执行的任务', 1200);
-      return;
+      return false;
     }
     if (this.agentTaskSubmitting) {
-      return;
+      return false;
     }
     this.agentTaskSubmitting = true;
     this.agentTaskSubmittingAction = submittingAction;
@@ -1272,9 +1280,12 @@ export struct HomePage {
       await this.onExecuteAgentTask(task, keepTargetAppAfterFinish);
       this.closeRecommendationDetail();
       this.closeTaskSuggestionDetail();
+      return true;
     } catch (e) {
       let err = e as Error;
       showToastSafely('任务下发失败：' + err.message, 1800);
+      AppLogger.errorCause('HomeSuggestion', 'Dispatch failed action=' + submittingAction, err);
+      return false;
     } finally {
       this.agentTaskSubmitting = false;
       this.agentTaskSubmittingAction = '';
@@ -1282,12 +1293,15 @@ export struct HomePage {
   }
 
   private async executeAgentTask(): Promise<void> {
-    await this.submitAgentTask(this.agentTaskDraft, false, 'execute');
+    try {
+      await this.submitAgentTask(homeTaskExecutionDescription(this.agentTaskDraft), false, 'execute');
+    } catch (e) { showToastSafely((e as Error).message, 1800); }
   }
 
   private async executeQwenAgentTask(): Promise<void> {
-    let task = this.agentTaskDraft.trim();
-    await this.submitAgentTask(task.length > 0 ? this.buildQwenCollaborationTask(task) : task, true, 'qwen');
+    try {
+      await this.submitAgentTask(this.buildQwenCollaborationTask(this.agentTaskDraft), true, 'qwen');
+    } catch (e) { showToastSafely((e as Error).message, 1800); }
   }
 
   @Builder RecommendationFilterButton(label: string, showAll: boolean) {
@@ -1404,7 +1418,22 @@ export struct HomePage {
   }
 
   private executeTaskSuggestion(item: HomeTaskSuggestion): void {
-    this.submitAgentTask(item.task, false, 'guess-' + item.id);
+    if (this.agentTaskSubmitting || this.executionSheetOpen) { return; }
+    this.executionCandidate = item;
+    this.executionSheetOpen = true;
+  }
+
+  @Builder TaskExecutionSheetContent() {
+    HomeTaskExecutionSheet({ suggestion: this.executionCandidate,
+      onExecute: async (method: string, draft: string): Promise<boolean> => {
+        let request = buildHomeTaskExecutionRequest(this.executionCandidate, method, draft);
+        AppLogger.info('HomeSuggestion', 'DISPATCH route=' + method + ' id=' + this.executionCandidate.id +
+          ' chars=' + request.taskDescription.length.toString());
+        let success = await this.submitAgentTask(request.taskDescription, request.keepTargetAppAfterFinish,
+          'guess-' + this.executionCandidate.id);
+        if (success) { this.executionSheetOpen = false; }
+        return success;
+      } })
   }
 
   private openTaskSuggestionDetail(item: HomeTaskSuggestion): void {
@@ -1925,7 +1954,8 @@ export struct HomePage {
               .fontWeight(FontWeight.Bold)
               .fontColor(AppTheme.text('#151A28'))
               .width('100%')
-            TextArea({ placeholder: '调整要交给 GUI Agent 的任务', text: this.agentTaskDraft })
+            TextArea({ placeholder: '一句话，只做一件事（最多60字）', text: this.agentTaskDraft })
+              .maxLength(HOME_TASK_DESCRIPTION_LIMIT)
               .placeholderColor($r('app.color.ui_text_placeholder'))
               .caretColor($r('app.color.ui_accent_blue'))
               .width('100%')
@@ -2085,5 +2115,11 @@ export struct HomePage {
     .width('100%')
     .height('100%')
     .backgroundColor(AppTheme.background(Color.White))
+    .bindSheet($$this.executionSheetOpen, this.TaskExecutionSheetContent(), {
+      height: SheetSize.FIT_CONTENT,
+      title: { title: '选择执行方式' },
+      backgroundColor: AppTheme.background('#FFFFFF'),
+      showClose: true
+    })
   }
 }

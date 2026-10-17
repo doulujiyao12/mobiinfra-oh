@@ -3,6 +3,22 @@ import { HdcBridgeResponse } from '../WorkflowTypes';
 
 export interface PhoneAgentScreenSize { width: number; height: number; }
 
+export const PHONE_AGENT_MAX_ACTION_TOKENS: number = 4096;
+export const PHONE_AGENT_ACTION_OUTPUT_RULES: string =
+  '\nReturn one complete JSON action. Keep reasoning to one short sentence; do not repeat the input text there. ' +
+  'For long messages, first click to focus the input, then use a separate input action with the full text. ' +
+  'Describe a text input field as "input field" in target_element when focusing it. ' +
+  'If using click_input, put bbox before text in parameters. Never omit the coordinates of a click.';
+
+// An input action can contain the entire user message, not just a short coordinate pair.
+export function phoneAgentActionTokenBudget(task: string): number {
+  return Math.min(PHONE_AGENT_MAX_ACTION_TOKENS, Math.ceil((1024 + task.length * 3) / 512) * 512);
+}
+
+export function phoneAgentOutputWasTruncated(finishReason: string): boolean {
+  return finishReason === 'length' || finishReason === 'max_tokens';
+}
+
 export function phoneAgentLogText(message: string): string {
   return message.replace(/data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[image data omitted]');
 }
