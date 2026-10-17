@@ -1343,7 +1343,10 @@ static void LoadModelExecute(napi_env env, void* data) {
         std::unique_ptr<KirinFullNpu::Runtime> runtime(new KirinFullNpu::Runtime(
             KirinFullNpu::createNnrtBackend(log), log, []() { return g_debugLoggingEnabled.load(); }));
         std::string error;
-        asyncData->success = runtime->load(asyncData->inputStr, error);
+        // App policy overrides older model packages' 4-graph / 2-GiB limits.
+        // KV allocation and incremental-copy settings still come from the model.
+        const KirinFullNpu::ResidencyBudget residency{16, size_t(4096) << 20};
+        asyncData->success = runtime->load(asyncData->inputStr, error, residency);
         asyncData->outputStr = asyncData->success ? "ok" : "error: full NPU: " + error;
         if (asyncData->success) g_fullNpu = std::move(runtime);
         else LOGE("[FULL_NPU] level=error %{public}s", error.c_str());

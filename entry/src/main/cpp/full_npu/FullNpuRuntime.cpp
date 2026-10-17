@@ -264,7 +264,7 @@ std::string Runtime::chatTemplate(const std::vector<std::pair<std::string, std::
     return out + "<|im_start|>assistant\n";
 }
 
-bool Runtime::load(const std::string& configPath, std::string& error) {
+bool Runtime::load(const std::string& configPath, std::string& error, ResidencyBudget residency) {
     auto& s = *impl;
     reset();
     s.cache.reset(); s.tokenizer.reset(); s.graphs.clear(); s.p = Profile{};
@@ -310,6 +310,19 @@ bool Runtime::load(const std::string& configPath, std::string& error) {
     }
     if (p.backend.maxResidentGraphs < 1 || p.backend.maxResidentGraphs > 16 || !p.backend.residentModelBytes) {
         error = "Invalid NNRT residency budget"; return false;
+    }
+    if (residency.maxResidentGraphs < 0 || residency.maxResidentGraphs > 16 ||
+        residency.residentModelBytes > (size_t(4096) << 20)) {
+        error = "Invalid caller NNRT residency budget"; return false;
+    }
+    if (residency.maxResidentGraphs || residency.residentModelBytes) {
+        const auto modelOptions = p.backend;
+        if (residency.maxResidentGraphs) p.backend.maxResidentGraphs = residency.maxResidentGraphs;
+        if (residency.residentModelBytes) p.backend.residentModelBytes = residency.residentModelBytes;
+        s.trace("level=cache_budget_override source=caller from_max_graphs=" + std::to_string(modelOptions.maxResidentGraphs) +
+                " from_model_budget_bytes=" + std::to_string(modelOptions.residentModelBytes) +
+                " max_graphs=" + std::to_string(p.backend.maxResidentGraphs) +
+                " model_budget_bytes=" + std::to_string(p.backend.residentModelBytes));
     }
     if (!r.HasMember("rope_theta") || !r["rope_theta"].IsNumber() || !r.HasMember("mrope_section") || !r["mrope_section"].IsArray()) {
         error = "Missing M-RoPE configuration"; return false;

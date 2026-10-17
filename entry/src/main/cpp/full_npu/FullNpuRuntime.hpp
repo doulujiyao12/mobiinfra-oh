@@ -40,6 +40,12 @@ struct BackendOptions {
     bool incrementalKv = true;
 };
 
+// Optional caller policy; zero keeps the model package's value. KV is separate.
+struct ResidencyBudget {
+    int maxResidentGraphs = 0;
+    size_t residentModelBytes = 0;
+};
+
 struct Graph {
     std::string name, path;
     // OMG external-data mode; InitWeights takes the containing directory.
@@ -113,7 +119,7 @@ class Runtime {
 public:
     Runtime(std::unique_ptr<Backend> backend, Log log, std::function<bool()> debug = {});
     ~Runtime();
-    bool load(const std::string& configPath, std::string& error);
+    bool load(const std::string& configPath, std::string& error, ResidencyBudget residency = {});
     bool response(const std::string& modelInput, const Cancel& cancel, const Emit& emit,
                   std::string& output, std::string& error, int limit = -1);
     void reset();
