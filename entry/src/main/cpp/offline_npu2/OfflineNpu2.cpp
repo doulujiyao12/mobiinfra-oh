@@ -52,7 +52,7 @@ public:
         return ids;
     }
     std::vector<int> tokenizer_encode(const MultimodalPrompt&) override {
-        fail("Offline NPU-2 currently requires <img> file paths, not in-memory media"); return {};
+        fail("Offline NPU currently requires <img> file paths, not in-memory media"); return {};
     }
     void response(const std::vector<int>& ids,std::ostream* os,const char* end,int limit) override {
         if (!state->error.empty()) return;
@@ -135,14 +135,14 @@ std::unique_ptr<Llm> create(const std::string& path,std::unique_ptr<KirinFullNpu
         std::string(d["offline_npu2"]["format"].GetString())!="kirin_offline_npu2_v1" ||
         !d["offline_npu2"]["vision_config"].IsString() ||
         std::string(d["offline_npu2"]["vision_config"].GetString())!="vision/config.json") {
-        state->error="Select a dedicated Offline NPU-2 package (MNN CPU LLM + external-weight vision_full)"; return {};
+        state->error="Select a dedicated Offline NPU package (MNN CPU LLM + external-weight vision_full)"; return {};
     }
     try {
     auto config=std::make_shared<LlmConfig>(path);
     if(config->config_.value("model_type",std::string())!="qwen3_vl" ||
        config->config_.value("hidden_size",0)!=2048 || config->config_.value("layer_nums",0)!=28 ||
        !config->config_.value("has_deepstack",false) || !config->config_.value("is_mrope",false)) {
-        state->error="Offline NPU-2 requires the matching Mobi Qwen3-VL 2B CPU language model"; return {};
+        state->error="Offline NPU requires the matching Mobi Qwen3-VL 2B CPU language model"; return {};
     }
     config->config_["backend_type"]="cpu";
     config->config_["prompt_cache"]=false;
@@ -154,7 +154,7 @@ std::unique_ptr<Llm> create(const std::string& path,std::unique_ptr<KirinFullNpu
     auto visual=std::unique_ptr<Vision>(new Vision(std::move(backend),log,std::move(cancel)));
     return std::unique_ptr<Llm>(new Hybrid(config,std::move(visual),config->base_dir_+"vision/config.json",state,log));
     } catch (const std::exception& e) {
-        state->error=std::string("Invalid Offline NPU-2 MNN configuration: ")+e.what();
+        state->error=std::string("Invalid Offline NPU MNN configuration: ")+e.what();
         return {};
     }
 }

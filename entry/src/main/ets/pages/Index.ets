@@ -419,7 +419,8 @@ const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
-type LocalNpuExecutionMode = 'cpu' | 'online' | 'offline' | 'full_npu' | 'offline_npu2';
+// Keep offline_npu2 as the wire ID for the primary 离线NPU mode.
+type LocalNpuExecutionMode = 'cpu' | 'online' | 'full_npu' | 'offline_npu2';
 
 const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
 const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
@@ -890,11 +891,20 @@ struct Index {
   }
 
   private normalizedLocalNpuExecutionMode(): LocalNpuExecutionMode {
-    if (this.localNpuExecutionMode === 'online' || this.localNpuExecutionMode === 'offline' ||
-      this.localNpuExecutionMode === 'full_npu' || this.localNpuExecutionMode === 'offline_npu2') {
+    if (this.localNpuExecutionMode === 'offline') {
+      return 'offline_npu2';
+    }
+    if (this.localNpuExecutionMode === 'online' || this.localNpuExecutionMode === 'full_npu' ||
+      this.localNpuExecutionMode === 'offline_npu2') {
       return this.localNpuExecutionMode;
     }
     return 'cpu';
+  }
+
+  private migrateLegacyOfflineNpuExecutionMode(): void {
+    if (this.localNpuExecutionMode === 'offline') {
+      this.localNpuExecutionMode = 'offline_npu2';
+    }
   }
 
   private migrateLocalInferenceCpuDefault(): void {
@@ -908,7 +918,8 @@ struct Index {
   }
 
   private switchLocalNpuExecutionMode(mode: string): void {
-    let normalized: LocalNpuExecutionMode = mode === 'online' || mode === 'offline' || mode === 'full_npu' || mode === 'offline_npu2' ? mode : 'cpu';
+    if (mode === 'offline') mode = 'offline_npu2';
+    let normalized: LocalNpuExecutionMode = mode === 'online' || mode === 'full_npu' || mode === 'offline_npu2' ? mode : 'cpu';
     if (normalized === this.normalizedLocalNpuExecutionMode()) {
       return;
     }
@@ -922,9 +933,7 @@ struct Index {
     } else if (normalized === 'full_npu') {
       this.output = '已切换为全图 NPU。请下载专用全图模型包；ViT 和 LLM 均使用预编译图，最大上下文 2048 token，缺失或不兼容时直接报错。';
     } else if (normalized === 'offline_npu2') {
-      this.output = '已切换为离线NPU-2。需配套模型包：ViT 使用一张离线图和外置权重，LLM、embedding、head 和 KV 使用 CPU。';
-    } else if (normalized === 'offline') {
-      this.output = '已切换为离线 NPU 图。下次加载模型时会严格加载模型目录中的预编译 OM，不会回退在线编译。';
+      this.output = '已切换为离线NPU。ViT 使用单张预编译图，图与权重分离；LLM、embedding、head 和 KV 使用 CPU。需配套单图模型包。';
     } else {
       this.output = '已切换为在线编译。下次加载模型时会使用 MNN HiAI 在线编译与 chunk OM 缓存。';
     }
@@ -2943,6 +2952,7 @@ struct Index {
     this.migrateDefaultEndpointValues();
     this.migrateWechatAutoSummaryDefaultValues();
     this.migrateLocalInferenceCpuDefault();
+    this.migrateLegacyOfflineNpuExecutionMode();
     if (this.manualHdcServerIp.trim().length === 0 && !this.isAutoHdcUrl(this.hdcServerIp)) {
       this.manualHdcServerIp = this.hdcServerIp;
     }

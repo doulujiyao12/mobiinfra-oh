@@ -34,7 +34,7 @@ bool parseImages(const std::string& input, Prompt& out, std::string& error) {
     }
     if (out.text.find("<img") != std::string::npos || out.text.find("</img>") != std::string::npos ||
         out.text.find("<video>") != std::string::npos || out.text.find("<audio>") != std::string::npos) {
-        error = "Offline NPU-2 supports text and <img> file paths only"; return false;
+        error = "Offline NPU supports text and <img> file paths only"; return false;
     }
     return true;
 }

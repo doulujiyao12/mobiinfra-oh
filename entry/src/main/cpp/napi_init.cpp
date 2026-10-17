@@ -1329,7 +1329,7 @@ static napi_value CopyModel(napi_env env, napi_callback_info info) {
 static bool offlineNpu2Failed(AsyncData* data) {
     if (!g_offlineNpu2State || g_offlineNpu2State->error.empty() || g_offlineNpu2State->error == "cancelled") return false;
     data->success = false;
-    data->outputStr = "error: offline NPU-2: " + g_offlineNpu2State->error;
+    data->outputStr = "error: offline NPU: " + g_offlineNpu2State->error;
     // A failed Agent request requires a fresh prefix before another step;
     // prepareRequest discards inconsistent CPU KV on retry.
     if (g_agent_mode) { g_agent_mode = false; g_prefix_pos = 0; g_agent_step = 0; }
@@ -1386,7 +1386,7 @@ static void LoadModelExecute(napi_env env, void* data) {
         g_llm = OfflineNpu2::create(asyncData->inputStr, KirinFullNpu::createNnrtBackend(log), log, cancel, g_offlineNpu2State);
         if (!g_llm) {
             asyncData->success = false;
-            asyncData->outputStr = "error: offline NPU-2: " + g_offlineNpu2State->error;
+            asyncData->outputStr = "error: offline NPU: " + g_offlineNpu2State->error;
             return;
         }
     } else {
@@ -1399,7 +1399,7 @@ static void LoadModelExecute(napi_env env, void* data) {
             !(mnnMode && completeMnnVision)) {
             g_llm.reset();
             asyncData->success = false;
-            asyncData->outputStr = "error: this model package requires Offline NPU-2; online/CPU modes need complete MNN vision assets";
+            asyncData->outputStr = "error: this model package requires offline NPU; online/CPU modes need complete MNN vision assets";
             return;
         }
         g_llm.reset(Llm::createLLM(asyncData->inputStr));
@@ -1476,7 +1476,7 @@ static void LoadModelExecute(napi_env env, void* data) {
     } else {
         g_llm.reset();
         asyncData->success = false;
-        asyncData->outputStr = g_offlineNpu2State ? "error: offline NPU-2: " + g_offlineNpu2State->error : "error: load failed";
+        asyncData->outputStr = g_offlineNpu2State ? "error: offline NPU: " + g_offlineNpu2State->error : "error: load failed";
         LOGE("Model load FAILED");
         LOGE("%{public}s", currentNpuStatusLine("model_load_failed").c_str());
     }

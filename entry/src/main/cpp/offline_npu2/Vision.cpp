@@ -72,7 +72,7 @@ bool Vision::load(const std::string& path, std::string& error) {
     if (!s.backend) { error = "No NNRT vision backend"; return false; }
     rapidjson::Document d; auto content = text(path); d.Parse(content.c_str());
     if (d.HasParseError() || !d.IsObject() || field(d,"format") != "kirin_offline_npu2_vision_v1" ||
-        !d.HasMember("graph") || !d["graph"].IsObject()) { error = "Invalid dedicated Offline NPU-2 vision config"; return false; }
+        !d.HasMember("graph") || !d["graph"].IsObject()) { error = "Invalid dedicated Offline NPU vision config"; return false; }
     const auto root = path.substr(0, path.find_last_of('/')+1);
     const auto& g = d["graph"]; s.graph = {}; s.graph.name = "vision_full";
     auto file = field(g,"file"), constants = field(d,"vision_constants");
