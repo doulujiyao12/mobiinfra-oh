@@ -156,6 +156,16 @@ struct ProfileTest {
     }
   }
 
+  private modelExecutionMode(path: string): 'cpu' | 'full_npu' | 'offline_npu2' {
+    if (this.isFullNpuConfig(path)) return 'full_npu';
+    try {
+      let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
+      if (config['offline_npu2'] !== undefined) return 'offline_npu2';
+    } catch (e) {
+    }
+    return 'cpu';
+  }
+
   private profileConfigDir(baseConfigPath: string): string {
     let slash = baseConfigPath.lastIndexOf('/');
     let modelDir = slash >= 0 ? baseConfigPath.substring(0, slash) : baseConfigPath;
@@ -224,7 +234,7 @@ struct ProfileTest {
 
   private async loadAndProfile(configPath: string, label: string, topK: number): Promise<string> {
     let fullNpu = this.isFullNpuConfig(configPath);
-    let loadRes: string = await native.loadModel(configPath, fullNpu ? 'full_npu' : 'cpu');
+    let loadRes: string = await native.loadModel(configPath, this.modelExecutionMode(configPath));
     let profileRes: string = await native.profileGenerate(this.prompt, topK);
     let note = fullNpu ? '\n全图 NPU 的分图耗时请开启 Debug 后查看 Runtime Logs；此处不提供 OMC 内部算子排名。\n' : '\n';
     return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + note + profileRes;
@@ -236,7 +246,7 @@ struct ProfileTest {
     }
     this.running = true;
     this.result = 'Loading model...\n' + this.modelConfigPath;
-    native.loadModel(this.modelConfigPath, this.isFullNpuConfig(this.modelConfigPath) ? 'full_npu' : 'cpu')
+    native.loadModel(this.modelConfigPath, this.modelExecutionMode(this.modelConfigPath))
       .then((res: string) => {
         this.loaded = true;
         this.result = 'loadModel: ' + res;

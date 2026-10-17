@@ -1386,18 +1386,21 @@ export struct SettingsCenterPage {
     }
     .width('100%')
     .justifyContent(FlexAlign.SpaceBetween)
-    Row() {
+    Row({ space: 8 }) {
       this.NpuExecutionModeButton('全图 NPU', 'full_npu')
+      this.NpuExecutionModeButton('离线NPU-2', 'offline_npu2')
     }
     .width('100%')
     .margin({ top: 8 })
     Text(this.localNpuExecutionMode === 'cpu' ?
       '全 CPU：LLM、VIT、视觉分块及其他本地模型模块统一使用 CPU，不会加载 HiAI/NPU 图。' :
+      (this.localNpuExecutionMode === 'offline_npu2' ?
+        '离线NPU-2：ViT 使用单张离线图和外置权重，语言模型使用 CPU。需配套模型包。' :
       (this.localNpuExecutionMode === 'full_npu' ?
         '全图 NPU（实验）：需专用模型包，ViT、LLM prefill/decode 均使用离线图。上下文 2048 token；开启 Debug 后可导出图接口、执行及 KV 日志。' :
       (this.localNpuExecutionMode === 'offline' ?
         '离线 OM：严格加载模型目录 om/ 下与 NPU chunk 同名的预编译图；缺失、shape 或设备不兼容时直接报错。' :
-        '在线 NPU：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。')))
+        '在线 NPU：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。'))))
       .fontSize(12)
       .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
       .width('100%')

@@ -1,0 +1,8 @@
+{
+  "OfflineNpu2.cpp": "f22d274af215e6b6127a4be8110053bd276555cdcf202c63e294cd3312066ffb",
+  "OfflineNpu2.hpp": "8b239d87b695a184f443ab83d51e285a5b19006c10eb66b06a4e5040a295f790",
+  "Protocol.cpp": "51e8e87b0d04c3e7ddb1c25c14593b8435fec0940d8c0fd78b73be0d2968aa1e",
+  "Vision.cpp": "197b48b54ceea1208e520aa33d40c283181dc7e0568ca09dbb2b80f3be4a29c7",
+  "llmconfig.hpp": "39ab4cc3e1b1a93a499871117ed8a8f02c4c1cf0ae1a39fe2bc5a52a7b973b91",
+  "ujson.hpp": "c0d17264d2a0dc17d598b0aebb84f9c5693519d179ca0b838ba1da4a4b1e2c08"
+}

@@ -50,6 +50,7 @@
 #include "OfflineNpuProbe.h"
 #include "full_npu/FullNpuRuntime.hpp"
 #include "full_npu/NnrtBackend.hpp"
+#include "offline_npu2/OfflineNpu2.hpp"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -64,6 +65,7 @@ using namespace MNN::Transformer;
 // 原生侧全局模型状态。所有 load/generate/chat/agentStep 都通过 g_mutex 串行化，
 // 避免 ArkTS 多次点击或 PC Agent 并发请求时同时访问 MNN Llm 实例。
 static std::unique_ptr<Llm> g_llm = nullptr;
+static std::shared_ptr<OfflineNpu2::State> g_offlineNpu2State;
 static std::unique_ptr<KirinFullNpu::Runtime> g_fullNpu;
 static std::string g_fullNpuAgentPrefix;
 static std::mutex g_mutex;
@@ -380,7 +382,8 @@ static std::string resetNpuRuntimeDiagnostics(const std::string& requestedBacken
 
 static std::string observeNpuRuntimeLine(const std::string& line) {
     const std::string lower = lowerAscii(line);
-    const bool fullNpu = lower.find("[full_npu]") != std::string::npos;
+    const bool fullNpu = lower.find("[full_npu]") != std::string::npos ||
+                         lower.find("[offline_npu2]") != std::string::npos;
     bool offlineReady = lower.find("[offline_npu]") != std::string::npos &&
                         lower.find("level=ready") != std::string::npos;
     bool offlineExecuteSuccess = lower.find("[offline_npu]") != std::string::npos &&
@@ -1323,6 +1326,16 @@ static napi_value CopyModel(napi_env env, napi_callback_info info) {
 }
 
 // ========== 2. 异步加载模型 ==========
+static bool offlineNpu2Failed(AsyncData* data) {
+    if (!g_offlineNpu2State || g_offlineNpu2State->error.empty() || g_offlineNpu2State->error == "cancelled") return false;
+    data->success = false;
+    data->outputStr = "error: offline NPU-2: " + g_offlineNpu2State->error;
+    // A failed Agent request requires a fresh prefix before another step;
+    // prepareRequest discards inconsistent CPU KV on retry.
+    if (g_agent_mode) { g_agent_mode = false; g_prefix_pos = 0; g_agent_step = 0; }
+    return true;
+}
+
 static void LoadModelExecute(napi_env env, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     LOGI("Loading model from: %{public}s", asyncData->inputStr.c_str());
@@ -1331,6 +1344,7 @@ static void LoadModelExecute(napi_env env, void* data) {
     g_currentModelConfigPath = asyncData->inputStr;
     resetNpuRuntimeDiagnostics("config unavailable", false);
     g_fullNpu.reset();
+    g_offlineNpu2State.reset();
     g_fullNpuAgentPrefix.clear();
     if (asyncData->npuMode == "full_npu") {
         g_llm.reset();
@@ -1358,7 +1372,32 @@ static void LoadModelExecute(napi_env env, void* data) {
         asyncData->outputStr = "error: this model package requires the full NPU execution mode";
         return;
     }
-    g_llm.reset(Llm::createLLM(asyncData->inputStr));
+    if (asyncData->npuMode == "offline_npu2") {
+        g_llm.reset();
+        g_messages.clear();
+        g_agent_mode = false;
+        g_offlineNpu2State = std::make_shared<OfflineNpu2::State>();
+        auto log = [](std::string line) {
+            const std::string prefix = "[FULL_NPU]";
+            if (line.compare(0, prefix.size(), prefix) == 0) line.replace(0, prefix.size(), "[OFFLINE_NPU2]");
+            if (g_debugLoggingEnabled.load()) { std::printf("%s\n", line.c_str()); std::fflush(stdout); }
+        };
+        auto cancel = []() { return isChatRequestCancelled(g_running_chat_request_id.load(std::memory_order_acquire)); };
+        g_llm = OfflineNpu2::create(asyncData->inputStr, KirinFullNpu::createNnrtBackend(log), log, cancel, g_offlineNpu2State);
+        if (!g_llm) {
+            asyncData->success = false;
+            asyncData->outputStr = "error: offline NPU-2: " + g_offlineNpu2State->error;
+            return;
+        }
+    } else {
+        if (readTextFileLocal(asyncData->inputStr).find("kirin_offline_npu2_v1") != std::string::npos) {
+            g_llm.reset();
+            asyncData->success = false;
+            asyncData->outputStr = "error: this model package requires Offline NPU-2";
+            return;
+        }
+        g_llm.reset(Llm::createLLM(asyncData->inputStr));
+    }
     if (!g_llm) {
         asyncData->success = false;
         asyncData->outputStr = "error: create LLM failed";
@@ -1366,7 +1405,9 @@ static void LoadModelExecute(napi_env env, void* data) {
         return;
     }
 
-    if (asyncData->npuMode == "cpu") {
+    if (asyncData->npuMode == "offline_npu2") {
+        LOGI("NPU execution mode=offline_npu2, one external-weight vision graph; language/embedding/head/KV on CPU");
+    } else if (asyncData->npuMode == "cpu") {
         const std::string cpuOverride = buildAllCpuBackendOverride(g_llm->dump_config());
         if (!g_llm->set_config(cpuOverride)) {
             g_llm.reset();
@@ -1414,7 +1455,8 @@ static void LoadModelExecute(napi_env env, void* data) {
 
     const std::string effectiveConfig = g_llm->dump_config();
     bool npuRequested = false;
-    const std::string backendSummary = summarizeRequestedBackends(effectiveConfig, npuRequested);
+    std::string backendSummary = summarizeRequestedBackends(effectiveConfig, npuRequested);
+    if (g_offlineNpu2State) { npuRequested = true; backendSummary += ", vision=offline_npu2 language=cpu"; }
     std::string configStatus = resetNpuRuntimeDiagnostics(
         backendSummary + ", npu_execution_mode=" + asyncData->npuMode, npuRequested);
     LOGI("%{public}s", configStatus.c_str());
@@ -1428,7 +1470,7 @@ static void LoadModelExecute(napi_env env, void* data) {
     } else {
         g_llm.reset();
         asyncData->success = false;
-        asyncData->outputStr = "error: load failed";
+        asyncData->outputStr = g_offlineNpu2State ? "error: offline NPU-2: " + g_offlineNpu2State->error : "error: load failed";
         LOGE("Model load FAILED");
         LOGE("%{public}s", currentNpuStatusLine("model_load_failed").c_str());
     }
@@ -1478,7 +1520,7 @@ static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
         }
     }
     if (asyncData->npuMode != "cpu" && asyncData->npuMode != "online" &&
-        asyncData->npuMode != "offline" && asyncData->npuMode != "full_npu") {
+        asyncData->npuMode != "offline" && asyncData->npuMode != "full_npu" && asyncData->npuMode != "offline_npu2") {
         asyncData->npuMode = "cpu";
     }
 
@@ -1511,7 +1553,9 @@ static void GenerateExecute(napi_env env, void* data) {
     std::ostringstream oss;
     dumpLlmRequest("Generate", asyncData->inputStr, g_llm->apply_chat_template(asyncData->inputStr));
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     g_llm->response(asyncData->inputStr, &oss);
+    if (offlineNpu2Failed(asyncData)) return;
     asyncData->outputStr = oss.str();
     dumpLlmResponse("Generate", asyncData->outputStr);
 
@@ -1728,6 +1772,7 @@ static void ProfileGenerateExecute(napi_env env, void* data) {
     std::ostringstream response;
     dumpLlmRequest("ProfileGenerate", prompt, g_llm->apply_chat_template(prompt));
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     g_llm->response(prompt, &response);
 
     g_llm->setDebugCallback(
@@ -1735,6 +1780,7 @@ static void ProfileGenerateExecute(napi_env env, void* data) {
         [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; }
     );
 
+    if (offlineNpu2Failed(asyncData)) return;
     std::string responseStr = response.str();
     dumpLlmResponse("ProfileGenerate", responseStr);
     logLlmPerf("ProfileGenerate", g_llm.get(), -1, perfBaseline);
@@ -1838,6 +1884,7 @@ static void ChatExecute(napi_env env, void* data) {
     dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     std::string assistant_str;
+    OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     LlmContext* context = const_cast<LlmContext*>(g_llm->getContext());
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn, asyncData->chatRequestId, context);
@@ -1849,6 +1896,7 @@ static void ChatExecute(napi_env env, void* data) {
         g_llm->response(g_messages, &oss);
         assistant_str = oss.str();
     }
+    if (offlineNpu2Failed(asyncData)) { g_messages.pop_back(); return; }
     bool cancelled = isChatRequestCancelled(asyncData->chatRequestId);
 
     if (cancelled && context) {
@@ -2064,7 +2112,9 @@ static void AgentPrefillExecute(napi_env env, void* data) {
     // 只 prefill prefix，不生成新 token；记录 prefix 结束位置供后续 eraseHistory 使用。
     dumpLlmRequest("AgentPrefill", asyncData->inputStr, asyncData->inputStr);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
+    if (offlineNpu2Failed(asyncData)) return;
     g_prefix_pos = g_llm->getCurrentHistory();
     g_agent_mode = true;
     g_agent_step = 0;
@@ -2138,6 +2188,7 @@ static void AgentStepExecute(napi_env env, void* data) {
     std::string response;
     dumpLlmRequest("AgentStep", asyncData->inputStr, asyncData->inputStr);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
         std::ostream tokenStream(&buf);
@@ -2148,6 +2199,7 @@ static void AgentStepExecute(napi_env env, void* data) {
         g_llm->response(asyncData->inputStr, &oss, nullptr, -1);
         response = oss.str();
     }
+    if (offlineNpu2Failed(asyncData)) return;
     g_agent_step++;
     auto context = g_llm->getContext();
     if (response.empty() && context) {
