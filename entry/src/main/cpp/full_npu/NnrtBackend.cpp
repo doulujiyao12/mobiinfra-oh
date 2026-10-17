@@ -54,7 +54,9 @@ struct Tensor {
     std::shared_ptr<TensorStorage> storage;
     Port port;
     size_t bytes = 0;
-    bool persistent = false;
+    // An executor's own input storage can receive deltas even when its format
+    // is unavailable and it cannot safely enter the cross-executor pool.
+    bool incremental = false;
 };
 struct DeviceGraph {
     OH_NNExecutor* executor = nullptr;
@@ -79,9 +81,8 @@ public:
         if (hiaiLibrary) dlclose(hiaiLibrary);
     }
     void configure(const BackendOptions& value) override {
-        release(); options = value;
-        effectiveGraphs = std::max(1, value.maxResidentGraphs);
-        effectiveKvBytes = value.incrementalKv ? value.persistentKvBytes : 0;
+        resident.clear(); kvBuffers.clear(); kvBytes = 0; options = value; configured = true;
+        restorePolicy();
         if (log) log("[FULL_NPU] level=cache_config max_graphs=" + std::to_string(effectiveGraphs) +
                      " model_budget_bytes=" + std::to_string(options.residentModelBytes) +
                      " kv_budget_bytes=" + std::to_string(effectiveKvBytes));
@@ -97,7 +98,10 @@ public:
         }
         return true;
     }
-    void releaseGraphs() override { resident.clear(); }
+    void releaseGraphs() override {
+        resident.clear();
+        restorePolicy();
+    }
     void release() override { releaseGraphs(); kvBuffers.clear(); kvBytes = 0; }
     bool run(const Graph& g, const std::vector<View>& inputs,
              std::vector<std::vector<float>>& outputs, std::string& error) override {
@@ -147,7 +151,7 @@ public:
             }
             const auto& src = inputs[i];
             size_t written = 0;
-            if (!syncInput(src, g.inputs[i], dst.port.dtype, buffer, dst.persistent && options.incrementalKv,
+            if (!syncInput(src, g.inputs[i], dst.port.dtype, buffer, dst.incremental && options.incrementalKv,
                            dst.storage->sync, written, error)) return false;
             if (src.cacheEpoch) { kvWritten += written; kvFull += dst.bytes; }
         }
@@ -179,7 +183,9 @@ public:
         }
         if (log) log("[FULL_NPU] graph=" + g.name + " level=run_timing input_copy_ms=" + std::to_string(copyMs) +
                      " run_sync_ms=" + std::to_string(runMs) + " kv_copied_bytes=" + std::to_string(kvWritten) +
-                     " kv_full_bytes=" + std::to_string(kvFull) + " persistent_kv_bytes=" + std::to_string(kvBytes));
+                     " kv_full_bytes=" + std::to_string(kvFull) + " persistent_kv_bytes=" + std::to_string(kvBytes) +
+                     " effective_max_graphs=" + std::to_string(effectiveGraphs) +
+                     " effective_kv_budget_bytes=" + std::to_string(effectiveKvBytes));
         return true;
     }
 private:
@@ -190,6 +196,7 @@ private:
     std::string weightApiEvidence;
     BackendOptions options;
     int effectiveGraphs = 1; // A standalone backend remains conservative until configured.
+    bool configured = false;
     size_t effectiveKvBytes = 0, kvBytes = 0;
     uint64_t clock = 0;
     std::map<std::string, std::unique_ptr<DeviceGraph>> resident;
@@ -242,9 +249,29 @@ private:
     }
 
     int priority(const Graph& g) const {
-        if (g.name == "lm_head") return 100000;
-        if (g.name.find("llm_decode_") == 0 || g.name.find("llm_prefill_") == 0) return 10000 - g.start;
+        // If only two models fit, retain the expensive decoder while cycling
+        // embedding/head. Keeping the head instead reloads the whole decoder.
+        if (g.name == "lm_head") return 10000;
+        if (g.name.find("llm_decode_") == 0 || g.name.find("llm_prefill_") == 0) return 100000 - g.start;
         return 0;
+    }
+    void restorePolicy() {
+        const int graphs = configured ? std::max(1, options.maxResidentGraphs) : 1;
+        const size_t budget = configured && options.incrementalKv ? options.persistentKvBytes : 0;
+        if (configured && log && (graphs != effectiveGraphs || budget != effectiveKvBytes))
+            log("[FULL_NPU] level=cache_policy_restore max_graphs=" + std::to_string(graphs) +
+                " kv_budget_bytes=" + std::to_string(budget));
+        effectiveGraphs = graphs;
+        effectiveKvBytes = budget;
+    }
+    void evictOne(const Graph& g, const std::string& policy) {
+        auto victim = std::min_element(resident.begin(), resident.end(), [](const auto& a, const auto& b) {
+            return a.second->priority != b.second->priority ? a.second->priority < b.second->priority :
+                   a.second->used < b.second->used;
+        });
+        if (log) log("[FULL_NPU] graph=" + g.name + " level=resident_evict previous_graph=" +
+                     victim->first + " policy=" + policy);
+        resident.erase(victim);
     }
     size_t residentBytes() const {
         size_t bytes = 0;
@@ -252,10 +279,19 @@ private:
         return bytes;
     }
     bool backoff(const Graph& g, const std::string& reason) {
-        if (resident.empty() && kvBuffers.empty()) return false;
+        // Every retry removes a model or the pool, bounding recovery attempts.
+        // A failed larger working set must not also discard the KV optimization
+        // or poison all subsequent requests/phases with single-model residency.
+        if (!resident.empty()) {
+            effectiveGraphs = std::max(1, std::min(effectiveGraphs, int(resident.size())));
+            evictOne(g, "resource_pressure");
+        } else if (!kvBuffers.empty()) {
+            kvBuffers.clear(); kvBytes = 0; effectiveKvBytes = 0;
+        } else return false;
         if (log) log("[FULL_NPU] graph=" + g.name + " level=cache_backoff reason=" + reason +
-                     " max_graphs=1 persistent_kv_bytes=0; retrying_after_release");
-        release(); effectiveGraphs = 1; effectiveKvBytes = 0;
+                     " max_graphs=" + std::to_string(effectiveGraphs) +
+                     " persistent_kv_bytes=" + std::to_string(kvBytes) +
+                     " kv_budget_bytes=" + std::to_string(effectiveKvBytes) + "; retrying_after_release");
         return true;
     }
 
@@ -304,18 +340,15 @@ private:
         // a pure LRU cache thrashes on a decoder cycle larger than its budget.
         while (!resident.empty() && (resident.size() >= size_t(effectiveGraphs) ||
                residentBytes() + modelBytes > options.residentModelBytes)) {
-            auto victim = std::min_element(resident.begin(), resident.end(), [](const auto& a, const auto& b) {
-                return a.second->priority != b.second->priority ? a.second->priority < b.second->priority :
-                       a.second->used < b.second->used;
-            });
-            trace("level=resident_evict previous_graph=" + victim->first + " policy=bounded_priority");
-            resident.erase(victim);
+            evictOne(g, "bounded_priority");
         }
         const char* version = HMS_HiAI_GetVersion();
         trace("level=load_begin path=" + g.path + " file_bytes=" + std::to_string(fileInfo.st_size) +
               " external_weight_bytes=" + std::to_string(weightBytes) +
               " hiai_version=" + (version ? version : "unavailable") +
-              " resident_models=" + std::to_string(resident.size()) + " resident_policy=bounded_priority" + resourceSnapshot());
+              " resident_models=" + std::to_string(resident.size()) + " resident_policy=bounded_priority" +
+              " effective_max_graphs=" + std::to_string(effectiveGraphs) +
+              " effective_kv_budget_bytes=" + std::to_string(effectiveKvBytes) + resourceSnapshot());
         auto compatibility = HMS_HiAICompatibility_CheckFromFile(g.path.c_str());
         trace("level=load_step step=HMS_HiAICompatibility_CheckFromFile result=" + std::to_string(int(compatibility)));
         if (compatibility != HIAI_COMPATIBILITY_COMPATIBLE) {
@@ -403,6 +436,8 @@ private:
                 trace("level=error " + error); return nullptr;
             }
         }
+        size_t incrementalKvBytes = 0;
+        int unknownKvFormats = 0;
         for (bool input : {true, false}) {
             size_t count = 0;
             ret = input ? OH_NNExecutor_GetInputCount(device->executor, &count) : OH_NNExecutor_GetOutputCount(device->executor, &count);
@@ -427,28 +462,36 @@ private:
                 }
                 if (valid) {
                     std::string cacheKey;
-                    if (input && cacheKv && effectiveKvBytes) {
-                        OH_NN_Format format{};
-                        bool knownFormat = OH_NNTensorDesc_GetFormat(desc, &format) == OH_NN_SUCCESS;
+                    if (input && cacheKv && options.incrementalKv) {
                         for (const auto& logical : g.inputs) {
                             const auto& name = logical.name;
                             bool kv = name.find("past_key_") == 0 || name.find("past_value_") == 0 ||
                                       name.find("sink_key_") == 0 || name.find("sink_value_") == 0 ||
                                       name.find("recent_key_") == 0 || name.find("recent_value_") == 0;
-                            if (kv && knownFormat && logical.shape.size() == 4 && named(tensor.port.name, name)) {
-                                auto canonical = tensor.port; canonical.name = name;
-                                cacheKey = std::to_string(deviceId) + " format=" + std::to_string(int(format)) + " " + description(canonical);
+                            if (kv && logical.shape.size() == 4 && named(tensor.port.name, name)) {
+                                tensor.incremental = true;
+                                incrementalKvBytes += bytes;
+                                OH_NN_Format format{};
+                                auto formatRet = OH_NNTensorDesc_GetFormat(desc, &format);
+                                if (formatRet == OH_NN_SUCCESS && effectiveKvBytes) {
+                                    auto canonical = tensor.port; canonical.name = name;
+                                    cacheKey = std::to_string(deviceId) + " format=" + std::to_string(int(format)) + " " + description(canonical);
+                                } else if (formatRet != OH_NN_SUCCESS) {
+                                    if (!unknownKvFormats) trace("level=kv_format_query ret=" + returnCode(formatRet) +
+                                        " reuse=executor_local cross_executor_reuse=disabled");
+                                    ++unknownKvFormats;
+                                }
                                 break;
                             }
                         }
                         auto found = kvBuffers.find(cacheKey);
-                        if (found != kvBuffers.end()) { tensor.storage = found->second; tensor.persistent = true; }
+                        if (found != kvBuffers.end()) tensor.storage = found->second;
                     }
                     if (!tensor.storage) {
                         tensor.storage = std::make_shared<TensorStorage>();
                         tensor.storage->handle = OH_NNTensor_Create(deviceId, desc);
                         if (tensor.storage->handle && !cacheKey.empty() && bytes <= effectiveKvBytes - kvBytes) {
-                            kvBuffers[cacheKey] = tensor.storage; kvBytes += bytes; tensor.persistent = true;
+                            kvBuffers[cacheKey] = tensor.storage; kvBytes += bytes;
                         }
                     }
                 }
@@ -468,6 +511,8 @@ private:
         for (const auto& t : device->outputs) outputPorts.push_back(t.port);
         if (!bindPorts(g.inputs, inputPorts, {}, device->inputMap, error) ||
             !bindPorts(g.outputs, outputPorts, g.aliases, device->outputMap, error)) return nullptr;
+        if (incrementalKvBytes) trace("level=kv_storage incremental_input_bytes=" + std::to_string(incrementalKvBytes) +
+            " persistent_pool_bytes=" + std::to_string(kvBytes) + " unknown_formats=" + std::to_string(unknownKvFormats));
         trace("level=graph_ready cpu_fallback=disabled load_ms=" + std::to_string(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()));
         device->modelBytes = modelBytes; device->used = ++clock; device->priority = priority(g);

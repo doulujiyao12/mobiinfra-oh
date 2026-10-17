@@ -496,6 +496,9 @@ bool Runtime::response(const std::string& input, const Cancel& cancel, const Emi
         std::vector<std::vector<float>> logits;
         if (!s.run("lm_head", {floats(hidden)}, logits, cancel, error)) return fail();
         int token = int(std::max_element(logits[0].begin(), logits[0].end()) - logits[0].begin());
+        if (s.debug && s.debug()) s.trace("level=sample step=" + std::to_string(step) +
+            " token_id=" + std::to_string(token) + " logit=" + std::to_string(logits[0][token]) +
+            " past=" + std::to_string(s.cache->length));
         if (s.tokenizer->is_stop(token)) break;
         pending += decodePiece(s.tokenizer.get(), token); ++generated;
         auto piece = takeUtf8(pending);
