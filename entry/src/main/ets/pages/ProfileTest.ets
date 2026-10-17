@@ -156,11 +156,18 @@ struct ProfileTest {
     }
   }
 
-  private modelExecutionMode(path: string): 'cpu' | 'full_npu' | 'offline_npu2' {
+  private modelExecutionMode(path: string): 'cpu' | 'online' | 'full_npu' | 'offline_npu2' {
     if (this.isFullNpuConfig(path)) return 'full_npu';
     try {
       let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
-      if (config['offline_npu2'] !== undefined) return 'offline_npu2';
+      if (config['offline_npu2'] !== undefined) {
+        if (config['offline_npu2_mnn_visual'] === true && config['visual_split'] === true) {
+          let selected = AppStorage.get('localNpuExecutionMode') as string;
+          if (selected === 'online') return 'online';
+          if (selected === 'cpu') return 'cpu';
+        }
+        return 'offline_npu2';
+      }
     } catch (e) {
     }
     return 'cpu';

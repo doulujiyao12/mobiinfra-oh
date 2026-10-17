@@ -1390,10 +1390,16 @@ static void LoadModelExecute(napi_env env, void* data) {
             return;
         }
     } else {
-        if (readTextFileLocal(asyncData->inputStr).find("kirin_offline_npu2_v1") != std::string::npos) {
+        const std::string packageConfig = readTextFileLocal(asyncData->inputStr);
+        const bool completeMnnVision =
+            extractJsonBoolValue(packageConfig, "offline_npu2_mnn_visual", false) &&
+            extractJsonBoolValue(packageConfig, "visual_split", false);
+        const bool mnnMode = asyncData->npuMode == "online" || asyncData->npuMode == "cpu";
+        if (packageConfig.find("kirin_offline_npu2_v1") != std::string::npos &&
+            !(mnnMode && completeMnnVision)) {
             g_llm.reset();
             asyncData->success = false;
-            asyncData->outputStr = "error: this model package requires Offline NPU-2";
+            asyncData->outputStr = "error: this model package requires Offline NPU-2; online/CPU modes need complete MNN vision assets";
             return;
         }
         g_llm.reset(Llm::createLLM(asyncData->inputStr));
