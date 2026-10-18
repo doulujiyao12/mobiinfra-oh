@@ -1722,6 +1722,7 @@ export class DataPipelineModelClient {
         let content = await this.cloudClient.chatCompletionText({
           baseUrl: config.baseUrl,
           apiKey: config.apiKey,
+          model: config.model,
           messages: messages,
           temperature: temperature,
           chatTemplateKwargs: {

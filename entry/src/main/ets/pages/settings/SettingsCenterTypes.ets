@@ -5,7 +5,8 @@ export enum SettingsSectionId {
   DataCollection = 1,
   ModelAgents = 2,
   TaskAutomation = 3,
-  StorageAbout = 4
+  StorageAbout = 4,
+  CloudModelAdvanced = 5
 }
 
 export interface SettingsSectionItem {
@@ -45,19 +46,19 @@ const SETTINGS_SENSITIVE_INPUT_SINGLE_LINE_LIMIT: number = 24;
 
 export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
   {
+    id: SettingsSectionId.ModelAgents,
+    title: '模型与智能体',
+    subtitle: '云端模型、本地推理与模型服务配置'
+  },
+  {
     id: SettingsSectionId.PersonalPrivacy,
     title: '个人与隐私',
-    subtitle: '隐私守护、确认策略与数字分身'
+    subtitle: '隐私授权、小艺记忆访问与动作确认'
   },
   {
     id: SettingsSectionId.DataCollection,
     title: '数据采集',
-    subtitle: '图库、OCR、Embedding 与地图服务'
-  },
-  {
-    id: SettingsSectionId.ModelAgents,
-    title: '模型与智能体',
-    subtitle: '云端 Planner/Decider、本地模型与 HDC'
+    subtitle: '微信汇总、OCR、图片缩放与地图配置'
   },
   {
     id: SettingsSectionId.TaskAutomation,
@@ -71,7 +72,15 @@ export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
   }
 ];
 
+// Secondary screen: it is reachable through Cloud Model's More Settings, not a sixth root settings item.
+const CLOUD_MODEL_ADVANCED_SECTION: SettingsSectionItem = {
+  id: SettingsSectionId.CloudModelAdvanced,
+  title: '云端模型设置',
+  subtitle: '按用途分别配置，填写后自动保存'
+};
+
 export function settingsSectionTitle(id: SettingsSectionId): string {
+  if (id === SettingsSectionId.CloudModelAdvanced) { return CLOUD_MODEL_ADVANCED_SECTION.title; }
   for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
     if (SETTINGS_SECTION_ITEMS[i].id === id) {
       return SETTINGS_SECTION_ITEMS[i].title;
@@ -81,6 +90,7 @@ export function settingsSectionTitle(id: SettingsSectionId): string {
 }
 
 export function settingsSectionSubtitle(id: SettingsSectionId): string {
+  if (id === SettingsSectionId.CloudModelAdvanced) { return CLOUD_MODEL_ADVANCED_SECTION.subtitle; }
   for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
     if (SETTINGS_SECTION_ITEMS[i].id === id) {
       return SETTINGS_SECTION_ITEMS[i].subtitle;
@@ -90,6 +100,7 @@ export function settingsSectionSubtitle(id: SettingsSectionId): string {
 }
 
 export function normalizeSettingsSectionId(id: number): number {
+  if (id === SettingsSectionId.CloudModelAdvanced) { return id; }
   for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
     if (SETTINGS_SECTION_ITEMS[i].id === id) {
       return id;
@@ -100,6 +111,10 @@ export function normalizeSettingsSectionId(id: number): number {
 
 export function isSettingsSectionSelected(id: number): boolean {
   return normalizeSettingsSectionId(id) !== SETTINGS_SECTION_NONE;
+}
+
+export function settingsParentSection(id: number): number {
+  return id === SettingsSectionId.CloudModelAdvanced ? SettingsSectionId.ModelAgents : SETTINGS_SECTION_NONE;
 }
 
 export function maskSensitiveSettingValue(value: string): string {

@@ -4,6 +4,11 @@ import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
+import { CloudModelConfig } from '../../utils/CloudModelClient';
+import { defaultChatCloudConfig } from '../../utils/ChatCloudConfig';
+import {
+  cloudSettingValuesDiffer, cloudSettingsUseSeparateValues, sharedCloudSettingEditorValue, updateUnifiedCloudSetting
+} from '../../utils/CloudSettingsConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -79,7 +84,8 @@ import {
   SettingsSectionItem,
   SettingsSectionId,
   settingsSectionSubtitle,
-  settingsSectionTitle
+  settingsSectionTitle,
+  settingsParentSection
 } from './SettingsCenterTypes';
 import {
   SETTINGS_BUTTON_HEIGHT,
@@ -120,7 +126,7 @@ export struct SettingsCenterPage {
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
   @Prop localNpuExecutionMode: string = 'cpu';
-  @Link selectedSectionId: number;
+  @Link @Watch('onSelectedSectionChanged') selectedSectionId: number;
   @Link output: string;
   @Link chunkOmCacheOutput: string;
   @Link cloudOutput: string;
@@ -331,8 +337,11 @@ export struct SettingsCenterPage {
   }
 
   private openSection(id: SettingsSectionId): void {
-    this.closeSensitiveInputs();
     this.selectedSectionId = normalizeSettingsSectionId(id);
+  }
+
+  private onSelectedSectionChanged(): void {
+    this.closeSensitiveInputs();
     this.resetDetailScroll();
     setTimeout(() => {
       this.resetDetailScroll();
@@ -341,7 +350,7 @@ export struct SettingsCenterPage {
 
   private closeSection(): void {
     this.closeSensitiveInputs();
-    this.selectedSectionId = SETTINGS_SECTION_NONE;
+    this.selectedSectionId = settingsParentSection(this.selectedSectionId);
   }
 
   private sectionInitial(id: SettingsSectionId): string {
@@ -361,6 +370,9 @@ export struct SettingsCenterPage {
   }
 
   private activeSectionTitle(): string {
+    if (this.selectedSectionId === SettingsSectionId.CloudModelAdvanced) {
+      return settingsSectionTitle(SettingsSectionId.CloudModelAdvanced);
+    }
     if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
       return settingsSectionTitle(SettingsSectionId.PersonalPrivacy);
     }
@@ -974,7 +986,9 @@ export struct SettingsCenterPage {
 
   @Builder SelectedSectionContent() {
     Column() {
-      if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
+      if (this.selectedSectionId === SettingsSectionId.CloudModelAdvanced) {
+        this.CloudModelAdvancedSection()
+      } else if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
         this.PrivacySection()
       } else if (this.selectedSectionId === SettingsSectionId.DataCollection) {
         this.DataCollectionSection()
@@ -1003,12 +1017,6 @@ export struct SettingsCenterPage {
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AgentConfirmPolicyGroup() }
-      })
-      SettingsGroupCard({
-        title: '数字分身图片服务',
-        subtitle: '配置头像生成服务地址、密钥、模型与图片尺寸',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.AvatarImageServiceGroup() }
       })
     }
     .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
@@ -1117,22 +1125,10 @@ export struct SettingsCenterPage {
         contentBuilder: () => { this.WechatAutoSummarySettings() }
       })
       SettingsGroupCard({
-        title: '图库分析',
-        subtitle: '图库大模型服务与字段级请求策略',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.GalleryAnalysisGroup() }
-      })
-      SettingsGroupCard({
         title: 'OCR',
         subtitle: '本地 OCR 回退、关键词预筛和并发控制',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.OcrSettingsGroup() }
-      })
-      SettingsGroupCard({
-        title: 'Embedding',
-        subtitle: '图片检索向量服务和端云模式',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.EmbeddingSettingsGroup() }
       })
       SettingsGroupCard({
         title: '地图服务',
@@ -1260,32 +1256,73 @@ export struct SettingsCenterPage {
     Column() {
       this.SectionTitle(SettingsSectionId.ModelAgents)
       SettingsGroupCard({
+        title: '云端模型',
+        subtitle: '留空使用默认配置，填写后同时用于 Planner 和 Decider',
+        purpose: '提供云端对话、任务规划和手机截图决策能力。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.UnifiedCloudModelGroup() }
+      })
+      SettingsGroupCard({
         title: '本地模型',
         subtitle: '已下载模型管理与加载路径切换',
+        purpose: '在手机上加载和运行端侧大模型，可选择 CPU 或 NPU 推理。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.LocalModelGroup() }
       })
       SettingsGroupCard({
         title: '本地模型下载',
         subtitle: '从 ModelScope 仓库下载本地模型',
+        purpose: '下载端侧推理所需的模型文件，供本地模型加载。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ModelDownloadGroup() }
       })
+    }
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder CloudModelAdvancedSection() {
+    Column() {
+      this.SectionTitle(SettingsSectionId.CloudModelAdvanced)
       SettingsGroupCard({
-        title: '云端 Planner/Decider',
-        subtitle: '云端智能体服务、模型和连通性测试',
+        title: 'Planner · 任务规划',
+        purpose: '用于云端对话、任务规划、个人记忆查询与信息整理。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.CloudPlannerDeciderGroup() }
+        contentBuilder: () => { this.CloudPlannerGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Decider · 看图决策',
+        purpose: '读取手机截图并决定点击、滑动、输入等操作，需要支持图片输入的模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.CloudDeciderGroup() }
       })
       SettingsGroupCard({
         title: '语音合成服务',
-        subtitle: '配置助手朗读的 TTS 服务、模型、音色与流式播放',
+        purpose: '把 AI 回复合成为语音，用于助手朗读和语音聊天。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.VoiceTtsServiceGroup() }
       })
       SettingsGroupCard({
+        title: '数字分身图片服务',
+        purpose: '根据个人画像生成数字分身头像，可分别配置文生图和图生图模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.AvatarImageServiceGroup() }
+      })
+      SettingsGroupCard({
+        title: '图库分析模型',
+        purpose: '识别照片和截图，提取主题、内容摘要与生活记忆，需要支持图片输入的模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.GalleryAnalysisGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Embedding · 语义检索',
+        purpose: '把图库内容摘要和搜索词转为向量，支持按含义查找图片，可选端侧或云端模式。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.EmbeddingSettingsGroup() }
+      })
+      SettingsGroupCard({
         title: '上下文压缩',
-        subtitle: '聊天上下文压缩阈值和保留轮数',
+        purpose: '控制聊天历史何时压缩、保留多少轮对话，减少上下文占用。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ContextCompressionGroup() }
       })
@@ -1294,7 +1331,77 @@ export struct SettingsCenterPage {
     .margin({ top: 16, bottom: 110 })
   }
 
-  @Builder CloudPlannerDeciderGroup() {
+  private storedCloudSettings(): CloudModelConfig {
+    return {
+      plannerBaseUrl: this.cloudPlannerBaseUrl, plannerModel: this.cloudPlannerModel,
+      plannerApiKey: this.cloudPlannerApiKey, deciderBaseUrl: this.cloudDeciderBaseUrl,
+      deciderModel: this.cloudDeciderModel, deciderApiKey: this.cloudDeciderApiKey, apiKey: this.cloudApiKey
+    };
+  }
+
+  private updateUnifiedCloudField(field: string, value: string): void {
+    let next = updateUnifiedCloudSetting(this.storedCloudSettings(), field, value);
+    this.cloudPlannerBaseUrl = next.plannerBaseUrl;
+    this.cloudDeciderBaseUrl = next.deciderBaseUrl;
+    this.cloudPlannerModel = next.plannerModel;
+    this.cloudDeciderModel = next.deciderModel;
+    this.cloudPlannerApiKey = next.plannerApiKey || '';
+    this.cloudDeciderApiKey = next.deciderApiKey || '';
+    this.cloudApiKey = next.apiKey;
+  }
+
+  @Builder UnifiedCloudModelGroup() {
+    SettingInput({
+      label: '云端模型 URL',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
+      placeholder: cloudSettingValuesDiffer(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl) ?
+        '已分别配置，填写后同时覆盖两者' : '留空使用默认 URL，可填服务地址或 chat/completions 地址',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('url', value); }
+    })
+    SettingInput({
+      label: '模型名',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerModel, this.cloudDeciderModel,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel),
+      placeholder: cloudSettingValuesDiffer(this.cloudPlannerModel, this.cloudDeciderModel,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel) ?
+        '已分别配置，填写后同时覆盖两者' : '留空使用默认模型，或输入服务商提供的模型 ID',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('model', value); }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'unifiedCloudApiKey', activeSensitiveId: this.activeSensitiveInputId,
+      label: 'API Key',
+      configuredPreviewText: '*****',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey),
+      placeholder: '自定义服务的 API Key',
+      defaultPreviewText: cloudSettingValuesDiffer(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey) ? '已分别配置' : '默认',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('key', value); }
+    })
+    Text('支持 DeepSeek、OpenRouter、OpenAI。自定义服务请填写模型 ID 和 API Key，截图操控需选择支持图片的模型。')
+      .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
+      .width('100%').margin({ top: 10 })
+    if (cloudSettingsUseSeparateValues(this.storedCloudSettings(), defaultChatCloudConfig())) {
+      Text('当前已分别配置 Planner / Decider，可进入更多设置查看；修改上方对应字段会同步覆盖两者。')
+        .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
+        .width('100%').margin({ top: 6 })
+    }
+    Button('更多设置  ›')
+      .width('100%').height(42).fontSize(14)
+      .fontColor(AppTheme.text('#5B68FF')).backgroundColor(AppTheme.background('#F0EEFC'))
+      .borderRadius(SETTINGS_CONTROL_RADIUS).margin({ top: 12 })
+      .onClick((): void => {
+        this.closeSensitiveInputs();
+        this.openSection(SettingsSectionId.CloudModelAdvanced);
+      })
+  }
+
+  @Builder CloudPlannerGroup() {
     SettingInput({
       label: 'Planner 服务',
       value: hiddenDefaultSettingEditorValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
@@ -1321,6 +1428,11 @@ export struct SettingsCenterPage {
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.cloudPlannerApiKey = value; }
     })
+    SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
+    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
+  }
+
+  @Builder CloudDeciderGroup() {
     SettingInput({
       label: 'Decider 服务',
       value: hiddenDefaultSettingEditorValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
@@ -1346,8 +1458,6 @@ export struct SettingsCenterPage {
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudDeciderModel = value; }
     })
-    SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
-    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder CloudPlannerActionRow() {

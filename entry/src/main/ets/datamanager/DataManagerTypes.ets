@@ -93,6 +93,7 @@ DOMAIN_DESCRIPTIONS['other'] = '无法归入以上分类的事件';
 export interface DataManagerModelConfig {
   baseUrl: string;
   apiKey: string;
+  model?: string;
   enabled: boolean;
 }
 

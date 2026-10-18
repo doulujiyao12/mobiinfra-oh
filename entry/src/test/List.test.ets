@@ -14,6 +14,7 @@ import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
+import cloudSettingsUnitTest from './CloudSettingsUnit.test';
 import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
 import chatContextBudgetUnitTest from './ChatContextBudgetUnit.test';
 import chatReactAgentUnitTest from './ChatReactAgentUnit.test';
@@ -72,6 +73,7 @@ export default function testsuite() {
   chatPageTypesUnitTest();
   digitalAvatarTypesUnitTest();
   settingsCenterConfigUnitTest();
+  cloudSettingsUnitTest();
   chatSessionStorageUnitTest();
   chatContextBudgetUnitTest();
   chatReactAgentUnitTest();

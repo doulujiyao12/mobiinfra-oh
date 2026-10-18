@@ -8,6 +8,7 @@ const HOME_TASK_CONTENT_INTEREST_LIMIT: number = 6;
 const HOME_TASK_TITLE_LIMIT: number = 28;
 const HOME_TASK_REASON_LIMIT: number = 64;
 export const HOME_TASK_DESCRIPTION_LIMIT: number = 60;
+export const HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT: number = 300;
 const HOME_TASK_EVIDENCE_LIMIT: number = 3;
 const HOME_TASK_CONFIRMATION_SUFFIX: string = '；在提交订单、支付、转账或发送消息前停下等待用户确认';
 const HOME_TASK_ASK_USER: RegExp = /询问|先问|问一下|问用户|问我|征求|等待(?:用户|我)|(?:用户|我)(?:确认|选择|决定)/;
@@ -103,8 +104,21 @@ export function homeTaskSupportsQwen(item: HomeTaskSuggestion): boolean {
   return homeTaskQwenUnavailableReason(item).length === 0;
 }
 
+function isHomeTaskQwenTravelPlan(item: HomeTaskSuggestion): boolean {
+  return item.category === 'travel' && /规划|行程|攻略|出差安排|旅行安排|游玩安排/.test(
+    item.title + ' ' + item.task + ' ' + (item.qwenTask || ''));
+}
+
+export function homeTaskQwenDescriptionLimit(item: HomeTaskSuggestion): number {
+  return isHomeTaskQwenTravelPlan(item) ? HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT : HOME_TASK_DESCRIPTION_LIMIT;
+}
+
 export function homeTaskQwenDescription(item: HomeTaskSuggestion): string {
   let task = compactText(item.qwenTask, 500);
+  // Keep every known travel condition; never replace a detailed plan request with its short card title.
+  if (task && isHomeTaskQwenTravelPlan(item)) {
+    return validatedQwenDescription(item, task);
+  }
   let information = homeTaskIsInformationCategory(item.category);
   if (!task || qwenHasGuiSteps(task, information)) {
     // Compatibility with old responses: retain semantic clauses and platform constraints, discard gesture-only clauses.
@@ -116,23 +130,29 @@ export function homeTaskQwenDescription(item: HomeTaskSuggestion): string {
       .filter((part: string): boolean => part.trim().length > 0 && !qwenHasGuiSteps(part, information))
       .join('，');
   }
-  return homeTaskShortDraft(task || item.title, item.title);
+  return isHomeTaskQwenTravelPlan(item) ? validatedQwenDescription(item, task || item.title) :
+    homeTaskShortDraft(task || item.title, item.title);
 }
 
-export function buildQwenTaskHandoff(task: string): string {
+export function buildQwenTaskHandoff(task: string, travelPlan: boolean = false): string {
   // JSON quoting keeps message content distinct from the GUI agent's handoff instructions.
-  return '在千问（com.aliyun.tongyi4ohos）新对话中发送消息' + stringifyJsonCompat(homeTaskExecutionDescription(task)) +
+  return '在千问（com.aliyun.tongyi4ohos）新对话中发送消息' + stringifyJsonCompat(qwenExecutionDescription(task, travelPlan)) +
     '，确认发出后结束手机操作并停留千问，不重复发送，无法发送则报错';
 }
 
 export function buildHomeTaskExecutionRequest(item: HomeTaskSuggestion, method: string, draft: string): HomeTaskExecutionRequest {
-  let task = homeTaskExecutionDescription(draft);
   if (method === 'phone') {
-    return { taskDescription: task, keepTargetAppAfterFinish: false };
+    return { taskDescription: homeTaskExecutionDescription(draft), keepTargetAppAfterFinish: false };
   }
   if (method !== 'qwen') { throw new Error('请选择执行方式'); }
   let reason = homeTaskQwenUnavailableReason(item);
   if (reason) { throw new Error(reason); }
+  let task = validatedQwenDescription(item, draft);
+  return { taskDescription: buildQwenTaskHandoff(task, isHomeTaskQwenTravelPlan(item)), keepTargetAppAfterFinish: true };
+}
+
+function validatedQwenDescription(item: HomeTaskSuggestion, draft: string): string {
+  let task = qwenExecutionDescription(draft, isHomeTaskQwenTravelPlan(item));
   if (qwenHasGuiSteps(task, homeTaskIsInformationCategory(item.category))) {
     throw new Error('请向千问描述目标和要求，去掉点击、滑动等手机操作步骤');
   }
@@ -140,7 +160,7 @@ export function buildHomeTaskExecutionRequest(item: HomeTaskSuggestion, method: 
   if (qwenRequiresOtherPlatform(intent, homeTaskIsInformationCategory(item.category)) || QWEN_PRIVATE_DEVICE_TASK.test(intent)) {
     throw new Error('修改后的任务需要指定平台或手机操作，请选择操控手机完成');
   }
-  return { taskDescription: buildQwenTaskHandoff(task), keepTargetAppAfterFinish: true };
+  return task;
 }
 
 interface HomeTaskSuggestionResponse {
@@ -157,6 +177,7 @@ interface RecentEventPromptItem {
   sources: string[];
   domains: string[];
   keywords: string[];
+  travel_details: string;
 }
 
 interface ProfileDomainPromptItem {
@@ -166,12 +187,21 @@ interface ProfileDomainPromptItem {
   claims: string[];
 }
 
+interface PreviousSuggestionPromptItem {
+  title: string;
+  task: string;
+  qwen_task: string;
+  category: string;
+  reason: string;
+}
+
 interface HomeTaskSuggestionPromptContext {
   current_date: string;
   recent_records: RecentEventPromptItem[];
   content_interest_refs: string[];
   profile_summary: ProfileDomainPromptItem[];
   avoid_repeating_tasks: string[];
+  previous_suggestions: PreviousSuggestionPromptItem[];
 }
 
 function compactText(value: string | undefined, maxLength: number): string {
@@ -248,6 +278,18 @@ export function homeTaskExecutionDescription(draft: string): string {
   return task;
 }
 
+function qwenExecutionDescription(draft: string, travelPlan: boolean): string {
+  if (!travelPlan) { return homeTaskExecutionDescription(draft); }
+  let task = normalizedTaskSentence(draft);
+  if (!task) { throw new Error('请描述需要千问规划的行程'); }
+  if (HOME_TASK_ASK_USER.test(task)) { throw new Error('请直接使用已知出行条件，不要安排执行中提问'); }
+  task = guardedTaskDescription(task);
+  if (task.length > HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT) {
+    throw new Error('千问出行规划最多300字，请保留时间、地点、交通、人数和主要目的等必要条件');
+  }
+  return task;
+}
+
 // Old long recommendations use their short title as an editable draft; never cut a constraint in half.
 export function homeTaskShortDraft(task: string, title: string): string {
   if (!task.trim()) { return ''; }
@@ -291,12 +333,10 @@ function inferredCategory(value: string, title: string, task: string): string {
     return 'news';
   }
   if (/深入了解|弄懂|理解|解释|原理|教程|入门|科普|学习/.test(content)) { return 'learning'; }
+  if (/出差|出行|旅游|旅行|行程|攻略|景点|路线|导航|打车|车票|机票|酒店/.test(content)) { return 'travel'; }
   if (/查询|搜索/.test(content)) { return 'news'; }
   if (/朋友|聊天|微信|消息|联系/.test(content)) {
     return 'social';
-  }
-  if (/出行|旅游|旅行|行程|景点|路线|导航|打车|车票|机票|酒店/.test(content)) {
-    return 'travel';
   }
   if (/工作|文档|会议|邮件|日程/.test(content)) {
     return 'work';
@@ -406,7 +446,7 @@ export function homeTaskSuggestionCategoryLabel(category: string): string {
 }
 
 export function buildHomeTaskSuggestionPrompt(events: IndexedEvent[], domains: HomeDomainViewModel[],
-  previousTasks: string[], currentDate: string): string {
+  previousTasks: string[], currentDate: string, previousSuggestions: HomeTaskSuggestion[] = []): string {
   let sourceEvents = selectHomeTaskSuggestionEvents(events);
   let recentEvents: RecentEventPromptItem[] = sourceEvents
     .map((event: IndexedEvent, index: number): RecentEventPromptItem => {
@@ -416,7 +456,10 @@ export function buildHomeTaskSuggestionPrompt(events: IndexedEvent[], domains: H
         summary: compactText(event.normalized_fact.length > 0 ? event.normalized_fact : event.summary, 180),
         sources: event.sources.slice(0, 3),
         domains: event.domains.slice(0, 4),
-        keywords: event.keywords.slice(0, 8)
+        keywords: event.keywords.slice(0, 8),
+        // A normalized fact may omit trip conditions present in the collected summary.
+        travel_details: /出差|旅游|旅行|行程|航班|机票|高铁|火车|自驾|游玩/.test(
+          event.normalized_fact + ' ' + event.summary + ' ' + event.keywords.join(' ')) ? compactText(event.summary, 480) : ''
       };
     });
   let sourceDomains = domains.filter((item: HomeDomainViewModel): boolean => item.eventCount > 0);
@@ -431,24 +474,38 @@ export function buildHomeTaskSuggestionPrompt(events: IndexedEvent[], domains: H
     });
   let excluded = previousTasks.slice(0, HOME_TASK_SUGGESTION_COUNT)
     .map((item: string): string => compactText(item, 180));
+  let previous: PreviousSuggestionPromptItem[] = previousSuggestions.slice(0, HOME_TASK_SUGGESTION_COUNT)
+    .map((item: HomeTaskSuggestion): PreviousSuggestionPromptItem => {
+      return {
+        title: compactText(item.title, HOME_TASK_TITLE_LIMIT),
+        task: compactText(item.task, HOME_TASK_DESCRIPTION_LIMIT),
+        qwen_task: compactText(item.qwenTask, HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT),
+        category: item.category,
+        reason: compactText(item.reason, HOME_TASK_REASON_LIMIT)
+      };
+    });
   let context: HomeTaskSuggestionPromptContext = {
     current_date: currentDate,
     recent_records: recentEvents,
     content_interest_refs: recentEvents.filter((_item: RecentEventPromptItem, index: number): boolean =>
       isContentInterestRecord(sourceEvents[index])).map((item: RecentEventPromptItem): string => item.ref),
     profile_summary: profileDomains,
-    avoid_repeating_tasks: excluded
+    avoid_repeating_tasks: excluded,
+    previous_suggestions: previous
   };
   return '你是手机端生活助理，请根据用户最近的记录和画像摘要，猜测用户此刻最可能想在手机上完成的事情。' +
     '\n生成恰好 3 条彼此不同的中文任务，同时区分手机 GUI 执行和千问智能体协同两种方式。' +
+    '\nprevious_suggestions 是当前页面已经生成的推荐；用户点“换一批”时，请更换目标、主题或行动，不要仅改写标题、理由或手机指令后重复同一个千问需求，也不要重复 avoid_repeating_tasks。没有旧推荐时正常生成；旧推荐仅用于避重，不能当作用户事实或新推荐依据。' +
     '\n任务可以涉及购买商品、点外卖、查询资讯、与朋友聊天、出行或日常效率，但必须与输入记录存在合理关联，不得捏造记录中没有的具体事实。' +
     '\n也要关注看过的视频、帖子、博客和文章中的具体主题；content_interest_refs 指向这些浏览依据，有合适主题时优先留出1条“深入了解”(learning)或“追踪相关动态”(news)，不要三条都追同一主题，没有依据时不要硬凑。' +
     '\n深入了解只选一个概念、原理或入门问题；相关动态只查一个具体主题的近期新闻，默认近7天并参考 current_date，任务要求检索真实来源，推荐理由不得编造“最近发生了某新闻”。' +
     '\n每条推荐必须填写 evidence_refs，引用 1 至 3 个上下文中真实存在的 ref，说明该推测来自哪些近期记录或画像；禁止编造 ref。reason 要简短说明这些依据与任务之间的关系。' +
-    '\ntask 和 qwen_task 都必须是40字以内的一句话，每次只做一件简单的事，只保留目标和最必要的条件；不要步骤列表、多目标、对比多家商品、复杂筛选、完整行程或长篇分析。' +
+    '\n手机 task 必须是40字以内的一句话，每次只做一件简单的事，只保留目标和最必要的条件；不要步骤列表、多目标、对比多家商品、复杂筛选、完整行程或长篇分析。普通 qwen_task 同样遵守这条规则，只有下述千问出行规划例外。' +
     '\n在生成任务时就根据已有记录和偏好选定一个具体目标，不要写多个选项、询问用户、等待用户确认或让用户选择；缺少必要依据时改荐能直接完成的查看、搜索任务，不要编造地址、联系人或其他个人信息。' +
     '\ntask 写目标应用和一件操作，例如“在淘宝搜索300元以内的通勤背包”；qwen_task 直接写一个需求，例如“帮我找300元以内的通勤背包”，不要点击、滑动、坐标等操作步骤。' +
     '\n对于淘宝/天猫购物、淘宝闪购/饿了么外卖、飞猪或高德出行，以及不指定其他平台的购物、外卖、出行需求，设置 qwen_supported=true，单独生成 qwen_task，两种描述保留相同的必要条件，不得擅自改动平台、日期或预算。' +
+    '\n出差、旅游等需要规划的推荐归为 travel：仅 qwen_task 可以适当复杂，最多300字，可描述行程安排、交通衔接和游玩/办事重点。将记录或画像中确实存在且与同一次出行相关的时间/天数、出发地/目的地、交通工具、人数、主要想玩什么或干什么写进需求，保留已知预算和约束；这些信息都不是必填项，未采集到就省略，不猜测、不补齐、不把记录采集日期当出行日期、不混合不同出行，也不要要求执行中询问用户。travel_details 是采集摘要的补充，需结合记录语义判断，不能将过往已结束的旅行当成未来计划。' +
+    '\n同一条出行推荐的手机 task 仍只安排简单搜索或查看，例如“在高德查看杭州西湖周边景点”；千问 qwen_task 可写“按已知的10月24日至25日、2人高铁去杭州，规划以西湖和美食为主的两日行程”，前提是这些条件确实出现在输入中。只制定建议，不代下单、订票、支付或发送消息；没有规划需求时不要强行生成出行推荐。' +
     '\n公开知识问答和相关新闻查询也设置 qwen_supported=true：手机任务明确选择浏览器或相关App搜索，千问任务独立写清主题与时间范围，不让千问读取原App或历史记录；例如手机“在浏览器搜索NPU量化入门教程”，千问“用一个简单例子解释NPU量化原理”；新闻可写“联网查找近7天端侧AI相关新闻并标注来源”。' +
     '\n来源平台只说明兴趣从哪里来，不限制独立的知识问题或公开新闻查询；若手机任务选择在B站搜索教程，可另给千问不依赖B站的解释目标，两者仍围绕同一个具体主题。' +
     '\n除上述独立的公开知识和新闻目标外，必须在京东、美团、微信、携程等其他平台内完成的业务，或读取手机私有内容/操作系统设置，设置 qwen_supported=false，qwen_task 留空。qwen_reason 简短解释是否适合协同。' +
@@ -460,7 +517,8 @@ export function buildHomeTaskSuggestionPrompt(events: IndexedEvent[], domains: H
 }
 
 export function parseHomeTaskSuggestions(rawText: string, batchId: string,
-  previousTasks: string[] = [], events: IndexedEvent[] = [], domains: HomeDomainViewModel[] = []): HomeTaskSuggestion[] {
+  previousTasks: string[] = [], events: IndexedEvent[] = [], domains: HomeDomainViewModel[] = [],
+  previousSuggestions: HomeTaskSuggestion[] = []): HomeTaskSuggestion[] {
   let parsed = parseJsonCompat<HomeTaskSuggestionResponse>(suggestionJsonText(rawText));
   if (compactModelText(parsed.action, 40) === 'error') {
     throw new Error(compactModelText(parsed.reason, 160) || 'Planner 请求失败');
@@ -472,8 +530,12 @@ export function parseHomeTaskSuggestions(rawText: string, batchId: string,
     candidates = parsed.tasks;
   }
   let existingKeys: string[] = previousTasks.map((task: string): string => normalizedTaskKey(task));
+  let previousQwenKeys: string[] = previousSuggestions.filter((item: HomeTaskSuggestion): boolean =>
+    item.qwenSupported !== false && (item.qwenTask || '').trim().length > 0)
+    .map((item: HomeTaskSuggestion): string => normalizedTaskKey(item.qwenTask || ''));
   let acceptedKeys: string[] = [];
   let suggestions: HomeTaskSuggestion[] = [];
+  let rejectedRepeat: boolean = false;
   let sourceEvents = selectHomeTaskSuggestionEvents(events);
   for (let i = 0; i < candidates.length && suggestions.length < HOME_TASK_SUGGESTION_COUNT; i++) {
     let candidate = candidates[i];
@@ -487,7 +549,9 @@ export function parseHomeTaskSuggestions(rawText: string, batchId: string,
       continue;
     }
     let key = normalizedTaskKey(task);
-    if (key.length === 0 || existingKeys.indexOf(key) >= 0 || acceptedKeys.indexOf(key) >= 0) {
+    if (key.length === 0) { continue; }
+    if (existingKeys.indexOf(key) >= 0 || acceptedKeys.indexOf(key) >= 0) {
+      rejectedRepeat = true;
       continue;
     }
     let category = inferredCategory(compactModelText(candidate.category, 20), title, task);
@@ -515,13 +579,24 @@ export function parseHomeTaskSuggestions(rawText: string, batchId: string,
       suggestion.qwenSupported = false;
       suggestion.qwenTask = '';
     } else if (suggestion.qwenTask) {
-      suggestion.qwenTask = homeTaskQwenDescription(suggestion);
+      try {
+        suggestion.qwenTask = homeTaskQwenDescription(suggestion);
+      } catch (e) {
+        // A malformed Qwen plan must not discard a usable phone recommendation or silently lose its conditions.
+        suggestion.qwenSupported = false;
+        suggestion.qwenTask = '';
+        suggestion.qwenReason = compactText((e as Error).message, 64);
+      }
+    }
+    if (suggestion.qwenTask && previousQwenKeys.indexOf(normalizedTaskKey(suggestion.qwenTask)) >= 0) {
+      rejectedRepeat = true;
+      continue;
     }
     suggestions.push(suggestion);
     acceptedKeys.push(key);
   }
   if (suggestions.length !== HOME_TASK_SUGGESTION_COUNT) {
-    throw new Error('Planner 未返回 3 条有效推荐任务');
+    throw new Error(rejectedRepeat ? '新推荐与已有任务重复，请再换一批' : 'Planner 未返回 3 条有效推荐任务');
   }
   return suggestions;
 }

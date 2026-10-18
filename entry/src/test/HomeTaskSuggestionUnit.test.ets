@@ -12,16 +12,21 @@ import {
   homeTaskShortDraft,
   homeTaskExecutionDescription,
   HOME_TASK_DESCRIPTION_LIMIT,
+  HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT,
   HOME_TASK_SOURCE_EVENT_LIMIT,
-  selectHomeTaskSuggestionEvents
+  selectHomeTaskSuggestionEvents,
+  homeTaskQwenDescriptionLimit
 } from '../main/ets/pages/home/HomeTaskSuggestion';
 import { homeRecommendationGridHeight } from '../main/ets/pages/home/HomeRecommendationLayout';
-import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
+import { parseJsonCompat, stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
 
-interface PromptRecordForTest { ref: string; summary: string; }
+interface PromptRecordForTest { ref: string; summary: string; travel_details: string; }
+interface PreviousSuggestionForTest { title: string; task: string; qwen_task: string; category: string; reason: string; }
 interface PromptContextForTest {
   recent_records: PromptRecordForTest[];
   content_interest_refs: string[];
+  previous_suggestions: PreviousSuggestionForTest[];
+  avoid_repeating_tasks: string[];
 }
 
 function promptContext(prompt: string): PromptContextForTest {
@@ -95,6 +100,21 @@ function shoppingSuggestion(): HomeTaskSuggestion {
     qwenTask: '帮我找300元以内的通勤背包' };
 }
 
+function travelSuggestion(): HomeTaskSuggestion {
+  return { id: 'travel-1', title: '规划杭州两日行程', task: '在高德查看杭州西湖周边景点', category: 'travel',
+    reason: '已有杭州出行计划', evidence: [], qwenSupported: true,
+    qwenTask: '按10月24日至25日两个人从上海乘高铁去杭州的计划，安排以西湖散步和杭州美食为主的两日行程。' +
+      '已知总预算2000元，第一天上午到达，第二天下午返程，希望减少来回奔波并合理衔接公共交通，只提供建议，不下单' };
+}
+
+function travelBatchResponse(qwenTask: string): string {
+  return '{"suggestions":[' +
+    '{"title":"规划杭州两日行程","task":"在高德查看杭州西湖周边景点","category":"travel",' +
+    '"qwen_supported":true,"qwen_task":' + stringifyJsonCompat(qwenTask) + '},' +
+    '{"title":"看看川菜","task":"在外卖App搜索川菜","category":"food"},' +
+    '{"title":"了解端侧AI进展","task":"在浏览器搜索端侧AI新闻","category":"news"}]}';
+}
+
 function rejectsExecution(item: HomeTaskSuggestion, method: string, draft: string): boolean {
   try { buildHomeTaskExecutionRequest(item, method, draft); return false; } catch (e) { return true; }
 }
@@ -123,6 +143,96 @@ export default function homeTaskSuggestionUnitTest() {
       expect(prompt.includes('qwen_supported')).assertTrue();
       expect(prompt.includes('qwen_task')).assertTrue();
       expect(prompt.includes('不得擅自改动平台、日期或预算')).assertTrue();
+    });
+
+    it('attachesCurrentRecommendationsToRefreshWithoutTreatingThemAsUserFacts', 0, () => {
+      let previous = [shoppingSuggestion(), learningSuggestion(), travelSuggestion(), shoppingSuggestion()];
+      let previousTasks = previous.map((item: HomeTaskSuggestion): string => item.task);
+      let prompt = buildHomeTaskSuggestionPrompt([sampleRecentEvent()], [], previousTasks, '2026-10-18', previous);
+      let context = promptContext(prompt);
+      expect(context.previous_suggestions.length).assertEqual(3);
+      expect(context.previous_suggestions[0].title).assertEqual(previous[0].title);
+      expect(context.previous_suggestions[0].task).assertEqual(previous[0].task);
+      expect(context.previous_suggestions[0].reason).assertEqual(previous[0].reason);
+      expect(context.previous_suggestions[2].qwen_task).assertEqual(previous[2].qwenTask);
+      expect(context.previous_suggestions[2].category).assertEqual('travel');
+      expect(context.avoid_repeating_tasks.length).assertEqual(3);
+      expect(prompt.includes('更换目标、主题或行动')).assertTrue();
+      expect(prompt.includes('不能当作用户事实')).assertTrue();
+      expect(promptContext(buildHomeTaskSuggestionPrompt([], [], [], '2026-10-18'))
+        .previous_suggestions.length).assertEqual(0);
+    });
+
+    it('rejectsAnOldQwenGoalEvenIfItsPhoneInstructionWasReworded', 0, () => {
+      let item = travelSuggestion();
+      let previous = travelSuggestion(); previous.task = '在浏览器搜索杭州西湖周边景点';
+      let rejected = false;
+      try {
+        parseHomeTaskSuggestions(travelBatchResponse(item.qwenTask || ''), 'refresh', [previous.task], [], [], [previous]);
+      } catch (e) {
+        rejected = true;
+        expect((e as Error).message).assertContain('重复');
+      }
+      expect(rejected).assertTrue();
+    });
+
+    it('providesCollectedTripConditionsAndMakesMissingFieldsOptional', 0, () => {
+      let event = sampleRecentEvent(); event.normalized_fact = '计划去杭州旅游';
+      event.summary = '10月24日至25日，两个人从上海乘高铁去杭州，主要想游览西湖和品尝美食，预算2000元';
+      let prompt = buildHomeTaskSuggestionPrompt([event, sampleRecentEvent()], [], [], '2026-10-18');
+      let context = promptContext(prompt);
+      expect(context.recent_records[0].travel_details).assertEqual(event.summary);
+      expect(context.recent_records[1].travel_details).assertEqual('');
+      expect(prompt.includes('这些信息都不是必填项')).assertTrue();
+      expect(prompt.includes('未采集到就省略')).assertTrue();
+      expect(prompt.includes('不混合不同出行')).assertTrue();
+      expect(prompt.includes('不把记录采集日期当出行日期')).assertTrue();
+      expect(prompt.includes('手机 task 仍只安排简单搜索或查看')).assertTrue();
+    });
+
+    it('preservesDetailedTravelPlansThroughParsingEditingAndQwenHandoff', 0, () => {
+      let item = travelSuggestion();
+      let draft = item.qwenTask || '';
+      expect(draft.length > HOME_TASK_DESCRIPTION_LIMIT).assertTrue();
+      let parsed = parseHomeTaskSuggestions(travelBatchResponse(draft), 'travel')[0];
+      expect(parsed.qwenTask).assertEqual(draft);
+      expect(homeTaskQwenDescription(parsed)).assertEqual(draft);
+      expect(homeTaskQwenDescriptionLimit(parsed)).assertEqual(HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT);
+      let request = buildHomeTaskExecutionRequest(parsed, 'qwen', draft);
+      expect(request.taskDescription).assertContain(stringifyJsonCompat(draft));
+      expect(request.taskDescription).assertContain('两个人从上海乘高铁去杭州');
+      expect(request.taskDescription).assertContain('第二天下午返程');
+      expect(request.keepTargetAppAfterFinish).assertTrue();
+      let phone = buildHomeTaskExecutionRequest(parsed, 'phone', parsed.task);
+      expect(phone.taskDescription).assertEqual('在高德查看杭州西湖周边景点');
+      expect(phone.keepTargetAppAfterFinish).assertFalse();
+      expect(rejectsExecution(parsed, 'phone', draft)).assertTrue();
+      expect(homeTaskQwenDescriptionLimit(shoppingSuggestion())).assertEqual(HOME_TASK_DESCRIPTION_LIMIT);
+      let simpleTravel = travelSuggestion(); simpleTravel.title = '查询高铁时刻';
+      simpleTravel.task = '在高德查询去杭州的高铁时刻'; simpleTravel.qwenTask = '查询去杭州的高铁时刻';
+      expect(homeTaskQwenDescriptionLimit(simpleTravel)).assertEqual(HOME_TASK_DESCRIPTION_LIMIT);
+      let inferred = travelBatchResponse(draft).replace('"category":"travel"', '"category":"invalid"')
+        .replace('在高德查看杭州西湖周边景点', '在浏览器搜索杭州出差行程攻略');
+      expect(parseHomeTaskSuggestions(inferred, 'infer-travel')[0].category).assertEqual('travel');
+    });
+
+    it('boundsTravelPlanLengthAndKeepsExistingDeviceAndPlatformRestrictions', 0, () => {
+      let item = travelSuggestion();
+      let prefix = '规划杭州行程，';
+      let boundary = prefix + '景'.repeat(HOME_QWEN_TRAVEL_DESCRIPTION_LIMIT - prefix.length);
+      expect(rejectsExecution(item, 'qwen', boundary)).assertFalse();
+      expect(rejectsExecution(item, 'qwen', boundary + '点')).assertTrue();
+      for (let task of ['点击搜索框然后滑动页面', '读取微信聊天记录规划行程', '在携程订票', '先询问用户人数再规划']) {
+        expect(rejectsExecution(item, 'qwen', task)).assertTrue();
+      }
+      expect(rejectsExecution(shoppingSuggestion(), 'qwen', item.qwenTask || '')).assertTrue();
+      let parsed = parseHomeTaskSuggestions(travelBatchResponse(boundary + '点'), 'too-long')[0];
+      expect(parsed.qwenSupported).assertFalse();
+      expect(parsed.qwenTask).assertEqual('');
+      expect(parsed.qwenReason || '').assertContain('300字');
+      expect(parsed.task).assertEqual(item.task);
+      item.qwenSupported = false;
+      expect(rejectsExecution(item, 'qwen', boundary)).assertTrue();
     });
 
     it('recognizesWatchedVideosReadPostsAndBlogsWithoutTreatingTransactionsAsInterests', 0, () => {

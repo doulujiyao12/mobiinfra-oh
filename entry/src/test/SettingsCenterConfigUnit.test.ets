@@ -8,6 +8,7 @@ import {
   restoreMaskedSensitiveSettingDefault,
   SETTINGS_SECTION_ITEMS,
   SETTINGS_SECTION_NONE,
+  settingsParentSection,
   settingsInputShouldUseMultiline,
   settingsSensitiveInputShouldUseMultiline,
   SettingsSectionId,
@@ -47,9 +48,9 @@ export default function settingsCenterConfigUnitTest() {
   describe('settingsCenterConfigUnitTest', () => {
     it('usesConfirmedSettingsSectionOrder', 0, () => {
       expect(SETTINGS_SECTION_ITEMS.length).assertEqual(5);
-      expect(SETTINGS_SECTION_ITEMS[0].id).assertEqual(SettingsSectionId.PersonalPrivacy);
-      expect(SETTINGS_SECTION_ITEMS[1].id).assertEqual(SettingsSectionId.DataCollection);
-      expect(SETTINGS_SECTION_ITEMS[2].id).assertEqual(SettingsSectionId.ModelAgents);
+      expect(SETTINGS_SECTION_ITEMS[0].id).assertEqual(SettingsSectionId.ModelAgents);
+      expect(SETTINGS_SECTION_ITEMS[1].id).assertEqual(SettingsSectionId.PersonalPrivacy);
+      expect(SETTINGS_SECTION_ITEMS[2].id).assertEqual(SettingsSectionId.DataCollection);
       expect(SETTINGS_SECTION_ITEMS[3].id).assertEqual(SettingsSectionId.TaskAutomation);
       expect(SETTINGS_SECTION_ITEMS[4].id).assertEqual(SettingsSectionId.StorageAbout);
     });
@@ -60,7 +61,7 @@ export default function settingsCenterConfigUnitTest() {
       expect(settingsSectionTitle(SettingsSectionId.ModelAgents)).assertEqual('模型与智能体');
       expect(settingsSectionTitle(SettingsSectionId.TaskAutomation)).assertEqual('任务与自动化');
       expect(settingsSectionTitle(SettingsSectionId.StorageAbout)).assertEqual('存储与关于');
-      expect(settingsSectionSubtitle(SettingsSectionId.ModelAgents)).assertEqual('云端 Planner/Decider、本地模型与 HDC');
+      expect(settingsSectionSubtitle(SettingsSectionId.ModelAgents)).assertEqual('云端模型、本地推理与模型服务配置');
     });
 
     it('normalizesSettingsSectionSelection', 0, () => {
@@ -70,6 +71,34 @@ export default function settingsCenterConfigUnitTest() {
       expect(normalizeSettingsSectionId(99)).assertEqual(SETTINGS_SECTION_NONE);
       expect(isSettingsSectionSelected(99)).assertFalse();
       expect(isSettingsSectionSelected(SETTINGS_SECTION_NONE)).assertFalse();
+    });
+
+    it('keepsAdvancedCloudSettingsOffTheRootMenu', 0, () => {
+      expect(normalizeSettingsSectionId(SettingsSectionId.CloudModelAdvanced))
+        .assertEqual(SettingsSectionId.CloudModelAdvanced);
+      expect(isSettingsSectionSelected(SettingsSectionId.CloudModelAdvanced)).assertTrue();
+      expect(settingsSectionTitle(SettingsSectionId.CloudModelAdvanced)).assertEqual('云端模型设置');
+      expect(settingsSectionSubtitle(SettingsSectionId.CloudModelAdvanced)).assertEqual('按用途分别配置，填写后自动保存');
+      expect(SETTINGS_SECTION_ITEMS.some((item) => item.id === SettingsSectionId.CloudModelAdvanced)).assertFalse();
+    });
+
+    it('returnsFromAdvancedSettingsThroughTheModelSection', 0, () => {
+      let parent = settingsParentSection(SettingsSectionId.CloudModelAdvanced);
+      expect(parent).assertEqual(SettingsSectionId.ModelAgents);
+      expect(settingsParentSection(parent)).assertEqual(SETTINGS_SECTION_NONE);
+      for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
+        expect(settingsParentSection(SETTINGS_SECTION_ITEMS[i].id)).assertEqual(SETTINGS_SECTION_NONE);
+      }
+      expect(settingsParentSection(SETTINGS_SECTION_NONE)).assertEqual(SETTINGS_SECTION_NONE);
+      expect(settingsParentSection(99)).assertEqual(SETTINGS_SECTION_NONE);
+    });
+
+    it('preservesExistingSectionIds', 0, () => {
+      expect(SettingsSectionId.PersonalPrivacy).assertEqual(0);
+      expect(SettingsSectionId.DataCollection).assertEqual(1);
+      expect(SettingsSectionId.ModelAgents).assertEqual(2);
+      expect(SettingsSectionId.TaskAutomation).assertEqual(3);
+      expect(SettingsSectionId.StorageAbout).assertEqual(4);
     });
 
     it('mapsSettingsActionKindsToStableColors', 0, () => {

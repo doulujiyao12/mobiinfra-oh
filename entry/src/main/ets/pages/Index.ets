@@ -119,7 +119,9 @@ import {
   shouldShowFirstLaunchOnboarding
 } from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
-import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
+import {
+  SETTINGS_SECTION_NONE, SettingsSectionId, isSettingsSectionSelected, settingsParentSection
+} from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { PrivacyConsent } from '../utils/PrivacyConsent';
 import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
@@ -1938,13 +1940,12 @@ struct Index {
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
-    let plannerBaseUrl = configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
-      DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
-    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    let cloudConfig = this.getConfiguredCloudConfig();
     return {
-      baseUrl: plannerBaseUrl,
-      apiKey: configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey),
-      enabled: plannerBaseUrl.trim().length > 0
+      baseUrl: cloudConfig.plannerBaseUrl,
+      apiKey: cloudPlannerApiKey(cloudConfig),
+      model: cloudConfig.plannerModel,
+      enabled: cloudConfig.plannerBaseUrl.trim().length > 0
     };
   }
 
@@ -3088,6 +3089,10 @@ struct Index {
   onBackPress(): boolean {
     if (this.currentTab === MainTabIndex.Task && this.taskConfigViewOpen) {
       this.taskConfigViewOpen = false;
+      return true;
+    }
+    if (this.currentTab === MainTabIndex.Mine && isSettingsSectionSelected(this.settingsSectionId)) {
+      this.settingsSectionId = settingsParentSection(this.settingsSectionId);
       return true;
     }
     return false;
@@ -6391,15 +6396,17 @@ struct Index {
         throw new Error('请先在“我的”中配置 Planner 服务');
       }
       let recentEvents = this.recentHomeTaskSuggestionEvents();
-      let previousTasks = this.homeTaskSuggestions.map((item: HomeTaskSuggestion): string => item.task);
+      let previousSuggestions = this.homeTaskSuggestions.slice();
+      let previousTasks = previousSuggestions.map((item: HomeTaskSuggestion): string => item.task);
       let prompt = buildHomeTaskSuggestionPrompt(recentEvents, this.homeProfile.domains, previousTasks,
-        currentLocalDateKey());
+        currentLocalDateKey(), previousSuggestions);
       let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
       this.homeTaskSuggestionBatch++;
       let batchId = new Date().getTime().toString() + '-' + this.homeTaskSuggestionBatch.toString();
       this.homeTaskSuggestions = parseHomeTaskSuggestions(response, batchId, previousTasks,
-        recentEvents, this.homeProfile.domains);
-      AppLogger.info('HomeSuggestion', 'generated suggestions from recentEvents=' + recentEvents.length.toString());
+        recentEvents, this.homeProfile.domains, previousSuggestions);
+      AppLogger.info('HomeSuggestion', 'generated suggestions from recentEvents=' + recentEvents.length.toString() +
+        ' previousSuggestions=' + previousSuggestions.length.toString());
     } catch (e) {
       let err = e as Error;
       this.homeTaskSuggestionError = err.message.length > 0 ? err.message : '推荐生成失败，请稍后重试';
