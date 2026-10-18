@@ -94,6 +94,7 @@ import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
 import { PhoneHdcRunSession } from '../utils/selfhdc/PhoneHdcRunSession';
 import { SelfHdcSetupGuard } from '../utils/selfhdc/SelfHdcSetupGuard';
 import {
+  HOME_TASK_SOURCE_EVENT_LIMIT,
   HomeTaskSuggestion,
   buildHomeTaskSuggestionPrompt,
   parseHomeTaskSuggestions
@@ -6336,7 +6337,7 @@ struct Index {
       startDate: '',
       endDate: '',
       workflowSceneIds: [],
-      limit: 24
+      limit: HOME_TASK_SOURCE_EVENT_LIMIT
     };
     try {
       return this.dataManagerFacade.queryIndexedEvents(options).events;

@@ -137,7 +137,7 @@ export struct HomePage {
     if (category === 'shopping') {
       return 1;
     }
-    if (category === 'news') {
+    if (category === 'news' || category === 'learning') {
       return 2;
     }
     if (category === 'social') {
@@ -1365,7 +1365,7 @@ export struct HomePage {
     if (category === 'shopping') {
       return '#EF6D8D';
     }
-    if (category === 'news') {
+    if (category === 'news' || category === 'learning') {
       return '#4B8BFF';
     }
     if (category === 'social') {
@@ -1387,7 +1387,7 @@ export struct HomePage {
     if (category === 'shopping') {
       return '#FFF0F4';
     }
-    if (category === 'news') {
+    if (category === 'news' || category === 'learning') {
       return '#EDF4FF';
     }
     if (category === 'social') {

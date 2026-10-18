@@ -11,9 +11,23 @@ import {
   buildQwenTaskHandoff,
   homeTaskShortDraft,
   homeTaskExecutionDescription,
-  HOME_TASK_DESCRIPTION_LIMIT
+  HOME_TASK_DESCRIPTION_LIMIT,
+  HOME_TASK_SOURCE_EVENT_LIMIT,
+  selectHomeTaskSuggestionEvents
 } from '../main/ets/pages/home/HomeTaskSuggestion';
 import { homeRecommendationGridHeight } from '../main/ets/pages/home/HomeRecommendationLayout';
+import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
+
+interface PromptRecordForTest { ref: string; summary: string; }
+interface PromptContextForTest {
+  recent_records: PromptRecordForTest[];
+  content_interest_refs: string[];
+}
+
+function promptContext(prompt: string): PromptContextForTest {
+  let marker = '\n上下文：\n';
+  return parseJsonCompat<PromptContextForTest>(prompt.substring(prompt.indexOf(marker) + marker.length));
+}
 
 function sampleRecentEvent(): IndexedEvent {
   return {
@@ -57,6 +71,24 @@ function sampleDomain(): HomeDomainViewModel {
   };
 }
 
+function browsingEvent(id: string, summary: string, source: string): IndexedEvent {
+  let event = sampleRecentEvent();
+  event.event_id = id;
+  event.summary = summary;
+  event.normalized_fact = summary;
+  event.sources = [source];
+  event.tags = ['内容'];
+  event.keywords = [];
+  return event;
+}
+
+function learningSuggestion(): HomeTaskSuggestion {
+  return { id: 'learning-1', title: '深入理解B站视频里的NPU量化',
+    task: '在哔哩哔哩搜索NPU量化入门教程', category: 'learning', reason: '刚看过相关视频',
+    evidence: [{ ref: 'record-1', kind: 'record', title: '近期记录', summary: '观看NPU量化原理视频', meta: '哔哩哔哩' }],
+    qwenSupported: true, qwenTask: '用一个简单例子解释NPU量化原理' };
+}
+
 function shoppingSuggestion(): HomeTaskSuggestion {
   return { id: 'shopping-1', title: '挑选通勤背包', task: '打开淘宝搜索300元以内的通勤背包',
     reason: '近期购物需求', category: 'shopping', evidence: [], qwenSupported: true,
@@ -91,6 +123,124 @@ export default function homeTaskSuggestionUnitTest() {
       expect(prompt.includes('qwen_supported')).assertTrue();
       expect(prompt.includes('qwen_task')).assertTrue();
       expect(prompt.includes('不得擅自改动平台、日期或预算')).assertTrue();
+    });
+
+    it('recognizesWatchedVideosReadPostsAndBlogsWithoutTreatingTransactionsAsInterests', 0, () => {
+      let events = [sampleRecentEvent(),
+        browsingEvent('video', '观看了端侧AI量化原理的视频', '哔哩哔哩'),
+        browsingEvent('post', '浏览了关于端侧AI的帖子', '小红书'),
+        browsingEvent('blog', '阅读了介绍NPU编译的博客文章', '浏览器'),
+        browsingEvent('membership', '购买了视频会员', '哔哩哔哩'),
+        browsingEvent('not-viewed', '没有观看这条视频', '哔哩哔哩'),
+        browsingEvent('cleared-history', '清空了浏览记录', '哔哩哔哩')];
+      let prompt = buildHomeTaskSuggestionPrompt(events, [], [], '2026-10-18');
+      let context = promptContext(prompt);
+      expect(context.content_interest_refs.join(',')).assertEqual('record-2,record-3,record-4');
+      expect(prompt.includes('深入了解')).assertTrue();
+      expect(prompt.includes('近7天')).assertTrue();
+      expect(prompt.includes('推荐理由不得编造')).assertTrue();
+      expect(prompt.includes('不让千问读取原App或历史记录')).assertTrue();
+      expect(promptContext(buildHomeTaskSuggestionPrompt([sampleRecentEvent()], [], [], '2026-10-18'))
+        .content_interest_refs.length).assertEqual(0);
+    });
+
+    it('reservesBrowsingEvidenceWithinABoundedContextAndKeepsEvidenceReferencesAligned', 0, () => {
+      let events: IndexedEvent[] = [];
+      for (let index = 0; index < 30; index++) {
+        let event = sampleRecentEvent(); event.event_id = 'transaction-' + index;
+        events.push(event);
+      }
+      events.push(browsingEvent('video', '观看了介绍NPU量化原理的视频', '哔哩哔哩'));
+      let selected = selectHomeTaskSuggestionEvents(events);
+      expect(selected.length).assertEqual(24);
+      expect(selected[0].event_id).assertEqual('transaction-0');
+      expect(selected[selected.length - 1].event_id).assertEqual('video');
+      let context = promptContext(buildHomeTaskSuggestionPrompt(events, [], [], '2026-10-18'));
+      expect(context.recent_records.length).assertEqual(24);
+      expect(context.content_interest_refs.join(',')).assertEqual('record-24');
+      let response = '{"suggestions":[' +
+        '{"title":"弄懂NPU量化","task":"在哔哩哔哩搜索NPU量化入门教程","category":"unknown",' +
+        '"qwen_supported":true,"qwen_task":"用一个例子解释NPU量化原理","evidence_refs":["record-24"]},' +
+        '{"title":"端侧AI相关动态","task":"在浏览器搜索近7天端侧AI相关新闻","category":"news",' +
+        '"qwen_supported":true,"qwen_task":"联网查找近7天端侧AI相关新闻并标注来源","evidence_refs":["record-24"]},' +
+        '{"title":"看看川菜","task":"在外卖App搜索川菜","category":"food","evidence_refs":["record-1"]}]}';
+      let items = parseHomeTaskSuggestions(response, 'interests', [], events, []);
+      expect(items[0].evidence[0].summary).assertEqual('观看了介绍NPU量化原理的视频');
+      expect(items[0].evidence[0].meta.includes('哔哩哔哩')).assertTrue();
+      expect(homeTaskSupportsQwen(items[0])).assertTrue();
+      expect(homeTaskSupportsQwen(items[1])).assertTrue();
+      expect(items[1].qwenTask).assertContain('近7天');
+      expect(homeTaskSuggestionCategoryLabel(items[0].category)).assertEqual('探索');
+      expect(homeTaskSuggestionCategoryLabel(items[1].category)).assertEqual('资讯');
+      for (let item of items.slice(0, 2)) {
+        let phone = buildHomeTaskExecutionRequest(item, 'phone', item.task);
+        let qwen = buildHomeTaskExecutionRequest(item, 'qwen', homeTaskQwenDescription(item));
+        expect(phone.taskDescription).assertEqual(item.task);
+        expect(phone.keepTargetAppAfterFinish).assertFalse();
+        expect(qwen.taskDescription).assertContain('在千问');
+        expect(qwen.keepTargetAppAfterFinish).assertTrue();
+      }
+    });
+
+    it('limitsReservedInterestsAndNeverReadsPastTheSourceWindow', 0, () => {
+      let events: IndexedEvent[] = [];
+      for (let index = 0; index < HOME_TASK_SOURCE_EVENT_LIMIT; index++) {
+        let event = sampleRecentEvent(); event.event_id = 'transaction-' + index;
+        events.push(event);
+      }
+      for (let index = 30; index < 40; index++) {
+        events[index] = browsingEvent('video-' + index, '观看了关于AI的视频', '哔哩哔哩');
+      }
+      events.push(browsingEvent('outside-window', '阅读了量化博客', '浏览器'));
+      let selected = selectHomeTaskSuggestionEvents(events);
+      expect(selected.length).assertEqual(24);
+      expect(selected.filter((event: IndexedEvent): boolean => event.event_id.startsWith('video-')).length).assertEqual(6);
+      expect(selected.some((event: IndexedEvent): boolean => event.event_id === 'outside-window')).assertFalse();
+    });
+
+    it('usesIndependentInformationGoalsForQwenWhileKeepingPhoneAppSearch', 0, () => {
+      let item = learningSuggestion();
+      expect(homeTaskSupportsQwen(item)).assertTrue();
+      expect(homeTaskQwenDescription(item)).assertEqual('用一个简单例子解释NPU量化原理');
+      expect(buildHomeTaskExecutionRequest(item, 'phone', item.task).taskDescription).assertContain('哔哩哔哩');
+      let qwen = buildHomeTaskExecutionRequest(item, 'qwen', homeTaskQwenDescription(item));
+      expect(qwen.taskDescription.includes('哔哩哔哩')).assertFalse();
+      expect(qwen.taskDescription.includes('B站')).assertFalse();
+      expect(rejectsExecution(item, 'qwen', '在B站搜索NPU量化教程')).assertTrue();
+      expect(rejectsExecution(item, 'qwen', '打开小红书搜索NPU量化教程')).assertTrue();
+      item.qwenTask = '解释抖音推荐算法的基本原理';
+      expect(homeTaskSupportsQwen(item)).assertTrue();
+      expect(rejectsExecution(item, 'qwen', homeTaskQwenDescription(item))).assertFalse();
+      item.qwenTask = '解释HDC的认证原理';
+      expect(homeTaskSupportsQwen(item)).assertTrue();
+      expect(homeTaskQwenDescription(item)).assertEqual('解释HDC的认证原理');
+      expect(rejectsExecution(item, 'qwen', '通过HDC点击搜索框')).assertTrue();
+      expect(rejectsExecution(item, 'qwen', '购买京东的背包')).assertTrue();
+      expect(rejectsExecution(item, 'qwen', '在浏览器搜索NPU量化原理')).assertTrue();
+      item.qwenSupported = false;
+      expect(homeTaskSupportsQwen(item)).assertFalse();
+      item = learningSuggestion(); item.title = '弄懂NPU量化';
+      item.task = '在浏览器搜索NPU量化入门教程'; item.qwenTask = undefined;
+      expect(homeTaskSupportsQwen(item)).assertTrue();
+      expect(homeTaskQwenDescription(item)).assertEqual('搜索NPU量化入门教程');
+    });
+
+    it('neverUsesAnInformationCategoryToBypassPrivateDataOrPlatformRestrictions', 0, () => {
+      let item = learningSuggestion();
+      item.qwenTask = '在B站搜索NPU量化教程';
+      expect(homeTaskSupportsQwen(item)).assertFalse();
+      item = learningSuggestion(); item.qwenTask = undefined;
+      expect(homeTaskSupportsQwen(item)).assertFalse();
+      for (let task of ['在B站读取观看历史', '读取微信聊天记录', '查看个人收藏里的帖子']) {
+        item = learningSuggestion(); item.task = task;
+        expect(homeTaskSupportsQwen(item)).assertFalse();
+      }
+      item = learningSuggestion(); item.category = 'news';
+      item.qwenTask = '读取手机中的浏览记录';
+      expect(homeTaskSupportsQwen(item)).assertFalse();
+      item = shoppingSuggestion(); item.category = 'news'; item.task = '在京东购买背包';
+      item.qwenTask = '介绍通勤背包面料的特点';
+      expect(homeTaskSupportsQwen(item)).assertFalse();
     });
 
     it('parsesExactlyThreeExecutableSuggestions', 0, () => {
