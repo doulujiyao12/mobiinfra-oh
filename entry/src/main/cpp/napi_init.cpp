@@ -57,6 +57,7 @@
 #endif
 #define LOG_TAG "MobiInfra"
 static std::atomic<bool> g_debugLoggingEnabled{false};
+static std::atomic<uint32_t> g_onlineCompileCount{0};
 #define LOGI(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
 #define LOGE(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
 
@@ -382,6 +383,10 @@ static std::string resetNpuRuntimeDiagnostics(const std::string& requestedBacken
 
 static std::string observeNpuRuntimeLine(const std::string& line) {
     const std::string lower = lowerAscii(line);
+    // Read independently of Debug logging. This is a UI notice, not a token.
+    if (lower.find("[npu_cache] compile_begin:") != std::string::npos) {
+        g_onlineCompileCount.fetch_add(1, std::memory_order_relaxed);
+    }
     const bool fullNpu = lower.find("[full_npu]") != std::string::npos ||
                          lower.find("[offline_npu2]") != std::string::npos;
     bool offlineReady = lower.find("[offline_npu]") != std::string::npos &&
@@ -394,8 +399,12 @@ static std::string observeNpuRuntimeLine(const std::string& line) {
                       lower.find("buildirmodel ok") != std::string::npos ||
                       lower.find("loadmodelsync ok") != std::string::npos ||
                       lower.find("onresizeend: ok") != std::string::npos ||
-                      lower.find("[hiai conv]") != std::string::npos;
+                      lower.find("[hiai conv]") != std::string::npos ||
+                      lower.find("[npu_cache] validated:") != std::string::npos ||
+                      lower.find("[npu_cache] saved:") != std::string::npos;
     bool cpuFallback = lower.find("fallback to cpu") != std::string::npos ||
+                       (lower.find("[npu_cache] chunk[") != std::string::npos &&
+                        lower.find("cpu fallback:") != std::string::npos) ||
                        (lower.find("[hiai_v]") != std::string::npos &&
                         lower.find("oncreate fail:") != std::string::npos) ||
                        (lower.find("[hiai delegate]") != std::string::npos &&
@@ -1994,6 +2003,13 @@ static napi_value CancelChat(napi_env env, napi_callback_info info) {
     }
     napi_value value;
     napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &value);
+    return value;
+}
+
+static napi_value GetOnlineCompileCount(napi_env env, napi_callback_info info) {
+    (void)info;
+    napi_value value;
+    napi_create_uint32(env, g_onlineCompileCount.load(std::memory_order_relaxed), &value);
     return value;
 }
 
@@ -5648,6 +5664,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat",   nullptr, CancelChat,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isChatRunning", nullptr, IsChatRunning,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getOnlineCompileCount", nullptr, GetOnlineCompileCount, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreChatHistory", nullptr, RestoreChatHistory, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
