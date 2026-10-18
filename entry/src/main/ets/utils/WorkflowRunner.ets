@@ -13,6 +13,7 @@ import { WorkflowStorage } from './WorkflowStorage';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser } from './AgentActionParser';
 import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
+import { phoneAgentAssertCompleted, phoneAgentScreenSize, phoneAgentValidateAction } from './selfhdc/PhoneAgentPolicy';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -103,6 +104,8 @@ interface WorkflowScreenshotCache {
   width: number;
   height: number;
   source: string;
+  screen_width?: number;
+  screen_height?: number;
 }
 
 interface GuiActionPayload {
@@ -376,6 +379,7 @@ export class WorkflowRunner {
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: () => CloudModelConfig;
   private hdcBridge: HdcWorkflowBridge;
+  private phoneDevice: boolean = false;
   private cancellation: WorkflowCancellation | null = null;
   private logHandler: (message: string) => void;
   private workflow: WorkflowDefinition | null = null;
@@ -420,9 +424,13 @@ export class WorkflowRunner {
   useDeviceBridge(bridge: HdcWorkflowBridge): void {
     if (this.runningTask !== null) { throw new Error('Cannot switch device backend during a workflow'); }
     this.hdcBridge = bridge;
+    this.phoneDevice = false;
   }
 
-  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void { this.useDeviceBridge(bridge); }
+  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void {
+    this.useDeviceBridge(bridge);
+    this.phoneDevice = true;
+  }
 
   useCancellation(cancellation: WorkflowCancellation): void {
     if (this.runningTask !== null) { throw new Error('Cannot switch cancellation signal during a workflow'); }
@@ -794,7 +802,8 @@ export class WorkflowRunner {
     }
     let resultExtractionScreenshotCount = resolveGuiTaskResultExtractionScreenshotCount(step);
     let deciderResult = await this.runDeciderLoop(step, taskDescription, resultExtractionScreenshotCount);
-    if (deciderResult.stopReason === 'MAX_STEPS_REACHED' && step.fail_on_max_steps === true) {
+    if (deciderResult.stopReason === 'MAX_STEPS_REACHED' &&
+      (step.fail_on_max_steps === true || (this.phoneDevice && step.fail_on_max_steps !== false))) {
       throw new Error('Decider max steps reached: ' + String(resolveGuiTaskMaxSteps(step)));
     }
     let output: GuiDeciderOutput = {
@@ -916,11 +925,14 @@ export class WorkflowRunner {
     if (imageBase64.length === 0) {
       throw new Error(shot.message || 'screenshot failed');
     }
+    if (this.phoneDevice) { phoneAgentScreenSize(shot); }
     return {
       image_b64: imageBase64,
       width: shot.width || 0,
       height: shot.height || 0,
-      source: source
+      source: source,
+      screen_width: shot.screen_width,
+      screen_height: shot.screen_height
     };
   }
 
@@ -1026,13 +1038,14 @@ export class WorkflowRunner {
           String(info.maxRetries) + '：' + info.errorMessage);
         AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps +
           ': JSON解析失败，同屏重试 ' + String(info.retryNumber) + '/' + String(info.maxRetries));
-      });
+      }, this.phoneDevice ? phoneAgentValidateAction : undefined);
       this.ensureNotCancelled();
       let response = parsedAction.raw;
       let parsed = parsedAction.data;
       let action = parsedAction.action;
       AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1, maxSteps));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
+        if (this.phoneDevice) { phoneAgentAssertCompleted(parsedAction); }
         result.stopReason = 'TASK_COMPLETED_' + action;
         result.finalAction = action;
         result.finalReasoning = this.finalDeciderReasoning(parsed);
@@ -1041,11 +1054,13 @@ export class WorkflowRunner {
         result.finalScreenshot = shot;
         break;
       }
-      let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsedAction, width * 2, height * 2);
+      let fullWidth = this.phoneDevice ? shot.screen_width || 0 : width * 2;
+      let fullHeight = this.phoneDevice ? shot.screen_height || 0 : height * 2;
+      let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsedAction, fullWidth, fullHeight);
       if (swipeFallbackDiagnostic.length > 0) {
         this.log('Decider swipe fallback: ' + swipeFallbackDiagnostic);
       }
-      let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
+      let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, fullWidth, fullHeight);
       this.clearWorkflowScreenshotCache();
       this.ensureNotCancelled();
       await this.hdcBridge.guiAction(hdcPayload);

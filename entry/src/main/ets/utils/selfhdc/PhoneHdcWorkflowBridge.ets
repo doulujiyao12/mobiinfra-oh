@@ -183,8 +183,10 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
     let ability = phoneHdcMainAbility(await this.execute('bm dump -n ' + selfHdcShellQuote(bundle), 'resolve-main-ability', false, false));
     this.phoneLog('APP bundle=' + bundle + ' mainAbility=' + ability + ' reset=' + resetFirst);
     if (resetFirst && bundle !== getAppBundleName()) {
+      await this.waitForAction();
       await this.execute('aa force-stop ' + selfHdcShellQuote(bundle), 'app-stop');
     }
+    await this.waitForAction();
     await this.execute('aa start -b ' + selfHdcShellQuote(bundle) + ' -a ' + selfHdcShellQuote(ability), 'app-start');
     await this.pause(2000);
   }
@@ -244,8 +246,14 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
     }
   }
 
-  async guiAction(payload: WorkflowJsonMap): Promise<HdcBridgeResponse> {
+  private async waitForAction(): Promise<void> {
     this.check();
+    if (this.respectAgentExecution) { await AgentExecutionController.waitIfPaused(); }
+    this.check();
+  }
+
+  async guiAction(payload: WorkflowJsonMap): Promise<HdcBridgeResponse> {
+    await this.waitForAction();
     let action = phoneHdcString(payload, 'action');
     let sequence = ++this.actionSequence;
     this.phoneLog('ACTION_BEGIN seq=' + sequence + ' action=' + action);
