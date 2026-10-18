@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { normalizeCodexOrigin, validCodexToken, codexTaskBusy, codexStatusLabel } from '../main/ets/pages/codex/CodexTypes';
+import { normalizeCodexOrigin, validCodexToken, codexTaskBusy, codexStatusLabel, validCodexCa, validateCodexPairing, CodexPairingBundle } from '../main/ets/pages/codex/CodexTypes';
 
 export default function codexPolicyUnitTest() {
   describe('codexPolicyUnitTest', () => {
@@ -28,6 +28,16 @@ export default function codexPolicyUnitTest() {
       expect(codexTaskBusy('stopping')).assertTrue();
       expect(codexTaskBusy('completed')).assertFalse();
       expect(codexStatusLabel('failed')).assertEqual('执行失败');
+    });
+    it('requiresExpiringPairingAndBoundedCertificate', 0, () => {
+      const bundle: CodexPairingBundle = { type: 'clawmate-codex-pairing', version: 1, name: 'PC',
+        origin: 'https://192.168.1.8:8787', serverId: 'server', caCertificate: '', code: 'a'.repeat(43), expiresAt: Date.now() + 60000 };
+      validateCodexPairing(bundle);
+      bundle.expiresAt = Date.now() - 1;
+      let rejected: boolean = false;
+      try { validateCodexPairing(bundle); } catch (e) { rejected = true; }
+      expect(rejected).assertTrue();
+      expect(validCodexCa('skip verification')).assertFalse();
     });
   });
 }

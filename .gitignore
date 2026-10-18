@@ -4,6 +4,7 @@
 /build-profile.json5
 /.idea
 **/build
+!/pc-companion/build/
 /.hvigor
 /.hvigor-user-home
 /.hdc-auto-cache/

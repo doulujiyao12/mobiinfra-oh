@@ -14,7 +14,7 @@ import { CodexApprovalCard } from './CodexApprovalCard';
 import {
   CODEX_MAX_FILE_BYTES, CodexConnection, CodexModel, CodexWorkspace, CodexTask, CodexTaskSummary,
   CodexAttachment, CodexItem, CodexApproval, CodexAnswer, CodexEffort,
-  normalizeCodexOrigin, codexTaskBusy, codexStatusLabel
+  normalizeCodexOrigin, codexTaskBusy, codexStatusLabel, CodexPairingBundle, validateCodexPairing
 } from './CodexTypes';
 
 @Component
@@ -24,6 +24,7 @@ export struct CodexPage {
   @StorageProp(PRIVACY_STATE_KEY) @Watch('privacyChanged') private privacyState: string = 'unselected';
   @State private originInput: string = '';
   @State private tokenInput: string = '';
+  @State private pairingInput: string = '';
   @State private remember: boolean = true;
   @State private hasSavedConnection: boolean = false;
   @State private connected: boolean = false;
@@ -53,6 +54,7 @@ export struct CodexPage {
   private pollCount: number = 0;
   private retryDelay: number = 2000;
   private pendingRequestId: string = '';
+  private pairedConnection: CodexConnection | null = null;
 
   aboutToAppear(): void { this.restoreAddress(); }
   aboutToDisappear(): void { this.disconnect(); }
@@ -81,6 +83,7 @@ export struct CodexPage {
     this.epoch++; this.clearTimer(); this.client.close();
     this.connected = false; this.connectionOpen = true; this.task = null;
     this.tasks = []; this.attachments = []; this.tokenInput = ''; this.pendingRequestId = '';
+    this.pairedConnection = null; this.pairingInput = '';
     this.draft = ''; this.models = []; this.workspaces = []; this.serverName = ''; this.expandedTools = [];
     this.networkText = ''; this.busy = false; this.polling = false;
   }
@@ -92,12 +95,16 @@ export struct CodexPage {
       PrivacyConsent.requireAccepted();
       const origin = normalizeCodexOrigin(this.originInput);
       let token = this.tokenInput.trim();
+      let caCertificate = '';
+      if (this.pairedConnection !== null && this.pairedConnection.origin === origin && !token) {
+        token = this.pairedConnection.token; caCertificate = this.pairedConnection.caCertificate || '';
+      }
       if (!token) {
         const saved = await CodexCredentialStore.load();
         if (saved === null || saved.origin !== origin) { throw new Error('请输入此服务器的桥接令牌'); }
-        token = saved.token;
+        token = saved.token; caCertificate = saved.caCertificate || '';
       }
-      const connection: CodexConnection = { origin: origin, token: token };
+      const connection: CodexConnection = { origin: origin, token: token, caCertificate: caCertificate };
       if (epoch !== this.epoch) { return; }
       this.client.configure(connection);
       const info = await this.client.call('/v1/info');
@@ -130,6 +137,55 @@ export struct CodexPage {
       await CodexCredentialStore.forget(); this.hasSavedConnection = false; this.originInput = '';
       this.errorText = '';
     } catch (e) { this.errorText = '未能删除安全凭据，请重试'; }
+  }
+  private async importPairingFile(): Promise<void> {
+    if (this.busy) { return; }
+    let file: fileIo.File | null = null;
+    try {
+      const options = new picker.DocumentSelectOptions(); options.maxSelectNumber = 1;
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const uris = await new picker.DocumentViewPicker(context).select(options);
+      if (!uris.length) { return; }
+      file = await fileIo.open(uris[0], fileIo.OpenMode.READ_ONLY);
+      const size = (await fileIo.stat(file.fd)).size;
+      if (size <= 0 || size > 8192) { throw new Error('配对文件无效，文件上限为 8 KiB'); }
+      const bytes = new ArrayBuffer(size);
+      if (await fileIo.read(file.fd, bytes) !== size) { throw new Error('配对文件读取不完整'); }
+      this.pairingInput = new util.TextDecoder().decodeWithStream(new Uint8Array(bytes));
+      await this.pairFromInput();
+    } catch (e) { this.errorText = (e as Error).message; }
+    finally { if (file !== null) { try { await fileIo.close(file); } catch (e) { } } }
+  }
+  private async pairFromInput(): Promise<void> {
+    if (this.busy) { return; }
+    this.errorText = '';
+    try {
+      let raw = this.pairingInput.trim();
+      if (raw.startsWith('CLAWMATE-CODEX-PAIR:')) {
+        let encoded = raw.substring('CLAWMATE-CODEX-PAIR:'.length).replace(/-/g, '+').replace(/_/g, '/');
+        while (encoded.length % 4 !== 0) { encoded += '='; }
+        raw = new util.TextDecoder().decodeWithStream(new util.Base64Helper().decodeSync(encoded));
+      }
+      if (raw.length > 8192) { throw new Error('配对内容过长'); }
+      const bundle = JSON.parse(raw) as CodexPairingBundle;
+      validateCodexPairing(bundle);
+      PrivacyConsent.requireAccepted();
+      const confirmed = await new Promise<boolean>((resolve) => {
+        this.getUIContext().showAlertDialog({ title: '连接自己的电脑',
+          message: bundle.name + '\n' + bundle.origin + '\n\n请确认这份配对信息来自你自己的 PC 应用。连接后可以向该电脑下发任务。',
+          autoCancel: false,
+          primaryButton: { value: '取消', action: () => { resolve(false); } },
+          secondaryButton: { value: '确认配对', action: () => { resolve(true); } }
+        });
+      });
+      if (!confirmed) { return; }
+      this.busy = true;
+      this.pairedConnection = await this.client.pair(bundle);
+      this.originInput = bundle.origin; this.tokenInput = ''; this.pairingInput = '';
+      this.busy = false;
+      await this.connect();
+    } catch (e) { this.errorText = (e as Error).message || '配对失败，请在 PC 应用中重新生成'; }
+    finally { this.busy = false; }
   }
   private chooseModel(id: string): void {
     this.modelId = id;
@@ -293,8 +349,16 @@ export struct CodexPage {
           Text('局域网 PC · 云端服务器').fontSize(12).fontColor(AppTheme.text('#747B87'))
         }.alignItems(HorizontalAlign.Start)
       }.width('100%')
-      Text('在电脑部署 ClawMate 桥接服务，登录 Codex，并配置 HTTPS。地址与桥接令牌均由你自己的服务器提供。')
+      Text('安装 ClawMate Codex 电脑端，登录并选择项目，再导入电脑端生成的配对文件。无需 npm、域名或手工证书。')
         .fontSize(13).lineHeight(20).fontColor(AppTheme.text('#697386')).width('100%')
+      Button('导入电脑配对文件').width('100%').enabled(!this.busy)
+        .onClick(() => { this.importPairingFile(); })
+      TextArea({ placeholder: '也可粘贴电脑端的一次性配对信息', text: this.pairingInput })
+        .height(60).maxLength(8192).onChange((v: string) => { this.pairingInput = v; })
+      if (this.pairingInput.trim().length > 0) {
+        Button('使用配对信息连接').enabled(!this.busy).onClick(() => { this.pairFromInput(); })
+      }
+      Text('已有服务器：也可手动填写 HTTPS 地址和桥接令牌').fontSize(11).fontColor(AppTheme.text('#747B87'))
       TextInput({ placeholder: 'https://codex.example.com:8787', text: this.originInput })
         .type(InputType.Normal).maxLength(255).onChange((v: string) => { this.originInput = v; })
       TextInput({ placeholder: this.hasSavedConnection ? '留空使用此地址已保存的令牌' : '服务器生成的桥接 token', text: this.tokenInput })
@@ -315,7 +379,7 @@ export struct CodexPage {
         Button('忘记已保存连接').fontSize(12).backgroundColor(Color.Transparent).fontColor(AppTheme.text('#A34C4C'))
           .enabled(!this.busy).onClick(() => { this.forget(); })
       }
-      Text('只接受 HTTPS；校验证书，不跳过安全检查。OpenAI 登录和密钥保留在电脑。\n安装说明：仓库 docs/codex-bridge.md')
+      Text('只接受 HTTPS；配对证书仅用于这台电脑，不安装到系统信任库。OpenAI 登录和密钥保留在电脑。')
         .fontSize(11).lineHeight(18).fontColor(AppTheme.text('#747B87')).width('100%')
     }.padding(20).backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).width('100%')
   }

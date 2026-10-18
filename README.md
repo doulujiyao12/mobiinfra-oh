@@ -80,7 +80,7 @@ cd mobiinfra-oh
 | 端侧模型推理 | 我的 → 模型与智能体 | 下载模型，选择 CPU / NPU，进行本地推理 |
 | 主动服务 | 首页 → 为你提醒 / 猜你喜欢 | 根据个人记忆生成待办与个性化建议 |
 
-Codex 功能采用官方 App Server 与本仓库的 HTTPS 桥接服务，电脑端支持 Linux、macOS 与 Windows。安装、证书、连接和安全边界见 [Codex 部署与使用指南](docs/codex-bridge.md)。
+Codex 电脑端支持 Windows、Linux 与 macOS，提供桌面安装程序和内置终端工具。普通用户无需安装 Node.js、运行 npm 或寻找源码：安装电脑端、登录、选择项目，再在手机导入一次性配对文件即可连接。见 [电脑端使用指南](pc-companion/USER-GUIDE.md)；维护者构建见 [PC companion](pc-companion/README.md)，底层协议和高级部署见 [Codex 桥接指南](docs/codex-bridge.md)。
 
 ### 1. 手机 GUI 操控：手机自己控制自己
 

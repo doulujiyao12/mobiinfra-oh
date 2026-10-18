@@ -8,9 +8,9 @@ export class CodexRpc extends EventEmitter {
   sequence = 0;
   closed = false;
 
-  constructor(command = 'codex', args = ['app-server', '--listen', 'stdio://']) {
+  constructor(command = 'codex', args = ['app-server', '--listen', 'stdio://'], options = {}) {
     super();
-    this.child = spawn(command, args, { shell: false, windowsHide: true,
+    this.child = spawn(command, args, { env: options.env || process.env, shell: false, windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'] });
     // Do not forward stderr: it may contain paths, prompts or credentials.
     this.child.stderr.resume();

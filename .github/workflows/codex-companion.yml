@@ -1,0 +1,78 @@
+name: Build Codex PC companion
+on:
+  workflow_dispatch:
+    inputs:
+      production:
+        description: Require code signing and macOS notarization
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: linux-x64, arch: x64 }
+          - { os: windows-2025, target: win32-x64, arch: x64 }
+          - { os: macos-15, target: darwin-arm64, arch: arm64 }
+          - { os: macos-15, target: darwin-x64, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: pc-companion/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - run: npm ci --prefix pc-companion
+      - run: npm audit --omit=dev --prefix pc-companion
+      - run: npm test --prefix bridge/codex
+      - run: go test -C pc-companion/launcher ./...
+      - run: node pc-companion/build/prepare-runtime.mjs ${{ matrix.target }}
+      - run: node pc-companion/build/stage.mjs ${{ matrix.target }}
+      - run: npm test --prefix pc-companion
+        env:
+          CLAWMATE_TEST_TARGET: ${{ matrix.target }}
+      - name: Check desktop UI
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pc-companion/node_modules/electron/dist/electron --no-sandbox --disable-gpu pc-companion/test/ui-smoke.mjs
+      - name: Check production signing credentials
+        if: inputs.production && runner.os != 'Linux'
+        shell: bash
+        env:
+          CSC_LINK: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
+          if [ "$RUNNER_OS" = macOS ]; then
+            test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
+          fi
+      - run: node pc-companion/build/distribute.mjs ${{ matrix.target }}
+        env:
+          CSC_LINK: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CLAWMATE_NOTARIZE: ${{ inputs.production && '1' || '0' }}
+          CLAWMATE_UNSIGNED_TEST: ${{ inputs.production && '0' || '1' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClawMate-Codex-${{ matrix.target }}
+          path: |
+            pc-companion/dist/${{ matrix.target }}/*.deb
+            pc-companion/dist/${{ matrix.target }}/*.dmg
+            pc-companion/dist/${{ matrix.target }}/*.exe
+            pc-companion/dist/${{ matrix.target }}/*.zip
+            pc-companion/dist/${{ matrix.target }}/*.tar.gz
+            pc-companion/dist/${{ matrix.target }}/SHA256SUMS.txt
+          if-no-files-found: error

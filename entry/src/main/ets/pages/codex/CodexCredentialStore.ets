@@ -1,7 +1,7 @@
 import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { CodexConnection, normalizeCodexOrigin, validCodexToken } from './CodexTypes';
+import { CodexConnection, normalizeCodexOrigin, validCodexToken, validCodexCa } from './CodexTypes';
 
 // Store the origin and token together to prevent sending a saved token to an edited host.
 export class CodexCredentialStore {
@@ -19,6 +19,14 @@ export class CodexCredentialStore {
       if (results.length === 0) { return null; }
       const bytes = results[0].get(asset.Tag.SECRET) as Uint8Array;
       const saved = JSON.parse(new util.TextDecoder().decodeWithStream(bytes)) as CodexConnection;
+      const ca = results[0].get(asset.Tag.DATA_LABEL_CRITICAL_1) as Uint8Array | undefined;
+      if (ca !== undefined) {
+        const value = new util.TextDecoder().decodeWithStream(ca);
+        if (value !== 'system') {
+          if (!validCodexCa(value)) { throw new Error('配对证书无效'); }
+          saved.caCertificate = value;
+        }
+      }
       if (normalizeCodexOrigin(saved.origin) !== saved.origin || !validCodexToken(saved.token)) {
         throw new Error('已保存的 Codex 连接信息无效，请忘记连接后重新配置');
       }
@@ -32,7 +40,12 @@ export class CodexCredentialStore {
 
   static async save(connection: CodexConnection): Promise<void> {
     let attributes = CodexCredentialStore.query();
-    attributes.set(asset.Tag.SECRET, new util.TextEncoder().encodeInto(JSON.stringify(connection)));
+    // SECRET is limited to 1024 bytes. Public CA data uses an integrity-protected 2048-byte label.
+    const secret: CodexConnection = { origin: connection.origin, token: connection.token };
+    attributes.set(asset.Tag.SECRET, new util.TextEncoder().encodeInto(JSON.stringify(secret)));
+    const ca = connection.caCertificate || 'system';
+    if (ca !== 'system' && !validCodexCa(ca)) { throw new Error('配对证书格式无效'); }
+    attributes.set(asset.Tag.DATA_LABEL_CRITICAL_1, new util.TextEncoder().encodeInto(ca));
     attributes.set(asset.Tag.ACCESSIBILITY, asset.Accessibility.DEVICE_UNLOCKED);
     attributes.set(asset.Tag.AUTH_TYPE, asset.AuthType.NONE);
     attributes.set(asset.Tag.SYNC_TYPE, asset.SyncType.NEVER);

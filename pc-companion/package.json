@@ -1,0 +1,27 @@
+{
+  "name": "clawmate-codex-desktop",
+  "productName": "ClawMate Codex",
+  "version": "1.1.0",
+  "description": "Connect HarmonyOS ClawMate to Codex on your computer",
+  "homepage": "https://github.com/doulujiyao12/mobiinfra-oh",
+  "author": "ClawMate",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "prepare:runtime": "node build/prepare-runtime.mjs",
+    "stage": "node build/stage.mjs",
+    "dist": "node build/distribute.mjs"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2"
+  }
+}

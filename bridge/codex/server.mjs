@@ -29,7 +29,7 @@ async function bodyJson(req, limit) {
   return body;
 }
 
-export function createBridgeServer(config, core) {
+export function createBridgeServer(config, core, extensions = {}) {
   if (typeof config.token !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(config.token)) {
     throw new Error('Use a random bridge token with at least 256 bits of entropy');
   }
@@ -54,11 +54,18 @@ export function createBridgeServer(config, core) {
       if (!bucket || now - bucket.since >= 60000) { bucket = { since: now, count: 0 }; rates.set(ip, bucket); }
       if (++bucket.count > 180) throw new BridgeError(429, 'Too many requests; retry in a minute');
       if (rates.size > 4096) for (const [key, b] of rates) if (now - b.since > 60000) rates.delete(key);
-      if (!timingSafeEqual(digest(req.headers.authorization || ''), expected)) {
+      const url = new URL(req.url, 'http://bridge.invalid');
+      if (req.method === 'POST' && url.pathname === '/v1/pair' && extensions.pairing) {
+        if (url.search) throw new BridgeError(400, 'Unexpected query parameters');
+        const body = await bodyJson(req, 4096);
+        return send(200, extensions.pairing.redeem(body));
+      }
+      const authorization = req.headers.authorization || '';
+      const deviceToken = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+      if (!timingSafeEqual(digest(authorization), expected) && !extensions.pairing?.authenticates(deviceToken)) {
         res.setHeader('WWW-Authenticate', 'Bearer');
         throw new BridgeError(401, 'Bridge token rejected');
       }
-      const url = new URL(req.url, 'http://bridge.invalid');
       if (url.search && !(req.method === 'GET' && /^\/v1\/tasks\/[^/]+$/.test(url.pathname))) {
         throw new BridgeError(400, 'Unexpected query parameters');
       }
@@ -166,6 +173,6 @@ async function main() {
   process.on('SIGTERM', close);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && path.basename(process.argv[1]) === 'server.mjs' && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { console.error(error.message); process.exit(1); });
 }

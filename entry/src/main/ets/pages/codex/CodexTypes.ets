@@ -12,7 +12,18 @@ export interface CodexModel {
   isDefault?: boolean;
 }
 export interface CodexWorkspace { id: string; name: string; }
-export interface CodexConnection { origin: string; token: string; }
+export interface CodexConnection { origin: string; token: string; caCertificate?: string; }
+export interface CodexPairingBundle {
+  type: string;
+  version: number;
+  name: string;
+  origin: string;
+  serverId: string;
+  caCertificate: string;
+  code: string;
+  expiresAt: number;
+}
+export interface CodexPairBody { code: string; deviceName: string; }
 export interface CodexItem { id: string; kind: string; text: string; }
 export interface CodexQuestionOption { label: string; description: string; }
 export interface CodexQuestion {
@@ -68,6 +79,9 @@ export interface CodexEnvelope {
   attachment?: CodexAttachment;
   unchanged?: boolean;
   error?: string;
+  token?: string;
+  deviceId?: string;
+  serverId?: string;
 }
 export interface CodexCreateBody { workspaceId: string; model: string; effort: string; mode: string; }
 export interface CodexTurnBody {
@@ -92,6 +106,19 @@ export function normalizeCodexOrigin(input: string): string {
   return value.toLowerCase();
 }
 export function validCodexToken(value: string): boolean { return /^[A-Za-z0-9_-]{43,128}$/.test(value); }
+export function validCodexCa(value: string): boolean {
+  return value.length <= 2048 && /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*$/.test(value);
+}
+export function validateCodexPairing(bundle: CodexPairingBundle): void {
+  if (bundle.type !== 'clawmate-codex-pairing' || bundle.version !== 1 || typeof bundle.name !== 'string' ||
+    bundle.name.length > 80 || normalizeCodexOrigin(bundle.origin) !== bundle.origin || !validCodexToken(bundle.code) ||
+    typeof bundle.serverId !== 'string' || bundle.serverId.length > 80 ||
+    typeof bundle.expiresAt !== 'number' || bundle.expiresAt < Date.now() ||
+    bundle.expiresAt > Date.now() + 10 * 60000 || typeof bundle.caCertificate !== 'string' ||
+    (bundle.caCertificate.length > 0 && !validCodexCa(bundle.caCertificate))) {
+    throw new Error('配对信息无效或已过期，请在 PC 应用中重新生成');
+  }
+}
 export function codexTaskBusy(status: string): boolean {
   return ['starting', 'running', 'waitingApproval', 'stopping'].includes(status);
 }

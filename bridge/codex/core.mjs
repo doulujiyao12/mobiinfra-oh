@@ -63,8 +63,8 @@ export class BridgeCore {
     });
   }
 
-  async initialize() {
-    await this.rpc.initialize();
+  async initialize({ initializeRpc = true } = {}) {
+    if (initializeRpc) await this.rpc.initialize();
     let cursor;
     do {
       const page = await this.rpc.request('model/list', { limit: 100, includeHidden: false, cursor });

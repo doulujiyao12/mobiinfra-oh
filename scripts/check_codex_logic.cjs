@@ -21,7 +21,7 @@ const dummy = () => {};
 const decorator = () => dummy;
 class Scroller {}
 const asset = {
-  Tag: { ALIAS: 1, SECRET: 2, RETURN_TYPE: 3, ACCESSIBILITY: 4, AUTH_TYPE: 5, SYNC_TYPE: 6, CONFLICT_RESOLUTION: 7 },
+  Tag: { ALIAS: 1, SECRET: 2, RETURN_TYPE: 3, ACCESSIBILITY: 4, AUTH_TYPE: 5, SYNC_TYPE: 6, CONFLICT_RESOLUTION: 7, DATA_LABEL_CRITICAL_1: 8 },
   ReturnType: { ALL: 1 }, Accessibility: { DEVICE_UNLOCKED: 2 }, AuthType: { NONE: 0 },
   SyncType: { NEVER: 0 }, ConflictResolution: { OVERWRITE: 1 },
   add: async attributes => { storedAssets.set(attributes.get(1).toString(), attributes); },
@@ -141,6 +141,28 @@ async function main() {
   assert.equal(attributes.get(asset.Tag.ACCESSIBILITY), asset.Accessibility.DEVICE_UNLOCKED);
   await CodexCredentialStore.forget(); assert.equal(await CodexCredentialStore.load(), null);
 
+  const ca = '-----BEGIN CERTIFICATE-----\n' + 'A'.repeat(900) + '\n-----END CERTIFICATE-----\n';
+  await CodexCredentialStore.save({ origin: 'https://example.com', token: 'b'.repeat(43), caCertificate: ca });
+  assert.equal((await CodexCredentialStore.load()).caCertificate, ca);
+  const pairedAttributes = [...storedAssets.values()][0];
+  assert.ok(pairedAttributes.get(asset.Tag.SECRET).length <= 1024);
+  assert.ok(pairedAttributes.get(asset.Tag.DATA_LABEL_CRITICAL_1).length <= 2048);
+  await PrivacyConsent.choose(true); deferred = false;
+  const bundle = { type: 'clawmate-codex-pairing', version: 1, name: 'My PC', origin: 'https://example.com',
+    serverId: 'server', code: 'c'.repeat(43), caCertificate: ca, expiresAt: Date.now() + 5 * 60000 };
+  response.toString = () => JSON.stringify({ token: 'd'.repeat(43), serverId: 'server' });
+  const connected = await client.pair(bundle);
+  assert.equal(connected.token, 'd'.repeat(43));
+  assert.equal(sentRequest.url, 'https://example.com/v1/pair');
+  assert.equal(sentRequest.headers.Authorization, undefined, 'one-time pairing does not send a long-lived credential');
+  assert.equal(sessionConfiguration.requestConfiguration.security.remoteValidation.content, ca);
+  await client.call('/v1/info');
+  assert.equal(sentRequest.headers.Authorization, 'Bearer ' + 'd'.repeat(43));
+  assert.throws(() => types.validateCodexPairing({ ...bundle, expiresAt: Date.now() - 1 }));
+  response.toString = () => JSON.stringify({ token: 'd'.repeat(43), serverId: 'other-computer' });
+  await assert.rejects(client.pair(bundle), /不匹配/);
+  client.close();
+
   const { CodexPage } = load('entry/src/main/ets/pages/codex/CodexPage.ets');
   const page = new CodexPage(); page.followOutput = false;
   page.task = { id: 'a', revision: 10 };
@@ -148,7 +170,7 @@ async function main() {
   page.pendingRequestId = 'retry'; page.draft = 'pending input'; page.attachments = [{}];
   page.applyTask({ id: 'a', revision: 11, lastRequestId: 'retry', status: 'running' });
   assert.equal(page.pendingRequestId, ''); assert.equal(page.draft, ''); assert.equal(page.attachments.length, 0);
-  console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, privacy cancellation, Asset Store policy and task reconciliation.');
+  console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, privacy cancellation, Asset Store size/trust policy, one-time pairing and task reconciliation.');
   console.log('ArkUI rendering and HarmonyOS API type checking require the full DevEco SDK.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
