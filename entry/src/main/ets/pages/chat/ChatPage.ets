@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { inputMethod } from '@kit.IMEKit';
@@ -38,7 +39,7 @@ import {
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
-import { digitalAvatarContainerHeight, digitalAvatarVisualStateForVoiceStatus } from './DigitalAvatarTypes';
+import { digitalAvatarContainerWidth, digitalAvatarVisualStateForVoiceStatus } from './DigitalAvatarTypes';
 import { VoiceInteractionStatus, voiceStatusLabel } from './VoiceInteractionTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
@@ -66,9 +67,6 @@ export struct ChatPage {
   @Prop sessions: ChatSessionSummary[] = [];
   @Prop activeSessionId: string = '';
   @Prop messages: ChatMessage[] = [];
-  // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
@@ -303,11 +301,11 @@ export struct ChatPage {
     Text(this.compactModeLabel(mode))
       .fontSize(12)
       .fontWeight(this.chatMode === mode ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.chatMode === mode ? Color.White : '#5D6472')
+      .fontColor(AppTheme.text(this.chatMode === mode ? Color.White : '#5D6472'))
       .width(46)
       .height(28)
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.chatMode === mode ? '#111827' : '#F4F6FA')
+      .backgroundColor(AppTheme.background(this.chatMode === mode ? '#111827' : '#F4F6FA'))
       .borderRadius(14)
       .onClick(async () => {
         await this.onSwitchMode(mode);
@@ -323,7 +321,7 @@ export struct ChatPage {
     }
     .height(32)
     .padding({ left: 2, right: 2 })
-    .backgroundColor('#F4F6FA')
+    .backgroundColor(AppTheme.background('#F4F6FA'))
     .borderRadius(16)
   }
 
@@ -349,7 +347,7 @@ export struct ChatPage {
     }
     .width(38)
     .height(38)
-    .backgroundColor('#F2F5FF')
+    .backgroundColor(AppTheme.background('#F2F5FF'))
     .borderRadius(14)
   }
 
@@ -360,13 +358,13 @@ export struct ChatPage {
         Text(title)
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#111827')
+          .fontColor(AppTheme.text('#111827'))
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(desc)
           .fontSize(11)
-          .fontColor('#7B8392')
+          .fontColor(AppTheme.text('#7B8392'))
           .width('100%')
           .margin({ top: 2 })
           .maxLines(1)
@@ -379,9 +377,9 @@ export struct ChatPage {
     .width('100%')
     .height(58)
     .padding({ left: 14, right: 14 })
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(16)
-    .shadow({ radius: 8, color: '#10000000', offsetX: 0, offsetY: 3 })
+    .shadow({ radius: 8, color: AppTheme.shadow('#10000000'), offsetX: 0, offsetY: 3 })
     .margin({ bottom: 8 })
     .onClick(() => {
       this.setActiveInput(task);
@@ -391,9 +389,7 @@ export struct ChatPage {
   @Builder WelcomeAvatarHero() {
     Row() {
       DigitalAvatarView({
-        avatarForegroundUri: this.avatarForegroundUri,
-        fallbackText: 'H',
-        fallbackColor: '#5968FF',
+        useAssistantMascot: true,
         visualState: digitalAvatarVisualStateForVoiceStatus(this.voiceStatus),
         avatarSize: 'hero',
         debugSource: 'welcome-hero mode=' + this.chatMode
@@ -403,7 +399,7 @@ export struct ChatPage {
         .layoutWeight(1)
     }
     .width('100%')
-    .height(this.avatarForegroundUri.length > 0 ? digitalAvatarContainerHeight('hero', true) + 8 : 118)
+    .height(digitalAvatarContainerWidth('hero', true) + 8)
     .alignItems(VerticalAlign.Bottom)
     .margin({ top: 0 })
   }
@@ -416,7 +412,7 @@ export struct ChatPage {
         Text(this.welcomeGreeting())
           .fontSize(28)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#111827')
+          .fontColor(AppTheme.text('#111827'))
           .width('100%')
           .margin({ top: 8 })
           .maxLines(1)
@@ -425,7 +421,7 @@ export struct ChatPage {
         Text('我可以帮你整理信息、执行任务')
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#6F7787')
+          .fontColor(AppTheme.text('#6F7787'))
           .width('100%')
           .margin({ top: 8 })
           .maxLines(2)
@@ -463,8 +459,6 @@ export struct ChatPage {
         streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
-        avatarForegroundUri: this.avatarForegroundUri,
-        avatarMessageForegroundUri: this.avatarMessageForegroundUri,
         bottomOverlayInset: this.bottomOverlayInset(),
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },
@@ -479,32 +473,29 @@ export struct ChatPage {
       Scroll(this.pageScroller) {
         Column() {
           Row() {
-            Text(this.isCloudMode() ? '云' : '本')
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .width(42)
-              .height(42)
-              .textAlign(TextAlign.Center)
-              .backgroundColor(this.isCloudMode() ? '#5968FF' : '#111827')
-              .borderRadius(16)
+            DigitalAvatarView({
+              useAssistantMascot: true,
+              visualState: digitalAvatarVisualStateForVoiceStatus(this.voiceStatus),
+              avatarSize: 'message',
+              debugSource: 'empty-conversation mode=' + this.chatMode
+            })
             Column() {
               Text(chatModeLabel(this.chatMode))
                 .fontSize(13)
                 .fontWeight(FontWeight.Bold)
-                .fontColor('#111827')
+                .fontColor(AppTheme.text('#111827'))
               Text(this.activeConversationText())
                 .fontSize(15)
-                .fontColor('#1F2937')
+                .fontColor(AppTheme.text('#1F2937'))
                 .lineHeight(22)
                 .width('100%')
                 .margin({ top: 8 })
             }
             .layoutWeight(1)
             .padding({ left: 14, right: 14, top: 14, bottom: 14 })
-            .backgroundColor('#F8FAFD')
+            .backgroundColor(AppTheme.background('#F8FAFD'))
             .borderRadius(18)
-            .border({ width: 1, color: '#E8ECF3' })
+            .border({ width: 1, color: AppTheme.border('#E8ECF3') })
           }
           .width('100%')
           .alignItems(VerticalAlign.Top)
@@ -513,7 +504,7 @@ export struct ChatPage {
           if (this.isBusy()) {
             Text('处理中...')
               .fontSize(13)
-              .fontColor('#6B7280')
+              .fontColor(AppTheme.text('#6B7280'))
               .margin({ left: 56, top: 12 })
           }
 
@@ -589,7 +580,7 @@ export struct ChatPage {
                 .height(this.attachmentPreviewHeight() * 0.86)
                 .objectFit(ImageFit.Cover)
                 .borderRadius(9)
-                .backgroundColor('#F3F4F6')
+                .backgroundColor(AppTheme.background('#F3F4F6'))
                 .margin({ right: 6 })
             }, (uri: string, index?: number) => uri + ':' + String(index === undefined ? 0 : index))
           }
@@ -603,11 +594,11 @@ export struct ChatPage {
           Text('图片附件 x' + String(this.pendingImageAttachmentCount()))
             .fontSize(12)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .maxLines(1)
           Text('将随下一条消息发送')
             .fontSize(10)
-            .fontColor('#7B8392')
+            .fontColor(AppTheme.text('#7B8392'))
             .margin({ top: 2 })
             .maxLines(1)
         }
@@ -615,11 +606,11 @@ export struct ChatPage {
         .alignItems(HorizontalAlign.Start)
         Text('×')
           .fontSize(18)
-          .fontColor('#6B7280')
+          .fontColor(AppTheme.text('#6B7280'))
           .width(this.attachmentPreviewHeight() * 0.72)
           .height(this.attachmentPreviewHeight() * 0.72)
           .textAlign(TextAlign.Center)
-          .backgroundColor('#F3F4F6')
+          .backgroundColor(AppTheme.background('#F3F4F6'))
           .borderRadius(this.attachmentPreviewHeight() * 0.36)
           .onClick(() => {
             this.onClearImageAttachment();
@@ -630,9 +621,9 @@ export struct ChatPage {
       .alignItems(VerticalAlign.Center)
       .padding({ left: 8, right: 8 })
       .margin({ left: 22, right: 22, bottom: Math.round(this.composerTextAreaHeight() * 0.18) })
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(18)
-      .shadow({ radius: 10, color: '#12000000', offsetX: 0, offsetY: 3 })
+      .shadow({ radius: 10, color: AppTheme.shadow('#12000000'), offsetX: 0, offsetY: 3 })
     }
   }
 
@@ -641,11 +632,11 @@ export struct ChatPage {
       Text(chatImageAttachmentSourceLabel(source))
         .fontSize(16)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#111827')
+        .fontColor(AppTheme.text('#111827'))
         .maxLines(1)
       Text(source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA ? '调用相机' : '选择图片')
         .fontSize(11)
-        .fontColor('#7B8392')
+        .fontColor(AppTheme.text('#7B8392'))
         .margin({ top: 4 })
         .maxLines(1)
     }
@@ -653,9 +644,9 @@ export struct ChatPage {
     .height(64)
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor('#F8FAFD')
+    .backgroundColor(AppTheme.background('#F8FAFD'))
     .borderRadius(18)
-    .border({ width: 1, color: '#E8ECF3' })
+    .border({ width: 1, color: AppTheme.border('#E8ECF3') })
     .onClick(async () => {
       await this.selectImageAttachmentSource(source);
     })
@@ -668,7 +659,7 @@ export struct ChatPage {
         }
           .width('100%')
           .height('100%')
-          .backgroundColor('#33000000')
+          .backgroundColor(AppTheme.background('#33000000'))
           .onClick(() => {
             this.closeAttachmentSourceMenu();
           })
@@ -678,12 +669,12 @@ export struct ChatPage {
             Text('添加附件')
               .fontSize(16)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#111827')
+              .fontColor(AppTheme.text('#111827'))
             Blank()
               .layoutWeight(1)
             Text('取消')
               .fontSize(14)
-              .fontColor('#6B7280')
+              .fontColor(AppTheme.text('#6B7280'))
               .height(32)
               .padding({ left: 12, right: 12 })
               .onClick(() => {
@@ -710,7 +701,7 @@ export struct ChatPage {
           bottom: Math.max(22, Math.round((this.bottomOverlayInset() - this.navigationBottomInset) * 0.18)) +
             this.navigationBottomInset
         })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(24)
       }
       .width('100%')
@@ -724,12 +715,12 @@ export struct ChatPage {
       Row() {
         Text(voiceStatusLabel(this.voiceStatus))
           .fontSize(11)
-          .fontColor('#5968FF')
+          .fontColor(AppTheme.text('#5968FF'))
           .maxLines(1)
         if (this.voiceStatusText().length > 0) {
           Text(this.voiceStatusText())
             .fontSize(12)
-            .fontColor('#4B5563')
+            .fontColor(AppTheme.text('#4B5563'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -755,10 +746,10 @@ export struct ChatPage {
               .layoutWeight(1)
             Text('关闭')
               .fontSize(14)
-              .fontColor(Color.White)
+              .fontColor(AppTheme.text(Color.White))
               .height(36)
               .padding({ left: 16, right: 16 })
-              .backgroundColor('#33000000')
+              .backgroundColor(AppTheme.filledBackground('#33000000'))
               .borderRadius(18)
               .onClick(() => {
                 this.closeDebugImagePreview();
@@ -773,11 +764,11 @@ export struct ChatPage {
             .objectFit(ImageFit.Contain)
             .borderRadius(18)
             .margin({ top: 24 })
-            .backgroundColor(Color.Black)
+            .backgroundColor(AppTheme.background(Color.Black))
 
           Text('图片预览')
             .fontSize(13)
-            .fontColor('#E5E7EB')
+            .fontColor(AppTheme.text('#E5E7EB'))
             .margin({ top: 12 })
             .maxLines(1)
         }
@@ -787,7 +778,7 @@ export struct ChatPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#D9000000')
+      .backgroundColor(AppTheme.background('#D9000000'))
       .zIndex(90)
     }
   }
@@ -796,7 +787,7 @@ export struct ChatPage {
     Row() {
       Text('☰')
         .fontSize(28)
-        .fontColor('#111827')
+        .fontColor(AppTheme.text('#111827'))
         .width(44)
         .height(40)
         .textAlign(TextAlign.Center)
@@ -807,7 +798,7 @@ export struct ChatPage {
         Text('MobiAgent')
           .fontSize(18)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#111827')
+          .fontColor(AppTheme.text('#111827'))
           .lineHeight(28)
           .maxLines(1)
           .layoutWeight(1)
@@ -823,7 +814,7 @@ export struct ChatPage {
       if (this.debugEnabled) {
         Text('日志')
           .fontSize(14)
-          .fontColor('#111827')
+          .fontColor(AppTheme.text('#111827'))
           .width(52)
           .height(36)
           .textAlign(TextAlign.Center)
@@ -851,7 +842,7 @@ export struct ChatPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
+    .backgroundColor(AppTheme.background(chatPageBackgroundColor(this.hasConversationContent())))
   }
 
   build() {
@@ -870,35 +861,35 @@ export struct ChatPage {
           if (chatDeepThinkingToggleVisible(this.chatMode)) {
             Text(this.chatDeepThinkingEnabled ? '深度思考 开' : '深度思考 关')
               .fontSize(12)
-              .fontColor(this.chatDeepThinkingEnabled ? '#FFFFFF' : '#222222')
+              .fontColor(AppTheme.text(this.chatDeepThinkingEnabled ? '#FFFFFF' : '#222222'))
               .height(34)
               .padding({ left: 13, right: 13 })
-              .backgroundColor(this.chatDeepThinkingEnabled ? '#111827' : Color.White)
+              .backgroundColor(AppTheme.background(this.chatDeepThinkingEnabled ? '#111827' : Color.White))
               .borderRadius(17)
-              .border({ width: 1, color: this.chatDeepThinkingEnabled ? '#111827' : '#E2E5EA' })
+              .border({ width: 1, color: AppTheme.border(this.chatDeepThinkingEnabled ? '#111827' : '#E2E5EA') })
               .opacity(this.isBusy() ? 0.6 : 1)
               .onClick(() => { this.toggleDeepThinking(); })
           }
           if (this.showPcServerCloudButton()) {
             Text('PC Server')
               .fontSize(12)
-              .fontColor(this.pcServerCloudEnabled ? '#FFFFFF' : '#222222')
+              .fontColor(AppTheme.text(this.pcServerCloudEnabled ? '#FFFFFF' : '#222222'))
               .height(34)
               .padding({ left: 13, right: 13 })
-              .backgroundColor(this.pcServerCloudEnabled ? '#167456' : Color.White)
+              .backgroundColor(AppTheme.background(this.pcServerCloudEnabled ? '#167456' : Color.White))
               .borderRadius(17)
-              .border({ width: 1, color: this.pcServerCloudEnabled ? '#167456' : '#E2E5EA' })
+              .border({ width: 1, color: AppTheme.border(this.pcServerCloudEnabled ? '#167456' : '#E2E5EA') })
               .margin({ left: chatDeepThinkingToggleVisible(this.chatMode) ? 10 : 0 })
               .onClick(() => { this.onUsePcServerCloud(); })
           }
           Text('下发任务')
             .fontSize(12)
-            .fontColor('#222222')
+            .fontColor(AppTheme.text('#222222'))
             .height(34)
             .padding({ left: 13, right: 13 })
-            .backgroundColor(Color.White)
+            .backgroundColor(AppTheme.background(Color.White))
             .borderRadius(17)
-            .border({ width: 1, color: '#E2E5EA' })
+            .border({ width: 1, color: AppTheme.border('#E2E5EA') })
             .margin({ left: (chatDeepThinkingToggleVisible(this.chatMode) || this.showPcServerCloudButton()) ? 10 : 0 })
             .onClick(async () => { await this.runTaskAction(); })
         }
@@ -911,22 +902,24 @@ export struct ChatPage {
         Row() {
           Text('+')
             .fontSize(30)
-            .fontColor('#111827')
+            .fontColor(AppTheme.text('#111827'))
             .width(40)
             .height(40)
             .textAlign(TextAlign.Center)
-            .backgroundColor(Color.White)
+            .backgroundColor(AppTheme.background(Color.White))
             .borderRadius(20)
-            .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
+            .shadow({ radius: 6, color: AppTheme.shadow('#12000000'), offsetX: 0, offsetY: 2 })
             .onClick(() => { this.openAttachmentSourceMenu(); })
           TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
             .maxLines(CHAT_COMPOSER_MAX_LINES)
             .fontSize(15)
             .lineHeight(20)
-            .fontColor('#4B5563')
-            .backgroundColor('#00FFFFFF')
+            .fontColor(AppTheme.text('#4B5563'))
+            .backgroundColor(AppTheme.background('#00FFFFFF'))
             .padding({ left: 14, right: 12, top: 8, bottom: 8 })
             .margin({ left: 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
@@ -939,7 +932,7 @@ export struct ChatPage {
               } else if (this.primaryActionRole() === 'busy') {
                 Text(this.primaryButtonText())
                   .fontSize(14)
-                  .fontColor(Color.White)
+                  .fontColor(AppTheme.text(Color.White))
                   .fontWeight(FontWeight.Bold)
               } else {
                 Image($r('app.media.voice_microphone_light'))
@@ -948,7 +941,7 @@ export struct ChatPage {
                   .margin({ right: 5 })
                 Text(this.primaryButtonText())
                   .fontSize(14)
-                  .fontColor(Color.White)
+                  .fontColor(AppTheme.text(Color.White))
                   .fontWeight(FontWeight.Bold)
               }
             }
@@ -958,7 +951,7 @@ export struct ChatPage {
           }
             .width(82)
             .height(40)
-            .backgroundColor(this.primaryButtonBackgroundColor())
+            .backgroundColor(AppTheme.background(this.primaryButtonBackgroundColor()))
             .borderRadius(20)
             .gesture(
               GestureGroup(GestureMode.Exclusive,
@@ -980,9 +973,9 @@ export struct ChatPage {
         .height(this.composerBarHeight())
         .alignItems(VerticalAlign.Center)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(26)
-        .shadow({ radius: 14, color: '#20000000', offsetX: 0, offsetY: 5 })
+        .shadow({ radius: 14, color: AppTheme.shadow('#20000000'), offsetX: 0, offsetY: 5 })
         .margin({ left: 20, right: 20, bottom: 10 })
       }
       .width('100%')
@@ -1008,7 +1001,7 @@ export struct ChatPage {
           Blank()
             .layoutWeight(1)
             .height('100%')
-            .backgroundColor('#66000000')
+            .backgroundColor(AppTheme.background('#66000000'))
             .onClick(() => {
               this.onCloseSessionDrawer();
             })
@@ -1023,6 +1016,6 @@ export struct ChatPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
+    .backgroundColor(AppTheme.background(chatPageBackgroundColor(this.hasConversationContent())))
   }
 }

@@ -118,6 +118,7 @@ import {
 } from '../main/ets/datamanager/avatar/SeedreamAvatarProvider';
 import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
+import { DataManagerImageResolver } from '../main/ets/datamanager/DataManagerImageResolver';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
 import { sourceEntryProcessingHash } from '../main/ets/datamanager/ConsolidationService';
 
@@ -213,6 +214,10 @@ class MemoryDataManagerStorage extends DataManagerStorage {
       names[child] = true;
     }
   }
+}
+
+class MemoryImageResolverStorage extends MemoryDataManagerStorage {
+  exists(path: string): boolean { return this.readJson<Object | null>(path, null) !== null; }
 }
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
@@ -613,6 +618,36 @@ function demoProfileStateForAvatar(): ProfileState {
 
 export default function dataManagerUnitTest() {
   describe('dataManagerUnitTest', () => {
+    it('historicalGalleryUriPointersPreferThumbnailsAfterFullCopyCleanup', 0, () => {
+      let root = '/tmp/gallery-thumbnail-reference';
+      let storage = new MemoryImageResolverStorage();
+      let paths = new DataManagerPaths(root, storage);
+      let ref = 'gallery-log/items/2026-10-16/hdc-photo.json';
+      let result = createJsonMap();
+      result['uri'] = '/storage/media/local/files/Photo/1/original.jpg';
+      result['thumbnailUri'] = 'file://gallery/thumbnail.jpg';
+      storage.writeJsonAtomic(root + '/' + ref, result);
+      let resolver = new DataManagerImageResolver(paths, storage);
+      let images = resolver.resolveAll([ref + '#uri', ref + '#/uri', ref]);
+      expect(images.length).assertEqual(3);
+      for (let image of images) {
+        expect(image.uri).assertEqual('file://gallery/thumbnail.jpg');
+        expect(image.available).assertTrue();
+      }
+    });
+
+    it('galleryUriPointersRetainPickerUrisWhenNoThumbnailExists', 0, () => {
+      let root = '/tmp/gallery-picker-reference';
+      let storage = new MemoryImageResolverStorage();
+      let ref = 'gallery-log/items/2026-10-16/picker-photo.json';
+      let result = createJsonMap();
+      result['uri'] = 'file://media/Photo/1/IMG_001.jpg';
+      result['thumbnailUri'] = '';
+      storage.writeJsonAtomic(root + '/' + ref, result);
+      let resolver = new DataManagerImageResolver(new DataManagerPaths(root, storage), storage);
+      expect(resolver.resolveAll([ref + '#uri'])[0].uri).assertEqual('file://media/Photo/1/IMG_001.jpg');
+    });
+
     it('parseDailyLogDocument', 0, () => {
       let content = '<!-- DAILY_LOG_METADATA\n{"workflow_metadata":{"name":"demo"},"latest_entry_index":2}\n-->\n\n1. 第一条\n\n2. 第二条';
       let doc = parseDailyLogDocument(content);

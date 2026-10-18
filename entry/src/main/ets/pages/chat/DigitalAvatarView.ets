@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import {
   digitalAvatarContainerHeight,
   digitalAvatarContainerWidth,
@@ -12,6 +13,7 @@ import { AppLogger } from '../../utils/AppLogger';
 @Component
 export struct DigitalAvatarView {
   @Prop @Watch('onAvatarForegroundUriChanged') avatarForegroundUri: string = '';
+  @Prop useAssistantMascot: boolean = false;
   @Prop fallbackText: string = '助';
   @Prop fallbackColor: string = '#5968FF';
   @Prop avatarSize: DigitalAvatarSize = 'message';
@@ -51,11 +53,15 @@ export struct DigitalAvatarView {
   }
 
   private hasForegroundImage(): boolean {
-    return this.avatarForegroundUri.length > 0 && !this.imageLoadFailed;
+    return this.hasAvatarFrame() && !this.imageLoadFailed;
   }
 
   private hasAvatarFrame(): boolean {
-    return this.avatarForegroundUri.length > 0;
+    return this.useAssistantMascot || this.avatarForegroundUri.length > 0;
+  }
+
+  private foregroundImageSource(): string | Resource {
+    return this.useAssistantMascot ? $r('app.media.chat_assistant_avatar') : this.avatarForegroundUri;
   }
 
   private avatarLogContext(): string {
@@ -64,6 +70,7 @@ export struct DigitalAvatarView {
       ', size=' + this.avatarSize +
       ', visualState=' + this.visualState +
       ', hasUri=' + String(this.avatarForegroundUri.length > 0) +
+      ', assistantMascot=' + String(this.useAssistantMascot) +
       ', imageLoadFailed=' + String(this.imageLoadFailed) +
       ', tapLocked=' + String(this.tapLocked);
   }
@@ -81,6 +88,9 @@ export struct DigitalAvatarView {
   }
 
   private containerHeight(): number {
+    if (this.useAssistantMascot) {
+      return this.containerWidth();
+    }
     return digitalAvatarContainerHeight(this.avatarSize, this.hasAvatarFrame());
   }
 
@@ -89,6 +99,9 @@ export struct DigitalAvatarView {
   }
 
   private frameHeight(): number {
+    if (this.useAssistantMascot) {
+      return this.frameWidth();
+    }
     return digitalAvatarFrameHeight(this.avatarSize);
   }
 
@@ -387,27 +400,36 @@ export struct DigitalAvatarView {
       Row()
         .width(this.fallbackRingSize())
         .height(this.fallbackRingSize())
-        .backgroundColor('#335968FF')
+        .backgroundColor(AppTheme.background('#335968FF'))
         .borderRadius(this.fallbackRingRadius())
         .opacity(this.ringOpacity())
         .scale({ x: this.ringScale(), y: this.ringScale() })
         .animation({ duration: 760, curve: Curve.EaseInOut });
 
-      Text(this.fallbackText)
-        .fontSize(this.fallbackFontSize())
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .width(this.fallbackSize())
-        .height(this.fallbackSize())
-        .textAlign(TextAlign.Center)
-        .backgroundColor(this.fallbackColor)
-        .borderRadius(this.fallbackRadius())
-        .translate({ x: 0, y: this.tapTranslateY })
-        .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
-        .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
+      if (this.useAssistantMascot) {
+        Image($r('app.media.home_explorer_mascot'))
+          .width(this.frameWidth()).height(this.frameWidth()).objectFit(ImageFit.Contain)
+          .accessibilityText('ClawMate 卡通猫助手')
+          .translate({ x: 0, y: this.tapTranslateY })
+          .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
+          .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
+      } else {
+        Text(this.fallbackText)
+          .fontSize(this.fallbackFontSize())
+          .fontWeight(FontWeight.Bold)
+          .fontColor(AppTheme.text(Color.White))
+          .width(this.fallbackSize())
+          .height(this.fallbackSize())
+          .textAlign(TextAlign.Center)
+          .backgroundColor(AppTheme.filledBackground(this.fallbackColor))
+          .borderRadius(this.fallbackRadius())
+          .translate({ x: 0, y: this.tapTranslateY })
+          .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
+          .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
+      }
     }
-    .width(this.fallbackSize())
-    .height(this.fallbackSize());
+    .width(this.useAssistantMascot ? this.frameWidth() : this.fallbackSize())
+    .height(this.useAssistantMascot ? this.frameHeight() : this.fallbackSize());
   }
 
   @Builder ForegroundAvatar() {
@@ -416,7 +438,7 @@ export struct DigitalAvatarView {
       Row()
         .width(this.ringSize())
         .height(this.ringSize())
-        .backgroundColor('#445968FF')
+        .backgroundColor(AppTheme.background('#445968FF'))
         .borderRadius(this.ringRadius())
         .opacity(this.tapHaloOpacity)
         .scale({ x: this.tapHaloScale, y: this.tapHaloScale })
@@ -425,7 +447,7 @@ export struct DigitalAvatarView {
       Row()
         .width(this.ringSize())
         .height(this.ringSize())
-        .backgroundColor('#335968FF')
+        .backgroundColor(AppTheme.background('#335968FF'))
         .borderRadius(this.ringRadius())
         .opacity(this.ringOpacity())
         .scale({ x: this.ringScale(), y: this.ringScale() })
@@ -434,17 +456,18 @@ export struct DigitalAvatarView {
       Row()
         .width(this.shadowWidth())
         .height(this.shadowHeight())
-        .backgroundColor('#35222B46')
+        .backgroundColor(AppTheme.background('#35222B46'))
         .borderRadius(this.shadowRadius())
         .translate({ x: 0, y: this.shadowTranslateY() })
         .opacity(this.tapShadowOpacity)
         .scale({ x: this.shadowScale(), y: 1 })
         .animation({ duration: this.tapShadowAnimationDuration(), curve: Curve.EaseOut });
 
-      Image(this.avatarForegroundUri)
+      Image(this.foregroundImageSource())
         .width(this.frameWidth())
         .height(this.frameHeight())
         .objectFit(ImageFit.Contain)
+        .accessibilityText(this.useAssistantMascot ? 'ClawMate 卡通猫助手' : '个人生成形象')
         .translate({ x: 0, y: this.tapTranslateY })
         .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
         .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut })
@@ -457,7 +480,7 @@ export struct DigitalAvatarView {
       Row()
         .width(this.highlightWidth())
         .height(this.highlightHeight())
-        .backgroundColor('#33FFFFFF')
+        .backgroundColor(AppTheme.background('#33FFFFFF'))
         .borderRadius(this.highlightRadius())
         .translate({ x: this.highlightTranslateX(), y: this.highlightTranslateY() })
         .opacity(0.32);
@@ -466,19 +489,19 @@ export struct DigitalAvatarView {
         Row()
           .width(this.waveBarWidth())
           .height(this.waveBarMaxHeight())
-          .backgroundColor('#5968FF')
+          .backgroundColor(AppTheme.background('#5968FF'))
           .borderRadius(this.waveBarRadius())
           .scale({ x: 1, y: this.waveBarScaleY(0) })
         Row()
           .width(this.waveBarWidth())
           .height(this.waveBarMaxHeight())
-          .backgroundColor('#5968FF')
+          .backgroundColor(AppTheme.background('#5968FF'))
           .borderRadius(this.waveBarRadius())
           .scale({ x: 1, y: this.waveBarScaleY(1) })
         Row()
           .width(this.waveBarWidth())
           .height(this.waveBarMaxHeight())
-          .backgroundColor('#5968FF')
+          .backgroundColor(AppTheme.background('#5968FF'))
           .borderRadius(this.waveBarRadius())
           .scale({ x: 1, y: this.waveBarScaleY(2) })
       }

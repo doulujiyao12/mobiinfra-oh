@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
@@ -15,7 +16,13 @@ import {
   GalleryQuestionAnswerResult
 } from '../../utils/CloudModelClient';
 import { GalleryAnalyzer } from '../../utils/gallery/GalleryAnalyzer';
-import { GalleryAutoScanner } from '../../utils/gallery/GalleryAutoScanner';
+import { GalleryHdcReader } from '../../utils/gallery/GalleryHdcReader';
+import { GalleryHdcBatchOptions } from '../../components/GalleryHdcBatchOptions';
+import { GalleryPreviewImage } from '../../components/GalleryPreviewImage';
+import { GalleryImageStore } from '../../utils/gallery/GalleryImageStore';
+import { galleryHdcMediaPath } from '../../utils/gallery/GalleryHdcPolicy';
+import { image } from '@kit.ImageKit';
+import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
 import { GalleryExifUtils } from '../../utils/gallery/GalleryExifUtils';
 import {
   GalleryMonthlyCategoryCount,
@@ -90,15 +97,26 @@ registerGallerySettingsDefaults();
 @Component
 struct GalleryPage {
   private pageScroller: Scroller = new Scroller();
+  private pageActive: boolean = true;
   onPageShow(): void {
+    this.pageActive = true;
     applyPageStatusBar(this.getUIContext(), '#F6F7FA');
   }
 
   onPageHide(): void {
+    this.pageActive = false;
+    this.closeResultDetail();
+    if (this.hdcReader !== null) { this.pauseRequested = true; this.hdcReader.pause(); }
     applyPageStatusBar(this.getUIContext(), '#FFFFFF');
   }
 
   @State analyzing: boolean = false;
+  @State private hdcSheetOpen: boolean = false;
+  @State private hdcStarting: boolean = false;
+  @State private hdcBatch: boolean = false;
+  @State private hdcStatus: string = '';
+  @State private hdcError: string = '';
+  private hdcReader: GalleryHdcReader | null = null;
   @State progress: number = 0;
   @State selectedFilter: number = 0;
   @State selectedTimeFilter: number = 0;
@@ -125,6 +143,13 @@ struct GalleryPage {
   @State monthlyAiErrorKey: string = '';
   @State monthlyAiErrorText: string = '';
   @State selectedDetailId: string = '';
+  @State private originalPixels: image.PixelMap | undefined = undefined;
+  @State private originalLoading: boolean = false;
+  @State private originalError: string = '';
+  private originalReader: GalleryHdcReader | null = null;
+  private originalRequest: number = 0;
+  private imageRepairGeneration: number = 0;
+  private imageRepair: Promise<void> = Promise.resolve();
   @State settingsRevision: number = 0;
   @State galleryQuestion: string = '';
   @State gallerySearchHits: GallerySearchHit[] = [];
@@ -180,9 +205,14 @@ struct GalleryPage {
     this.restoreScanSessionState();
     this.restoreMonthlyAiSummaries();
     this.startLastRunTimer();
+    this.repairHistoricalImages();
   }
 
   aboutToDisappear(): void {
+    this.pageActive = false;
+    this.imageRepairGeneration += 1;
+    this.closeResultDetail();
+    if (this.hdcReader !== null) { this.pauseRequested = true; this.hdcReader.pause(); }
     this.stopLastRunTimer();
   }
 
@@ -355,6 +385,7 @@ struct GalleryPage {
   }
 
   private async startManualAnalyze(): Promise<void> {
+    if (this.originalLoading || this.originalReader !== null) { showToastSafely('请等待原图读取结束', 1400); return; }
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
@@ -366,6 +397,9 @@ struct GalleryPage {
       return;
     }
     try {
+      await this.imageRepair;
+      if (!this.pageActive) { return; }
+      this.closeResultDetail();
       let picker = new GalleryPhotoPicker();
       let uris = await picker.selectImageUris(9);
       if (uris.length === 0) {
@@ -426,44 +460,78 @@ struct GalleryPage {
     }
   }
 
-  private async startAutoAnalyze(): Promise<void> {
-    if (!AiLoginGuard.ensure(this.getUIContext())) {
-      return;
-    }
-    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
-      return;
-    }
-    if (this.analyzing) {
-      showToastSafely('图库分析正在进行', 1200);
-      return;
-    }
+  private async runHdcBatch(count: number, saved: GalleryScanSession | null = null): Promise<void> {
+    if (this.originalLoading || this.originalReader !== null) { showToastSafely('请等待原图读取结束', 1400); return; }
+    if (this.analyzing || this.hdcStarting) { return; }
+    this.hdcStarting = true;
+    let reader: GalleryHdcReader | null = null;
+    let session = saved;
+    let outcome = 'failed';
+    let message = '';
     try {
-      let ctx = getContext(this) as common.UIAbilityContext;
-      let granted = await this.ensureGalleryReadPermission(ctx);
-      if (!granted) {
-        showToastSafely('未获得图库读取权限', 1600);
-        return;
+      await this.imageRepair;
+      this.closeResultDetail();
+      if (!AiLoginGuard.ensure(this.getUIContext()) || !await PrivacyConsentDialog.show(this.getUIContext())) { return; }
+      if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'gallery-batch', false)) { return; }
+      if (!this.pageActive) { return; }
+      this.pauseRequested = false;
+      this.hdcBatch = true;
+      this.hdcError = '';
+      this.hdcStatus = '正在准备手机 HDC…';
+      this.manualAnalyzing = false;
+      this.analyzing = true;
+      this.autoScanStatus = 'running';
+      if (saved === null) { this.scanTotal = 0; this.scanProcessed = 0; this.scanPending = 0; this.scanFailed = 0; this.scanSkipped = 0; }
+      reader = new GalleryHdcReader(getContext(this) as common.UIAbilityContext,
+        (): boolean => this.pauseRequested,
+        (status: string): void => { this.hdcStatus = status; this.progressRevision += 1; },
+        (): void => { this.requestPauseAutoAnalyze(); });
+      this.hdcReader = reader;
+      await reader.open();
+      if (session === null) {
+        let inputs = await reader.latestImages(count);
+        if (this.pauseRequested) { throw new Error('GALLERY_HDC_PAUSED: 已暂停读取'); }
+        session = this.createScanSession(inputs);
+        session.source = 'hdc';
+        session.requestedCount = count;
+        this.clearMonthlyAiRuntimeState();
+        GalleryStorage.saveScanSession(this.filesDir, session);
       }
-      let scanner = new GalleryAutoScanner();
-      let inputs = await scanner.scanAllImages(ctx);
-      if (inputs.length === 0) {
-        showToastSafely('未扫描到图库图片', 1200);
-        return;
-      }
-      // 每次全量扫描先创建新的会话快照；后续暂停/恢复都从该快照继续。
-      let session = this.createScanSession(inputs);
-      this.clearMonthlyAiRuntimeState();
-      GalleryStorage.saveScanSession(this.filesDir, session);
       await this.runScanSession(session);
+      outcome = this.pauseRequested ? 'cancelled' : (session.failed > 0 ? 'failed' : 'success');
+      message = '本批完成 ' + session.processed + '/' + session.total + ' 张，失败 ' + session.failed + ' 张';
+      this.hdcStatus = (this.pauseRequested ? '已暂停；' : '') + message;
     } catch (e) {
+      message = this.errorMessage(e);
+      if (this.pauseRequested) {
+        outcome = 'cancelled';
+        this.hdcStatus = session !== null ? '已暂停，可继续读取和分析剩余图片' : '已停止扫描，点击批量读图重新选择';
+      } else {
+        this.hdcError = message;
+        AppLogger.errorCause('Gallery.Hdc', 'Batch failed', e as Error);
+        showToastSafely('批量读图失败：' + message, 2600);
+      }
+      if (session !== null) {
+        session.status = 'paused';
+        GalleryStorage.saveScanSession(this.filesDir, session);
+        this.applyScanSession(session);
+      } else { this.autoScanStatus = 'idle'; }
+    } finally {
+      try { if (reader !== null) { reader.finish(outcome, message || this.hdcStatus); } }
+      catch (e) { AppLogger.errorCause('Gallery.Hdc', 'Log finalization failed', e as Error); }
+      this.hdcReader = null;
       this.analyzing = false;
-      this.autoScanStatus = 'failed';
-      this.setLastRunLabel('分析失败');
-      showToastSafely('自动分析失败：' + this.errorMessage(e), 2000);
+      this.hdcStarting = false;
+      this.progressRevision += 1;
     }
   }
 
   private async continueAutoAnalyze(): Promise<void> {
+    let saved = GalleryStorage.loadScanSession(this.filesDir);
+    if (saved !== null && saved.source === 'hdc') {
+      await this.runHdcBatch(saved.requestedCount || 20, saved);
+      return;
+    }
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
@@ -499,12 +567,13 @@ struct GalleryPage {
     }
     // 并发分析无法立刻终止已进入流水线的图片，因此先进入 pausing 状态并给用户明确反馈。
     this.pauseRequested = true;
+    if (this.hdcReader !== null) { this.hdcReader.pause(); }
     this.autoScanStatus = 'pausing';
     this.setLastRunLabel('暂停中');
     this.scanRevision += 1;
     this.progressRevision += 1;
     let session = GalleryStorage.loadScanSession(this.filesDir);
-    if (session) {
+    if (session && (!this.hdcBatch || this.scanTotal > 0)) {
       session.status = 'pausing';
       GalleryStorage.saveScanSession(this.filesDir, session);
     }
@@ -538,14 +607,32 @@ struct GalleryPage {
     this.autoProgressBaselineFailed = session.failed;
 
     let analyzer = new GalleryAnalyzer(this.filesDir, this.cloudClient);
-    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(true), (next: GalleryProgress) => {
+    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(session.source !== 'hdc'), (next: GalleryProgress) => {
       this.updateAutoProgress(session, next);
     }, (result: GalleryAnalysisResult) => {
       this.mergeResult(result);
     }, {
       shouldPause: (): boolean => this.pauseRequested,
+      prepareInput: async (input: GalleryPhotoInput): Promise<void> => {
+        if (session.source !== 'hdc') { return; }
+        let reader = this.hdcReader;
+        if (reader === null) { throw new Error('手机 HDC 读取器未连接，请点击继续批量读图'); }
+        await reader.prepareImage(input);
+        let item = session.items.find((candidate: GalleryScanItem): boolean => candidate.hdcSourcePath === input.hdcSourcePath);
+        if (item) { item.id = input.id || item.id; item.uri = input.uri; item.hdcChecksum = input.hdcChecksum; }
+        GalleryStorage.saveScanSession(this.filesDir, session);
+      },
+      onPrepareError: (input: GalleryPhotoInput, error: string): void => {
+        this.hdcError = error;
+        if (this.hdcReader !== null) { this.hdcReader.note('READ_FAILED error=' + error); }
+        this.markScanItem(session, input, false, error, false);
+        GalleryStorage.saveScanSession(this.filesDir, session);
+        this.applyScanSession(session);
+      },
       onItemDone: (input: GalleryPhotoInput, outcome: GalleryAnalyzeOutcome) => {
         // 单项完成后立即更新并保存会话，确保暂停或退出后可以从最后完成项继续。
+        let item = session.items.find((candidate: GalleryScanItem): boolean => candidate.id === outcome.result.id);
+        if (item) { item.uri = outcome.result.uri; item.thumbnailUri = outcome.result.thumbnailUri; }
         let marked = this.markScanItem(session, input, outcome.cached, outcome.result.error, outcome.skippedByKeyword === true);
         if (this.pauseRequested && session.status === 'running') {
           session.status = 'pausing';
@@ -588,20 +675,6 @@ struct GalleryPage {
       showToastSafely('调用 AI 分析失败：' + session.failed.toString() + ' 张，请查看失败详情或日志', 2200);
     } else {
       showToastSafely(sessionCompleted ? '自动分析完成' : '自动分析已暂停', 1500);
-    }
-  }
-
-  private async ensureGalleryReadPermission(ctx: common.UIAbilityContext): Promise<boolean> {
-    try {
-      let permissions: Permissions[] = ['ohos.permission.READ_IMAGEVIDEO', 'ohos.permission.MEDIA_LOCATION'];
-      let atManager = abilityAccessCtrl.createAtManager();
-      let result = await atManager.requestPermissionsFromUser(ctx, permissions);
-      if (!result.authResults || result.authResults.length === 0) {
-        return false;
-      }
-      return result.authResults[0] === 0;
-    } catch (e) {
-      return false;
     }
   }
 
@@ -932,7 +1005,11 @@ struct GalleryPage {
         date: date,
         status: 'queued',
         error: '',
-        skipReason: ''
+        skipReason: '',
+        hdcSourcePath: input.hdcSourcePath,
+        hdcSourceSize: input.hdcSourceSize,
+        hdcModifiedAt: input.hdcModifiedAt,
+        hdcChecksum: input.hdcChecksum
       });
     }
     let now = new Date().getTime();
@@ -962,7 +1039,11 @@ struct GalleryPage {
         inputs.push({
           uri: session.items[i].uri,
           id: session.items[i].id,
-          date: session.items[i].date
+          date: session.items[i].date,
+          hdcSourcePath: session.items[i].hdcSourcePath,
+          hdcSourceSize: session.items[i].hdcSourceSize,
+          hdcModifiedAt: session.items[i].hdcModifiedAt,
+          hdcChecksum: session.items[i].hdcChecksum
         });
       }
     }
@@ -975,7 +1056,8 @@ struct GalleryPage {
     let inputDate = input.date !== undefined && input.date.length > 0 ? input.date : '';
     for (let i = 0; i < session.items.length; i++) {
       let sameIdentity = session.items[i].id === inputId && (inputDate.length === 0 || session.items[i].date === inputDate);
-      if (sameIdentity || session.items[i].uri === input.uri) {
+      if (sameIdentity || session.items[i].uri === input.uri ||
+        (input.hdcSourcePath !== undefined && session.items[i].hdcSourcePath === input.hdcSourcePath)) {
         if (error && error.length > 0) {
           session.items[i].status = 'failed';
           session.items[i].error = error;
@@ -1030,6 +1112,7 @@ struct GalleryPage {
   }
 
   private applyScanSession(session: GalleryScanSession): void {
+    this.hdcBatch = session.source === 'hdc';
     // 将落盘会话同步到页面展示；所有进度卡片和顶部“已分析 x/y”都从这些状态读取。
     this.recountScanSession(session);
     this.scanTotal = session.total;
@@ -1155,11 +1238,11 @@ struct GalleryPage {
 
   @Builder StatCell(label: string, value: string, color: string) {
     Column() {
-      Text(label).fontSize(12).fontColor('#737987').maxLines(1)
+      Text(label).fontSize(12).fontColor(AppTheme.text('#737987')).maxLines(1)
       Text(value)
         .fontSize(label === '最近分析' ? 14 : 21)
         .fontWeight(FontWeight.Bold)
-        .fontColor(color)
+        .fontColor(AppTheme.text(color))
         .margin({ top: 5 })
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1169,11 +1252,12 @@ struct GalleryPage {
   }
 
   private runAction(actionId: number): void {
+    if (this.hdcStarting && actionId !== 3) { return; }
     if (actionId === 0) {
       if (this.hasPausedScan()) {
         this.continueAutoAnalyze();
       } else {
-        this.startAutoAnalyze();
+        if (!this.analyzing && !this.hdcStarting) { this.hdcSheetOpen = true; }
       }
       return;
     }
@@ -1191,7 +1275,7 @@ struct GalleryPage {
   }
 
   private confirmClearAnalysis(): void {
-    if (this.analyzing) {
+    if (this.analyzing || this.hdcStarting) {
       showToastSafely('图库分析正在进行，无法清空', 1200);
       return;
     }
@@ -1199,8 +1283,8 @@ struct GalleryPage {
       title: '清空分析',
       message: '将清空已保存的图库分析结果、扫描进度、月度总结和位置缓存。此操作不可恢复。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '清空', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '清空', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -1210,6 +1294,8 @@ struct GalleryPage {
   }
 
   private clearAnalysis(): void {
+    this.imageRepairGeneration += 1;
+    this.closeResultDetail();
     GalleryStorage.clear(this.filesDir);
     GalleryStorage.clearScanSession(this.filesDir);
     GalleryStorage.clearMonthlySummaries(this.filesDir);
@@ -1232,6 +1318,9 @@ struct GalleryPage {
     this.scanFailed = 0;
     this.scanRevision += 1;
     this.autoScanStatus = 'idle';
+    this.hdcStatus = '';
+    this.hdcError = '';
+    this.hdcBatch = false;
     this.setLastRunLabel('尚未开始');
     showToastSafely('图库缓存已清理', 1200);
   }
@@ -1246,27 +1335,27 @@ struct GalleryPage {
       return '分析中';
     }
     if (this.hasPausedScan()) {
-      return '继续分析';
+      return this.hdcBatch ? '继续读图' : '继续分析';
     }
-    return '图库分析';
+    return '批量读图';
   }
 
   @Builder PrimaryActionButton() {
     Row() {
-      Text('选择图片分析').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Color.White).layoutWeight(1).maxLines(1)
+      Text('选择图片分析').fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(Color.White)).layoutWeight(1).maxLines(1)
       Text('>')
         .fontSize(18)
-        .fontColor('#39BFA3')
+        .fontColor(AppTheme.text('#39BFA3'))
         .width(30)
         .height(30)
         .textAlign(TextAlign.Center)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(15)
     }
     .width('100%')
     .height(50)
     .padding({ left: 16, right: 14 })
-    .backgroundColor('#39BFA3')
+    .backgroundColor(AppTheme.background('#39BFA3'))
     .borderRadius(15)
     .margin({ top: 10 })
     .onClick(() => { this.runAction(1); })
@@ -1275,11 +1364,11 @@ struct GalleryPage {
   @Builder HeaderIconButton(label: string, actionId: number) {
     Text(label)
       .fontSize(18)
-      .fontColor('#2F5BEA')
+      .fontColor(AppTheme.text('#2F5BEA'))
       .width(38)
       .height(38)
       .textAlign(TextAlign.Center)
-      .backgroundColor('#EEF3FF')
+      .backgroundColor(AppTheme.background('#EEF3FF'))
       .borderRadius(10)
       .onClick(() => {
         if (actionId === 0) {
@@ -1295,10 +1384,10 @@ struct GalleryPage {
       .height(38)
       .layoutWeight(1)
       .fontSize(12)
-      .fontColor(color)
-      .backgroundColor(bg)
+      .fontColor(AppTheme.text(color))
+      .backgroundColor(AppTheme.background(bg))
       .borderRadius(9)
-      .enabled(!(this.analyzing && actionId !== 3))
+      .enabled(!(this.hdcStarting && !this.analyzing) && !(this.analyzing && actionId !== 3))
       .onClick(() => { this.runAction(actionId); })
   }
 
@@ -1308,7 +1397,7 @@ struct GalleryPage {
         Column() {
           Row() {
             this.StatCell('已分析', this.analyzedCountText(), '#2F5BEA')
-            Divider().vertical(true).height(38).color('#E5E8F0')
+            Divider().vertical(true).height(38).color(AppTheme.border('#E5E8F0'))
             this.StatCell('最近分析', this.lastRunText, '#202636')
           }.width('100%')
 
@@ -1330,7 +1419,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(12)
     .margin({ top: 14 })
   }
@@ -1339,10 +1428,12 @@ struct GalleryPage {
     if (this.manualAnalyzing) {
       return false;
     }
-    return this.analyzing || this.hasPausedScan() || this.scanTotal > 0;
+    return this.analyzing || this.hasPausedScan() || this.scanTotal > 0 ||
+      (this.hdcBatch && (this.hdcStatus.length > 0 || this.hdcError.length > 0));
   }
 
   private progressTitle(): string {
+    if (!this.analyzing && this.hdcError.length > 0 && this.scanTotal === 0) { return '读取失败'; }
     if (this.analyzing) {
       return this.autoScanStatus === 'pausing' ? '暂停中' : '分析中';
     }
@@ -1363,44 +1454,56 @@ struct GalleryPage {
             Text(this.progressTitle())
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#202636')
+              .fontColor(AppTheme.text('#202636'))
               .layoutWeight(1)
             Text(this.progressPercentText(this.progress))
               .fontSize(12)
-              .fontColor('#667085')
+              .fontColor(AppTheme.text('#667085'))
           }.width('100%')
           Stack({ alignContent: Alignment.Start }) {
             Row()
               .width('100%')
               .height(6)
-              .backgroundColor('#E8EDF7')
+              .backgroundColor(AppTheme.background('#E8EDF7'))
               .borderRadius(3)
             Row()
               .width(this.progressFillWidth(this.progress))
               .height(6)
-              .backgroundColor('#2F5BEA')
+              .backgroundColor(AppTheme.background('#2F5BEA'))
               .borderRadius(3)
           }
           .width('100%')
           .height(6)
           .margin({ top: 8 })
           this.ScanStatsPanel()
+          if (this.hdcBatch && this.hdcStatus.length > 0) {
+            Text(this.hdcStatus).fontSize(12).fontColor(AppTheme.text('#667085')).width('100%').margin({ top: 8 })
+          }
+          if (this.hdcError.length > 0) {
+            Text(this.hdcError).fontSize(12).fontColor(AppTheme.text('#B42318')).width('100%').margin({ top: 8 })
+          }
+          if (!this.analyzing && !this.hdcStarting && this.hdcBatch) {
+            Button('重新选择数量')
+              .height(32).fontSize(12).fontColor(AppTheme.text('#2F5BEA'))
+              .backgroundColor(Color.Transparent).margin({ top: 4 })
+              .onClick((): void => { this.hdcSheetOpen = true; })
+          }
         }.width('100%')
       }, (revision: number) => revision.toString())
     }
     .width('90%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(12)
     .margin({ top: 10 })
   }
 
   @Builder CompactActionButton(title: string, color: string, actionId: number) {
     Row() {
-      Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#151A28')).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Text('>')
         .fontSize(15)
-        .fontColor(color)
+        .fontColor(AppTheme.text(color))
         .width(20)
         .height(20)
         .textAlign(TextAlign.Center)
@@ -1408,15 +1511,15 @@ struct GalleryPage {
     .height(44)
     .layoutWeight(1)
     .padding({ left: 12, right: 10 })
-    .backgroundColor('#F8FAFE')
+    .backgroundColor(AppTheme.background('#F8FAFE'))
     .borderRadius(13)
     .onClick(() => { this.runAction(actionId); })
   }
 
   @Builder ScanStatCell(label: string, value: number, color: string, actionId: number) {
     Column() {
-      Text(actionId === 1 && value > 0 ? label + ' >' : label).fontSize(11).fontColor('#7C8494').maxLines(1)
-      Text(value.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
+      Text(actionId === 1 && value > 0 ? label + ' >' : label).fontSize(11).fontColor(AppTheme.text('#7C8494')).maxLines(1)
+      Text(value.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(color)).margin({ top: 3 }).maxLines(1)
     }
     .layoutWeight(1)
     .alignItems(HorizontalAlign.Start)
@@ -1429,8 +1532,8 @@ struct GalleryPage {
 
   @Builder ScanStatTextCell(label: string, value: string, color: string) {
     Column() {
-      Text(label).fontSize(11).fontColor('#7C8494').maxLines(1)
-      Text(value).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
+      Text(label).fontSize(11).fontColor(AppTheme.text('#7C8494')).maxLines(1)
+      Text(value).fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text(color)).margin({ top: 3 }).maxLines(1)
     }
     .layoutWeight(1)
     .alignItems(HorizontalAlign.Start)
@@ -1515,15 +1618,18 @@ struct GalleryPage {
   @Builder SettingInput(label: string, value: string, placeholder: string, fieldId: number,
     defaultValue: string = '', hideDefaultValue: boolean = false) {
     Column() {
-      Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').width('100%')
+      Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
       TextInput({
         placeholder: hideDefaultValue ? hiddenDefaultSettingPlaceholder(value, defaultValue, placeholder) : placeholder,
         text: hideDefaultValue ? hiddenDefaultSettingEditorValue(value, defaultValue) : value
       })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(42)
         .fontSize(12)
-        .backgroundColor('#F7F9FE')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .margin({ top: 8 })
@@ -1536,14 +1642,17 @@ struct GalleryPage {
   @Builder ConcurrencyInput(label: string, value: string, rangeText: string, maxValue: number, fieldId: number) {
     Column() {
       Row() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').layoutWeight(1)
-        Text(rangeText).fontSize(11).fontColor('#8A92A3')
+        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).layoutWeight(1)
+        Text(rangeText).fontSize(11).fontColor(AppTheme.text('#8A92A3'))
       }.width('100%')
       TextInput({ placeholder: value, text: value })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(42)
         .fontSize(12)
-        .backgroundColor('#F7F9FE')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .margin({ top: 8 })
@@ -1556,11 +1665,11 @@ struct GalleryPage {
   @Builder SettingToggle(label: string, desc: string, enabled: boolean, fieldId: number) {
     Row() {
       Column() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').width('100%')
-        Text(desc).fontSize(11).fontColor('#8A92A3').margin({ top: 4 }).width('100%')
+        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
+        Text(desc).fontSize(11).fontColor(AppTheme.text('#8A92A3')).margin({ top: 4 }).width('100%')
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: enabled })
-        .selectedColor('#5B68FF')
+        .selectedColor(AppTheme.background('#5B68FF'))
         .onChange((next: boolean) => { this.updateSetting(fieldId, next ? 'true' : 'false'); })
     }
     .width('100%')
@@ -1573,7 +1682,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => {
             this.activeSensitiveInputId = '';
             this.settingsOpen = false;
@@ -1582,12 +1691,12 @@ struct GalleryPage {
         Column() {
           Row() {
             Column() {
-              Text('图库采集设置').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#11182F')
-              Text('云端模型、OCR 与索引写入并发').fontSize(12).fontColor('#7B8290').margin({ top: 4 })
+              Text('图库采集设置').fontSize(18).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+              Text('云端模型、OCR 与索引写入并发').fontSize(12).fontColor(AppTheme.text('#7B8290')).margin({ top: 4 })
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
             Text('关闭')
               .fontSize(13)
-              .fontColor('#5B68FF')
+              .fontColor(AppTheme.text('#5B68FF'))
               .onClick(() => {
                 this.activeSensitiveInputId = '';
                 this.settingsOpen = false;
@@ -1655,8 +1764,8 @@ struct GalleryPage {
               .height(40)
               .layoutWeight(1)
               .fontSize(12)
-              .backgroundColor('#EEF4FF')
-              .fontColor('#4F68FF')
+              .backgroundColor(AppTheme.background('#EEF4FF'))
+              .fontColor(AppTheme.text('#4F68FF'))
               .borderRadius(12)
               .onClick(() => {
                 this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
@@ -1680,7 +1789,7 @@ struct GalleryPage {
               .height(40)
               .layoutWeight(1)
               .fontSize(12)
-              .backgroundColor('#5B68FF')
+              .backgroundColor(AppTheme.background('#5B68FF'))
               .borderRadius(12)
               .margin({ left: 10 })
               .onClick(() => {
@@ -1693,9 +1802,9 @@ struct GalleryPage {
         .width('86%')
         .height('82%')
         .padding(18)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(18)
-        .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
       }
       .width('100%')
       .height('100%')
@@ -1706,7 +1815,7 @@ struct GalleryPage {
     Text(label)
       .fontSize(13)
       .fontWeight(FontWeight.Bold)
-      .fontColor('#202636')
+      .fontColor(AppTheme.text('#202636'))
       .width('100%')
       .margin({ top: 14 })
   }
@@ -1715,12 +1824,12 @@ struct GalleryPage {
     Row() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .width(64)
         .maxLines(1)
       Text(value)
         .fontSize(12)
-        .fontColor('#303746')
+        .fontColor(AppTheme.text('#303746'))
         .layoutWeight(1)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1733,12 +1842,12 @@ struct GalleryPage {
     Row() {
       Text(label)
         .fontSize(12)
-        .fontColor('#7C8494')
+        .fontColor(AppTheme.text('#7C8494'))
         .width(64)
         .maxLines(1)
       Text(value)
         .fontSize(12)
-        .fontColor('#5B68FF')
+        .fontColor(AppTheme.text('#5B68FF'))
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1755,10 +1864,10 @@ struct GalleryPage {
           Text('地址解析')
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
           Text(this.captureLocationPreviewText(item))
             .fontSize(12)
-            .fontColor('#5E6678')
+            .fontColor(AppTheme.text('#5E6678'))
             .lineHeight(18)
             .margin({ top: 6 })
         }
@@ -1767,9 +1876,9 @@ struct GalleryPage {
         .margin({ right: 10 })
         Text(this.captureLocationActionText(item))
           .fontSize(12)
-          .fontColor('#5B68FF')
+          .fontColor(AppTheme.text('#5B68FF'))
           .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-          .backgroundColor('#EEF4FF')
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(10)
           .onClick(() => {
             if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
@@ -1785,7 +1894,7 @@ struct GalleryPage {
         Text(this.captureAddressText(item))
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .lineHeight(22)
           .width('100%')
           .margin({ top: 10 })
@@ -1793,7 +1902,7 @@ struct GalleryPage {
       if (this.capturePoiText(item).length > 0) {
         Text('附近：' + this.capturePoiText(item))
           .fontSize(12)
-          .fontColor('#6B7280')
+          .fontColor(AppTheme.text('#6B7280'))
           .width('100%')
           .margin({ top: 6 })
       }
@@ -1803,13 +1912,13 @@ struct GalleryPage {
           .height(138)
           .objectFit(ImageFit.Cover)
           .borderRadius(12)
-          .backgroundColor('#EDF1F7')
+          .backgroundColor(AppTheme.background('#EDF1F7'))
           .margin({ top: 10 })
       }
       Row() {
         Text('查看地图标注')
           .fontSize(12)
-          .fontColor('#5B68FF')
+          .fontColor(AppTheme.text('#5B68FF'))
           .onClick(() => {
             this.openCaptureMap(item);
           })
@@ -1820,16 +1929,16 @@ struct GalleryPage {
     .width('100%')
     .padding(12)
     .borderRadius(14)
-    .backgroundColor('#F7F9FC')
+    .backgroundColor(AppTheme.background('#F7F9FC'))
     .margin({ top: 10 })
   }
 
   @Builder DetailTag(label: string) {
     Text(label)
       .fontSize(11)
-      .fontColor('#596273')
+      .fontColor(AppTheme.text('#596273'))
       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-      .backgroundColor('#F1F4FA')
+      .backgroundColor(AppTheme.background('#F1F4FA'))
       .borderRadius(8)
       .margin({ right: 7, top: 7 })
   }
@@ -1837,7 +1946,7 @@ struct GalleryPage {
   @Builder DetailBullet(detail: string) {
     Text('· ' + detail)
       .fontSize(12)
-      .fontColor('#4D5566')
+      .fontColor(AppTheme.text('#4D5566'))
       .lineHeight(18)
       .width('100%')
       .margin({ top: 6 })
@@ -1884,7 +1993,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => { this.closeResultDetail(); })
 
         ForEach(this.selectedDetailItems(), (item: GalleryAnalysisResult) => {
@@ -1894,12 +2003,12 @@ struct GalleryPage {
                 Text(item.title)
                   .fontSize(18)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor('#11182F')
+                  .fontColor(AppTheme.text('#11182F'))
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(this.categoryLabel(item.category))
                   .fontSize(12)
-                  .fontColor(this.categoryColor(item.category))
+                  .fontColor(AppTheme.text(this.categoryColor(item.category)))
                   .margin({ top: 5 })
                   .maxLines(1)
               }
@@ -1910,24 +2019,38 @@ struct GalleryPage {
                 .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
-                .fontColor('#5B68FF')
+                .fontColor(AppTheme.text('#5B68FF'))
                 .onClick(() => { this.closeResultDetail(); })
             }
             .width('100%')
 
             Scroll() {
               Column() {
-                Image(this.previewUri(item))
-                  .width('100%')
-                  .height(220)
-                  .objectFit(ImageFit.Contain)
-                  .backgroundColor('#F2F4F7')
-                  .borderRadius(12)
-                  .margin({ top: 14 })
+                if (this.originalPixels !== undefined) {
+                  Image(this.originalPixels)
+                    .width('100%').height(220).objectFit(ImageFit.Contain)
+                    .borderRadius(12).margin({ top: 14 })
+                } else {
+                  GalleryPreviewImage({ source: this.previewUri(item), imageId: item.id, fit: ImageFit.Contain })
+                    .width('100%').height(220).borderRadius(12).margin({ top: 14 })
+                }
+                if (this.canReadOriginal(item)) {
+                  Row() {
+                    Text(this.originalLoading ? '正在读取原图…' : (this.originalPixels !== undefined ? '原图已加载' : '查看原图'))
+                      .fontSize(13).fontColor(AppTheme.text('#5B68FF'))
+                      .onClick(() => { if (!this.originalLoading) { this.loadDetailOriginal(item); } })
+                    if (item.hdcSourcePath) {
+                      Text('通过手机 HDC 按需读取').fontSize(11).fontColor(AppTheme.text('#7F8592')).margin({ left: 10 })
+                    }
+                  }.width('100%').margin({ top: 8 })
+                }
+                if (this.originalError.length > 0) {
+                  Text(this.originalError).fontSize(12).fontColor(AppTheme.text('#B42318')).width('100%').margin({ top: 6 })
+                }
 
                 Text(item.summary)
                   .fontSize(13)
-                  .fontColor('#4D5566')
+                  .fontColor(AppTheme.text('#4D5566'))
                   .lineHeight(20)
                   .width('100%')
                   .margin({ top: 12 })
@@ -1975,11 +2098,11 @@ struct GalleryPage {
                   this.DetailSectionTitle('OCR 文本')
                   Text(item.ocrText)
                     .fontSize(12)
-                    .fontColor('#4D5566')
+                    .fontColor(AppTheme.text('#4D5566'))
                     .lineHeight(18)
                     .width('100%')
                     .padding(10)
-                    .backgroundColor('#F7F9FC')
+                    .backgroundColor(AppTheme.background('#F7F9FC'))
                     .borderRadius(10)
                     .margin({ top: 8 })
                 }
@@ -1988,11 +2111,11 @@ struct GalleryPage {
                   this.DetailSectionTitle('错误信息')
                   Text(item.error)
                     .fontSize(12)
-                    .fontColor('#B42318')
+                    .fontColor(AppTheme.text('#B42318'))
                     .lineHeight(18)
                     .width('100%')
                     .padding(10)
-                    .backgroundColor('#FFF4F2')
+                    .backgroundColor(AppTheme.background('#FFF4F2'))
                     .borderRadius(10)
                     .margin({ top: 8 })
                 }
@@ -2007,10 +2130,10 @@ struct GalleryPage {
           .width('88%')
           .height('82%')
           .padding(18)
-          .backgroundColor(Color.White)
+          .backgroundColor(AppTheme.background(Color.White))
           .borderRadius(18)
-          .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
-        }, (item: GalleryAnalysisResult) => item.id)
+          .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
+        }, (item: GalleryAnalysisResult) => item.id + '_' + (item.thumbnailUri || item.uri))
       }
       .width('100%')
       .height('100%')
@@ -2019,27 +2142,26 @@ struct GalleryPage {
 
   @Builder SkippedItemRow(item: GalleryScanItem) {
     Row() {
-      Image(item.uri)
+      GalleryPreviewImage({ source: GalleryImageStore.displayUri(item.thumbnailUri || item.uri), imageId: item.id })
         .width(72)
         .height(72)
-        .objectFit(ImageFit.Cover)
-        .backgroundColor('#F2F4F7')
+        .backgroundColor(AppTheme.background('#F2F4F7'))
         .borderRadius(10)
       Column() {
         Text(this.skippedReason(item))
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(AppTheme.text('#151A28'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(item.date)
           .fontSize(12)
-          .fontColor('#7C8494')
+          .fontColor(AppTheme.text('#7C8494'))
           .margin({ top: 6 })
           .maxLines(1)
         Text(item.id)
           .fontSize(11)
-          .fontColor('#9AA3B2')
+          .fontColor(AppTheme.text('#9AA3B2'))
           .margin({ top: 5 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2050,7 +2172,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#F7F9FC')
+    .backgroundColor(AppTheme.background('#F7F9FC'))
     .borderRadius(14)
     .margin({ top: 10 })
   }
@@ -2061,7 +2183,7 @@ struct GalleryPage {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor(AppTheme.background('#66000000'))
           .onClick(() => { this.closeSkippedPanel(); })
 
         Column() {
@@ -2070,11 +2192,11 @@ struct GalleryPage {
               Text('跳过图片')
                 .fontSize(18)
                 .fontWeight(FontWeight.Bold)
-                .fontColor('#11182F')
+                .fontColor(AppTheme.text('#11182F'))
                 .maxLines(1)
               Text('OCR 关键词预筛未命中的图片会计入跳过')
                 .fontSize(12)
-                .fontColor('#717684')
+                .fontColor(AppTheme.text('#717684'))
                 .margin({ top: 5 })
                 .maxLines(2)
             }
@@ -2083,7 +2205,7 @@ struct GalleryPage {
             .margin({ right: 12 })
             Text('关闭')
               .fontSize(13)
-              .fontColor('#5B68FF')
+              .fontColor(AppTheme.text('#5B68FF'))
               .onClick(() => { this.closeSkippedPanel(); })
           }
           .width('100%')
@@ -2104,9 +2226,9 @@ struct GalleryPage {
         .width('88%')
         .height('72%')
         .padding(18)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(18)
-        .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+        .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
       }
       .width('100%')
       .height('100%')
@@ -2117,11 +2239,11 @@ struct GalleryPage {
     Text(this.categoryChipText(item))
       .fontSize(13)
       .fontWeight(this.selectedFilter === item.index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.selectedFilter === item.index ? Color.White : '#596071')
+      .fontColor(AppTheme.text(this.selectedFilter === item.index ? Color.White : '#596071'))
       .height(36)
       .padding({ left: 14, right: 14 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.selectedFilter === item.index ? '#5B68FF' : '#F1F4FA')
+      .backgroundColor(AppTheme.background(this.selectedFilter === item.index ? '#5B68FF' : '#F1F4FA'))
       .borderRadius(18)
       .margin({ right: 8, bottom: 8 })
       .onClick(() => {
@@ -2227,12 +2349,101 @@ struct GalleryPage {
   }
 
   private showResultDetail(item: GalleryAnalysisResult): void {
+    this.closeResultDetail();
     this.selectedDetailId = item.id;
     this.resolveCaptureAddressLazy(item, false);
   }
 
   private closeResultDetail(): void {
+    this.originalRequest += 1;
+    if (this.originalReader !== null) { this.originalReader.pause(); }
+    let pixels = this.originalPixels;
+    this.originalPixels = undefined;
+    this.originalLoading = false;
+    this.originalError = '';
+    if (pixels) { pixels.release().catch(() => {}); }
     this.selectedDetailId = '';
+  }
+
+  private repairHistoricalImages(): void {
+    let generation = ++this.imageRepairGeneration;
+    this.imageRepair = GalleryImageStore.migrateHistory(this.filesDir, GalleryStorage.loadScanSession(this.filesDir),
+      (): boolean => generation !== this.imageRepairGeneration || !this.pageActive,
+      (result: GalleryAnalysisResult): void => { this.mergeResult(result); })
+      .catch((e: Error): void => { AppLogger.errorCause('Gallery.Images', 'History migration failed', e); });
+  }
+
+  private canReadOriginal(item: GalleryAnalysisResult): boolean {
+    return galleryHdcMediaPath(item.hdcSourcePath || '') || GalleryImageStore.exists(GalleryImageStore.localCopy(this.filesDir, item));
+  }
+
+  private async loadDetailOriginal(item: GalleryAnalysisResult): Promise<void> {
+    if (this.originalLoading || this.originalPixels !== undefined) { return; }
+    if (this.analyzing || this.hdcStarting || this.originalReader !== null) {
+      showToastSafely('请等待图库读取和分析结束后查看原图', 1800); return;
+    }
+    let request = ++this.originalRequest;
+    this.originalLoading = true;
+    this.originalError = '';
+    let reader: GalleryHdcReader | null = null;
+    let temporary = '';
+    let decoded: image.PixelMap | undefined = undefined;
+    let outcome = 'failed';
+    let message = '';
+    try {
+      await this.imageRepair;
+      if (request !== this.originalRequest || !this.pageActive) { return; }
+      // Migration can replace the old card's local path while the user opens its detail.
+      item = GalleryStorage.loadResult(this.filesDir, item.date, item.id) || item;
+      let path = GalleryImageStore.localCopy(this.filesDir, item);
+      let input: GalleryPhotoInput | undefined = undefined;
+      if (galleryHdcMediaPath(item.hdcSourcePath || '') || !GalleryImageStore.exists(path)) {
+        if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'gallery-original', false)) { return; }
+        if (request !== this.originalRequest || !this.pageActive) { return; }
+        let ctx = getContext(this) as common.UIAbilityContext;
+        reader = new GalleryHdcReader(ctx,
+          (): boolean => request !== this.originalRequest || !this.pageActive,
+          (status: string): void => { if (request === this.originalRequest) { this.hdcStatus = status; } },
+          (): void => { this.closeResultDetail(); });
+        this.originalReader = reader;
+        await reader.open('查看图库原图');
+        input = GalleryImageStore.sourceInput(item);
+        // Re-read and verify the original, rather than trusting a possibly broken legacy full copy.
+        await reader.prepareImage(input, true);
+        path = input.uri;
+        temporary = path;
+        if (item.hdcChecksum && item.hdcChecksum !== input.hdcChecksum) {
+          throw new Error('原图已发生变化，请重新批量读图分析；当前保留的是此前分析时的缩略图');
+        }
+      }
+      decoded = await GalleryImageStore.decode(path, 2048);
+      if (request !== this.originalRequest || !this.pageActive) { return; }
+      if (input !== undefined) {
+        let latest = GalleryStorage.loadResult(this.filesDir, item.date, item.id) || item;
+        let saved = await GalleryImageStore.persist(this.filesDir, input, latest,
+          (): boolean => request !== this.originalRequest || !this.pageActive);
+        if (request !== this.originalRequest || !this.pageActive) { return; }
+        this.mergeResult(saved);
+      }
+      this.originalPixels = decoded;
+      decoded = undefined;
+      outcome = 'success';
+      message = '原图已读取，关闭详情后释放预览';
+    } catch (e) {
+      message = this.errorMessage(e);
+      if (request === this.originalRequest) {
+        this.originalError = '读取原图失败：' + message + '。请确认原图仍在相册中且无线调试可用。';
+        GalleryImageStore.report('ORIGINAL_READ_FAILED id=' + item.id, e as Error);
+      }
+    } finally {
+      if (decoded) { await decoded.release().catch(() => {}); }
+      GalleryImageStore.discardPreview(this.filesDir, temporary);
+      if (request !== this.originalRequest) { outcome = 'cancelled'; message = '已关闭原图预览'; }
+      try { if (reader !== null) { reader.finish(outcome, message); } }
+      catch (e) { AppLogger.errorCause('Gallery.Images', 'Original log finalization failed', e as Error); }
+      if (this.originalReader === reader) { this.originalReader = null; }
+      if (request === this.originalRequest) { this.originalLoading = false; }
+    }
   }
 
   private resultDetails(item: GalleryAnalysisResult): string[] {
@@ -2252,11 +2463,11 @@ struct GalleryPage {
   @Builder TagChip(label: string) {
     Text(label)
       .fontSize(10)
-      .fontColor('#596273')
+      .fontColor(AppTheme.text('#596273'))
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
       .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-      .backgroundColor('#F4F6FA')
+      .backgroundColor(AppTheme.background('#F4F6FA'))
       .borderRadius(7)
       .margin({ right: 6, top: 6 })
   }
@@ -2265,7 +2476,7 @@ struct GalleryPage {
     if (this.detailAt(item, index).length > 0) {
       Text('· ' + this.detailAt(item, index))
         .fontSize(11)
-        .fontColor('#667085')
+        .fontColor(AppTheme.text('#667085'))
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .margin({ top: index === 0 ? 0 : 2 })
@@ -2301,17 +2512,16 @@ struct GalleryPage {
 
   @Builder InsightCard(item: GalleryAnalysisResult) {
     Row() {
-      Image(this.previewUri(item))
+      GalleryPreviewImage({ source: this.previewUri(item), imageId: item.id })
         .width(92)
         .height(92)
-        .objectFit(ImageFit.Cover)
         .borderRadius(8)
       Column() {
         Row() {
           Text(item.title)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2319,14 +2529,14 @@ struct GalleryPage {
             .margin({ left: 8, right: 8 })
           Text(this.categoryLabel(item.category))
             .fontSize(11)
-            .fontColor(this.categoryColor(item.category))
+            .fontColor(AppTheme.text(this.categoryColor(item.category)))
             .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-            .backgroundColor(this.categoryBg(item.category))
+            .backgroundColor(AppTheme.background(this.categoryBg(item.category)))
             .borderRadius(8)
         }.width('100%')
         Text(item.summary)
           .fontSize(12)
-          .fontColor('#596273')
+          .fontColor(AppTheme.text('#596273'))
           .margin({ top: 7 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2339,15 +2549,15 @@ struct GalleryPage {
         Row() {
           Text(this.resultTime(item))
             .fontSize(10)
-            .fontColor('#858C99')
+            .fontColor(AppTheme.text('#858C99'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.resultStatus(item))
             .fontSize(10)
-            .fontColor(this.statusColor(this.resultStatus(item)))
+            .fontColor(AppTheme.text(this.statusColor(this.resultStatus(item))))
             .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-            .backgroundColor(this.statusBg(this.resultStatus(item)))
+            .backgroundColor(AppTheme.background(this.statusBg(this.resultStatus(item))))
             .borderRadius(7)
             .maxLines(1)
         }.width('100%').margin({ top: 4 })
@@ -2355,7 +2565,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(12)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(AppTheme.background('#FFFFFF'))
     .borderRadius(12)
     .margin({ top: 10 })
     .onClick(() => { this.showResultDetail(item); })
@@ -2969,7 +3179,7 @@ struct GalleryPage {
   }
 
   private previewUri(item: GalleryAnalysisResult): string {
-    return item.uri;
+    return GalleryImageStore.previewUri(item);
   }
 
   private monthlyCategoryColor(label: string): string {
@@ -3007,18 +3217,18 @@ struct GalleryPage {
       Text(insight.label)
         .fontSize(12)
         .fontWeight(FontWeight.Bold)
-        .fontColor(this.selectedMonthKey === insight.key ? Color.White : '#4C5260')
+        .fontColor(AppTheme.text(this.selectedMonthKey === insight.key ? Color.White : '#4C5260'))
         .maxLines(1)
       Text(insight.totalCount.toString() + ' 张')
         .fontSize(11)
-        .fontColor(this.selectedMonthKey === insight.key ? '#EAF1FF' : '#7C8494')
+        .fontColor(AppTheme.text(this.selectedMonthKey === insight.key ? '#EAF1FF' : '#7C8494'))
         .margin({ top: 3 })
         .maxLines(1)
     }
     .justifyContent(FlexAlign.Center)
     .height(48)
     .padding({ left: 13, right: 13 })
-    .backgroundColor(this.selectedMonthKey === insight.key ? '#4B8BFF' : '#F1F4FA')
+    .backgroundColor(AppTheme.background(this.selectedMonthKey === insight.key ? '#4B8BFF' : '#F1F4FA'))
     .borderRadius(12)
     .margin({ right: 8 })
     .onClick(() => {
@@ -3032,24 +3242,24 @@ struct GalleryPage {
         Text(item.label)
           .fontSize(12)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#2F3645')
+          .fontColor(AppTheme.text('#2F3645'))
           .layoutWeight(1)
           .maxLines(1)
         Text(item.count.toString() + ' 张')
           .fontSize(12)
-          .fontColor('#7C8494')
+          .fontColor(AppTheme.text('#7C8494'))
           .maxLines(1)
       }.width('100%')
       Stack({ alignContent: Alignment.Start }) {
         Row()
           .width('100%')
           .height(7)
-          .backgroundColor('#EEF0F5')
+          .backgroundColor(AppTheme.background('#EEF0F5'))
           .borderRadius(4)
         Row()
           .width(this.monthlyCategoryPercent(item.count, total))
           .height(7)
-          .backgroundColor(this.monthlyCategoryColor(item.label))
+          .backgroundColor(AppTheme.background(this.monthlyCategoryColor(item.label)))
           .borderRadius(4)
       }
       .width('100%')
@@ -3063,22 +3273,21 @@ struct GalleryPage {
   @Builder MonthlyCategoryChip(item: GalleryMonthlyCategoryCount) {
     Text(item.label + ' ' + item.count.toString())
       .fontSize(11)
-      .fontColor(this.monthlyCategoryColor(item.label))
+      .fontColor(AppTheme.text(this.monthlyCategoryColor(item.label)))
       .fontWeight(FontWeight.Bold)
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
       .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-      .backgroundColor(this.monthlyCategoryBg(item.label))
+      .backgroundColor(AppTheme.background(this.monthlyCategoryBg(item.label)))
       .borderRadius(8)
       .margin({ right: 7, top: 7 })
       .constraintSize({ maxWidth: 132 })
   }
 
   @Builder MonthlyRepresentativeImage(item: GalleryAnalysisResult) {
-    Image(this.previewUri(item))
+    GalleryPreviewImage({ source: this.previewUri(item), imageId: item.id })
       .width(64)
       .height(64)
-      .objectFit(ImageFit.Cover)
       .borderRadius(8)
       .margin({ right: 8 })
       .onClick(() => { this.showResultDetail(item); })
@@ -3088,10 +3297,10 @@ struct GalleryPage {
     if (this.monthlyInsights().length > 0) {
       Column() {
         Row() {
-          Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+          Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F')).layoutWeight(1)
           AiGeneratedBadge({ compact: true })
             .margin({ right: 8 })
-          Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor('#7F8592')
+          Text(this.monthlyInsights().length.toString() + ' 个月').fontSize(13).fontColor(AppTheme.text('#7F8592'))
         }.width('100%')
         Scroll() {
           Row() {
@@ -3111,7 +3320,7 @@ struct GalleryPage {
       }
       .width('86%')
       .padding(18)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(18)
       .margin({ top: 18 })
     }
@@ -3124,12 +3333,12 @@ struct GalleryPage {
           Text(this.monthlyTitle(insight))
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(insight.totalCount.toString() + ' 张分析结果')
             .fontSize(12)
-            .fontColor('#7C8494')
+            .fontColor(AppTheme.text('#7C8494'))
             .margin({ top: 3 })
             .maxLines(1)
         }
@@ -3140,8 +3349,8 @@ struct GalleryPage {
           .height(34)
           .width(74)
           .fontSize(12)
-          .fontColor('#4B8BFF')
-          .backgroundColor('#EEF4FF')
+          .fontColor(AppTheme.text('#4B8BFF'))
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(10)
           .enabled(this.monthlyAiLoadingKey.length === 0)
           .onClick(() => {
@@ -3153,7 +3362,7 @@ struct GalleryPage {
 
       Text(this.monthlySummaryText(insight))
         .fontSize(13)
-        .fontColor('#596273')
+        .fontColor(AppTheme.text('#596273'))
         .lineHeight(20)
         .margin({ top: 10 })
         .width('100%')
@@ -3162,10 +3371,10 @@ struct GalleryPage {
       if (this.monthlySuggestionText(insight).length > 0) {
         Text('整理建议：' + this.monthlySuggestionText(insight))
           .fontSize(12)
-          .fontColor('#4B5F9F')
+          .fontColor(AppTheme.text('#4B5F9F'))
           .lineHeight(18)
           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-          .backgroundColor('#F2F6FF')
+          .backgroundColor(AppTheme.background('#F2F6FF'))
           .borderRadius(10)
           .margin({ top: 10 })
           .width('100%')
@@ -3175,7 +3384,7 @@ struct GalleryPage {
       if (this.monthlyAiError(insight).length > 0) {
         Text('AI 总结失败：' + this.monthlyAiError(insight))
           .fontSize(12)
-          .fontColor('#B42318')
+          .fontColor(AppTheme.text('#B42318'))
           .margin({ top: 8 })
           .width('100%')
       }
@@ -3215,43 +3424,42 @@ struct GalleryPage {
 
   @Builder GallerySearchHitCard(hit: GallerySearchHit) {
     Row() {
-      Image(this.previewUri(hit.item))
+      GalleryPreviewImage({ source: this.previewUri(hit.item), imageId: hit.item.id })
         .width(64)
         .height(64)
-        .objectFit(ImageFit.Cover)
         .borderRadius(8)
       Column() {
         Row() {
           Text(hit.item.title)
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#151A28')
+            .fontColor(AppTheme.text('#151A28'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.categoryLabel(hit.item.category))
             .fontSize(10)
-            .fontColor(this.categoryColor(hit.item.category))
+            .fontColor(AppTheme.text(this.categoryColor(hit.item.category)))
             .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-            .backgroundColor(this.categoryBg(hit.item.category))
+            .backgroundColor(AppTheme.background(this.categoryBg(hit.item.category)))
             .borderRadius(7)
         }.width('100%')
         Text(hit.item.summary)
           .fontSize(11)
-          .fontColor('#596273')
+          .fontColor(AppTheme.text('#596273'))
           .margin({ top: 5 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row() {
           Text(hit.reason)
             .fontSize(10)
-            .fontColor('#4B5F9F')
+            .fontColor(AppTheme.text('#4B5F9F'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.groupDate(hit.item))
             .fontSize(10)
-            .fontColor('#8A92A3')
+            .fontColor(AppTheme.text('#8A92A3'))
             .margin({ left: 8 })
             .maxLines(1)
         }.width('100%').margin({ top: 5 })
@@ -3262,7 +3470,7 @@ struct GalleryPage {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#F8FAFE')
+    .backgroundColor(AppTheme.background('#F8FAFE'))
     .borderRadius(12)
     .margin({ top: 8 })
     .onClick(() => { this.showResultDetail(hit.item); })
@@ -3273,18 +3481,21 @@ struct GalleryPage {
       Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
       Row() {
         Column() {
-          Text('图库问答').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
-          Text(this.gallerySearchMessage).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+          Text('图库问答').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+          Text(this.gallerySearchMessage).fontSize(12).fontColor(AppTheme.text('#7F8592')).margin({ top: 3 })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
       }.width('100%')
       Row() {
         TextInput({ placeholder: '例如：找一下外卖订单、停车缴费、会议安排', text: this.galleryQuestion })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .height(42)
           .layoutWeight(1)
           .fontSize(12)
-          .backgroundColor('#F7F9FE')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(12)
           .padding({ left: 12, right: 12 })
           .onChange((value: string) => { this.galleryQuestion = value; })
@@ -3292,7 +3503,7 @@ struct GalleryPage {
           .width(64)
           .height(42)
           .fontSize(12)
-          .backgroundColor('#5B68FF')
+          .backgroundColor(AppTheme.background('#5B68FF'))
           .borderRadius(12)
           .margin({ left: 8 })
           .onClick(() => { this.runGalleryKeywordSearch(); })
@@ -3300,7 +3511,7 @@ struct GalleryPage {
           .width(70)
           .height(42)
           .fontSize(12)
-          .backgroundColor('#2F5BEA')
+          .backgroundColor(AppTheme.background('#2F5BEA'))
           .borderRadius(12)
           .margin({ left: 8 })
           .enabled(!this.galleryAnswerLoading)
@@ -3309,11 +3520,11 @@ struct GalleryPage {
       .width('100%')
       .margin({ top: 12 })
       Row() {
-        Text('关键词检索').fontSize(11).fontColor('#8A92A3').layoutWeight(1)
+        Text('关键词检索').fontSize(11).fontColor(AppTheme.text('#8A92A3')).layoutWeight(1)
         if (this.galleryQuestion.length > 0 || this.gallerySearchHits.length > 0) {
           Text('清空')
             .fontSize(12)
-            .fontColor('#5B68FF')
+            .fontColor(AppTheme.text('#5B68FF'))
             .onClick(() => { this.clearGalleryQuestion(); })
         }
       }
@@ -3322,10 +3533,10 @@ struct GalleryPage {
       if (this.galleryAnswerLoading) {
         Text('正在基于检索结果生成回答...')
           .fontSize(12)
-          .fontColor('#667085')
+          .fontColor(AppTheme.text('#667085'))
           .width('100%')
           .padding(10)
-          .backgroundColor('#F7F9FC')
+          .backgroundColor(AppTheme.background('#F7F9FC'))
           .borderRadius(10)
           .margin({ top: 10 })
       }
@@ -3335,13 +3546,13 @@ struct GalleryPage {
             .margin({ bottom: 7 })
           Text(this.galleryAnswerText)
             .fontSize(13)
-            .fontColor('#303746')
+            .fontColor(AppTheme.text('#303746'))
             .lineHeight(20)
             .width('100%')
           if (this.galleryAnswerMeta.length > 0) {
             Text(this.galleryAnswerMeta)
               .fontSize(11)
-              .fontColor('#7F8592')
+              .fontColor(AppTheme.text('#7F8592'))
               .margin({ top: 6 })
               .width('100%')
           }
@@ -3349,14 +3560,14 @@ struct GalleryPage {
         .alignItems(HorizontalAlign.Start)
         .width('100%')
         .padding(12)
-        .backgroundColor('#F2F6FF')
+        .backgroundColor(AppTheme.background('#F2F6FF'))
         .borderRadius(12)
         .margin({ top: 10 })
       }
       if (this.galleryAnswerError.length > 0) {
         Text('问答失败：' + this.galleryAnswerError)
           .fontSize(12)
-          .fontColor('#B42318')
+          .fontColor(AppTheme.text('#B42318'))
           .width('100%')
           .margin({ top: 8 })
       }
@@ -3368,7 +3579,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(16)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
     .margin({ top: 14 })
   }
@@ -3377,11 +3588,11 @@ struct GalleryPage {
     Text(label)
       .fontSize(13)
       .fontWeight(this.selectedTimeFilter === index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.selectedTimeFilter === index ? '#151A28' : '#596071')
+      .fontColor(AppTheme.text(this.selectedTimeFilter === index ? '#151A28' : '#596071'))
       .height(34)
       .padding({ left: 12, right: 12 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.selectedTimeFilter === index ? '#E8EEFF' : '#F1F4FA')
+      .backgroundColor(AppTheme.background(this.selectedTimeFilter === index ? '#E8EEFF' : '#F1F4FA'))
       .borderRadius(17)
       .margin({ right: 8 })
       .onClick(() => {
@@ -3395,8 +3606,8 @@ struct GalleryPage {
     Column() {
       Row() {
         Column() {
-          Text('图库结果').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
-          Text(this.resultPanelCountText()).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+          Text('图库结果').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
+          Text(this.resultPanelCountText()).fontSize(12).fontColor(AppTheme.text('#7F8592')).margin({ top: 3 })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
@@ -3424,7 +3635,7 @@ struct GalleryPage {
       ForEach(this.displayedResults(this.visibleResults()), (item: GalleryAnalysisResult, index: number) => {
         if (this.shouldShowDateHeader(this.displayedResults(this.visibleResults()), index)) {
           Row() {
-            Text(this.groupDate(item)).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#4C5260').layoutWeight(1)
+            Text(this.groupDate(item)).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#4C5260')).layoutWeight(1)
           }
           .width('100%')
           .height(28)
@@ -3437,16 +3648,16 @@ struct GalleryPage {
           Text(this.results.length === 0 ? '暂无图库分析结果' : '当前筛选无结果')
             .fontSize(15)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#303746')
-          Text(this.results.length === 0 ? '选择图片或启动全库分析后，这里会展示图片洞察。' : '换一个分类或时间范围看看。')
+            .fontColor(AppTheme.text('#303746'))
+          Text(this.results.length === 0 ? '选择图片，或批量读取最近照片，开始整理图片洞察。' : '换一个分类或时间范围看看。')
             .fontSize(12)
-            .fontColor('#7B8393')
+            .fontColor(AppTheme.text('#7B8393'))
             .textAlign(TextAlign.Center)
             .margin({ top: 8 })
         }
         .width('100%')
         .padding({ top: 28, bottom: 24, left: 18, right: 18 })
-        .backgroundColor('#F7F9FC')
+        .backgroundColor(AppTheme.background('#F7F9FC'))
         .borderRadius(12)
         .margin({ top: 16 })
       }
@@ -3455,8 +3666,8 @@ struct GalleryPage {
           .height(40)
           .width('100%')
           .fontSize(13)
-          .fontColor('#4F68FF')
-          .backgroundColor('#EEF4FF')
+          .fontColor(AppTheme.text('#4F68FF'))
+          .backgroundColor(AppTheme.background('#EEF4FF'))
           .borderRadius(12)
           .margin({ top: 12 })
           .onClick(() => { this.resultDisplayLimit += GALLERY_RESULT_PAGE_SIZE; })
@@ -3464,7 +3675,7 @@ struct GalleryPage {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor('#F2F5FA')
+    .backgroundColor(AppTheme.background('#F2F5FA'))
     .borderRadius(12)
     .margin({ top: 14 })
   }
@@ -3482,7 +3693,7 @@ struct GalleryPage {
       Text('图库分析')
         .fontSize(20)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#172033')
+        .fontColor(AppTheme.text('#172033'))
         .lineHeight(28)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -3512,8 +3723,17 @@ struct GalleryPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F6F7FA')
+    .backgroundColor(AppTheme.background('#F6F7FA'))
     .clip(false)
+  }
+
+  @Builder HdcBatchSheet() {
+    GalleryHdcBatchOptions({ onStart: (count: number): void => {
+      this.hdcSheetOpen = false;
+      this.runHdcBatch(count).catch((e: Error): void => {
+        AppLogger.errorCause('Gallery.Hdc', 'Batch dispatch failed', e);
+      });
+    } })
   }
 
   build() {
@@ -3531,5 +3751,11 @@ struct GalleryPage {
     }
     .width('100%')
     .height('100%')
+    .bindSheet($$this.hdcSheetOpen, this.HdcBatchSheet(), {
+      height: 400,
+      title: { title: '批量读图' },
+      backgroundColor: AppTheme.background('#FFFFFF'),
+      showClose: true
+    })
   }
 }

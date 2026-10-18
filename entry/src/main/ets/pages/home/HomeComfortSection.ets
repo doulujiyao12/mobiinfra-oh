@@ -1,9 +1,11 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { window } from '@kit.ArkUI';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { AiLoginGuard } from '../../components/AiLoginGuard';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { HomeComfortChatStore } from './HomeComfortChatStore';
+import { HomeCategoryIcon } from '../../components/HomeCategoryIcon';
 import {
   HomeComfortChatMessage,
   HomeComfortConcern
@@ -71,14 +73,6 @@ export struct HomeComfortSection {
     return '#F3EEFF';
   }
 
-  private categoryIconColumn(index: number): number {
-    return Math.max(0, Math.min(11, Math.floor(index))) % 6;
-  }
-
-  private categoryIconRow(index: number): number {
-    return Math.floor(Math.max(0, Math.min(11, Math.floor(index))) / 6);
-  }
-
   private concernIconIndex(category: string): number {
     if (category === 'work') {
       return 5;
@@ -99,21 +93,7 @@ export struct HomeComfortSection {
   }
 
   @Builder CategoryIcon(index: number, size: number) {
-    Stack({ alignContent: Alignment.TopStart }) {
-      Image($r('app.media.home_category_icons'))
-        .width(size * 6)
-        .height(size * 2)
-        .objectFit(ImageFit.Fill)
-        .translate({
-          x: -this.categoryIconColumn(index) * size,
-          y: -this.categoryIconRow(index) * size
-        })
-    }
-    .width(size)
-    .height(size)
-    .backgroundColor(Color.White)
-    .borderRadius(size / 2)
-    .clip(true)
+    HomeCategoryIcon({ iconIndex: index, iconSize: size })
   }
 
   private selectedConcerns(): HomeComfortConcern[] {
@@ -276,14 +256,14 @@ export struct HomeComfortSection {
       .width(50)
       .height(50)
       .borderRadius(17)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .clip(true)
 
       Text(item.title)
         .fontSize(15)
         .lineHeight(21)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#252A3A')
+        .fontColor(AppTheme.text('#252A3A'))
         .layoutWeight(1)
         .margin({ left: 12, right: 8 })
         .maxLines(2)
@@ -291,7 +271,7 @@ export struct HomeComfortSection {
 
       Text('›')
         .fontSize(24)
-        .fontColor('#9AA0AE')
+        .fontColor(AppTheme.text('#9AA0AE'))
     }
     .alignItems(VerticalAlign.Center)
     .width('100%')
@@ -308,39 +288,39 @@ export struct HomeComfortSection {
         LoadingProgress()
           .width(28)
           .height(28)
-          .color('#8B6BD6')
+          .color(AppTheme.text('#8B6BD6'))
         Text('正在听听最近的心事')
           .fontSize(13)
-          .fontColor('#6F7684')
+          .fontColor(AppTheme.text('#6F7684'))
           .margin({ left: 12 })
       }
       .justifyContent(FlexAlign.Center)
       .width('100%')
       .height(82)
       .margin({ top: 10 })
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(18)
-      .border({ width: 1, color: '#ECEEF5' })
+      .border({ width: 1, color: AppTheme.border('#ECEEF5') })
     } else {
       Row() {
         this.CategoryIcon(9, 48)
         Text('和我随便聊聊，我会读心术')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#2E2840')
+          .fontColor(AppTheme.text('#2E2840'))
           .layoutWeight(1)
           .margin({ left: 12 })
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text('›')
           .fontSize(24)
-          .fontColor('#7658C2')
+          .fontColor(AppTheme.text('#7658C2'))
       }
       .alignItems(VerticalAlign.Center)
       .width('100%')
       .padding({ left: 8, right: 8, top: 13, bottom: 13 })
       .margin({ top: 10 })
-      .backgroundColor('#FBF9FF')
+      .backgroundColor(AppTheme.background('#FBF9FF'))
       .borderRadius(20)
       .onClick(() => {
         this.openCasualChat();
@@ -357,11 +337,11 @@ export struct HomeComfortSection {
           Text(item.content)
             .fontSize(14)
             .lineHeight(21)
-            .fontColor(Color.White)
+            .fontColor(AppTheme.text(Color.White))
         }
         .alignItems(HorizontalAlign.Start)
         .padding({ left: 15, right: 15, top: 11, bottom: 11 })
-        .backgroundColor('#7862D3')
+        .backgroundColor(AppTheme.background('#7862D3'))
         .borderRadius({ topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
         .clip(true)
         .constraintSize({ maxWidth: '78%' })
@@ -373,11 +353,11 @@ export struct HomeComfortSection {
           Text('心')
             .fontSize(12)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#7B5CC4')
+            .fontColor(AppTheme.text('#7B5CC4'))
         }
         .width(34)
         .height(34)
-        .backgroundColor('#EEE8FF')
+        .backgroundColor(AppTheme.background('#EEE8FF'))
         .borderRadius(12)
         .alignSelf(ItemAlign.Start)
 
@@ -385,11 +365,11 @@ export struct HomeComfortSection {
           Text(item.content)
             .fontSize(14)
             .lineHeight(21)
-            .fontColor('#34394A')
+            .fontColor(AppTheme.text('#34394A'))
         }
         .alignItems(HorizontalAlign.Start)
         .padding({ left: 15, right: 15, top: 11, bottom: 11 })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius({ topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
         .clip(true)
         .constraintSize({ maxWidth: '76%' })
@@ -406,12 +386,12 @@ export struct HomeComfortSection {
         Stack({ alignContent: Alignment.Center }) {
           Text('‹')
             .fontSize(30)
-            .fontColor('#252B3B')
+            .fontColor(AppTheme.text('#252B3B'))
             .offset({ y: -1 })
         }
         .width(42)
         .height(42)
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(21)
         .onClick(() => {
           this.closeChat();
@@ -419,14 +399,14 @@ export struct HomeComfortSection {
         Text('陪你聊聊')
           .fontSize(19)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#171B2B')
+          .fontColor(AppTheme.text('#171B2B'))
           .layoutWeight(1)
           .margin({ left: 12 })
         Button('重头开聊')
           .height(32)
           .fontSize(12)
-          .fontColor('#7557BC')
-          .backgroundColor('#F1ECFF')
+          .fontColor(AppTheme.text('#7557BC'))
+          .backgroundColor(AppTheme.background('#F1ECFF'))
           .padding({ left: 13, right: 13 })
           .borderRadius(16)
           .margin({ left: 8 })
@@ -437,26 +417,26 @@ export struct HomeComfortSection {
       .width('100%')
       .height(70)
       .padding({ left: 16, right: 18 })
-      .backgroundColor('#F8F6FF')
+      .backgroundColor(AppTheme.background('#F8F6FF'))
 
       if (item.id !== HOME_COMFORT_CASUAL_CHAT_ID) {
         Row() {
           Blank()
             .width(4)
             .height(38)
-            .backgroundColor(this.concernAccent(item.category))
+            .backgroundColor(AppTheme.background(this.concernAccent(item.category)))
             .borderRadius(2)
           Column() {
             Text(item.title)
               .fontSize(14)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#2F3445')
+              .fontColor(AppTheme.text('#2F3445'))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text(item.summary)
               .fontSize(11)
               .lineHeight(16)
-              .fontColor('#777E8E')
+              .fontColor(AppTheme.text('#777E8E'))
               .margin({ top: 4 })
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -468,9 +448,9 @@ export struct HomeComfortSection {
         .alignItems(VerticalAlign.Center)
         .width('92%')
         .padding({ left: 14, right: 14, top: 11, bottom: 11 })
-        .backgroundColor(Color.White)
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(16)
-        .border({ width: 1, color: '#ECE9F6' })
+        .border({ width: 1, color: AppTheme.border('#ECE9F6') })
         .margin({ top: 6, bottom: 8 })
       }
 
@@ -486,10 +466,10 @@ export struct HomeComfortSection {
               LoadingProgress()
                 .width(20)
                 .height(20)
-                .color('#8568D2')
+                .color(AppTheme.text('#8568D2'))
               Text('正在认真听你说')
                 .fontSize(12)
-                .fontColor('#777E8E')
+                .fontColor(AppTheme.text('#777E8E'))
                 .margin({ left: 9 })
             }
             .padding({ left: 44, top: 4, bottom: 4 })
@@ -505,18 +485,20 @@ export struct HomeComfortSection {
         if (this.chatError.length > 0) {
           Text(this.chatError)
             .fontSize(11)
-            .fontColor('#D65A68')
+            .fontColor(AppTheme.text('#D65A68'))
             .width('100%')
             .maxLines(2)
             .margin({ bottom: 7 })
         }
         Row() {
           TextInput({ placeholder: '想说什么都可以…', text: this.chatInput })
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .layoutWeight(1)
             .height(46)
             .fontSize(14)
-            .fontColor('#262B3A')
-            .backgroundColor('#F1F2F7')
+            .fontColor(AppTheme.text('#262B3A'))
+            .backgroundColor(AppTheme.inputBackground())
             .borderRadius(16)
             .padding({ left: 14, right: 14 })
             .maxLength(500)
@@ -529,8 +511,8 @@ export struct HomeComfortSection {
             .height(46)
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
-            .backgroundColor(this.chatInput.trim().length > 0 && !this.sending ? '#7862D3' : '#B9B6C8')
+            .fontColor(AppTheme.text(Color.White))
+            .backgroundColor(AppTheme.filledBackground(this.chatInput.trim().length > 0 && !this.sending ? '#7862D3' : '#B9B6C8'))
             .borderRadius(16)
             .enabled(this.chatInput.trim().length > 0 && !this.sending)
             .margin({ left: 10 })
@@ -542,14 +524,14 @@ export struct HomeComfortSection {
       }
       .width('100%')
       .padding({ left: 18, right: 18, top: 10, bottom: 10 })
-      .backgroundColor(Color.White)
-      .shadow({ radius: 14, color: '#12000000', offsetX: 0, offsetY: -5 })
+      .backgroundColor(AppTheme.background(Color.White))
+      .shadow({ radius: 14, color: AppTheme.shadow('#12000000'), offsetX: 0, offsetY: -5 })
       .translate({ y: -this.keyboardHeightVp })
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F8F6FF')
+    .backgroundColor(AppTheme.background('#F8F6FF'))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 
@@ -561,7 +543,7 @@ export struct HomeComfortSection {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F8F6FF')
+    .backgroundColor(AppTheme.background('#F8F6FF'))
   }
 
   build() {
@@ -570,7 +552,7 @@ export struct HomeComfortSection {
         Text('帮你解闷')
           .fontSize(20)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
         AiGeneratedBadge({ compact: true })
           .margin({ right: 10 })
@@ -578,9 +560,9 @@ export struct HomeComfortSection {
           .height(32)
           .fontSize(12)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.loading ? '#A0A4B0' : '#7557BC')
+          .fontColor(AppTheme.text(this.loading ? '#A0A4B0' : '#7557BC'))
           .padding({ left: 13, right: 13 })
-          .backgroundColor(this.loading ? '#F0F1F5' : '#F1ECFF')
+          .backgroundColor(AppTheme.background(this.loading ? '#F0F1F5' : '#F1ECFF'))
           .borderRadius(16)
           .enabled(!this.loading)
           .onClick(() => {
@@ -599,7 +581,7 @@ export struct HomeComfortSection {
             if (index < this.concerns.length - 1) {
               Divider()
                 .strokeWidth(1)
-                .color('#EAE6F2')
+                .color(AppTheme.border('#EAE6F2'))
                 .margin({ left: 68, right: 6 })
             }
           }, (item: HomeComfortConcern) => item.id)
@@ -607,7 +589,7 @@ export struct HomeComfortSection {
         .width('100%')
         .padding({ left: 4, right: 4 })
         .margin({ top: 8 })
-        .backgroundColor('#FCFBFF')
+        .backgroundColor(AppTheme.background('#FCFBFF'))
         .borderRadius(22)
       }
     }

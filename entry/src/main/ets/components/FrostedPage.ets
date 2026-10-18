@@ -1,3 +1,4 @@
+import { AppTheme, APP_DARK_MODE_KEY } from '../utils/AppTheme';
 import { LengthMetrics, window } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import {
@@ -14,7 +15,6 @@ import {
 } from '@kit.UIDesignKit';
 import { APP_HEADER_HEIGHT } from './AppHeader';
 
-const TITLE_GLASS_TINT: string = '#26FFFFFF';
 const TITLE_GLASS_BLUR_RADIUS: number = 24;
 const TITLE_GLASS_FADE_HEIGHT: number = 32;
 
@@ -23,12 +23,16 @@ const TITLE_GLASS_FADE_HEIGHT: number = 32;
 @Component
 export struct FrostedPage {
   @Prop pageBackgroundColor: string = '#FFFFFF';
+  @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   scrollers: Scroller[] = [];
   @BuilderParam headerBuilder: () => void = this.EmptyContent;
   @BuilderParam contentBuilder: () => void = this.EmptyContent;
   private hdsAvailable: boolean = canIUse('SystemCapability.UIDesign.HDSComponent.Core');
-  private statusBarStyle: window.SystemBarStyle = { statusBarContentColor: '#172033' };
   private titleMaterial: SystemMaterialParams = {};
+
+  private statusBarStyle(): window.SystemBarStyle {
+    return { statusBarContentColor: this.darkMode ? '#ECF1FA' : '#172033' };
+  }
 
   aboutToAppear(): void {
     // 与底部胶囊采用相同的材质策略；旧系统不调用 API 23 的材质探测接口。
@@ -55,7 +59,7 @@ export struct FrostedPage {
 
   private titleOptions(): HdsNavigationTitleBarOptions {
     let scrollBackground: HdsNavigationBackgroundStyle = {
-      backgroundColor: TITLE_GLASS_TINT,
+      backgroundColor: $r('app.color.ui_glass_title'),
       maskExtraHeight: TITLE_GLASS_FADE_HEIGHT
     };
     let scrollEffect: ScrollEffectType = ScrollEffectType.GRADIENT_BLUR;
@@ -112,12 +116,12 @@ export struct FrostedPage {
       .hideToolBar(true)
       .mode(NavigationMode.Stack)
       .bindToScrollable(this.scrollers)
-      .systemBarStyle(this.statusBarStyle, this.statusBarStyle)
+      .systemBarStyle(this.statusBarStyle(), this.statusBarStyle())
       // 只拓展顶部背景，标题文字仍位于系统安全区内；底部与键盘避让保持原布局。
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
       .width('100%')
       .height('100%')
-      .backgroundColor(this.pageBackgroundColor)
+      .backgroundColor(AppTheme.pageBackground(this.pageBackgroundColor))
       .clip(true)
     } else {
       // 无 HDS 能力的设备使用 ArkUI 的固定标题、安全区避让及基础背景模糊。
@@ -126,17 +130,17 @@ export struct FrostedPage {
       }
       .title({ builder: (): void => { this.headerBuilder(); }, height: APP_HEADER_HEIGHT }, {
         barStyle: BarStyle.STANDARD,
-        backgroundColor: TITLE_GLASS_TINT,
+        backgroundColor: $r('app.color.ui_glass_title'),
         backgroundBlurStyle: BlurStyle.COMPONENT_THIN
       })
       .hideBackButton(true)
       .hideToolBar(true)
       .mode(NavigationMode.Stack)
-      .systemBarStyle(this.statusBarStyle)
+      .systemBarStyle(this.statusBarStyle())
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
       .width('100%')
       .height('100%')
-      .backgroundColor(this.pageBackgroundColor)
+      .backgroundColor(AppTheme.pageBackground(this.pageBackgroundColor))
       .clip(true)
     }
   }

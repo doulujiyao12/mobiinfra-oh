@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
@@ -274,8 +275,8 @@ struct WorkflowFileViewer {
       title: '删除选中文件',
       message: this.deleteSelectedMessage(selected.length),
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '删除', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -302,11 +303,11 @@ struct WorkflowFileViewer {
     Text(label)
       .fontSize(13)
       .fontWeight(this.category === category ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.category === category ? Color.White : '#5E6675')
+      .fontColor(AppTheme.text(this.category === category ? Color.White : '#5E6675'))
       .textAlign(TextAlign.Center)
       .layoutWeight(1)
       .height(34)
-      .backgroundColor(this.category === category ? '#5968FF' : '#F3F5FA')
+      .backgroundColor(AppTheme.background(this.category === category ? '#5968FF' : '#F3F5FA'))
       .borderRadius(12)
       .onClick(() => { this.switchCategory(category); })
   }
@@ -316,7 +317,7 @@ struct WorkflowFileViewer {
       if (this.manageMode) {
         Checkbox({ name: file.path, group: 'workflowFiles' })
           .select(this.isFileSelected(file))
-          .selectedColor('#5968FF')
+          .selectedColor(AppTheme.background('#5968FF'))
           .margin({ right: 10 })
           .onChange((checked: boolean) => { this.setFileSelected(file, checked); })
       }
@@ -324,13 +325,13 @@ struct WorkflowFileViewer {
         Text(this.fileDisplayTitle(file))
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor(this.selectedPath === file.path ? '#4F46E5' : '#202637')
+          .fontColor(AppTheme.text(this.selectedPath === file.path ? '#4F46E5' : '#202637'))
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.fileDisplayMeta(file))
           .fontSize(11)
-          .fontColor('#7B8290')
+          .fontColor(AppTheme.text('#7B8290'))
           .margin({ top: 6 })
           .width('100%')
           .maxLines(2)
@@ -339,13 +340,13 @@ struct WorkflowFileViewer {
       if (!this.manageMode) {
         Text('查看')
           .fontSize(12)
-          .fontColor(this.selectedPath === file.path ? '#4F46E5' : '#7B8290')
+          .fontColor(AppTheme.text(this.selectedPath === file.path ? '#4F46E5' : '#7B8290'))
           .margin({ left: 10 })
       }
     }
     .width('100%')
     .padding(13)
-    .backgroundColor(this.selectedPath === file.path ? '#EEF4FF' : '#FFFFFF')
+    .backgroundColor(AppTheme.background(this.selectedPath === file.path ? '#EEF4FF' : '#FFFFFF'))
     .borderRadius(14)
     .onClick(() => {
       if (this.manageMode) {
@@ -361,7 +362,7 @@ struct WorkflowFileViewer {
       .width(58)
       .height('100%')
       .fontSize(12)
-      .backgroundColor('#5968FF')
+      .backgroundColor(AppTheme.background('#5968FF'))
       .borderRadius(12)
       .onClick(() => {
         this.setManageMode(true);
@@ -374,7 +375,7 @@ struct WorkflowFileViewer {
       .width(58)
       .height('100%')
       .fontSize(12)
-      .backgroundColor('#FF5A4F')
+      .backgroundColor(AppTheme.background('#FF5A4F'))
       .borderRadius(12)
       .onClick(() => { this.deleteManagedFile(file); })
   }
@@ -385,14 +386,14 @@ struct WorkflowFileViewer {
         .width(70)
         .height(34)
         .fontSize(12)
-        .fontColor('#5968FF')
-        .backgroundColor('#EEF4FF')
+        .fontColor(AppTheme.text('#5968FF'))
+        .backgroundColor(AppTheme.background('#EEF4FF'))
         .borderRadius(12)
         .onClick(() => { router.back(); })
       Text(this.title)
         .fontSize(20)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#11182F')
+        .fontColor(AppTheme.text('#11182F'))
         .layoutWeight(1)
         .textAlign(TextAlign.Center)
         .maxLines(1)
@@ -401,7 +402,7 @@ struct WorkflowFileViewer {
         .width(70)
         .height(34)
         .fontSize(12)
-        .backgroundColor('#607D8B')
+        .backgroundColor(AppTheme.background('#607D8B'))
         .borderRadius(12)
         .onClick(() => { this.loadFiles(); })
     }
@@ -422,7 +423,7 @@ struct WorkflowFileViewer {
       }
       .width('86%')
       .padding(6)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(18)
       .margin({ top: 8 })
 
@@ -431,15 +432,15 @@ struct WorkflowFileViewer {
           Text('文件列表 · ' + this.files.length + ' 个')
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           if (this.files.length > 0) {
             Button(this.manageMode ? '完成' : '管理')
               .width(58)
               .height(30)
               .fontSize(12)
-              .fontColor(this.manageMode ? Color.White : '#5968FF')
-              .backgroundColor(this.manageMode ? '#5968FF' : '#EEF4FF')
+              .fontColor(AppTheme.text(this.manageMode ? Color.White : '#5968FF'))
+              .backgroundColor(AppTheme.background(this.manageMode ? '#5968FF' : '#EEF4FF'))
               .borderRadius(10)
               .margin({ right: 8 })
               .onClick(() => { this.setManageMode(!this.manageMode); })
@@ -448,8 +449,8 @@ struct WorkflowFileViewer {
             .width(58)
             .height(30)
             .fontSize(12)
-            .fontColor('#5968FF')
-            .backgroundColor('#F3F5FA')
+            .fontColor(AppTheme.text('#5968FF'))
+            .backgroundColor(AppTheme.background('#F3F5FA'))
             .borderRadius(10)
             .onClick(() => { this.toggleFileListExpanded(); })
         }
@@ -482,22 +483,22 @@ struct WorkflowFileViewer {
             Row() {
               Text('已选 ' + this.selectedDeleteCount() + ' 个')
                 .fontSize(12)
-                .fontColor('#6F7584')
+                .fontColor(AppTheme.text('#6F7584'))
                 .layoutWeight(1)
               Button('全选')
                 .width(54)
                 .height(30)
                 .fontSize(12)
-                .fontColor('#5968FF')
-                .backgroundColor('#EEF4FF')
+                .fontColor(AppTheme.text('#5968FF'))
+                .backgroundColor(AppTheme.background('#EEF4FF'))
                 .borderRadius(10)
                 .onClick(() => { this.selectAllFiles(); })
               Button('清空')
                 .width(54)
                 .height(30)
                 .fontSize(12)
-                .fontColor('#5968FF')
-                .backgroundColor('#F3F5FA')
+                .fontColor(AppTheme.text('#5968FF'))
+                .backgroundColor(AppTheme.background('#F3F5FA'))
                 .borderRadius(10)
                 .margin({ left: 8 })
                 .onClick(() => { this.selectedDeletePaths = []; })
@@ -505,7 +506,7 @@ struct WorkflowFileViewer {
                 .width(54)
                 .height(30)
                 .fontSize(12)
-                .backgroundColor('#FF5A4F')
+                .backgroundColor(AppTheme.background('#FF5A4F'))
                 .borderRadius(10)
                 .margin({ left: 8 })
                 .onClick(() => { this.deleteSelectedFiles(); })
@@ -516,13 +517,13 @@ struct WorkflowFileViewer {
         } else if (this.fileListExpanded) {
           Text(this.fileText)
             .fontSize(13)
-            .fontColor('#7B8290')
+            .fontColor(AppTheme.text('#7B8290'))
             .margin({ top: 16 })
             .width('100%')
         } else {
           Text(this.selectedName.length > 0 ? '当前：' + this.selectedName : this.emptyText(this.category))
             .fontSize(13)
-            .fontColor('#7B8290')
+            .fontColor(AppTheme.text('#7B8290'))
             .margin({ top: 12 })
             .width('100%')
             .maxLines(2)
@@ -531,7 +532,7 @@ struct WorkflowFileViewer {
       }
       .width('86%')
       .padding(18)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(20)
       .margin({ top: 14 })
 
@@ -540,7 +541,7 @@ struct WorkflowFileViewer {
           Text('当前文件')
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           if (this.containsAiGeneratedContent()) {
             AiGeneratedBadge({ compact: true })
@@ -551,8 +552,8 @@ struct WorkflowFileViewer {
               .width(62)
               .height(30)
               .fontSize(12)
-              .fontColor(this.previewMode ? Color.White : '#5968FF')
-              .backgroundColor(this.previewMode ? '#5968FF' : '#F3F5FA')
+              .fontColor(AppTheme.text(this.previewMode ? Color.White : '#5968FF'))
+              .backgroundColor(AppTheme.background(this.previewMode ? '#5968FF' : '#F3F5FA'))
               .borderRadius(10)
               .margin({ right: 8 })
               .onClick(() => { this.setPreviewMode(true); })
@@ -560,8 +561,8 @@ struct WorkflowFileViewer {
               .width(62)
               .height(30)
               .fontSize(12)
-              .fontColor(!this.previewMode ? Color.White : '#5968FF')
-              .backgroundColor(!this.previewMode ? '#5968FF' : '#F3F5FA')
+              .fontColor(AppTheme.text(!this.previewMode ? Color.White : '#5968FF'))
+              .backgroundColor(AppTheme.background(!this.previewMode ? '#5968FF' : '#F3F5FA'))
               .borderRadius(10)
               .margin({ right: 8 })
               .onClick(() => { this.setPreviewMode(false); })
@@ -570,8 +571,8 @@ struct WorkflowFileViewer {
             .width(58)
             .height(30)
             .fontSize(12)
-            .fontColor('#5968FF')
-            .backgroundColor('#F3F5FA')
+            .fontColor(AppTheme.text('#5968FF'))
+            .backgroundColor(AppTheme.background('#F3F5FA'))
             .borderRadius(10)
             .onClick(() => { this.currentInfoExpanded = !this.currentInfoExpanded; })
         }
@@ -582,11 +583,11 @@ struct WorkflowFileViewer {
             Row() {
               Text('文件')
                 .fontSize(11)
-                .fontColor('#8A91A0')
+                .fontColor(AppTheme.text('#8A91A0'))
                 .width(34)
               Text(this.selectedDisplayTitle())
                 .fontSize(12)
-                .fontColor('#3C4354')
+                .fontColor(AppTheme.text('#3C4354'))
                 .fontWeight(FontWeight.Medium)
                 .layoutWeight(1)
                 .maxLines(2)
@@ -598,11 +599,11 @@ struct WorkflowFileViewer {
             Row() {
               Text('路径')
                 .fontSize(11)
-                .fontColor('#8A91A0')
+                .fontColor(AppTheme.text('#8A91A0'))
                 .width(34)
               Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
                 .fontSize(12)
-                .fontColor('#6F7584')
+                .fontColor(AppTheme.text('#6F7584'))
                 .layoutWeight(1)
                 .maxLines(4)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -620,28 +621,28 @@ struct WorkflowFileViewer {
             Text(this.fileText)
               .fontSize(11)
               .fontFamily('monospace')
-              .fontColor('#2F3645')
+              .fontColor(AppTheme.text('#2F3645'))
               .width('100%')
           }
         }
         .width('100%')
         .layoutWeight(1)
         .padding(12)
-        .backgroundColor('#F7F9FE')
+        .backgroundColor(AppTheme.background('#F7F9FE'))
         .borderRadius(14)
         .margin({ top: this.currentInfoExpanded ? 10 : 8 })
       }
       .width('86%')
       .layoutWeight(1)
       .padding(18)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(20)
       .margin({ top: 14, bottom: 24 })
     }
     .width('100%')
     .height('100%')
     .padding({ top: APP_HEADER_CONTENT_GAP })
-    .backgroundColor('#F4F8FF')
+    .backgroundColor(AppTheme.background('#F4F8FF'))
   }
 
   build() {

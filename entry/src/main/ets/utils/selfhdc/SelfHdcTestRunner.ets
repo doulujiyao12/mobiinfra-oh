@@ -183,7 +183,7 @@ export class SelfHdcTestRunner {
     this.state.runId = String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
     this.state.endpoint = endpoint;
     this.state.stage = mode === 'phone-chat-local' ? '手机本地 Agent' :
-      (mode === 'phone-chat-cloud' ? '手机云端 Agent' : '手机 GUI 任务');
+      (mode === 'phone-chat-cloud' ? '手机云端 Agent' : (mode === 'phone-gallery' ? '图库批量读图' : '手机 GUI 任务'));
     this.state.message = title;
     this.startedAt = Date.now(); this.cancelled = false; this.externalCancel = cancel;
     this.record('RUN mode=' + mode + ' title=' + title + ' transport=direct-device-TCP');

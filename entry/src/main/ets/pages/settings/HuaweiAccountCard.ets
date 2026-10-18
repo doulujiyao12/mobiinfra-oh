@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { LoginWithHuaweiIDButton, loginComponentManager } from '@kit.AccountKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -97,12 +98,12 @@ export struct HuaweiAccountCard {
         .width(42)
         .height(42)
         .borderRadius(14)
-        .backgroundColor('#F1F2FF')
+        .backgroundColor(AppTheme.background('#F1F2FF'))
 
         Text('华为账号')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .margin({ left: 12 })
 
         Blank()
@@ -110,8 +111,8 @@ export struct HuaweiAccountCard {
         Button('退出登录')
           .height(36)
           .fontSize(13)
-          .fontColor('#5B5CE2')
-          .backgroundColor('#F1F2FF')
+          .fontColor(AppTheme.text('#5B5CE2'))
+          .backgroundColor(AppTheme.background('#F1F2FF'))
           .borderRadius(18)
           .padding({ left: 16, right: 16 })
           .onClick(() => { this.clearLocalSession(); })
@@ -134,10 +135,10 @@ export struct HuaweiAccountCard {
     }
     .width('92%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(20)
-    .border({ width: 1, color: '#E9EDF5' })
-    .shadow({ radius: 12, color: '#100F1E3A', offsetX: 0, offsetY: 4 })
+    .border({ width: 1, color: AppTheme.border('#E9EDF5') })
+    .shadow({ radius: 12, color: AppTheme.shadow('#100F1E3A'), offsetX: 0, offsetY: 4 })
     .margin({ top: 8 })
   }
 }

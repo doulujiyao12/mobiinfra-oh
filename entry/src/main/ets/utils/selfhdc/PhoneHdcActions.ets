@@ -71,7 +71,11 @@ export class PhoneHdcActions {
       if (!point || (action !== 'input' && !hasX)) {
         throw new Error('PHONE_HDC_FOCUS: input needs coordinates or a prior input-field click; refusing unknown focus');
       }
-      commands.push(this.command('uitest uiInput click ' + point.x + ' ' + point.y, 'activate/click', 500));
+      // A coordinate-free input follows a verified field click. The keyboard can move that field;
+      // use its current focus instead of clicking the stale pre-keyboard coordinates again.
+      if (action !== 'input' || hasX) {
+        commands.push(this.command('uitest uiInput click ' + point.x + ' ' + point.y, 'activate/click', 500));
+      }
       if (action === 'click') {
         inputTarget = null;
         let target = phoneHdcString(payload, 'target_element', phoneHdcString(payload, 'targetElement')).toLowerCase();
@@ -79,6 +83,12 @@ export class PhoneHdcActions {
           inputTarget = point;
         }
       } else {
+        if (typeof payload['text'] !== 'string') {
+          throw new Error('PHONE_HDC_ARGUMENT: input requires an explicit text field');
+        }
+        if (payload['submit_enter'] !== undefined && typeof payload['submit_enter'] !== 'boolean') {
+          throw new Error('PHONE_HDC_ARGUMENT: submit_enter must be boolean');
+        }
         let text = phoneHdcString(payload, 'text');
         if (text.indexOf('\0') >= 0 || text.length > 8192) {
           throw new Error('PHONE_HDC_TEXT: NUL or text longer than 8192 characters is unsupported');
@@ -89,9 +99,11 @@ export class PhoneHdcActions {
         if (text.length > 0) {
           commands.push(this.command('uitest uiInput text ' + selfHdcShellQuote(text), 'input-text chars=' + text.length, 250, true));
         }
-        // Match the PC's default driver-input path. Diagnostics can explicitly suppress submission.
-        if (payload['submit_enter'] !== false) {
+        // Typing must not implicitly send a chat message or submit a form. Explicit workflows
+        // may request Enter; the visual agent otherwise chooses its next action from a screenshot.
+        if (payload['submit_enter'] === true) {
           commands.push(this.command('uitest uiInput keyEvent 2054', 'submit-enter', 300));
+          inputTarget = null;
         }
       }
     } else if (action === 'swipe' || action === 'swipe_with_coords') {
@@ -102,7 +114,7 @@ export class PhoneHdcActions {
         start = this.point(numberField(payload, 'start_x'), numberField(payload, 'start_y'));
         end = this.point(numberField(payload, 'end_x'), numberField(payload, 'end_y'));
       } else {
-        let direction = phoneHdcString(payload, 'direction', 'up').toLowerCase();
+        let direction = phoneHdcString(payload, 'direction').toLowerCase();
         if (direction === 'up' || direction === 'down') {
           start = this.point(this.width * 0.5, this.height * (direction === 'up' ? 0.7 : 0.3));
           end = this.point(this.width * 0.5, this.height * (direction === 'up' ? 0.3 : 0.7));
@@ -114,7 +126,7 @@ export class PhoneHdcActions {
       commands.push(this.command('uitest uiInput swipe ' + start.x + ' ' + start.y + ' ' + end.x + ' ' + end.y,
         'swipe', 700));
     } else if (action === 'keyevent') {
-      let key = phoneHdcString(payload, 'key', 'BACK').toUpperCase();
+      let key = phoneHdcString(payload, 'key').toUpperCase();
       let code = key === 'BACK' ? 2 : (key === 'HOME' ? 1 : (key === 'ENTER' ? 2054 : 0));
       if (code === 0) {
         if (!/^\d{1,5}$/.test(key) || Number(key) < 1 || Number(key) > 10000) {
@@ -122,7 +134,7 @@ export class PhoneHdcActions {
         }
         code = Number(key);
       }
-      if (code === 1 || code === 2) { inputTarget = null; }
+      if (code === 1 || code === 2 || code === 2054) { inputTarget = null; }
       commands.push(this.command('uitest uiInput keyEvent ' + code, 'keyevent', 300));
     } else if (action === 'sleep' || action === 'wait') {
       let seconds = numberField(payload, 'seconds', 1);

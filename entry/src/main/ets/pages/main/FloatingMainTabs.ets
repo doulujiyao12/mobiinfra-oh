@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { HdsTabs, HdsTabsFloatingStyle, SystemMaterialParams, hdsMaterial } from '@kit.UIDesignKit';
 import { MainTabIndex } from './MainTabConfig';
@@ -53,8 +54,7 @@ export struct FloatingMainTabs {
       barSideMargin: TAB_BAR_SIDE_MARGIN,
       barBottomMargin: TAB_BAR_BOTTOM_MARGIN,
       gradientMask: {
-        maskColor: this.selectedIndex === MainTabIndex.Chat ?
-          '#66' + this.pageBackgroundColor.substring(1) : '#66FFFFFF',
+        maskColor: $r('app.color.ui_glass_mask'),
         maskHeight: FLOATING_MAIN_TABS_INSET
       },
       systemMaterialEffect: this.materialEffect,
@@ -76,7 +76,7 @@ export struct FloatingMainTabs {
       .barMode(BarMode.Fixed)
       .barHeight(TAB_BAR_HEIGHT)
       .barOverlap(true)
-      .barBackgroundColor('#B3FFFFFF')
+      .barBackgroundColor(AppTheme.background('#B3FFFFFF'))
       .barBackgroundBlurStyle(BlurStyle.COMPONENT_REGULAR)
       .barFloatingStyle(this.floatingStyle())
       .onChange((index: number) => { this.selectedIndex = index; })
@@ -90,19 +90,19 @@ export struct FloatingMainTabs {
       .height('100%')
       // 顶部允许页签内的导航材质延伸到状态栏；保留 Tabs 原有的底部拓展。
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .backgroundColor(this.pageBackgroundColor)
+      .backgroundColor(AppTheme.pageBackground(this.pageBackgroundColor))
     } else {
       Tabs({ barPosition: BarPosition.End, index: this.selectedIndex }) {
         this.contentBuilder()
       }
       .barMode(BarMode.Fixed)
       .barHeight(TAB_BAR_HEIGHT)
-      .barBackgroundColor(this.selectedIndex === MainTabIndex.Chat ? this.pageBackgroundColor : '#FFFFFF')
+      .barBackgroundColor(AppTheme.background(this.selectedIndex === MainTabIndex.Chat ? this.pageBackgroundColor : '#FFFFFF'))
       .onChange((index: number) => { this.selectedIndex = index; })
       .width('100%')
       .height('100%')
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .backgroundColor(this.pageBackgroundColor)
+      .backgroundColor(AppTheme.pageBackground(this.pageBackgroundColor))
     }
   }
 }

@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { AI_GENERATED_LABEL_TEXT } from '../utils/AiGeneratedContent';
 
 export type AiGeneratedBadgeTone = 'surface' | 'overlay';
@@ -31,7 +32,7 @@ export struct AiGeneratedBadge {
     Text(AI_GENERATED_LABEL_TEXT)
       .fontSize(this.resolveBadgeFontSize())
       .fontWeight(FontWeight.Bold)
-      .fontColor(this.resolveBadgeTextColor())
+      .fontColor(AppTheme.text(this.resolveBadgeTextColor()))
       .maxLines(1)
       .padding({
         left: this.resolveHorizontalPadding(),
@@ -39,7 +40,7 @@ export struct AiGeneratedBadge {
         top: this.resolveVerticalPadding(),
         bottom: this.resolveVerticalPadding()
       })
-      .backgroundColor(this.resolveBadgeBackgroundColor())
+      .backgroundColor(AppTheme.background(this.resolveBadgeBackgroundColor()))
       .borderRadius(7)
   }
 }

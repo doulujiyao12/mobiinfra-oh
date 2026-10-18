@@ -1,5 +1,6 @@
 import { promptAction } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { AppTheme } from '../../utils/AppTheme';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -17,6 +18,7 @@ import { ChatMessageDetailUiModel, ChatMessageUiModel } from './ChatMessageUiMod
 import { DigitalAvatarView } from './DigitalAvatarView';
 import {
   digitalAvatarContainerWidth,
+  digitalAvatarFrameWidth,
   DigitalAvatarVisualState,
   digitalAvatarVisualStateForMessageVoice,
   TEXT_AVATAR_SIZE
@@ -76,10 +78,6 @@ function chatRoleLabelFor(role: ChatMessageRole, kind: ChatMessageKind, modeLabe
   return modeLabel.length > 0 ? modeLabel : '助手';
 }
 
-function chatResolvedMessageAvatarUri(avatarForegroundUri: string, avatarMessageForegroundUri: string): string {
-  return avatarMessageForegroundUri.length > 0 ? avatarMessageForegroundUri : avatarForegroundUri;
-}
-
 function chatAvatarTextFor(role: ChatMessageRole, kind: ChatMessageKind, modeMark: string): string {
   if (role === 'user') {
     return '我';
@@ -112,14 +110,12 @@ function chatAvatarColorFor(role: ChatMessageRole, kind: ChatMessageKind): strin
   return '#5968FF';
 }
 
-function chatShouldUseDigitalAvatarFor(role: ChatMessageRole, kind: ChatMessageKind): boolean {
-  return role === 'assistant' && kind === CHAT_MESSAGE_KIND_CHAT;
+function chatShouldUseDigitalAvatarFor(role: ChatMessageRole): boolean {
+  return role === 'assistant' || role === 'task';
 }
 
-function chatAvatarColumnWidthFor(role: ChatMessageRole, kind: ChatMessageKind, avatarForegroundUri: string,
-  avatarMessageForegroundUri: string): number {
-  if (chatShouldUseDigitalAvatarFor(role, kind) &&
-    chatResolvedMessageAvatarUri(avatarForegroundUri, avatarMessageForegroundUri).length > 0) {
+function chatAvatarColumnWidthFor(role: ChatMessageRole): number {
+  if (chatShouldUseDigitalAvatarFor(role)) {
     return digitalAvatarContainerWidth('message', true);
   }
   return TEXT_AVATAR_SIZE;
@@ -222,29 +218,34 @@ struct ChatMessageAvatarView {
   @Prop role: ChatMessageRole = 'assistant';
   @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   @Prop visualState: DigitalAvatarVisualState = 'idle';
 
   build() {
-    if (chatShouldUseDigitalAvatarFor(this.role, this.kind)) {
-      DigitalAvatarView({
-        avatarForegroundUri: chatResolvedMessageAvatarUri(this.avatarForegroundUri, this.avatarMessageForegroundUri),
-        fallbackText: chatAvatarTextFor(this.role, this.kind, this.modeMark),
-        fallbackColor: chatAvatarColorFor(this.role, this.kind),
-        visualState: this.visualState,
-        avatarSize: 'message',
-        debugSource: chatAvatarDebugSourceFor(this.messageId, this.role, this.kind)
-      })
+    if (chatShouldUseDigitalAvatarFor(this.role)) {
+      if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+        // Leave trace clicks with ChatMessageAvatarBadge so one tap expands/collapses the trace.
+        Stack() {
+          Image($r('app.media.chat_assistant_avatar'))
+            .width(digitalAvatarFrameWidth('message')).height(digitalAvatarFrameWidth('message'))
+            .objectFit(ImageFit.Contain).accessibilityText('ClawMate 卡通猫助手，点击查看任务过程')
+        }.width(digitalAvatarContainerWidth('message', true)).height(digitalAvatarContainerWidth('message', true))
+      } else {
+        DigitalAvatarView({
+          useAssistantMascot: true,
+          visualState: this.visualState,
+          avatarSize: 'message',
+          debugSource: chatAvatarDebugSourceFor(this.messageId, this.role, this.kind)
+        })
+      }
     } else {
       Text(chatAvatarTextFor(this.role, this.kind, this.modeMark))
         .fontSize(13)
         .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
+        .fontColor(AppTheme.text(Color.White))
         .width(TEXT_AVATAR_SIZE)
         .height(TEXT_AVATAR_SIZE)
         .textAlign(TextAlign.Center)
-        .backgroundColor(chatAvatarColorFor(this.role, this.kind))
+        .backgroundColor(AppTheme.filledBackground(chatAvatarColorFor(this.role, this.kind)))
         .borderRadius(13)
     }
   }
@@ -256,8 +257,6 @@ struct ChatMessageAvatarBadge {
   @Prop role: ChatMessageRole = 'assistant';
   @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   @Prop voiceActiveMessageId: string = '';
   @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onToggleTaskTrace: (id: string) => void = () => {};
@@ -272,8 +271,6 @@ struct ChatMessageAvatarBadge {
       role: this.role,
       kind: this.kind,
       modeMark: this.modeMark,
-      avatarForegroundUri: this.avatarForegroundUri,
-      avatarMessageForegroundUri: this.avatarMessageForegroundUri,
       visualState: this.avatarVisualState()
     })
   }
@@ -283,7 +280,7 @@ struct ChatMessageAvatarBadge {
       Column() {
         this.AvatarContent()
       }
-      .width(chatAvatarColumnWidthFor(this.role, this.kind, this.avatarForegroundUri, this.avatarMessageForegroundUri))
+      .width(chatAvatarColumnWidthFor(this.role))
       .onClick(() => {
         this.onToggleTaskTrace(this.messageId);
       })
@@ -291,7 +288,7 @@ struct ChatMessageAvatarBadge {
       Column() {
         this.AvatarContent()
       }
-      .width(chatAvatarColumnWidthFor(this.role, this.kind, this.avatarForegroundUri, this.avatarMessageForegroundUri))
+      .width(chatAvatarColumnWidthFor(this.role))
     }
   }
 }
@@ -302,8 +299,6 @@ struct ChatMessageAvatarHeader {
   @Prop role: ChatMessageRole = 'assistant';
   @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   @Prop voiceActiveMessageId: string = '';
   @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onToggleTaskTrace: (id: string) => void = () => {};
@@ -318,8 +313,6 @@ struct ChatMessageAvatarHeader {
           role: this.role,
           kind: this.kind,
           modeMark: this.modeMark,
-          avatarForegroundUri: this.avatarForegroundUri,
-          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           voiceActiveMessageId: this.voiceActiveMessageId,
           voiceStatus: this.voiceStatus,
           onToggleTaskTrace: this.onToggleTaskTrace
@@ -330,8 +323,6 @@ struct ChatMessageAvatarHeader {
           role: this.role,
           kind: this.kind,
           modeMark: this.modeMark,
-          avatarForegroundUri: this.avatarForegroundUri,
-          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           voiceActiveMessageId: this.voiceActiveMessageId,
           voiceStatus: this.voiceStatus,
           onToggleTaskTrace: this.onToggleTaskTrace
@@ -356,7 +347,7 @@ struct ChatToolCallSummaryView {
     if (chatToolCallCount(this.role, this.kind, this.detail) > 0) {
       Text('已执行 ' + String(chatToolCallCount(this.role, this.kind, this.detail)) + ' 次工具调用')
         .fontSize(12)
-        .fontColor('#9CA3AF')
+        .fontColor(AppTheme.text('#9CA3AF'))
         .lineHeight(18)
         .width('100%')
         .margin({ top: 6 })
@@ -425,7 +416,7 @@ struct ChatVoicePlaybackView {
         }
           .width(30)
           .height(30)
-          .backgroundColor(this.buttonBackgroundColor())
+          .backgroundColor(AppTheme.background(this.buttonBackgroundColor()))
           .borderRadius(15)
           .opacity(this.synthesizing() ? 0.72 : 1)
           .onClick(async () => {
@@ -438,7 +429,7 @@ struct ChatVoicePlaybackView {
         }
           .width(30)
           .height(30)
-          .backgroundColor('#EEF2FF')
+          .backgroundColor(AppTheme.background('#EEF2FF'))
           .borderRadius(15)
           .opacity(this.replayAvailable() ? 1 : 0.48)
           .enabled(this.replayAvailable())
@@ -469,7 +460,7 @@ struct ChatThinkingModuleView {
         Row() {
           Text(this.detail.thinkingCollapsed ? '▶' : '▼')
             .fontSize(11)
-            .fontColor('#6B7280')
+            .fontColor(AppTheme.text('#6B7280'))
             .width(20)
             .height(20)
             .textAlign(TextAlign.Center)
@@ -477,12 +468,12 @@ struct ChatThinkingModuleView {
             Text('Think 思考过程')
               .fontSize(12)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#4B5563')
+              .fontColor(AppTheme.text('#4B5563'))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text(this.detail.thinkingCollapsed ? '已折叠，点击查看' : '点击收起')
               .fontSize(10)
-              .fontColor('#8B95A5')
+              .fontColor(AppTheme.text('#8B95A5'))
               .margin({ top: 2 })
           }
           .layoutWeight(1)
@@ -493,7 +484,7 @@ struct ChatThinkingModuleView {
         if (!this.detail.thinkingCollapsed) {
           Text(this.detail.thinkingContent)
             .fontSize(12)
-            .fontColor('#4B5563')
+            .fontColor(AppTheme.text('#4B5563'))
             .lineHeight(18)
             .copyOption(CopyOptions.LocalDevice)
             .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
@@ -504,9 +495,9 @@ struct ChatThinkingModuleView {
       .width('100%')
       .padding({ left: 10, right: 10, top: 9, bottom: 9 })
       .margin({ top: 8 })
-      .backgroundColor('#F3F4F6')
+      .backgroundColor(AppTheme.background('#F3F4F6'))
       .borderRadius(12)
-      .border({ width: 1, color: '#E5E7EB' })
+      .border({ width: 1, color: AppTheme.border('#E5E7EB') })
       .onClick(() => {
         this.onToggleThinking(this.messageId);
       })
@@ -524,7 +515,7 @@ struct ChatMarkdownContentView {
       if (this.detail.streamingActive) {
         Text(this.detail.content)
           .fontSize(15)
-          .fontColor(chatContentTextColorFor(this.role))
+          .fontColor(AppTheme.text(chatContentTextColorFor(this.role)))
           .lineHeight(22)
           .copyOption(CopyOptions.LocalDevice)
           .textSelectable(TextSelectableMode.SELECTABLE_UNFOCUSABLE)
@@ -552,7 +543,7 @@ struct ChatMessageImagePreviewView {
             .width(92)
             .height(118)
             .objectFit(ImageFit.Contain)
-            .backgroundColor(Color.Black)
+            .backgroundColor(AppTheme.background(Color.Black))
             .borderRadius(12)
             .margin({ right: 8, bottom: 8 })
             .onClick(() => {
@@ -595,7 +586,7 @@ struct ChatBubbleView {
       Row() {
         Text(chatRoleLabelFor(this.role, this.kind, this.modeLabel))
           .fontSize(11)
-          .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
+          .fontColor(AppTheme.text(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (isAiGeneratedChatMessage(this.role, this.kind)) {
@@ -604,7 +595,7 @@ struct ChatBubbleView {
         }
         Text(chatFormatMessageTime(this.createdAt))
           .fontSize(10)
-          .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
+          .fontColor(AppTheme.text(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ left: 8 })
@@ -651,12 +642,12 @@ struct ChatBubbleView {
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .backgroundColor(AppTheme.background(chatBubbleColorFor(this.role, this.kind)))
     .borderRadius(17)
     .border({
       width: chatIsUserRole(this.role) ? 0 : 1,
-      color: this.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
-        (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')
+      color: AppTheme.border(this.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
+        (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3'))
     })
   }
 }
@@ -676,7 +667,7 @@ struct ChatLightweightBubbleView {
       Row() {
         Text(chatRoleLabelFor(this.role, this.kind, this.modeLabel))
           .fontSize(11)
-          .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
+          .fontColor(AppTheme.text(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (isAiGeneratedChatMessage(this.role, this.kind)) {
@@ -685,7 +676,7 @@ struct ChatLightweightBubbleView {
         }
         Text(chatFormatMessageTime(this.createdAt))
           .fontSize(10)
-          .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
+          .fontColor(AppTheme.text(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ left: 8 })
@@ -694,7 +685,7 @@ struct ChatLightweightBubbleView {
 
       Text(chatLightweightPreviewText(this.kind, this.detail))
         .fontSize(13)
-        .fontColor(chatIsUserRole(this.role) ? '#F3F4F6' : '#4B5563')
+        .fontColor(AppTheme.text(chatIsUserRole(this.role) ? '#F3F4F6' : '#4B5563'))
         .lineHeight(20)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -704,19 +695,19 @@ struct ChatLightweightBubbleView {
       if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
         Text(String(this.detail.trace.length) + ' 步操作')
           .fontSize(11)
-          .fontColor('#7C3AED')
+          .fontColor(AppTheme.text('#7C3AED'))
           .margin({ top: 4 })
       }
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .backgroundColor(AppTheme.background(chatBubbleColorFor(this.role, this.kind)))
     .borderRadius(17)
     .border({
       width: chatIsUserRole(this.role) ? 0 : 1,
-      color: this.kind === CHAT_MESSAGE_KIND_TASK_TRACE ? '#DDD6FE' :
+      color: AppTheme.border(this.kind === CHAT_MESSAGE_KIND_TASK_TRACE ? '#DDD6FE' :
         (this.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
-          (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3'))
+          (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')))
     })
     .onClick(() => {
       if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
@@ -739,7 +730,7 @@ struct ChatTraceBubbleView {
       Row() {
         Text(this.detail.collapsed ? '▶' : '▼')
           .fontSize(12)
-          .fontColor('#7C3AED')
+          .fontColor(AppTheme.text('#7C3AED'))
           .width(22)
           .height(22)
           .textAlign(TextAlign.Center)
@@ -747,12 +738,12 @@ struct ChatTraceBubbleView {
           Text(chatTraceTitle(this.detail))
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#4C1D95')
+            .fontColor(AppTheme.text('#4C1D95'))
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(String(this.detail.trace.length) + ' 步操作')
             .fontSize(11)
-            .fontColor('#7C3AED')
+            .fontColor(AppTheme.text('#7C3AED'))
             .margin({ top: 3 })
         }
         .layoutWeight(1)
@@ -767,18 +758,18 @@ struct ChatTraceBubbleView {
           if (this.detail.trace.length === 0) {
             Text('暂无步骤')
               .fontSize(12)
-              .fontColor('#8B5CF6')
+              .fontColor(AppTheme.text('#8B5CF6'))
               .width('100%')
           } else {
             ForEach(this.detail.trace, (line: string, index?: number) => {
               Row() {
                 Text(String((index === undefined ? 0 : index) + 1))
                   .fontSize(10)
-                  .fontColor('#8B5CF6')
+                  .fontColor(AppTheme.text('#8B5CF6'))
                   .width(28)
                 Text(line)
                   .fontSize(12)
-                  .fontColor('#4B5563')
+                  .fontColor(AppTheme.text('#4B5563'))
                   .lineHeight(18)
                   .layoutWeight(1)
               }
@@ -794,9 +785,9 @@ struct ChatTraceBubbleView {
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 12, bottom: 12 })
-    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .backgroundColor(AppTheme.background(chatBubbleColorFor(this.role, this.kind)))
     .borderRadius(17)
-    .border({ width: 1, color: '#DDD6FE' })
+    .border({ width: 1, color: AppTheme.border('#DDD6FE') })
     .onClick(() => {
       this.onToggleTaskTrace(this.messageId);
     })
@@ -870,8 +861,6 @@ struct ChatMessageContentBlock {
   @Prop shouldRenderFull: boolean = true;
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
@@ -888,8 +877,6 @@ struct ChatMessageContentBlock {
         role: this.role,
         kind: this.kind,
         modeMark: this.modeMark,
-        avatarForegroundUri: this.avatarForegroundUri,
-        avatarMessageForegroundUri: this.avatarMessageForegroundUri,
         voiceActiveMessageId: this.voiceActiveMessageId,
         voiceStatus: this.voiceStatus,
         onToggleTaskTrace: this.onToggleTaskTrace
@@ -926,8 +913,6 @@ struct ChatMessageRow {
   @Prop shouldRenderFull: boolean = true;
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
@@ -951,8 +936,6 @@ struct ChatMessageRow {
           shouldRenderFull: this.shouldRenderFull,
           modeLabel: this.modeLabel,
           modeMark: this.modeMark,
-          avatarForegroundUri: this.avatarForegroundUri,
-          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           onToggleTaskTrace: this.onToggleTaskTrace,
           onToggleThinking: this.onToggleThinking,
           onPreviewDebugImage: this.onPreviewDebugImage,
@@ -972,8 +955,6 @@ struct ChatMessageRow {
           shouldRenderFull: this.shouldRenderFull,
           modeLabel: this.modeLabel,
           modeMark: this.modeMark,
-          avatarForegroundUri: this.avatarForegroundUri,
-          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           onToggleTaskTrace: this.onToggleTaskTrace,
           onToggleThinking: this.onToggleThinking,
           onPreviewDebugImage: this.onPreviewDebugImage,
@@ -1002,8 +983,6 @@ export struct ChatMessageList {
   @Prop @Watch('onStreamFollowKeyChanged') streamFollowKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
-  @Prop avatarForegroundUri: string = '';
-  @Prop avatarMessageForegroundUri: string = '';
   @Prop bottomOverlayInset: number = 122;
   @State autoFollowEnabled: boolean = true;
   @State backToBottomVisible: boolean = false;
@@ -1307,15 +1286,8 @@ export struct ChatMessageList {
     return chatBottomOverlayKind(this.thinking, this.backToBottomVisible);
   }
 
-  private messageAvatarForegroundUri(): string {
-    return this.avatarMessageForegroundUri.length > 0 ? this.avatarMessageForegroundUri : this.avatarForegroundUri;
-  }
-
   private thinkingAvatarColumnWidth(): number {
-    if (this.messageAvatarForegroundUri().length > 0) {
-      return digitalAvatarContainerWidth('message', true);
-    }
-    return TEXT_AVATAR_SIZE;
+    return digitalAvatarContainerWidth('message', true);
   }
 
   private thinkingAvatarDebugSource(): string {
@@ -1324,9 +1296,7 @@ export struct ChatMessageList {
 
   @Builder ThinkingAvatar() {
     DigitalAvatarView({
-      avatarForegroundUri: this.messageAvatarForegroundUri(),
-      fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
-      fallbackColor: '#5968FF',
+      useAssistantMascot: true,
       visualState: 'thinking',
       avatarSize: 'message',
       debugSource: this.thinkingAvatarDebugSource()
@@ -1337,12 +1307,12 @@ export struct ChatMessageList {
     Text('↓ 回到底部')
       .fontSize(12)
       .fontWeight(FontWeight.Medium)
-      .fontColor(Color.White)
+      .fontColor(AppTheme.text(Color.White))
       .height(34)
       .padding({ left: 14, right: 14 })
-      .backgroundColor('#111827')
+      .backgroundColor(AppTheme.filledBackground('#111827'))
       .borderRadius(17)
-      .shadow({ radius: 10, color: '#24000000', offsetX: 0, offsetY: 3 })
+      .shadow({ radius: 10, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 3 })
       .margin({ right: 4, bottom: this.backToBottomButtonBottomOffset() })
       .onClick(() => {
         this.handleBackToBottom();
@@ -1358,12 +1328,12 @@ export struct ChatMessageList {
       .margin({ right: 10 })
       Text('处理中...')
         .fontSize(13)
-        .fontColor('#6B7280')
+        .fontColor(AppTheme.text('#6B7280'))
         .height(36)
         .padding({ left: 14, right: 14 })
-        .backgroundColor('#F8FAFD')
+        .backgroundColor(AppTheme.background('#F8FAFD'))
         .borderRadius(18)
-        .border({ width: 1, color: '#E8ECF3' })
+        .border({ width: 1, color: AppTheme.border('#E8ECF3') })
       Blank()
         .layoutWeight(1)
     }
@@ -1394,8 +1364,6 @@ export struct ChatMessageList {
               shouldRenderFull: this.shouldRenderFullMessage(index),
               modeLabel: this.modeLabel,
               modeMark: this.modeMark,
-              avatarForegroundUri: this.avatarForegroundUri,
-              avatarMessageForegroundUri: this.avatarMessageForegroundUri,
               onToggleTaskTrace: this.onToggleTaskTrace,
               onToggleThinking: this.onToggleThinking,
               onPreviewDebugImage: this.onPreviewDebugImage,

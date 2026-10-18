@@ -16,18 +16,15 @@ export class SelfHdcSetupGuard {
     try {
       let settings = SelfHdcTaskSettings.load(filesDir);
       if (phoneModeOnly && settings.mode !== 'phone') { return true; }
+      let problem = '';
       if (!startupReminderOnly) {
         settings = await SelfHdcTaskSettings.refreshLocalIp(filesDir, reason);
         // A user may have changed the mode while address detection was pending.
         if (phoneModeOnly && settings.mode !== 'phone') { return true; }
-        let problem = selfHdcSetupProblem(settings, AppStorage.get<string>('selfHdcDetectedWifiIp') || '');
+        problem = selfHdcSetupProblem(settings, AppStorage.get<string>('selfHdcDetectedWifiIp') || '');
         if (problem.length === 0) { return true; }
         AppLogger.info('SelfHdc', 'SETUP_REQUIRED source=' + reason + ' ' + problem.replace(/\n/g, ' '));
-        if (settings.port.trim().length > 0 || settings.skipSetupReminder) {
-          // Suppressing the guide never bypasses connection validation before a phone task.
-          showToastSafely('请检查“我的 > 手机 HDC”的连接设置：\n' + problem, 3000);
-          return false;
-        }
+        // The startup reminder preference never suppresses a required task setup dialog.
       } else {
         // Reminder eligibility uses saved settings only; no device state inspection.
         if (settings.port.trim().length > 0 || settings.skipSetupReminder) { return true; }
@@ -35,7 +32,7 @@ export class SelfHdcSetupGuard {
       }
       let openSettings = await showSelfHdcSetupDialog(uiContext, (skipReminder: boolean): void => {
         SelfHdcTaskSettings.saveSetupReminderChoice(filesDir, skipReminder);
-      });
+      }, problem, settings.skipSetupReminder);
       if (openSettings) { await router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }, router.RouterMode.Single); }
       return false;
     } catch (e) {

@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../components/AppHeader';
 import { FrostedPage } from '../components/FrostedPage';
 import native from 'libentry.so';
@@ -74,7 +75,7 @@ struct ProfileTest {
       let stat = fs.statSync(path);
       if (stat.isFile()) {
         let lower = path.toLowerCase();
-        return stat.size > 0 && (lower.endsWith('.mnn') || lower.endsWith('.om') ||
+        return stat.size > 0 && (lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.omc') ||
           lower.endsWith('.safetensors') || lower.endsWith('.weight'));
       }
       if (!stat.isDirectory()) {
@@ -144,6 +145,34 @@ struct ProfileTest {
     }
   }
 
+  private isFullNpuConfig(path: string): boolean {
+    try {
+      let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
+      return config['format'] === 'kirin_full_npu_runtime_v1' ||
+        config['format'] === 'kirin_full_npu_runtime_v2' ||
+        config['format'] === 'kirin_full_npu_runtime_v3';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private modelExecutionMode(path: string): 'cpu' | 'online' | 'full_npu' | 'offline_npu2' {
+    if (this.isFullNpuConfig(path)) return 'full_npu';
+    try {
+      let config = ArkJSON.parse(this.readTextFile(path)) as JsonMap;
+      if (config['offline_npu2'] !== undefined) {
+        if (config['offline_npu2_mnn_visual'] === true && config['visual_split'] === true) {
+          let selected = AppStorage.get('localNpuExecutionMode') as string;
+          if (selected === 'online') return 'online';
+          if (selected === 'cpu') return 'cpu';
+        }
+        return 'offline_npu2';
+      }
+    } catch (e) {
+    }
+    return 'cpu';
+  }
+
   private profileConfigDir(baseConfigPath: string): string {
     let slash = baseConfigPath.lastIndexOf('/');
     let modelDir = slash >= 0 ? baseConfigPath.substring(0, slash) : baseConfigPath;
@@ -211,9 +240,11 @@ struct ProfileTest {
   }
 
   private async loadAndProfile(configPath: string, label: string, topK: number): Promise<string> {
-    let loadRes: string = await native.loadModel(configPath);
+    let fullNpu = this.isFullNpuConfig(configPath);
+    let loadRes: string = await native.loadModel(configPath, this.modelExecutionMode(configPath));
     let profileRes: string = await native.profileGenerate(this.prompt, topK);
-    return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + '\n' + profileRes;
+    let note = fullNpu ? '\n全图 NPU 的分图耗时请开启 Debug 后查看 Runtime Logs；此处不提供 OMC 内部算子排名。\n' : '\n';
+    return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + note + profileRes;
   }
 
   private loadModel() {
@@ -222,7 +253,7 @@ struct ProfileTest {
     }
     this.running = true;
     this.result = 'Loading model...\n' + this.modelConfigPath;
-    native.loadModel(this.modelConfigPath)
+    native.loadModel(this.modelConfigPath, this.modelExecutionMode(this.modelConfigPath))
       .then((res: string) => {
         this.loaded = true;
         this.result = 'loadModel: ' + res;
@@ -241,10 +272,12 @@ struct ProfileTest {
     }
     const k = Math.max(1, parseInt(this.topK || '30') || 30);
     let preset = PROFILE_CPU_PRESETS[this.selectedPresetIndex];
+    let fullNpu = this.isFullNpuConfig(this.modelConfigPath);
+    let label = fullNpu ? 'Full NPU' : this.presetSummary(preset);
     this.running = true;
-    this.result = 'Profiling ' + this.presetSummary(preset) + '...';
-    let configPath = this.writePresetConfig(this.modelConfigPath, preset);
-    this.loadAndProfile(configPath, this.presetSummary(preset), k)
+    this.result = 'Profiling ' + label + '...';
+    let configPath = fullNpu ? this.modelConfigPath : this.writePresetConfig(this.modelConfigPath, preset);
+    this.loadAndProfile(configPath, label, k)
       .then((res: string) => {
         this.loaded = true;
         this.result = res;
@@ -258,6 +291,10 @@ struct ProfileTest {
 
   private runPresetSweep() {
     if (this.running) {
+      return;
+    }
+    if (this.isFullNpuConfig(this.modelConfigPath)) {
+      this.result = 'CPU 线程预设不适用于全图 NPU，请使用单次 Profile，并开启 Debug 查看 Runtime Logs。';
       return;
     }
     const k = Math.max(1, parseInt(this.topK || '30') || 30);
@@ -312,30 +349,36 @@ struct ProfileTest {
   @Builder PageContent() {
     Scroll(this.pageScroller) {
       Column() {
-        Text('Profile real generate path with MNN Executor callbacks.').fontSize(13).fontColor('#666666').width('90%').margin({ top: 14, bottom: 12 })
+        Text('Profile real generate path with MNN Executor callbacks.').fontSize(13).fontColor(AppTheme.text('#666666')).width('90%').margin({ top: 14, bottom: 12 })
 
         Text('Model config path')
           .fontSize(12)
-          .fontColor('#666666')
+          .fontColor(AppTheme.text('#666666'))
           .alignSelf(ItemAlign.Start)
           .margin({ left: '5%', bottom: 4 })
         TextInput({ text: this.modelConfigPath, placeholder: '/data/storage/el2/base/files/model/config.json' })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .width('90%')
           .height(42)
-          .backgroundColor('#F0F0F0')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .enabled(!this.running)
           .onChange((value: string) => { this.modelConfigPath = value; })
 
         Text('Prompt')
           .fontSize(12)
-          .fontColor('#666666')
+          .fontColor(AppTheme.text('#666666'))
           .alignSelf(ItemAlign.Start)
           .margin({ left: '5%', top: 12, bottom: 4 })
         TextArea({ text: this.prompt, placeholder: 'Prompt for profiling' })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .width('90%')
           .height(96)
-          .backgroundColor('#F0F0F0')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .enabled(!this.running)
           .onChange((value: string) => { this.prompt = value; })
@@ -343,12 +386,15 @@ struct ProfileTest {
         Row() {
           Text('Top ops')
             .fontSize(12)
-            .fontColor('#666666')
+            .fontColor(AppTheme.text('#666666'))
           TextInput({ text: this.topK, placeholder: '30' })
+            .fontColor($r('app.color.ui_text_primary'))
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .width(90)
             .height(36)
             .type(InputType.Number)
-            .backgroundColor('#F0F0F0')
+            .backgroundColor(AppTheme.inputBackground())
             .borderRadius(8)
             .enabled(!this.running)
             .onChange((value: string) => { this.topK = value; })
@@ -359,7 +405,7 @@ struct ProfileTest {
 
         Text('CPU preset')
           .fontSize(12)
-          .fontColor('#666666')
+          .fontColor(AppTheme.text('#666666'))
           .alignSelf(ItemAlign.Start)
           .margin({ left: '5%', bottom: 6 })
         Column() {
@@ -368,8 +414,8 @@ struct ProfileTest {
               .height(34)
               .width('100%')
               .fontSize(12)
-              .backgroundColor(this.selectedPresetIndex === index ? '#1565C0' : '#CFD8DC')
-              .fontColor(this.selectedPresetIndex === index ? '#FFFFFF' : '#263238')
+              .backgroundColor(AppTheme.background(this.selectedPresetIndex === index ? '#1565C0' : '#CFD8DC'))
+              .fontColor(AppTheme.text(this.selectedPresetIndex === index ? '#FFFFFF' : '#263238'))
               .borderRadius(6)
               .enabled(!this.running)
               .margin({ bottom: 6 })
@@ -384,7 +430,7 @@ struct ProfileTest {
             .height(42)
             .layoutWeight(1)
             .fontSize(14)
-            .backgroundColor('#1565C0')
+            .backgroundColor(AppTheme.background('#1565C0'))
             .borderRadius(8)
             .enabled(!this.running)
             .onClick(() => { this.loadModel(); })
@@ -392,7 +438,7 @@ struct ProfileTest {
             .height(42)
             .layoutWeight(1)
             .fontSize(14)
-            .backgroundColor(this.loaded ? '#2E7D32' : '#78909C')
+            .backgroundColor(AppTheme.background(this.loaded ? '#2E7D32' : '#78909C'))
             .borderRadius(8)
             .margin({ left: 10 })
             .enabled(!this.running)
@@ -405,7 +451,7 @@ struct ProfileTest {
           .height(42)
           .width('90%')
           .fontSize(14)
-          .backgroundColor(this.running ? '#B0BEC5' : '#00838F')
+          .backgroundColor(AppTheme.background(this.running ? '#B0BEC5' : '#00838F'))
           .borderRadius(8)
           .enabled(!this.running)
           .margin({ bottom: 12 })
@@ -415,7 +461,7 @@ struct ProfileTest {
           .height(42)
           .width('90%')
           .fontSize(14)
-          .backgroundColor(this.running ? '#B0BEC5' : '#6A1B9A')
+          .backgroundColor(AppTheme.background(this.running ? '#B0BEC5' : '#6A1B9A'))
           .borderRadius(8)
           .enabled(!this.running)
           .margin({ bottom: 12 })
@@ -425,7 +471,7 @@ struct ProfileTest {
           .height(40)
           .width('90%')
           .fontSize(14)
-          .backgroundColor('#FF9800')
+          .backgroundColor(AppTheme.background('#FF9800'))
           .borderRadius(8)
           .enabled(this.result.length > 0)
           .margin({ bottom: 12 })
@@ -442,10 +488,10 @@ struct ProfileTest {
         Text(this.result)
           .fontSize(11)
           .fontFamily('monospace')
-          .fontColor('#263238')
+          .fontColor(AppTheme.text('#263238'))
           .width('94%')
           .padding(10)
-          .backgroundColor('#ECEFF1')
+          .backgroundColor(AppTheme.background('#ECEFF1'))
           .borderRadius(6)
           .textAlign(TextAlign.Start)
       }

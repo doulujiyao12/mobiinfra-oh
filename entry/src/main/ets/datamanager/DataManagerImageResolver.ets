@@ -60,7 +60,15 @@ export class DataManagerImageResolver {
     }
     let hashIndex = ref.indexOf('#');
     if (hashIndex >= 0) {
-      return this.displayUriFromJsonPointer(ref.substring(0, hashIndex), ref.substring(hashIndex + 1));
+      let fileRef = ref.substring(0, hashIndex);
+      let pointer = ref.substring(hashIndex + 1);
+      // Old memories point to #uri. HDC results now keep a source reference there;
+      // prefer the committed thumbnail so existing memories survive full-copy cleanup.
+      if (this.isGalleryItemJsonRef(fileRef) && (pointer === 'uri' || pointer === '/uri')) {
+        let thumbnail = this.displayUriFromJsonPointer(fileRef, 'thumbnailUri');
+        if (thumbnail.length > 0) { return thumbnail; }
+      }
+      return this.displayUriFromJsonPointer(fileRef, pointer);
     }
     if (this.isGalleryItemJsonRef(ref)) {
       let uri = this.displayUriFromJsonPointer(ref, 'thumbnailUri');

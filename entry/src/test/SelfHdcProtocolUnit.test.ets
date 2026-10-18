@@ -14,7 +14,10 @@ import { PhoneHdcActions } from '../main/ets/utils/selfhdc/PhoneHdcActions';
 import { phoneHdcBundle, phoneHdcMainAbility } from '../main/ets/utils/selfhdc/PhoneHdcApp';
 import { parsePhoneHdcUiInputHelp } from '../main/ets/utils/selfhdc/PhoneHdcCapabilities';
 import { selfHdcIsUsableWifiIpv4, selectSelfHdcWifiIpv4 } from '../main/ets/utils/selfhdc/SelfHdcNetworkPolicy';
-import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
+import {
+  phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize,
+  phoneAgentActionTokenBudget, phoneAgentOutputWasTruncated, PHONE_AGENT_MAX_ACTION_TOKENS
+} from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
 import { localVisionPromptHw } from '../main/ets/utils/LocalVisionImageShape';
 import { SelfHdcTaskSettings } from '../main/ets/utils/selfhdc/SelfHdcTaskSettings';
 import { selfHdcControlMode, selfHdcSetupProblem } from '../main/ets/utils/selfhdc/SelfHdcSetupPolicy';
@@ -51,6 +54,15 @@ const REPORTED_UIINPUT_HELP: string = 'Missing parameter. \r\n\r\nUSAGE : \r\n' 
 
 export default function selfHdcProtocolUnitTest(): void {
   describe('selfHdcProtocolUnitTest', () => {
+    it('budgetsEnoughOutputForLongInputAndRecognizesProviderTruncation', 0, () => {
+      expect(phoneAgentActionTokenBudget('')).assertEqual(1024);
+      expect(phoneAgentActionTokenBudget('查询'.repeat(350)) > 2048).assertTrue();
+      expect(phoneAgentActionTokenBudget('长需求'.repeat(3000))).assertEqual(PHONE_AGENT_MAX_ACTION_TOKENS);
+      expect(phoneAgentOutputWasTruncated('length')).assertTrue();
+      expect(phoneAgentOutputWasTruncated('max_tokens')).assertTrue();
+      expect(phoneAgentOutputWasTruncated('stop')).assertFalse();
+      expect(phoneAgentOutputWasTruncated('')).assertFalse();
+    });
     it('defaultsToPhoneAndPreservesAnExplicitDesktopSelection', 0, () => {
       expect(new SelfHdcTaskSettings().mode).assertEqual('phone');
       expect(selfHdcControlMode(undefined)).assertEqual('phone');
@@ -166,16 +178,19 @@ export default function selfHdcProtocolUnitTest(): void {
       expect(actions.plan(payload).commands[0].command).assertEqual('uitest uiInput click 540 1222');
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click', x: 2160, y: 100 })); })).assertTrue();
     });
-    it('focusesClearsAndQuotesInputBeforeSubmittingAsThePcDriverDoes', 0, () => {
+    it('typesQuotedTextWithoutImplicitlySendingOrSubmittingIt', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
       let plan = actions.plan(phoneTestMap({ action: 'click_input', x: 200, y: 300, text: "中文 a'b;$(id)" }));
       expect(plan.commands.map((command): string => command.label).join('|')).assertEqual(
-        'activate/click|select-all|clear-input|input-text chars=12|submit-enter');
+        'activate/click|select-all|clear-input|input-text chars=12');
       expect(plan.commands[1].command).assertEqual('uitest uiInput keyEvent 2072 2017');
       expect(plan.commands[2].command).assertEqual('uitest uiInput keyEvent 2071');
       expect(plan.commands[3].command).assertEqual("uitest uiInput text '中文 a'\\''b;$(id)'");
       expect(plan.commands[3].sensitive).assertTrue();
-      expect(plan.commands[4].command).assertEqual('uitest uiInput keyEvent 2054');
+      expect(plan.commands.length).assertEqual(4);
+      let explicit = actions.plan(phoneTestMap({ action: 'click_input', x: 200, y: 300, text: 'search', submit_enter: true }));
+      expect(explicit.commands[4].command).assertEqual('uitest uiInput keyEvent 2054');
+      expect(explicit.inputTarget === null).assertTrue();
     });
     it('refusesBlindInputAndClearsRememberedFocusAfterNavigation', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
@@ -185,16 +200,20 @@ export default function selfHdcProtocolUnitTest(): void {
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', text: 'hello' })); })).assertTrue();
       actions.commit(clicked);
       let input = actions.plan(phoneTestMap({ action: 'input', text: ' hello ', submit_enter: false }));
-      expect(input.commands[3].command).assertEqual("uitest uiInput text ' hello '");
-      expect(input.commands.length).assertEqual(4);
+      expect(input.commands[2].command).assertEqual("uitest uiInput text ' hello '");
+      expect(input.commands.length).assertEqual(3);
+      expect(input.commands.some((command): boolean => command.label === 'activate/click')).assertFalse();
       actions.commit(actions.plan(phoneTestMap({ action: 'sleep' })));
-      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after wait' })).commands.length).assertEqual(5);
+      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after wait' })).commands.length).assertEqual(3);
       actions.commit(actions.plan(phoneTestMap({ action: 'keyevent', key: 'ENTER' })));
-      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after enter' })).commands.length).assertEqual(5);
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', text: 'after enter' })); })).assertTrue();
       actions.commit(actions.plan(phoneTestMap({ action: 'keyevent', key: 'BACK' })));
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', text: 'hello' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', x: 20, text: 'hello' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click_input', x: 20, y: 30, text: 'a\0b' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click_input', x: 20, y: 30 })); })).assertTrue();
+      let invalid: WorkflowJsonMap = { action: 'click_input', x: 200, y: 300, text: 'hello', submit_enter: 'true' };
+      expect(rejects((): void => { actions.plan(invalid); })).assertTrue();
     });
     it('reproducesPcSwipeDirectionsAndRejectsShellInjectionInKeys', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
@@ -204,9 +223,13 @@ export default function selfHdcProtocolUnitTest(): void {
         .assertEqual('uitest uiInput swipe 324 1222 756 1222');
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'keyevent', key: '2; id' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'swipe', direction: 'diagonal' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'swipe' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'keyevent' })); })).assertTrue();
     });
     it('resolvesAliasesAndTheHomeAbilityInsteadOfGuessingEntryAbility', 0, () => {
       expect(phoneHdcBundle('淘宝', '')).assertEqual('com.taobao.taobao4hmos');
+      expect(phoneHdcBundle('千问', '')).assertEqual('com.aliyun.tongyi4ohos');
+      expect(phoneHdcBundle('通义千问', '')).assertEqual('com.aliyun.tongyi4ohos');
       expect(rejects((): void => { phoneHdcBundle('', 'com.example;id'); })).assertTrue();
       let dump = 'bundle info:\n{"hapModuleInfos":[{"mainElementName":"OtherAbility","abilities":[' +
         '{"name":"Taobao_mainAbility","skills":[{"actions":["action.system.home"],"entities":["entity.system.home"]}]}]}]}';

@@ -1,5 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { AgentActionParser } from '../main/ets/utils/AgentActionParser';
+import { stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
+import { phoneAgentValidateAction } from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
 import {
   AgentActionParseRetry,
   AgentActionParseRetryInfo
@@ -140,6 +142,68 @@ export default function agentActionParserUnitTest() {
       expect(requestCount).assertEqual(4);
       expect(retryCount).assertEqual(3);
       expect(failure).assertContain('after 3 same-screen retries');
+    });
+
+    it('retriesTruncatedQwenInputInsteadOfExecutingRepairedPartialText', 0, async () => {
+      let requestCount = 0;
+      let diagnostics: string[] = [];
+      // Same failure shape as the phone log: long reasoning, then text cut off before bbox.
+      let truncated = '{"reasoning":"准备输入完整需求","action":"click_input",' +
+        '"parameters":{"target_element":"底部输入框","text":"查询指定手机的优惠价';
+      let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+        requestCount += 1;
+        return requestCount === 1 ? truncated :
+          '{"action":"click","parameters":{"target_element":"底部输入框","bbox":[50,900,900,960]}}';
+      }, (info: AgentActionParseRetryInfo): void => { diagnostics.push(info.errorMessage); }, phoneAgentValidateAction);
+      expect(requestCount).assertEqual(2);
+      expect(diagnostics[0]).assertContain('truncated');
+      expect(parsed.action).assertEqual('click');
+    });
+
+    it('retriesCompleteJsonWithMissingClickCoordinates', 0, async () => {
+      let requestCount = 0;
+      let diagnostic = '';
+      let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+        requestCount += 1;
+        return requestCount === 1 ? '{"action":"click_input","parameters":{"text":"需求"}}' :
+          '{"action":"click_input","parameters":{"bbox":[20,880,950,960],"text":"完整需求"}}';
+      }, (info: AgentActionParseRetryInfo): void => { diagnostic = info.errorMessage; }, phoneAgentValidateAction);
+      expect(requestCount).assertEqual(2);
+      expect(diagnostic).assertContain('PHONE_AGENT_COORDINATE: missing bbox');
+      expect(AgentActionParser.getMapString(parsed.parameters, 'text')).assertEqual('完整需求');
+    });
+
+    it('rejectsTruncatedTextEvenIfCoordinatesWereAlreadyGenerated', 0, () => {
+      let failure = '';
+      try {
+        AgentActionParser.parseExecutable('{"action":"click_input",' +
+          '"parameters":{"bbox":[20,880,950,960],"text":"不能执行这段残缺文字');
+      } catch (e) { failure = (e as Error).message; }
+      expect(failure).assertContain('truncated');
+    });
+
+    it('keepsCompleteSyntaxRepairsAndLongEscapedInputOnPhone', 0, () => {
+      let click = AgentActionParser.parseExecutable('{"action":"click","parameters":{"bbox":100,200,300,400}}');
+      expect(click.action).assertEqual('click');
+      let text = '查询"优惠"，保留符号{}[]与预算条件。'.repeat(35);
+      let raw = '{"action":"input","parameters":{"text":' + stringifyJsonCompat(text) + '}}';
+      let input = AgentActionParser.parseExecutable(raw);
+      expect(AgentActionParser.getMapString(input.parameters, 'text')).assertEqual(text);
+    });
+
+    it('doesNotRetryModelRequestExceptionsAsParsingFailures', 0, async () => {
+      let requests = 0;
+      let retries = 0;
+      let failure = '';
+      try {
+        await AgentActionParseRetry.request(async (): Promise<string> => {
+          requests += 1;
+          throw new Error('cancelled');
+        }, (): void => { retries += 1; }, phoneAgentValidateAction);
+      } catch (e) { failure = (e as Error).message; }
+      expect(requests).assertEqual(1);
+      expect(retries).assertEqual(0);
+      expect(failure).assertEqual('cancelled');
     });
 
     it('returnsRepairedActionWhenSameScreenRetrySucceeds', 0, async () => {

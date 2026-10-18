@@ -1,6 +1,6 @@
 import { JSON as ArkJSON } from '@kit.ArkTS';
 
-// Same app aliases as harmony_agent.py; the PC source remains untouched.
+// HarmonyOS app aliases for the independent phone backend.
 const APP_BUNDLES: Record<string, string> = {
   '携程': 'com.ctrip.harmonynext', '携程旅行': 'com.ctrip.harmonynext', '飞猪': 'com.fliggy.hmos',
   '飞猪旅行': 'com.fliggy.hmos', 'IntelliOS': 'ohos.hongmeng.intellios', '同城': 'com.tongcheng.hmos',
@@ -15,7 +15,9 @@ const APP_BUNDLES: Record<string, string> = {
   '智慧生活': 'com.huawei.hmos.ailife', '豆包': 'com.larus.nova.hm', 'WeLink': 'com.huawei.it.welink',
   '设置': 'com.huawei.hmos.settings', '懂车帝': 'com.ss.dcar.auto', '美团外卖': 'com.meituan.takeaway',
   '大众点评': 'com.sankuai.dianping', '美团': 'com.sankuai.hmeituan', '浏览器': 'com.huawei.hmos.browser',
-  '拼多多': 'com.xunmeng.pinduoduo.hos', '支付宝': 'com.alipay.mobile.client'
+  '拼多多': 'com.xunmeng.pinduoduo.hos', '支付宝': 'com.alipay.mobile.client',
+  // Same bundle as the existing built-in Planner app list.
+  '千问': 'com.aliyun.tongyi4ohos', '通义千问': 'com.aliyun.tongyi4ohos', '通义': 'com.aliyun.tongyi4ohos'
 };
 
 export function phoneHdcBundle(appName: string, packageName: string): string {

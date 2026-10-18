@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
@@ -131,7 +132,7 @@ struct SelfHdcTestPage {
   }
 
   @Builder private SectionTitle(title: string) {
-    Text(title).fontSize(16).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%')
+    Text(title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F')).width('100%')
   }
 
   @Builder private ScreenshotCard(title: string, path: string) {
@@ -139,10 +140,10 @@ struct SelfHdcTestPage {
       this.SectionTitle(title)
       Image('file://' + path)
         .width('100%').height(360).objectFit(ImageFit.Contain).borderRadius(12).margin({ top: 10 })
-      Text(path).fontSize(10).fontColor('#7B8290').width('100%').margin({ top: 8 })
+      Text(path).fontSize(10).fontColor(AppTheme.text('#7B8290')).width('100%').margin({ top: 8 })
     }
     .width('92%').padding(18).alignItems(HorizontalAlign.Start)
-    .backgroundColor(Color.White).borderRadius(18).margin({ top: 14 })
+    .backgroundColor(AppTheme.background(Color.White)).borderRadius(18).margin({ top: 14 })
   }
 
   @Builder PageHeader() {
@@ -156,9 +157,9 @@ struct SelfHdcTestPage {
           this.SectionTitle('无线调试地址')
           SelfHdcSetupGuide().margin({ top: 12 })
           Text('本机 IPv4：' + this.localAddresses)
-            .fontSize(12).fontColor('#667085').width('100%').margin({ top: 12 })
+            .fontSize(12).fontColor(AppTheme.text('#667085')).width('100%').margin({ top: 12 })
           Row({ space: 10 }) {
-            Text('自动更新手机 Wi-Fi IP').fontSize(13).fontColor('#475467').layoutWeight(1)
+            Text('自动更新手机 Wi-Fi IP').fontSize(13).fontColor(AppTheme.text('#475467')).layoutWeight(1)
             Toggle({ type: ToggleType.Switch, isOn: this.autoIp }).enabled(!this.result.running)
               .onChange((value: boolean): void => {
                 this.autoIp = value;
@@ -166,77 +167,85 @@ struct SelfHdcTestPage {
               })
           }.width('100%').margin({ top: 12 })
           TextInput({ text: this.ip, placeholder: '手机 IPv4 地址' })
+            .fontColor($r('app.color.ui_text_primary'))
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
+            .backgroundColor($r('app.color.ui_input_background'))
             .height(46).fontSize(14).enabled(!this.result.running && !this.autoIp).margin({ top: 10 })
             .onChange((value: string): void => { this.ip = value; this.saveConnection(); })
           TextInput({ text: this.port, placeholder: '无线调试连接端口' })
+            .fontColor($r('app.color.ui_text_primary'))
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
+            .backgroundColor($r('app.color.ui_input_background'))
             .type(InputType.Number).height(46).fontSize(14).enabled(!this.result.running).margin({ top: 10 })
             .onChange((value: string): void => { this.port = value; this.saveConnection(); })
           Text(this.ipStatus || '每次启动、回到 App 和连接前自动检测 Wi-Fi IP。')
-            .fontSize(12).lineHeight(19).fontColor('#667085').width('100%').margin({ top: 10 })
+            .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#667085')).width('100%').margin({ top: 10 })
           Button(this.refreshingIp ? '正在检测 IP…' : '立即检测手机 IP').height(34).fontSize(12)
             .enabled(!this.result.running && !this.refreshingIp).margin({ top: 8 })
             .onClick(async (): Promise<void> => { await this.refreshIp(); })
           Text('修改即保存，任务页共用这里的设置。需使用回环或其他手动地址时，关闭自动更新。')
-            .fontSize(12).lineHeight(19).fontColor('#7B8290').width('100%').margin({ top: 8 })
+            .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#7B8290')).width('100%').margin({ top: 8 })
           Row({ space: 10 }) {
             Button('仅测试连接').layoutWeight(1).height(44).fontSize(14)
-              .backgroundColor('#EEF1FF').fontColor('#4F68FF').enabled(!this.result.running && !this.refreshingIp)
+              .backgroundColor(AppTheme.background('#EEF1FF')).fontColor(AppTheme.text('#4F68FF')).enabled(!this.result.running && !this.refreshingIp)
               .onClick(async (): Promise<void> => { await this.start(true); })
             Button('开始完整测试').layoutWeight(1).height(44).fontSize(14)
-              .backgroundColor('#4F68FF').fontColor(Color.White).enabled(!this.result.running && !this.refreshingIp)
+              .backgroundColor(AppTheme.filledBackground('#4F68FF')).fontColor(AppTheme.text(Color.White)).enabled(!this.result.running && !this.refreshingIp)
               .onClick(async (): Promise<void> => { await this.start(false); })
           }.width('100%').margin({ top: 18 })
           if (this.result.running) {
-            Button('停止执行').width('100%').height(42).fontSize(14).backgroundColor('#FFF0ED').fontColor('#B54708')
+            Button('停止执行').width('100%').height(42).fontSize(14).backgroundColor(AppTheme.background('#FFF0ED')).fontColor(AppTheme.text('#B54708'))
               .margin({ top: 10 }).onClick(() => { this.runner.cancel(); })
           }
           Button('验证点击 / 聚焦 / 文本输入').width('100%').height(40).fontSize(13)
             .enabled(!this.result.running && !this.refreshingIp).margin({ top: 10 })
             .onClick(async (): Promise<void> => { await this.openInputTest(); })
           if (this.pageError) {
-            Text(this.pageError).fontSize(12).fontColor('#B42318').width('100%').margin({ top: 10 })
+            Text(this.pageError).fontSize(12).fontColor(AppTheme.text('#B42318')).width('100%').margin({ top: 10 })
           }
-        }.width('92%').padding(18).alignItems(HorizontalAlign.Start).backgroundColor(Color.White).borderRadius(18)
+        }.width('92%').padding(18).alignItems(HorizontalAlign.Start).backgroundColor(AppTheme.background(Color.White)).borderRadius(18)
 
         Column() {
           this.SectionTitle('测试动作')
           Text('打开支付宝 → 保存截图 → 向上滑动一次 → 保存对照截图 → 返回本 App。所有设备动作都通过手机端 HDC 会话发送。')
-            .fontSize(13).lineHeight(21).fontColor('#667085').width('100%').margin({ top: 10 })
+            .fontSize(13).lineHeight(21).fontColor(AppTheme.text('#667085')).width('100%').margin({ top: 10 })
           Text('测试期间请不要手动切换应用。系统授权、后台运行或 HDC 协议不兼容时会停止，并保留失败阶段。')
-            .fontSize(12).lineHeight(19).fontColor('#7B8290').width('100%').margin({ top: 10 })
+            .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#7B8290')).width('100%').margin({ top: 10 })
         }.width('92%').padding(18).alignItems(HorizontalAlign.Start)
-          .backgroundColor(Color.White).borderRadius(18).margin({ top: 14 })
+          .backgroundColor(AppTheme.background(Color.White)).borderRadius(18).margin({ top: 14 })
 
         Column() {
           this.SectionTitle(this.statusText())
           if (this.debugEnabled) {
             Button('清空日志').height(36).fontSize(13).enabled(!this.result.running)
-              .backgroundColor('#FFF0ED').fontColor('#B54708').margin({ top: 10 })
+              .backgroundColor(AppTheme.background('#FFF0ED')).fontColor(AppTheme.text('#B54708')).margin({ top: 10 })
               .onClick(() => { this.clearLogs(); })
           }
           if (this.result.endpoint) {
-            Text('直连地址：' + this.result.endpoint).fontSize(12).fontColor('#667085').width('100%').margin({ top: 8 })
+            Text('直连地址：' + this.result.endpoint).fontSize(12).fontColor(AppTheme.text('#667085')).width('100%').margin({ top: 8 })
           }
           if (this.result.message) {
-            Text(this.result.message).fontSize(13).lineHeight(21).fontColor('#30384C').width('100%').margin({ top: 10 })
+            Text(this.result.message).fontSize(13).lineHeight(21).fontColor(AppTheme.text('#30384C')).width('100%').margin({ top: 10 })
           }
           if (this.debugEnabled && this.result.logPath) {
-            Text('日志：' + this.result.logPath).fontSize(11).fontColor('#7B8290').width('100%').margin({ top: 10 })
-            Button('复制完整日志').height(38).fontSize(13).backgroundColor('#EEF1FF').fontColor('#4F68FF')
+            Text('日志：' + this.result.logPath).fontSize(11).fontColor(AppTheme.text('#7B8290')).width('100%').margin({ top: 10 })
+            Button('复制完整日志').height(38).fontSize(13).backgroundColor(AppTheme.background('#EEF1FF')).fontColor(AppTheme.text('#4F68FF'))
               .margin({ top: 10 }).onClick(async (): Promise<void> => { await this.copyLogs(); })
           }
           if (this.debugEnabled) {
             Text(this.result.logs.length > 0 ? this.result.logs.join('\n') : '执行后会在这里显示连接、授权和动作日志。')
-              .fontSize(10).lineHeight(16).fontColor('#475467').width('100%').copyOption(CopyOptions.InApp)
-              .margin({ top: 12 }).padding(12).backgroundColor('#F6F8FC').borderRadius(10)
+              .fontSize(10).lineHeight(16).fontColor(AppTheme.text('#475467')).width('100%').copyOption(CopyOptions.InApp)
+              .margin({ top: 12 }).padding(12).backgroundColor(AppTheme.background('#F6F8FC')).borderRadius(10)
           }
         }.width('92%').padding(18).alignItems(HorizontalAlign.Start)
-          .backgroundColor(Color.White).borderRadius(18).margin({ top: 14 })
+          .backgroundColor(AppTheme.background(Color.White)).borderRadius(18).margin({ top: 14 })
         if (this.result.beforeImage) { this.ScreenshotCard('首张截图', this.result.beforeImage) }
         if (this.result.afterImage) { this.ScreenshotCard('最近截图', this.result.afterImage) }
         if (this.debugEnabled) {
           Text('手机测试和任务日志在 self_hdc/runs。清空日志保留授权密钥、连接配置和截图；执行中不可清空。')
-            .fontSize(11).lineHeight(18).fontColor('#7B8290').width('92%').margin({ top: 16, bottom: 30 })
+            .fontSize(11).lineHeight(18).fontColor(AppTheme.text('#7B8290')).width('92%').margin({ top: 16, bottom: 30 })
         }
       }.width('100%').padding({ top: APP_HEADER_CONTENT_GAP })
     }.width('100%').height('100%').clip(false)

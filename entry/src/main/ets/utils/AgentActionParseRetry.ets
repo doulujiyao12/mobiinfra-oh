@@ -11,21 +11,24 @@ export interface AgentActionParseRetryInfo {
 
 export type AgentActionRequest = () => Promise<string>;
 export type AgentActionParseRetryHandler = (info: AgentActionParseRetryInfo) => void;
+export type AgentActionValidator = (parsed: ParsedAgentAction) => void;
 
 export class AgentActionParseRetry {
-  // request 只负责模型请求；请求异常直接抛出。仅当解析器完成全部修复仍失败时，才在同一截图上重试。
+  // Request errors propagate. Optional action validation also runs before dispatch and can trigger same-screen retry.
   static async request(request: AgentActionRequest,
-    onRetry?: AgentActionParseRetryHandler): Promise<ParsedAgentAction> {
+    onRetry?: AgentActionParseRetryHandler, validate?: AgentActionValidator): Promise<ParsedAgentAction> {
     let parseFailureCount = 0;
     while (true) {
       let response = await request();
       try {
-        return AgentActionParser.parse(response, true);
+        let parsed = AgentActionParser.parse(response, true);
+        if (validate !== undefined) { validate(parsed); }
+        return parsed;
       } catch (e) {
         let err = e as Error;
         let errorMessage = err.message || String(e);
         if (parseFailureCount >= MAX_SAME_SCREEN_JSON_PARSE_RETRIES) {
-          throw new Error('Agent JSON parse failed after ' +
+          throw new Error('Agent ' + (validate !== undefined ? 'action validation' : 'JSON parse') + ' failed after ' +
             String(MAX_SAME_SCREEN_JSON_PARSE_RETRIES) + ' same-screen retries: ' + errorMessage);
         }
         parseFailureCount += 1;

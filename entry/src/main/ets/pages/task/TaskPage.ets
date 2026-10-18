@@ -1,3 +1,4 @@
+import { AppTheme } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
@@ -25,6 +26,13 @@ import { TaskDeviceControlPanel } from '../../components/TaskDeviceControlPanel'
 import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
 import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
+import { WorkflowCancellation } from '../../utils/WorkflowCancellation';
+import { AppLogger } from '../../utils/AppLogger';
+import { CollectionReminderPanel } from '../../components/CollectionReminderPanel';
+import {
+  COLLECTION_REMINDER_READY_KEY, COLLECTION_REMINDER_REQUEST_KEY, CollectionReminderService
+} from '../../utils/CollectionReminderService';
+import { HuaweiAccountSession } from '../../utils/HuaweiAccountSession';
 
 interface WorkflowNodeTemplate {
   key: string;
@@ -109,14 +117,22 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 @Component
 export struct TaskPage {
   private pageScroller: Scroller = new Scroller();
+  @Prop @Watch('onCollectionReminderChanged') active: boolean = false;
+  @StorageProp(COLLECTION_REMINDER_REQUEST_KEY) @Watch('onCollectionReminderChanged')
+  private reminderRequest: string = '';
+  @StorageProp(COLLECTION_REMINDER_READY_KEY) @Watch('onCollectionReminderChanged')
+  private reminderWindowReady: boolean = false;
   @Link taskScene: number;
   onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
-  onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
-  onRunPhoneWorkflow: (task: WorkflowTask) => Promise<void> = async (_task: WorkflowTask): Promise<void> => {
+  onRunWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation) => Promise<void> =
+    async (_task: WorkflowTask, _cancellation: WorkflowCancellation): Promise<void> => {};
+  onRunPhoneWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation) => Promise<void> =
+    async (_task: WorkflowTask, _cancellation: WorkflowCancellation): Promise<void> => {
     throw new Error('手机任务执行器未连接');
   };
   @State private taskControlMode: string = 'phone';
   @StorageLink('selfHdcRunning') private phoneControlBusy: boolean = false;
+  @StorageLink('agentExecutionActive') private agentExecutionBusy: boolean = false;
 
   @State tasks: WorkflowTask[] = [];
   @State editorOpen: boolean = false;
@@ -156,6 +172,7 @@ export struct TaskPage {
   @Link @Watch('onConfigViewChanged') configViewOpen: boolean;
   @State private focusedConfigTaskId: string = '';
   @State batchRunning: boolean = false;
+  @State private batchStopRequested: boolean = false;
   @State batchRunStatusText: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
   @State configManagedFiles: WorkflowManagedFile[] = [];
@@ -175,6 +192,11 @@ export struct TaskPage {
   private cardContextSaveTimerIds: Record<string, number> = {};
   private pendingConfigTaskId: string = '';
   private configScrollTimerId: number = -1;
+  private batchCancellation: WorkflowCancellation | null = null;
+  @State private batchPreparing: boolean = false;
+  private reminderHandling: boolean = false;
+  private lastAutomaticReminderRequest: string = '';
+  private reminderStartTimerId: number = -1;
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -187,14 +209,48 @@ export struct TaskPage {
     } catch (e) {
     }
     this.reloadTasks();
+    this.onCollectionReminderChanged();
   }
 
   aboutToDisappear(): void {
+    if (this.reminderStartTimerId >= 0) { clearTimeout(this.reminderStartTimerId); this.reminderStartTimerId = -1; }
     this.cancelConfigTaskScroll();
     if (this.filesDir.length > 0) {
       this.flushTaskContextDrafts();
     }
     this.clearAllTaskContextSaveTimers();
+  }
+
+  private onCollectionReminderChanged(): void {
+    if (!this.active || !this.reminderWindowReady || this.filesDir.length === 0 || this.reminderRequest.length === 0 ||
+      this.reminderHandling || this.batchPreparing || this.isTaskExecutionBusy() ||
+      this.lastAutomaticReminderRequest === this.reminderRequest) { return; }
+    if (this.reminderStartTimerId >= 0) { clearTimeout(this.reminderStartTimerId); }
+    this.reminderStartTimerId = setTimeout((): void => {
+      this.reminderStartTimerId = -1;
+      this.startCollectionFromReminder().catch((e: Error): void => {
+        AppLogger.errorCause('CollectionReminder', 'Reminder dispatch failed', e);
+        showToastSafely('提醒采集无法开始：' + e.message, 2200);
+      });
+    }, 0);
+  }
+
+  private async startCollectionFromReminder(): Promise<void> {
+    let request = this.reminderRequest;
+    if (!this.active || !this.reminderWindowReady || this.reminderHandling || request.length === 0 ||
+      this.lastAutomaticReminderRequest === request) { return; }
+    if (CollectionReminderService.pendingIntent(request) === null) {
+      CollectionReminderService.clearRequest(request);
+      return;
+    }
+    this.reminderHandling = true;
+    try {
+      // Cold notification launches may precede restoration of the Huawei login session.
+      await HuaweiAccountSession.refresh(getContext(this) as common.UIAbilityContext);
+      if (!this.active || !this.reminderWindowReady || this.reminderRequest !== request) { return; }
+      this.lastAutomaticReminderRequest = request;
+      await this.runEnabledTasks(request, true);
+    } finally { this.reminderHandling = false; }
   }
 
   private reloadTasks(): void {
@@ -305,7 +361,7 @@ export struct TaskPage {
   }
 
   private isTaskExecutionBusy(): boolean {
-    return this.batchRunning || this.runningTaskId.length > 0 || this.phoneControlBusy;
+    return this.batchRunning || this.runningTaskId.length > 0 || this.phoneControlBusy || this.agentExecutionBusy;
   }
 
   private isWorkflowCancelledStatus(status: string, message: string): boolean {
@@ -558,13 +614,34 @@ export struct TaskPage {
 
   private batchRunButtonText(): string {
     if (this.batchRunning) {
-      return '执行中';
+      return this.batchStopRequested ? '正在停止…' : '停止执行';
     }
     let count = this.enabledTaskCount();
     if (count === 0) {
       return '暂无开启任务';
     }
     return '一键执行已开启任务（' + count + '）';
+  }
+
+  private batchRunButtonEnabled(): boolean {
+    return this.batchRunning ? !this.batchStopRequested :
+      this.enabledTaskCount() > 0 && !this.batchPreparing && !this.isTaskExecutionBusy();
+  }
+
+  private stopEnabledTasks(): void {
+    if (!this.batchRunning || this.batchStopRequested || this.batchCancellation === null) { return; }
+    // Set the queue stop flag before cancelling the current asynchronous operation.
+    this.batchStopRequested = true;
+    this.batchRunStatusText = '正在停止当前任务，后续任务不再下发…';
+    this.batchCancellation.cancel();
+    AppLogger.info('Workflow.Batch', 'Stop requested currentTask=' + this.runningTaskId);
+    if (this.taskControlMode === 'phone' && this.phoneControlBusy) {
+      try {
+        SelfHdcTestRunner.shared().recordExternal('WORKFLOW_BATCH_STOP: cancel current task; drop remaining queue');
+      } catch (e) {
+        AppLogger.warnCause('Workflow.Batch', 'Stop log failed; cancellation was already requested', e as Error);
+      }
+    }
   }
 
   private openCreateEditor(mode: string = 'graph'): void {
@@ -784,7 +861,24 @@ export struct TaskPage {
     }
   }
 
-  private async runEnabledTasks(): Promise<void> {
+  private async runEnabledTasks(reminderRequest: string = '', automatic: boolean = false): Promise<void> {
+    if (this.batchPreparing) { return; }
+    // An explicit button tap remains usable if an old reminder expired or window-state detection is unavailable.
+    if (!automatic && reminderRequest.length > 0 && CollectionReminderService.pendingIntent(reminderRequest) === null) {
+      CollectionReminderService.clearRequest(reminderRequest);
+      reminderRequest = '';
+    }
+    this.batchPreparing = true;
+    try { await this.executeEnabledTasks(reminderRequest, automatic); }
+    finally { this.batchPreparing = false; }
+  }
+
+  private async executeEnabledTasks(reminderRequest: string, automatic: boolean): Promise<void> {
+    if (reminderRequest.length > 0 &&
+      (!this.active || (automatic && !this.reminderWindowReady) ||
+        CollectionReminderService.pendingIntent(reminderRequest) === null)) {
+      return;
+    }
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
@@ -816,12 +910,23 @@ export struct TaskPage {
       return;
     }
     if (this.isTaskExecutionBusy()) { return; }
+    if (reminderRequest.length > 0) {
+      if (!this.active || (automatic && !this.reminderWindowReady) || !CollectionReminderService.claim(reminderRequest)) { return; }
+      AppStorage.setOrCreate('collectionReminderActiveBatch', true);
+    }
+    let cancellation = new WorkflowCancellation();
+    this.batchCancellation = cancellation;
+    this.batchStopRequested = false;
     this.batchRunning = true;
     this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
     let stoppedByError = false;
     let stoppedByCancel = false;
     try {
       for (let i = 0; i < queue.length; i++) {
+        if (cancellation.isCancelled()) {
+          stoppedByCancel = true;
+          break;
+        }
         if (!AiLoginGuard.ensure(this.getUIContext())) {
           stoppedByCancel = true;
           break;
@@ -834,45 +939,63 @@ export struct TaskPage {
         this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
         this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
-          await this.runSelectedWorkflow(currentTask);
+          await this.runSelectedWorkflow(currentTask, cancellation);
           this.tasks = WorkflowStorage.loadTasks(this.filesDir);
-          if (this.isTaskCancelled(currentTask.id)) {
+          if (cancellation.isCancelled() || this.isTaskCancelled(currentTask.id)) {
             stoppedByCancel = true;
-            showToastSafely('批量执行已终止', 1500);
             break;
           }
         } catch (e) {
           let err = e as Error;
-          stoppedByError = true;
-          this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
-          showToastSafely('任务执行中断：' + err.message, 2500);
+          if (cancellation.isCancelled() || this.isWorkflowCancelledStatus('', err.message)) {
+            stoppedByCancel = true;
+            this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'cancelled', '用户取消 workflow');
+          } else {
+            stoppedByError = true;
+            this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
+            showToastSafely('任务执行中断：' + err.message, 2500);
+          }
           break;
         } finally {
           this.runningTaskId = '';
         }
       }
-      if (!stoppedByError && !stoppedByCancel) {
+      if (stoppedByCancel || cancellation.isCancelled()) {
+        showToastSafely('批量执行已停止，剩余任务未下发', 1800);
+      } else if (!stoppedByError) {
         showToastSafely('已完成开启任务的依次执行', 1500);
       }
     } finally {
+      cancellation.setHandler(null);
+      this.batchCancellation = null;
+      this.batchStopRequested = false;
       this.batchRunning = false;
       this.runningTaskId = '';
       this.batchRunStatusText = '';
+      AppStorage.setOrCreate('collectionReminderActiveBatch', false);
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
       this.refreshStatsText();
     }
   }
 
-  private async runSelectedWorkflow(task: WorkflowTask): Promise<void> {
+  private async runSelectedWorkflow(task: WorkflowTask,
+    cancellation: WorkflowCancellation = new WorkflowCancellation()): Promise<void> {
+    cancellation.throwIfCancelled();
     if (this.taskControlMode === 'phone') {
-      await this.onRunPhoneWorkflow(task);
+      await this.onRunPhoneWorkflow(task, cancellation);
       if (this.batchRunning) {
         let saved = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
         if (saved && (saved.lastStatus === 'failed' || saved.lastStatus === '失败')) {
           throw new Error(saved.lastMessage || '手机任务失败，停止后续批量任务');
         }
       }
-    } else { await this.onRunWorkflow(task); }
+    } else { await this.onRunWorkflow(task, cancellation); }
+    let savedTask = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
+    if (!cancellation.isCancelled() && savedTask !== undefined && savedTask.lastStatus === 'success') {
+      CollectionReminderService.recordSuccessfulCollection().catch((e: Error): void => {
+        AppLogger.errorCause('CollectionReminder', 'Collection history save failed', e);
+      });
+    }
   }
 
   private copyWorkflowTask(task: WorkflowTask): void {
@@ -895,8 +1018,8 @@ export struct TaskPage {
       title: '删除 Workflow',
       message: '将删除“' + task.title + '”及其配置文件。此操作不可恢复。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '删除', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -917,8 +1040,8 @@ export struct TaskPage {
       title: '删除 workflow 配置',
       message: '将删除所有沙箱 workflow 配置，并重新生成默认示例任务。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '删除', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -934,8 +1057,8 @@ export struct TaskPage {
       title: '删除 daily-log',
       message: '将删除 workflow 生成的所有 daily-log Markdown 文件。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '删除', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -951,8 +1074,8 @@ export struct TaskPage {
       title: '删除运行文件',
       message: '将删除 workflow 生成的所有运行摘要和步骤输出文件。',
       buttons: [
-        { text: '取消', color: '#666666' },
-        { text: '删除', color: '#FF4D4F' }
+        { text: '取消', color: AppTheme.dialogText('#666666') },
+        { text: '删除', color: AppTheme.dialogText('#FF4D4F') }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
@@ -2641,11 +2764,11 @@ export struct TaskPage {
     Text(label)
       .fontSize(11)
       .fontWeight(activeValue === value ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(activeValue === value ? Color.White : color)
+      .fontColor(AppTheme.text(activeValue === value ? Color.White : color))
       .height(30)
       .padding({ left: 10, right: 10 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(activeValue === value ? color : '#F2F5FA')
+      .backgroundColor(AppTheme.background(activeValue === value ? color : '#F2F5FA'))
       .borderRadius(8)
       .margin({ right: 8, bottom: 8 })
       .onClick(onTap)
@@ -2654,7 +2777,7 @@ export struct TaskPage {
   @Builder FieldLabel(text: string) {
     Text(text)
       .fontSize(11)
-      .fontColor('#6F7584')
+      .fontColor(AppTheme.text('#6F7584'))
       .width('100%')
       .margin({ bottom: 6 })
   }
@@ -2662,7 +2785,7 @@ export struct TaskPage {
   @Builder FieldLabelTop(text: string) {
     Text(text)
       .fontSize(11)
-      .fontColor('#6F7584')
+      .fontColor(AppTheme.text('#6F7584'))
       .width('100%')
       .margin({ top: 10, bottom: 6 })
   }
@@ -2671,10 +2794,12 @@ export struct TaskPage {
     Column() {
       this.FieldLabel(label)
       TextInput({ placeholder: placeholder, text: value })
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .height(38)
         .fontSize(12)
-        .fontColor('#1E2633')
-        .backgroundColor('#F6F8FC')
+        .fontColor(AppTheme.text('#1E2633'))
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding({ left: 10, right: 10 })
         .onChange((val: string) => {
@@ -2692,11 +2817,11 @@ export struct TaskPage {
       Text(value)
         .height(38)
         .fontSize(12)
-        .fontColor('#1E2633')
+        .fontColor(AppTheme.text('#1E2633'))
         .width('100%')
         .padding({ left: 10, right: 10 })
         .textAlign(TextAlign.Start)
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.background('#F6F8FC'))
         .borderRadius(8)
     }
     .width('100%')
@@ -2708,10 +2833,12 @@ export struct TaskPage {
     Column() {
       this.FieldLabel(label)
       TextInput({ placeholder: placeholder, text: value })
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .height(38)
         .fontSize(12)
-        .fontColor('#1E2633')
-        .backgroundColor('#F6F8FC')
+        .fontColor(AppTheme.text('#1E2633'))
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding({ left: 10, right: 10 })
         .onChange((val: string) => {
@@ -2728,22 +2855,25 @@ export struct TaskPage {
         Text('工作流信息')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
         Text(String(this.editorWorkflow.steps.length) + ' 个主节点')
           .fontSize(11)
-          .fontColor('#276EF1')
+          .fontColor(AppTheme.text('#276EF1'))
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor('#EAF2FF')
+          .backgroundColor(AppTheme.background('#EAF2FF'))
           .borderRadius(8)
       }
       .width('100%')
       Column() {
         this.FieldLabel('任务标题')
         TextInput({ placeholder: '展示给用户的任务名', text: this.workflowDescriptionDraft })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .height(38)
           .fontSize(12)
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .padding({ left: 10, right: 10 })
           .onChange((val: string) => { this.updateWorkflowDescription(val); })
@@ -2754,20 +2884,23 @@ export struct TaskPage {
       this.WorkflowSceneSelector()
       this.FieldLabelTop('上下文变量')
       TextArea({ placeholder: '{"contact_name":"小赵"}', text: this.editorContextText })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(46)
         .fontSize(11)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding({ left: 10, right: 10, top: 7, bottom: 7 })
         .onChange((val: string) => { this.editorContextText = val; })
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
   }
 
   @Builder WorkflowSceneSelector() {
@@ -2778,11 +2911,11 @@ export struct TaskPage {
           Text(scene.label)
             .fontSize(11)
             .fontWeight(this.editorSceneId === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
-            .fontColor(this.editorSceneId === scene.sceneId ? Color.White : scene.color)
+            .fontColor(AppTheme.text(this.editorSceneId === scene.sceneId ? Color.White : scene.color))
             .height(30)
             .padding({ left: 12, right: 12 })
             .textAlign(TextAlign.Center)
-            .backgroundColor(this.editorSceneId === scene.sceneId ? scene.color : '#F8F9FE')
+            .backgroundColor(AppTheme.background(this.editorSceneId === scene.sceneId ? scene.color : '#F8F9FE'))
             .borderRadius(8)
             .margin({ right: 8, bottom: 8 })
             .onClick(() => { this.editorSceneId = scene.sceneId; })
@@ -2799,11 +2932,11 @@ export struct TaskPage {
         Text('节点库')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
         Text(this.selectedPath.length > 0 ? '插入到选中节点后' : '插入到末尾')
           .fontSize(11)
-          .fontColor('#6F7584')
+          .fontColor(AppTheme.text('#6F7584'))
       }
       .width('100%')
       Scroll() {
@@ -2813,10 +2946,10 @@ export struct TaskPage {
               Text(item.shortLabel)
                 .fontSize(14)
                 .fontWeight(FontWeight.Bold)
-                .fontColor(item.accentColor)
+                .fontColor(AppTheme.text(item.accentColor))
               Text(item.label)
                 .fontSize(10)
-                .fontColor('#4E5666')
+                .fontColor(AppTheme.text('#4E5666'))
                 .margin({ top: 4 })
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2824,9 +2957,9 @@ export struct TaskPage {
             .width(82)
             .height(58)
             .justifyContent(FlexAlign.Center)
-            .backgroundColor(item.backgroundColor)
+            .backgroundColor(AppTheme.background(item.backgroundColor))
             .borderRadius(10)
-            .border({ width: 1, color: '#FFFFFF' })
+            .border({ width: 1, color: AppTheme.border('#FFFFFF') })
             .margin({ right: 10 })
             .onClick(() => { this.insertTemplateAfterSelection(item.key); })
           }, (item: WorkflowNodeTemplate) => item.key)
@@ -2840,19 +2973,19 @@ export struct TaskPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     .margin({ top: 12 })
   }
 
   @Builder FlowStepList(steps: WorkflowStep[], parentPath: string, branch: string, depth: number) {
     if (steps.length === 0) {
       Row() {
-        Row().width(2).height(28).backgroundColor('#DCE3EF').borderRadius(1).margin({ left: depth * 14 + 13, right: 12 })
+        Row().width(2).height(28).backgroundColor(AppTheme.background('#DCE3EF')).borderRadius(1).margin({ left: depth * 14 + 13, right: 12 })
         Text('空分支')
           .fontSize(12)
-          .fontColor('#9AA2B1')
+          .fontColor(AppTheme.text('#9AA2B1'))
           .height(30)
       }
       .width('100%')
@@ -2871,17 +3004,17 @@ export struct TaskPage {
   @Builder FlowShotSummaryCard(shot: WorkflowStep, summary: WorkflowStep, path: string, depth: number) {
     Row() {
       Column() {
-        Row().width(2).height(18).backgroundColor('#DCE3EF')
+        Row().width(2).height(18).backgroundColor(AppTheme.background('#DCE3EF'))
         Text(String(shot.id) + '+')
           .fontSize(9)
-          .fontColor(Color.White)
+          .fontColor(AppTheme.text(Color.White))
           .fontWeight(FontWeight.Bold)
           .width(28)
           .height(28)
           .textAlign(TextAlign.Center)
-          .backgroundColor('#148F73')
+          .backgroundColor(AppTheme.filledBackground('#148F73'))
           .borderRadius(14)
-        Row().width(2).height(18).backgroundColor('#DCE3EF')
+        Row().width(2).height(18).backgroundColor(AppTheme.background('#DCE3EF'))
       }
       .width(32)
       .alignItems(HorizontalAlign.Center)
@@ -2891,21 +3024,21 @@ export struct TaskPage {
           Text('截图 + Summary')
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text('2 steps')
             .fontSize(10)
-            .fontColor('#148F73')
+            .fontColor(AppTheme.text('#148F73'))
             .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-            .backgroundColor('#EAF8F3')
+            .backgroundColor(AppTheme.background('#EAF8F3'))
             .borderRadius(7)
         }
         .width('100%')
         Text((shot.file_name || 'screenshot.jpg') + ' / ' + this.summaryQuestion(summary))
           .fontSize(11)
-          .fontColor('#6F7584')
+          .fontColor(AppTheme.text('#6F7584'))
           .margin({ top: 6 })
           .width('100%')
           .maxLines(2)
@@ -2916,8 +3049,8 @@ export struct TaskPage {
               .width(74)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.selectedPath === path ? '#148F73' : '#EAF8F3')
-              .fontColor(this.selectedPath === path ? Color.White : '#148F73')
+              .backgroundColor(AppTheme.background(this.selectedPath === path ? '#148F73' : '#EAF8F3'))
+              .fontColor(AppTheme.text(this.selectedPath === path ? Color.White : '#148F73'))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.selectStep(path); })
@@ -2925,8 +3058,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.moveButtonBackground(path, -1))
-              .fontColor(this.moveButtonColor(path, -1))
+              .backgroundColor(AppTheme.background(this.moveButtonBackground(path, -1)))
+              .fontColor(AppTheme.text(this.moveButtonColor(path, -1)))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.moveStepAtPath(path, -1); })
@@ -2934,8 +3067,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.moveButtonBackground(path, 1))
-              .fontColor(this.moveButtonColor(path, 1))
+              .backgroundColor(AppTheme.background(this.moveButtonBackground(path, 1)))
+              .fontColor(AppTheme.text(this.moveButtonColor(path, 1)))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.moveStepAtPath(path, 1); })
@@ -2943,8 +3076,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.deleteButtonBackground(path))
-              .fontColor(this.deleteButtonColor(path))
+              .backgroundColor(AppTheme.background(this.deleteButtonBackground(path)))
+              .fontColor(AppTheme.text(this.deleteButtonColor(path)))
               .borderRadius(8)
               .onClick(() => { this.deleteStepAtPath(path); })
           }
@@ -2960,9 +3093,9 @@ export struct TaskPage {
       }
       .layoutWeight(1)
       .padding(13)
-      .backgroundColor(this.selectedPath === path ? '#F3FCF8' : Color.White)
+      .backgroundColor(AppTheme.background(this.selectedPath === path ? '#F3FCF8' : Color.White))
       .borderRadius(14)
-      .border({ width: this.selectedPath === path ? 2 : 1, color: this.selectedPath === path ? '#148F73' : '#E3E8F1' })
+      .border({ width: this.selectedPath === path ? 2 : 1, color: AppTheme.border(this.selectedPath === path ? '#148F73' : '#E3E8F1') })
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
@@ -2972,17 +3105,17 @@ export struct TaskPage {
   @Builder FlowStepCard(step: WorkflowStep, path: string, depth: number) {
     Row() {
       Column() {
-        Row().width(2).height(18).backgroundColor('#DCE3EF')
+        Row().width(2).height(18).backgroundColor(AppTheme.background('#DCE3EF'))
         Text(String(step.id))
           .fontSize(10)
-          .fontColor(Color.White)
+          .fontColor(AppTheme.text(Color.White))
           .fontWeight(FontWeight.Bold)
           .width(28)
           .height(28)
           .textAlign(TextAlign.Center)
-          .backgroundColor(this.nodeColor(step, path))
+          .backgroundColor(AppTheme.filledBackground(this.nodeColor(step, path)))
           .borderRadius(14)
-        Row().width(2).height(18).backgroundColor('#DCE3EF')
+        Row().width(2).height(18).backgroundColor(AppTheme.background('#DCE3EF'))
       }
       .width(32)
       .alignItems(HorizontalAlign.Center)
@@ -2992,21 +3125,21 @@ export struct TaskPage {
           Text(this.nodeLabel(step, path))
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(step.type)
             .fontSize(10)
-            .fontColor(this.nodeColor(step, path))
+            .fontColor(AppTheme.text(this.nodeColor(step, path)))
             .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-            .backgroundColor(this.nodeBackground(step, path))
+            .backgroundColor(AppTheme.background(this.nodeBackground(step, path)))
             .borderRadius(7)
         }
         .width('100%')
         Text(this.nodeSummary(step, path))
           .fontSize(11)
-          .fontColor('#6F7584')
+          .fontColor(AppTheme.text('#6F7584'))
           .margin({ top: 6 })
           .width('100%')
           .maxLines(2)
@@ -3017,8 +3150,8 @@ export struct TaskPage {
               .width(74)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.selectedPath === path ? '#276EF1' : '#EEF4FF')
-              .fontColor(this.selectedPath === path ? Color.White : '#276EF1')
+              .backgroundColor(AppTheme.background(this.selectedPath === path ? '#276EF1' : '#EEF4FF'))
+              .fontColor(AppTheme.text(this.selectedPath === path ? Color.White : '#276EF1'))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.selectStep(path); })
@@ -3026,8 +3159,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.moveButtonBackground(path, -1))
-              .fontColor(this.moveButtonColor(path, -1))
+              .backgroundColor(AppTheme.background(this.moveButtonBackground(path, -1)))
+              .fontColor(AppTheme.text(this.moveButtonColor(path, -1)))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.moveStepAtPath(path, -1); })
@@ -3035,8 +3168,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.moveButtonBackground(path, 1))
-              .fontColor(this.moveButtonColor(path, 1))
+              .backgroundColor(AppTheme.background(this.moveButtonBackground(path, 1)))
+              .fontColor(AppTheme.text(this.moveButtonColor(path, 1)))
               .borderRadius(8)
               .margin({ right: 8 })
               .onClick(() => { this.moveStepAtPath(path, 1); })
@@ -3044,8 +3177,8 @@ export struct TaskPage {
               .width(68)
               .height(30)
               .fontSize(11)
-              .backgroundColor(this.deleteButtonBackground(path))
-              .fontColor(this.deleteButtonColor(path))
+              .backgroundColor(AppTheme.background(this.deleteButtonBackground(path)))
+              .fontColor(AppTheme.text(this.deleteButtonColor(path)))
               .borderRadius(8)
               .onClick(() => { this.deleteStepAtPath(path); })
           }
@@ -3068,9 +3201,9 @@ export struct TaskPage {
       }
       .layoutWeight(1)
       .padding(13)
-      .backgroundColor(this.selectedPath === path ? '#F8FBFF' : Color.White)
+      .backgroundColor(AppTheme.background(this.selectedPath === path ? '#F8FBFF' : Color.White))
       .borderRadius(14)
-      .border({ width: this.selectedPath === path ? 2 : 1, color: this.selectedPath === path ? '#276EF1' : '#E3E8F1' })
+      .border({ width: this.selectedPath === path ? 2 : 1, color: AppTheme.border(this.selectedPath === path ? '#276EF1' : '#E3E8F1') })
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
@@ -3083,13 +3216,13 @@ export struct TaskPage {
         Text(label)
           .fontSize(11)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#4E5666')
+          .fontColor(AppTheme.text('#4E5666'))
           .layoutWeight(1)
         Button('添加节点')
           .height(28)
           .fontSize(10)
-          .backgroundColor('#F0EAFF')
-          .fontColor('#7C4DFF')
+          .backgroundColor(AppTheme.background('#F0EAFF'))
+          .fontColor(AppTheme.text('#7C4DFF'))
           .borderRadius(8)
           .onClick(() => {
             this.insertTemplateIntoBranch(parentPath, branch, 'gui_task');
@@ -3109,13 +3242,13 @@ export struct TaskPage {
         Text('流程图')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
         Button('取消选中')
           .height(30)
           .fontSize(11)
-          .backgroundColor('#F2F5FA')
-          .fontColor('#4E5666')
+          .backgroundColor(AppTheme.background('#F2F5FA'))
+          .fontColor(AppTheme.text('#4E5666'))
           .borderRadius(8)
           .onClick(() => {
             this.selectedPath = '';
@@ -3136,9 +3269,9 @@ export struct TaskPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor('#FAFBFD')
+    .backgroundColor(AppTheme.background('#FAFBFD'))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     .margin({ top: 12 })
   }
 
@@ -3156,18 +3289,18 @@ export struct TaskPage {
         Text('暂无节点')
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
         Text('从上方节点库添加“打开应用”“GUI 任务”“截图+Summary”或控制流节点。')
           .fontSize(12)
-          .fontColor('#6F7584')
+          .fontColor(AppTheme.text('#6F7584'))
           .margin({ top: 8 })
           .textAlign(TextAlign.Center)
       }
       .width('100%')
       .padding(24)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(12)
-      .border({ width: 1, color: '#E3E8F1' })
+      .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     } else if (this.flowNeedsHorizontalScroll()) {
       Scroll() {
         Column() {
@@ -3189,13 +3322,13 @@ export struct TaskPage {
       Row()
         .width('100%')
         .height(1)
-        .backgroundColor('#DCE3EF')
+        .backgroundColor(AppTheme.background('#DCE3EF'))
         .margin({ top: 12, bottom: 12 })
       Row() {
         Text('节点属性')
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
       }
       .width('100%')
@@ -3205,7 +3338,7 @@ export struct TaskPage {
         Row() {
           Text('失败策略')
             .fontSize(11)
-            .fontColor('#6F7584')
+            .fontColor(AppTheme.text('#6F7584'))
             .margin({ right: 10, bottom: 8 })
           this.SegmentButton('停止', 'stop', this.nodeOnErrorDraft, '#B42318', () => {
             this.nodeOnErrorDraft = 'stop';
@@ -3224,8 +3357,8 @@ export struct TaskPage {
                 Button(item.label)
                   .height(30)
                   .fontSize(10)
-                  .backgroundColor(item.backgroundColor)
-                  .fontColor(item.accentColor)
+                  .backgroundColor(AppTheme.background(item.backgroundColor))
+                  .fontColor(AppTheme.text(item.accentColor))
                   .borderRadius(8)
                   .margin({ right: 8 })
                   .onClick(() => { this.insertTemplateAfterSelection(item.key); })
@@ -3269,19 +3402,25 @@ export struct TaskPage {
       if (this.isSelectedOpenAppStep()) {
         this.FieldLabel('应用名称')
         TextInput({ placeholder: '例如：支付宝 / 微信 / 哔哩哔哩', text: this.openAppNameDraft })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .height(40)
           .fontSize(12)
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .padding({ left: 10, right: 10 })
           .onChange((val: string) => { this.openAppNameDraft = val; })
       } else {
         this.FieldLabel('GUI 任务描述')
         TextArea({ placeholder: '例如：进入我的订单页并查看当前列表', text: this.guiTaskDraft })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .width('100%')
           .height(96)
           .fontSize(12)
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .padding(10)
           .onChange((val: string) => {
@@ -3298,10 +3437,13 @@ export struct TaskPage {
       Column() {
         this.FieldLabel('Summary 内容')
         TextArea({ placeholder: '请总结当前截图内容', text: this.summaryQuestionDraft })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .width('100%')
           .height(110)
           .fontSize(12)
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .padding(10)
           .onChange((val: string) => { this.summaryQuestionDraft = val; })
@@ -3312,10 +3454,10 @@ export struct TaskPage {
       Row() {
         Text('阻塞执行')
           .fontSize(12)
-          .fontColor('#4E5666')
+          .fontColor(AppTheme.text('#4E5666'))
           .layoutWeight(1)
         Toggle({ type: ToggleType.Switch, isOn: this.summaryBlockingDraft })
-          .selectedColor('#148F73')
+          .selectedColor(AppTheme.background('#148F73'))
           .width(44)
           .height(26)
           .onChange((value: boolean) => { this.summaryBlockingDraft = value; })
@@ -3324,11 +3466,14 @@ export struct TaskPage {
       .margin({ top: 10 })
       this.FieldLabelTop('结构化输出 Schema')
       TextArea({ placeholder: '{"summary":{"type":"string","description":"..."}}', text: this.toolSchemaText })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(96)
         .fontSize(11)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding(10)
         .onChange((val: string) => { this.toolSchemaText = val; })
@@ -3420,10 +3565,13 @@ export struct TaskPage {
       Column() {
         this.FieldLabel('图片变量')
         TextInput({ placeholder: '${steps.3.output.image_b64}', text: this.selectedToolInput('image') })
+          .fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder'))
+          .caretColor($r('app.color.ui_accent_blue'))
           .height(38)
           .fontSize(12)
           .fontFamily('monospace')
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.inputBackground())
           .borderRadius(8)
           .padding({ left: 10, right: 10 })
           .onChange((val: string) => { this.updateSelectedToolInput('image', val); })
@@ -3433,20 +3581,23 @@ export struct TaskPage {
       .margin({ top: 10 })
       this.FieldLabelTop('Summary 提示词')
       TextArea({ placeholder: '请总结当前截图内容', text: this.summaryQuestionDraft })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(96)
         .fontSize(12)
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding(10)
         .onChange((val: string) => { this.summaryQuestionDraft = val; })
       Row() {
         Text('阻塞执行')
           .fontSize(12)
-          .fontColor('#4E5666')
+          .fontColor(AppTheme.text('#4E5666'))
           .layoutWeight(1)
         Toggle({ type: ToggleType.Switch, isOn: this.summaryBlockingDraft })
-          .selectedColor('#148F73')
+          .selectedColor(AppTheme.background('#148F73'))
           .width(44)
           .height(26)
           .onChange((value: boolean) => { this.summaryBlockingDraft = value; })
@@ -3455,11 +3606,14 @@ export struct TaskPage {
       .margin({ top: 10 })
       this.FieldLabelTop('结构化输出 Schema')
       TextArea({ placeholder: '{"summary":{"type":"string","description":"..."}}', text: this.toolSchemaText })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(96)
         .fontSize(11)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding(10)
         .onChange((val: string) => { this.toolSchemaText = val; })
@@ -3471,10 +3625,13 @@ export struct TaskPage {
     Column() {
       this.FieldLabel(label)
       TextInput({ placeholder: '${steps.2.output.response}', text: kind === 'break' ? this.breakLeftDraft : this.conditionLeftDraft })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .height(38)
         .fontSize(12)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding({ left: 10, right: 10 })
         .onChange((val: string) => {
@@ -3498,10 +3655,13 @@ export struct TaskPage {
       }.width('100%')
       this.FieldLabelTop('右侧值')
       TextInput({ placeholder: 'true / 3 / 关键词', text: kind === 'break' ? this.breakRightDraft : this.conditionRightDraft })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .height(38)
         .fontSize(12)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(8)
         .padding({ left: 10, right: 10 })
         .onChange((val: string) => {
@@ -3521,9 +3681,12 @@ export struct TaskPage {
         Column() {
           this.FieldLabel('最多次数')
           TextInput({ placeholder: '10', text: this.loopMaxTimesDraft })
+            .fontColor($r('app.color.ui_text_primary'))
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .height(38)
             .fontSize(12)
-            .backgroundColor('#F6F8FC')
+            .backgroundColor(AppTheme.inputBackground())
             .borderRadius(8)
             .padding({ left: 10, right: 10 })
             .onChange((val: string) => { this.loopMaxTimesDraft = val; })
@@ -3536,9 +3699,12 @@ export struct TaskPage {
         Column() {
           this.FieldLabel('固定次数')
           TextInput({ placeholder: '3', text: this.loopTimesDraft })
+            .fontColor($r('app.color.ui_text_primary'))
+            .placeholderColor($r('app.color.ui_text_placeholder'))
+            .caretColor($r('app.color.ui_accent_blue'))
             .height(38)
             .fontSize(12)
-            .backgroundColor('#F6F8FC')
+            .backgroundColor(AppTheme.inputBackground())
             .borderRadius(8)
             .padding({ left: 10, right: 10 })
             .onChange((val: string) => { this.loopTimesDraft = val; })
@@ -3563,20 +3729,23 @@ export struct TaskPage {
   @Builder JsonEditorPanel() {
     Column() {
       TextArea({ placeholder: '请输入 workflow JSON', text: this.editorText })
+        .fontColor($r('app.color.ui_text_primary'))
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(360)
         .fontSize(12)
         .fontFamily('monospace')
-        .backgroundColor('#F6F8FC')
+        .backgroundColor(AppTheme.inputBackground())
         .borderRadius(12)
         .padding(12)
         .onChange((val: string) => { this.editorText = val; })
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
   }
 
   @Builder EditorPanel() {
@@ -3586,13 +3755,13 @@ export struct TaskPage {
           Text(this.editingTaskId.length > 0 ? '编辑 Workflow' : '新建 Workflow')
             .fontSize(18)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           Button('关闭')
             .height(32)
             .fontSize(12)
-            .backgroundColor('#F2F5FA')
-            .fontColor('#4E5666')
+            .backgroundColor(AppTheme.background('#F2F5FA'))
+            .fontColor(AppTheme.text('#4E5666'))
             .borderRadius(8)
             .onClick(() => { this.editorOpen = false; })
         }
@@ -3602,16 +3771,16 @@ export struct TaskPage {
             .height(34)
             .layoutWeight(1)
             .fontSize(12)
-            .backgroundColor(this.editorMode === 'graph' ? '#276EF1' : '#EEF4FF')
-            .fontColor(this.editorMode === 'graph' ? Color.White : '#276EF1')
+            .backgroundColor(AppTheme.background(this.editorMode === 'graph' ? '#276EF1' : '#EEF4FF'))
+            .fontColor(AppTheme.text(this.editorMode === 'graph' ? Color.White : '#276EF1'))
             .borderRadius(8)
             .onClick(() => { this.switchEditorMode('graph'); })
           Button('JSON')
             .height(34)
             .layoutWeight(1)
             .fontSize(12)
-            .backgroundColor(this.editorMode === 'json' ? '#276EF1' : '#EEF4FF')
-            .fontColor(this.editorMode === 'json' ? Color.White : '#276EF1')
+            .backgroundColor(AppTheme.background(this.editorMode === 'json' ? '#276EF1' : '#EEF4FF'))
+            .fontColor(AppTheme.text(this.editorMode === 'json' ? Color.White : '#276EF1'))
             .borderRadius(8)
             .margin({ left: 10 })
             .onClick(() => { this.switchEditorMode('json'); })
@@ -3628,7 +3797,7 @@ export struct TaskPage {
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
-            .backgroundColor('#276EF1')
+            .backgroundColor(AppTheme.background('#276EF1'))
             .borderRadius(10)
             .onClick(() => { this.saveEditor(); })
         }
@@ -3637,9 +3806,9 @@ export struct TaskPage {
       }
       .width('92%')
       .padding(16)
-      .backgroundColor('#F4F7FB')
+      .backgroundColor(AppTheme.background('#F4F7FB'))
       .borderRadius(18)
-      .border({ width: 1, color: '#DCE3EF' })
+      .border({ width: 1, color: AppTheme.border('#DCE3EF') })
       .margin({ bottom: 18 })
     }
   }
@@ -3651,11 +3820,11 @@ export struct TaskPage {
           Text('任务执行')
             .fontSize(20)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .maxLines(1)
           Text('已开启 ' + this.enabledTaskCount() + ' / 全部 ' + this.tasks.length)
             .fontSize(12)
-            .fontColor('#6F7584')
+            .fontColor(AppTheme.text('#6F7584'))
             .margin({ top: 7 })
             .maxLines(1)
         }
@@ -3665,8 +3834,8 @@ export struct TaskPage {
           .width(92)
           .height(36)
           .fontSize(12)
-          .fontColor(Color.White)
-          .backgroundColor('#276EF1')
+          .fontColor(AppTheme.text(Color.White))
+          .backgroundColor(AppTheme.filledBackground('#276EF1'))
           .borderRadius(10)
           .enabled(!this.isTaskExecutionBusy())
           .onClick(() => { this.openConfigView(); })
@@ -3675,9 +3844,9 @@ export struct TaskPage {
     }
     .width('86%')
     .padding(18)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     .margin({ top: 12, bottom: 18 })
   }
 
@@ -3687,24 +3856,24 @@ export struct TaskPage {
       Row() {
         Text(task.icon)
           .fontSize(12)
-          .fontColor(task.enabled ? scene.color : '#8E95A3')
+          .fontColor(AppTheme.text(task.enabled ? scene.color : '#8E95A3'))
           .fontWeight(FontWeight.Bold)
           .width(40)
           .height(40)
           .textAlign(TextAlign.Center)
-          .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
+          .backgroundColor(AppTheme.background(task.enabled ? '#F1F5FF' : '#F4F5F8'))
           .borderRadius(12)
         Column() {
           Text(task.title)
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .width('100%')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
             .fontSize(11)
-            .fontColor(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3')
+            .fontColor(AppTheme.text(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3'))
             .margin({ top: 5 })
             .maxLines(1)
         }
@@ -3719,7 +3888,7 @@ export struct TaskPage {
       .accessibilityText('配置任务：' + task.title)
       .onClick((): void => { this.openConfigView(task.id); })
       Toggle({ type: ToggleType.Switch, isOn: task.enabled })
-        .selectedColor(scene.color)
+        .selectedColor(AppTheme.background(scene.color))
         .width(44)
         .height(26)
         .enabled(!this.isTaskExecutionBusy())
@@ -3728,9 +3897,9 @@ export struct TaskPage {
     .width('100%')
     .constraintSize({ minHeight: 66 })
     .padding({ right: 14 })
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(12)
-    .border({ width: 1, color: this.runningTaskId === task.id ? scene.color : '#E8EDF5' })
+    .border({ width: 1, color: AppTheme.border(this.runningTaskId === task.id ? scene.color : '#E8EDF5') })
     .margin({ top: 10 })
   }
 
@@ -3741,14 +3910,14 @@ export struct TaskPage {
           Text(scene.label)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
             .maxLines(1)
           Text(this.enabledTaskCountForScene(scene.sceneId) + '/' + this.tasksForScene(scene.sceneId).length + ' 开启')
             .fontSize(11)
-            .fontColor(scene.color)
+            .fontColor(AppTheme.text(scene.color))
             .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-            .backgroundColor('#F8F9FE')
+            .backgroundColor(AppTheme.background('#F8F9FE'))
             .borderRadius(8)
             .maxLines(1)
         }
@@ -3769,18 +3938,18 @@ export struct TaskPage {
         Text('暂无任务')
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
         Button('配置任务')
           .height(36)
           .fontSize(12)
-          .backgroundColor('#276EF1')
+          .backgroundColor(AppTheme.background('#276EF1'))
           .borderRadius(10)
           .margin({ top: 14 })
           .onClick(() => { this.openConfigView(); })
       }
       .width('86%')
       .padding(22)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(14)
       .margin({ bottom: 18 })
     } else {
@@ -3795,28 +3964,40 @@ export struct TaskPage {
       if (this.batchRunStatusText.length > 0) {
         Text(this.batchRunStatusText)
           .fontSize(12)
-          .fontColor('#4E5666')
+          .fontColor(AppTheme.text('#4E5666'))
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ bottom: 10 })
       }
-      Button(this.batchRunButtonText())
+      if (!this.batchRunning && this.reminderRequest.length > 0) {
+        Text('采集提醒已就绪，完成设置后点击下方开始')
+          .fontSize(12)
+          .fontColor(AppTheme.text('#276EF1'))
+          .margin({ bottom: 10 })
+      }
+      Button(this.batchPreparing && !this.batchRunning ? '正在准备…' : this.batchRunButtonText())
         .width('100%')
         .height(46)
         .fontSize(15)
         .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .backgroundColor(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy() ? '#276EF1' : '#A9B7E9')
+        .fontColor(AppTheme.text(Color.White))
+        .backgroundColor(AppTheme.filledBackground(this.batchRunning ? '#B42318' :
+          (this.batchRunButtonEnabled() ? '#276EF1' : '#A9B7E9')))
         .borderRadius(12)
-        .enabled(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy())
-        .onClick(() => { this.runEnabledTasks(); })
+        .enabled(this.batchRunButtonEnabled())
+        .onClick(async (): Promise<void> => {
+          if (this.batchRunning) { this.stopEnabledTasks(); return; }
+          try { await this.runEnabledTasks(this.reminderRequest); } catch (e) {
+            showToastSafely('批量任务无法执行：' + (e as Error).message, 2200);
+          }
+        })
     }
     .width('86%')
     .padding(14)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     .margin({ top: 2, bottom: 18 })
   }
 
@@ -3826,26 +4007,28 @@ export struct TaskPage {
         Text('上下文变量')
           .fontSize(13)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .layoutWeight(1)
           .maxLines(1)
         Text('contact_name')
           .fontSize(11)
-          .fontColor('#276EF1')
+          .fontColor(AppTheme.text('#276EF1'))
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor('#EAF2FF')
+          .backgroundColor(AppTheme.background('#EAF2FF'))
           .borderRadius(8)
           .maxLines(1)
       }
       .width('100%')
       TextInput({ placeholder: '请输入联系人名称', text: this.taskContactNameDraftForTask(task) })
+        .placeholderColor($r('app.color.ui_text_placeholder'))
+        .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
         .height(40)
         .fontSize(13)
-        .fontColor('#222B3D')
-        .backgroundColor(Color.White)
+        .fontColor(AppTheme.text('#222B3D'))
+        .backgroundColor(AppTheme.background(Color.White))
         .borderRadius(10)
-        .border({ width: 1, color: '#E3E8F1' })
+        .border({ width: 1, color: AppTheme.border('#E3E8F1') })
         .padding({ left: 10, right: 10 })
         .margin({ top: 10 })
         .enabled(!this.isTaskExecutionBusy())
@@ -3853,9 +4036,9 @@ export struct TaskPage {
     }
     .width('100%')
     .padding(12)
-    .backgroundColor('#F8FAFD')
+    .backgroundColor(AppTheme.background('#F8FAFD'))
     .borderRadius(12)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
     .margin({ top: 14 })
   }
 
@@ -3864,43 +4047,43 @@ export struct TaskPage {
       Row() {
         Text(task.icon)
           .fontSize(13)
-          .fontColor(task.iconColor)
+          .fontColor(AppTheme.text(task.iconColor))
           .fontWeight(FontWeight.Bold)
           .width(54)
           .height(54)
           .textAlign(TextAlign.Center)
-          .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
+          .backgroundColor(AppTheme.background(task.enabled ? '#F1F5FF' : '#F4F5F8'))
           .borderRadius(14)
         Column() {
           Row() {
             Text(task.title)
               .fontSize(16)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#11182F')
+              .fontColor(AppTheme.text('#11182F'))
               .layoutWeight(1)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Row().width(7).height(7).backgroundColor(task.enabled ? '#148F73' : '#A8AFBC').borderRadius(4).margin({ left: 8, right: 5 })
+            Row().width(7).height(7).backgroundColor(AppTheme.background(task.enabled ? '#148F73' : '#A8AFBC')).borderRadius(4).margin({ left: 8, right: 5 })
             Text(task.enabled ? task.lastStatus : '已暂停')
               .fontSize(11)
-              .fontColor(task.enabled ? '#66707E' : '#8E95A3')
+              .fontColor(AppTheme.text(task.enabled ? '#66707E' : '#8E95A3'))
               .maxLines(1)
           }
           .width('100%')
           Text('最近运行：' + task.lastRun)
             .fontSize(12)
-            .fontColor('#7B8290')
+            .fontColor(AppTheme.text('#7B8290'))
             .margin({ top: 7 })
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text('来源模块：' + task.source)
             .fontSize(12)
-            .fontColor('#7B8290')
+            .fontColor(AppTheme.text('#7B8290'))
             .margin({ top: 4 })
             .maxLines(1)
           Text(task.lastMessage)
             .fontSize(11)
-            .fontColor('#9AA2B1')
+            .fontColor(AppTheme.text('#9AA2B1'))
             .margin({ top: 4 })
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -3909,7 +4092,7 @@ export struct TaskPage {
         .layoutWeight(1)
         .margin({ left: 14, right: 8 })
         Toggle({ type: ToggleType.Switch, isOn: task.enabled })
-          .selectedColor('#276EF1')
+          .selectedColor(AppTheme.background('#276EF1'))
           .width(44)
           .height(26)
           .enabled(!this.isTaskExecutionBusy())
@@ -3925,8 +4108,8 @@ export struct TaskPage {
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor(this.isTaskExecutionBusy() && this.runningTaskId !== task.id ? '#A9B7E9' :
-              this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1')
+            .backgroundColor(AppTheme.background(this.isTaskExecutionBusy() && this.runningTaskId !== task.id ? '#A9B7E9' :
+              this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1'))
             .borderRadius(10)
             .margin({ right: 8 })
             .enabled(!this.isTaskExecutionBusy())
@@ -3935,8 +4118,8 @@ export struct TaskPage {
             .width(86)
             .height(36)
             .fontSize(12)
-            .backgroundColor('#EAF8F3')
-            .fontColor('#148F73')
+            .backgroundColor(AppTheme.background('#EAF8F3'))
+            .fontColor(AppTheme.text('#148F73'))
             .borderRadius(10)
             .margin({ right: 8 })
             .onClick(() => { this.openEditEditor(task.id, 'graph'); })
@@ -3944,8 +4127,8 @@ export struct TaskPage {
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor('#EEF4FF')
-            .fontColor('#276EF1')
+            .backgroundColor(AppTheme.background('#EEF4FF'))
+            .fontColor(AppTheme.text('#276EF1'))
             .borderRadius(10)
             .margin({ right: 8 })
             .onClick(() => { this.openEditEditor(task.id, 'json'); })
@@ -3953,8 +4136,8 @@ export struct TaskPage {
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor('#EEF4FF')
-            .fontColor('#276EF1')
+            .backgroundColor(AppTheme.background('#EEF4FF'))
+            .fontColor(AppTheme.text('#276EF1'))
             .borderRadius(10)
             .margin({ right: 8 })
             .onClick(() => { this.copyWorkflowTask(task); })
@@ -3962,8 +4145,8 @@ export struct TaskPage {
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor('#FFF0ED')
-            .fontColor('#B42318')
+            .backgroundColor(AppTheme.background('#FFF0ED'))
+            .fontColor(AppTheme.text('#B42318'))
             .borderRadius(10)
             .onClick(() => { this.deleteWorkflowTask(task); })
         }
@@ -3976,11 +4159,11 @@ export struct TaskPage {
     }
     .width('86%')
     .padding(18)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
     .border({ width: this.focusedConfigTaskId === task.id ? 1.5 : 1,
-      color: this.focusedConfigTaskId === task.id ? '#276EF1' : '#E3E8F1' })
-    .shadow({ radius: 10, color: '#0D000000', offsetX: 0, offsetY: 5 })
+      color: AppTheme.border(this.focusedConfigTaskId === task.id ? '#276EF1' : '#E3E8F1') })
+    .shadow({ radius: 10, color: AppTheme.shadow('#0D000000'), offsetX: 0, offsetY: 5 })
     .margin({ bottom: 16 })
     .onAreaChange((_oldArea: Area, newArea: Area): void => { this.scrollToConfigTask(task.id, newArea); })
   }
@@ -3989,11 +4172,11 @@ export struct TaskPage {
     Text(scene.label)
       .fontSize(13)
       .fontWeight(this.taskScene === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.taskScene === scene.sceneId ? Color.White : '#6D7481')
+      .fontColor(AppTheme.text(this.taskScene === scene.sceneId ? Color.White : '#6D7481'))
       .height(38)
       .padding({ left: 16, right: 16 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.taskScene === scene.sceneId ? scene.color : Color.White)
+      .backgroundColor(AppTheme.background(this.taskScene === scene.sceneId ? scene.color : Color.White))
       .borderRadius(10)
       .margin({ left: scene.sceneId === 0 ? 0 : 10 })
       .onClick(() => {
@@ -4011,18 +4194,18 @@ export struct TaskPage {
             Text('新建任务')
               .fontSize(20)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#11182F')
+              .fontColor(AppTheme.text('#11182F'))
             Text('图形编排')
               .fontSize(11)
-              .fontColor('#148F73')
+              .fontColor(AppTheme.text('#148F73'))
               .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .backgroundColor('#EAF8F3')
+              .backgroundColor(AppTheme.background('#EAF8F3'))
               .borderRadius(8)
               .margin({ left: 10 })
           }
           Text('选择场景后用节点连接定义 workflow')
             .fontSize(12)
-            .fontColor('#6F7584')
+            .fontColor(AppTheme.text('#6F7584'))
             .margin({ top: 7 })
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -4034,15 +4217,15 @@ export struct TaskPage {
             .width(76)
             .height(34)
             .fontSize(12)
-            .backgroundColor('#276EF1')
+            .backgroundColor(AppTheme.background('#276EF1'))
             .borderRadius(10)
             .onClick(() => { this.openCreateEditor('graph'); })
           Button('JSON')
             .width(76)
             .height(30)
             .fontSize(11)
-            .backgroundColor('#EEF4FF')
-            .fontColor('#276EF1')
+            .backgroundColor(AppTheme.background('#EEF4FF'))
+            .fontColor(AppTheme.text('#276EF1'))
             .borderRadius(9)
             .margin({ top: 8 })
             .onClick(() => { this.openCreateEditor('json'); })
@@ -4054,9 +4237,9 @@ export struct TaskPage {
           ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
             Text(scene.label)
               .fontSize(11)
-              .fontColor(scene.color)
+              .fontColor(AppTheme.text(scene.color))
               .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .backgroundColor('#F8F9FE')
+              .backgroundColor(AppTheme.background('#F8F9FE'))
               .borderRadius(8)
               .margin({ left: scene.sceneId === 0 ? 0 : 8 })
           }, (scene: WorkflowSceneConfig) => scene.tabId)
@@ -4070,9 +4253,9 @@ export struct TaskPage {
     }
     .width('86%')
     .padding(20)
-    .backgroundColor('#F8FAFD')
+    .backgroundColor(AppTheme.background('#F8FAFD'))
     .borderRadius(14)
-    .border({ width: 1, color: '#E3E8F1' })
+    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
   }
 
   @Builder TaskSceneList() {
@@ -4081,15 +4264,15 @@ export struct TaskPage {
         Text('当前场景暂无任务')
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
         Text('点击上方新建任务，使用图编辑或 JSON 创建 workflow。')
           .fontSize(12)
-          .fontColor('#7B8290')
+          .fontColor(AppTheme.text('#7B8290'))
           .margin({ top: 8 })
       }
       .width('86%')
       .padding(22)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(14)
       .margin({ bottom: 18 })
     } else {
@@ -4109,11 +4292,11 @@ export struct TaskPage {
           Text('Workflow 文件管理')
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .width('100%')
           Text(this.fileStatsText)
             .fontSize(12)
-            .fontColor('#6F7584')
+            .fontColor(AppTheme.text('#6F7584'))
             .margin({ top: 7 })
             .width('100%')
             .maxLines(2)
@@ -4124,7 +4307,7 @@ export struct TaskPage {
           .width(64)
           .height(34)
           .fontSize(12)
-          .backgroundColor('#4E5666')
+          .backgroundColor(AppTheme.background('#4E5666'))
           .borderRadius(10)
           .margin({ left: 10 })
           .onClick(() => { this.reloadTasks(); })
@@ -4137,7 +4320,7 @@ export struct TaskPage {
     }
     .width('86%')
     .padding(18)
-    .backgroundColor(Color.White)
+    .backgroundColor(AppTheme.background(Color.White))
     .borderRadius(14)
     .margin({ bottom: 18 })
   }
@@ -4149,13 +4332,13 @@ export struct TaskPage {
         Text(title)
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
+          .fontColor(AppTheme.text('#11182F'))
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(subtitle + ' · ' + files.length + ' 个 · ' + WorkflowStorage.formatSize(this.totalFileSize(files)))
           .fontSize(12)
-          .fontColor('#6F7584')
+          .fontColor(AppTheme.text('#6F7584'))
           .margin({ top: 6 })
           .width('100%')
           .maxLines(1)
@@ -4167,8 +4350,8 @@ export struct TaskPage {
         .width(74)
         .height(34)
         .fontSize(12)
-        .fontColor(Color.White)
-        .backgroundColor(color)
+        .fontColor(AppTheme.text(Color.White))
+        .backgroundColor(AppTheme.filledBackground(color))
         .borderRadius(10)
         .margin({ left: 10 })
         .onClick(() => { this.openFileViewer(category); })
@@ -4176,15 +4359,15 @@ export struct TaskPage {
         .width(66)
         .height(34)
         .fontSize(12)
-        .fontColor('#6F7584')
-        .backgroundColor('#F3F5FA')
+        .fontColor(AppTheme.text('#6F7584'))
+        .backgroundColor(AppTheme.background('#F3F5FA'))
         .borderRadius(10)
         .margin({ left: 8 })
         .onClick(() => { this.deleteFileCategory(category); })
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(bgColor)
+    .backgroundColor(AppTheme.background(bgColor))
     .borderRadius(14)
     .margin({ top: 12 })
   }
@@ -4196,7 +4379,7 @@ export struct TaskPage {
           Text(this.fileViewerTitle)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           if (this.fileViewerContainsAiGeneratedContent()) {
             AiGeneratedBadge({ compact: true })
@@ -4205,8 +4388,8 @@ export struct TaskPage {
           Button('关闭')
             .height(30)
             .fontSize(11)
-            .backgroundColor('#F2F5FA')
-            .fontColor('#4E5666')
+            .backgroundColor(AppTheme.background('#F2F5FA'))
+            .fontColor(AppTheme.text('#4E5666'))
             .borderRadius(8)
             .onClick(() => { this.fileViewerOpen = false; })
         }
@@ -4218,8 +4401,8 @@ export struct TaskPage {
                 Button(file.name + ' (' + WorkflowStorage.formatSize(file.size) + ')')
                   .height(32)
                   .fontSize(11)
-                  .backgroundColor(this.fileViewerSelectedName === file.name ? '#276EF1' : '#F3F5FA')
-                  .fontColor(this.fileViewerSelectedName === file.name ? Color.White : '#4E5666')
+                  .backgroundColor(AppTheme.background(this.fileViewerSelectedName === file.name ? '#276EF1' : '#F3F5FA'))
+                  .fontColor(AppTheme.text(this.fileViewerSelectedName === file.name ? Color.White : '#4E5666'))
                   .borderRadius(9)
                   .margin({ right: 8 })
                   .onClick(() => { this.openManagedFile(file); })
@@ -4232,7 +4415,7 @@ export struct TaskPage {
           .margin({ top: 12 })
           Text('当前文件：' + this.fileViewerSelectedName)
             .fontSize(12)
-            .fontColor('#6F7584')
+            .fontColor(AppTheme.text('#6F7584'))
             .margin({ top: 10 })
             .width('100%')
             .maxLines(1)
@@ -4242,16 +4425,16 @@ export struct TaskPage {
               .width(54)
               .height(30)
               .fontSize(12)
-              .fontColor(this.fileViewerPreviewMode ? Color.White : '#5968FF')
-              .backgroundColor(this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .fontColor(AppTheme.text(this.fileViewerPreviewMode ? Color.White : '#5968FF'))
+              .backgroundColor(AppTheme.background(this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA'))
               .borderRadius(10)
               .onClick(() => { this.fileViewerPreviewMode = true; })
             Button('原文')
               .width(54)
               .height(30)
               .fontSize(12)
-              .fontColor(!this.fileViewerPreviewMode ? Color.White : '#5968FF')
-              .backgroundColor(!this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .fontColor(AppTheme.text(!this.fileViewerPreviewMode ? Color.White : '#5968FF'))
+              .backgroundColor(AppTheme.background(!this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA'))
               .borderRadius(10)
               .margin({ left: 8 })
               .onClick(() => { this.fileViewerPreviewMode = false; })
@@ -4265,27 +4448,27 @@ export struct TaskPage {
               Text(this.fileViewerText)
                 .fontSize(11)
                 .fontFamily('monospace')
-                .fontColor('#2F3645')
+                .fontColor(AppTheme.text('#2F3645'))
                 .width('100%')
             }
           }
           .width('100%')
           .height(280)
           .padding(12)
-          .backgroundColor('#F6F8FC')
+          .backgroundColor(AppTheme.background('#F6F8FC'))
           .borderRadius(12)
           .margin({ top: 8 })
         } else {
           Text(this.fileViewerText)
             .fontSize(13)
-            .fontColor('#7B8290')
+            .fontColor(AppTheme.text('#7B8290'))
             .margin({ top: 14 })
             .width('100%')
         }
       }
       .width('86%')
       .padding(18)
-      .backgroundColor(Color.White)
+      .backgroundColor(AppTheme.background(Color.White))
       .borderRadius(14)
       .margin({ bottom: 18 })
     }
@@ -4331,6 +4514,7 @@ export struct TaskPage {
           TaskDeviceControlPanel({ mode: this.taskControlMode,
             busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
             onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
+          CollectionReminderPanel()
           this.TaskExecutionList()
           this.BatchRunPanel()
         }
@@ -4341,7 +4525,7 @@ export struct TaskPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F4F7FB')
+    .backgroundColor(AppTheme.background('#F4F7FB'))
     .clip(false)
   }
 

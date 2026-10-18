@@ -9,6 +9,7 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { localVisionPromptHw } from './LocalVisionImageShape';
+import { AgentRouterRequestBuffer } from './AgentRouterRequestBuffer';
 
 type RequestValue = Object | string | number | boolean | null;
 type AgentRouteMode = 'local' | 'cloud';
@@ -239,40 +240,52 @@ export class AgentRouterServer {
     this.filesDir = filesDir;
     this.cancellationRequested = false;
     let server = socket.constructTCPSocketServerInstance();
-    let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
+    // PC clients already connect through authorized HDC fport to the device loopback.
+    // Do not expose this unauthenticated task/model protocol to other devices on Wi-Fi.
+    let ipAddress: socket.NetAddress = { address: '127.0.0.1', port: port, family: 1 };
 
     server.on('connect', (client: socket.TCPSocketConnection) => {
-      let bufferStr = '';
+      let requestBuffer = new AgentRouterRequestBuffer();
+      let processing: Promise<void> = Promise.resolve();
+      let queuedRequests = 0;
+      let rejected = false;
       if (this.routeMode === 'cloud' && !this.cloudConnectLogged) {
         this.cloudConnectLogged = true;
         this.log('cloud', '>> [Cloud Connect] PC client connected to App TCP router.');
       }
 
-      client.on('message', async (data) => {
-        let textDecoder = util.TextDecoder.create('utf-8');
-        let str = textDecoder.decodeWithStream(new Uint8Array(data.message));
-        bufferStr += str;
-
-        let eofIdx = bufferStr.indexOf('<<EOF>>');
-        if (eofIdx === -1) {
-          return;
-        }
-
-        let payload = bufferStr.substring(0, eofIdx);
-        bufferStr = bufferStr.substring(eofIdx + 7);
-
+      client.on('message', (data): void => {
+        if (rejected) { return; }
         try {
-          let req = ArkJSON.parse(payload) as RequestMap;
-          await this.handleRequest(client, req);
-        } catch (e) {
-          let message = String(e);
-          if (this.isCancellationRequested()) {
-            this.log(this.routeMode, '>> [Request] cancelled during in-flight request.');
-            this.sendTerminate(client, 'Task cancelled by user');
-            return;
+          let messages = requestBuffer.feed(new Uint8Array(data.message));
+          if (queuedRequests + messages.length > 64) { throw new Error('Too many queued agent router requests'); }
+          for (let payload of messages) {
+            queuedRequests += 1;
+            // Model/history state is shared: never overlap requests from one TCP connection.
+            processing = processing.then(async (): Promise<void> => {
+              try {
+                if (rejected) { return; }
+                let req = ArkJSON.parse(payload) as RequestMap;
+                await this.handleRequest(client, req);
+              } catch (e) {
+                if (this.isCancellationRequested()) { this.sendTerminate(client, 'Task cancelled by user'); }
+                else {
+                  this.log(this.routeMode, '[ERROR] Routed request handling failed: ' + String(e));
+                  this.sendError(client, 'Failed');
+                }
+              } finally { queuedRequests -= 1; }
+            }).catch((error: Error): void => {
+              this.log(this.routeMode, '[ERROR] Router connection response failed: ' + error.message);
+            });
           }
-          this.log(this.routeMode, '[ERROR] Routed request handling failed: ' + message);
-          this.sendError(client, 'Failed');
+        } catch (e) {
+          rejected = true;
+          this.log(this.routeMode, '[ERROR] Router frame rejected: ' + String(e));
+          try {
+            client.close().catch((error: Error): void => {
+              this.log(this.routeMode, '[ERROR] Router close failed: ' + error.message);
+            });
+          } catch (closeError) { this.log(this.routeMode, '[ERROR] Router close failed: ' + String(closeError)); }
         }
       });
     });
@@ -893,7 +906,9 @@ export class AgentRouterServer {
       data: payload + '<<EOF>>'
     };
     try {
-      client.send(sendOptions);
+      client.send(sendOptions).catch((error: Error): void => {
+        this.log(this.routeMode, '[ERROR] Router send failed: ' + error.message);
+      });
     } catch (e) {
       let err = e as Error;
       throw err;

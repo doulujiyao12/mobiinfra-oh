@@ -22,6 +22,10 @@ export interface GalleryPhotoInput {
   date?: string;
   latitude?: number;
   longitude?: number;
+  hdcSourcePath?: string;
+  hdcSourceSize?: number;
+  hdcModifiedAt?: number;
+  hdcChecksum?: string;
 }
 
 export interface GalleryExifMetadata {
@@ -42,11 +46,16 @@ export interface GalleryExifMetadata {
 // 全量图库扫描的单项状态。status 只描述流程状态，skipReason 用于解释真正跳过的原因。
 export interface GalleryScanItem {
   uri: string;
+  thumbnailUri?: string;
   id: string;
   date: string;
   status: string;
   error: string;
   skipReason?: string;
+  hdcSourcePath?: string;
+  hdcSourceSize?: number;
+  hdcModifiedAt?: number;
+  hdcChecksum?: string;
 }
 
 // 全量扫描会话的落盘快照，用于暂停、恢复和页面重新进入后的进度恢复。
@@ -60,6 +69,8 @@ export interface GalleryScanSession {
   skipped: number;
   failed: number;
   items: GalleryScanItem[];
+  source?: string;
+  requestedCount?: number;
 }
 
 // 月度 AI 总结缓存。signature 绑定当月分析结果，结果变化时旧总结会自动失效。
@@ -94,6 +105,11 @@ export interface GalleryAnalysisResult {
   id: string;
   uri: string;
   thumbnailUri?: string;
+  // HDC source references are shell paths, not URIs the app can open directly.
+  hdcSourcePath?: string;
+  hdcSourceSize?: number;
+  hdcModifiedAt?: number;
+  hdcChecksum?: string;
   title: string;
   category: string;
   summary: string;
@@ -124,6 +140,8 @@ export interface GalleryAnalyzeOutcome {
 
 export interface GalleryAnalyzeOptions {
   shouldPause?: () => boolean;
+  prepareInput?: (input: GalleryPhotoInput) => Promise<void>;
+  onPrepareError?: (input: GalleryPhotoInput, error: string) => void;
   onItemDone?: (input: GalleryPhotoInput, outcome: GalleryAnalyzeOutcome) => void;
 }
 

@@ -1,3 +1,4 @@
+import { AppTheme } from '../utils/AppTheme';
 export const APP_HEADER_HEIGHT: number = 56;
 // 标题高度由导航容器避让；内容只需额外保留这段呼吸间距。
 export const APP_HEADER_CONTENT_GAP: number = 16;
@@ -27,7 +28,7 @@ export struct AppHeader {
       Text(this.title)
         .fontSize(20)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#172033')
+        .fontColor(AppTheme.text('#172033'))
         .lineHeight(28)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -44,8 +45,8 @@ export struct AppHeader {
             .width(42)
             .height(40)
             .fontSize(28)
-            .fontColor('#11182F')
-            .backgroundColor(Color.White)
+            .fontColor(AppTheme.text('#11182F'))
+            .backgroundColor(AppTheme.background(Color.White))
             .borderRadius(14)
             .accessibilityText('返回')
             .onClick(() => { this.onBackClick(); })
@@ -67,15 +68,15 @@ export struct AppHeader {
           }
           .width(40)
           .height(40)
-          .backgroundColor(this.circularAvatar ? '#EEF2FF' : Color.Transparent)
+          .backgroundColor(AppTheme.background(this.circularAvatar ? '#EEF2FF' : Color.Transparent))
           .borderRadius(this.circularAvatar ? 20 : 0)
           .border({
             width: this.circularAvatar ? 1 : 0,
-            color: this.circularAvatar ? '#FFFFFF' : Color.Transparent
+            color: AppTheme.border(this.circularAvatar ? '#FFFFFF' : Color.Transparent)
           })
           .shadow({
             radius: this.circularAvatar ? 8 : 0,
-            color: this.circularAvatar ? '#160D2A63' : Color.Transparent,
+            color: AppTheme.shadow(this.circularAvatar ? '#160D2A63' : Color.Transparent),
             offsetX: 0,
             offsetY: this.circularAvatar ? 3 : 0
           })
@@ -92,11 +93,11 @@ export struct AppHeader {
               .width(7)
               .height(7)
               .borderRadius(4)
-              .backgroundColor(this.pcServerConnected ? '#22B07D' : '#A7AFBD')
+              .backgroundColor(AppTheme.background(this.pcServerConnected ? '#22B07D' : '#A7AFBD'))
               .margin({ right: 5 })
             Text(this.pcServerLabel())
               .fontSize(11)
-              .fontColor(this.pcServerConnected ? '#167456' : '#747B87')
+              .fontColor(AppTheme.text(this.pcServerConnected ? '#167456' : '#747B87'))
               .fontWeight(FontWeight.Medium)
               .maxLines(1)
           }
@@ -110,8 +111,8 @@ export struct AppHeader {
             .fontSize(12)
             .padding({ left: 8, right: 8 })
             .fontWeight(FontWeight.Medium)
-            .fontColor('#276EF1')
-            .backgroundColor('#EEF4FF')
+            .fontColor(AppTheme.text('#276EF1'))
+            .backgroundColor(AppTheme.background('#EEF4FF'))
             .borderRadius(14)
             .accessibilityText(this.actionLabel)
             .onClick(() => { this.onActionClick(); })

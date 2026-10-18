@@ -1,6 +1,6 @@
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
+import { CloudModelClient, CloudModelConfig, PhoneAgentCloudOptions } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
@@ -17,7 +17,9 @@ import { getAppBundleName } from './AppIdentity';
 import { AgentLoopNativeApi } from 'libentry.so';
 import { localVisionPromptHw } from './LocalVisionImageShape';
 import { PhoneHdcWorkflowBridge } from './selfhdc/PhoneHdcWorkflowBridge';
-import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from './selfhdc/PhoneAgentPolicy';
+import {
+  phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize, phoneAgentValidateAction
+} from './selfhdc/PhoneAgentPolicy';
 
 type AgentLoopMode = 'local' | 'cloud';
 export type AgentPromptMode = 'local' | 'cloud';
@@ -350,12 +352,13 @@ export class AgentLoopRunner {
           await this.sleep(300);
           return candidate;
         }, (info: AgentActionParseRetryInfo): void => {
-          this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+          this.log(mode, '>> [Agent] ' + (this.phoneBridge !== null ? 'JSON/action validation' : 'JSON parse') +
+            ' failed; same-screen retry ' + String(info.retryNumber) + '/' +
             String(info.maxRetries) + ': ' + info.errorMessage);
           AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS +
-            ': JSON解析失败，同屏重试 ' +
+            (this.phoneBridge !== null ? ': 动作校验失败，同屏重试 ' : ': JSON解析失败，同屏重试 ') +
             String(info.retryNumber) + '/' + String(info.maxRetries));
-        });
+        }, this.phoneBridge !== null ? phoneAgentValidateAction : undefined);
         let response = parsed.raw;
         if (parsed.action === 'error') {
           throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
@@ -440,12 +443,14 @@ export class AgentLoopRunner {
         await this.sleep(300);
         return candidate;
       }, (info: AgentActionParseRetryInfo): void => {
-        this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+        this.log(mode, '>> [Agent] ' + (this.phoneBridge !== null ? 'JSON/action validation' : 'JSON parse') +
+          ' failed; same-screen retry ' + String(info.retryNumber) + '/' +
           String(info.maxRetries) + ': ' + info.errorMessage);
         AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': JSON解析失败，同屏重试 ' +
+          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS +
+          (this.phoneBridge !== null ? ': 动作校验失败，同屏重试 ' : ': JSON解析失败，同屏重试 ') +
           String(info.retryNumber) + '/' + String(info.maxRetries));
-      });
+      }, this.phoneBridge !== null ? phoneAgentValidateAction : undefined);
       let response = parsed.raw;
       if (AgentActionParser.isTerminal(parsed.action)) {
         if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }
@@ -582,11 +587,12 @@ export class AgentLoopRunner {
       this.log('cloud', '>> [Cloud Agent Step] image saved: ' + imgPath);
     }
     let qwenTask = this.cloudTask.length > 0 ? this.cloudTask : '';
-    let debugPrompt = this.cloudClient.formatQwenDeciderPromptForLog(qwenTask, this.cloudActionHistory, imageBase64);
+    let debugPrompt = this.cloudClient.formatQwenDeciderPromptForLog(qwenTask, this.cloudActionHistory, imageBase64,
+      this.phoneBridge !== null);
     this.log('cloud', '>> [Cloud Decider Prompt]\n' + debugPrompt);
     AgentExecutionController.updateFloatText('Cloud thinking...');
     let response = await this.cloudClient.chatQwenDecider(qwenTask, this.cloudActionHistory, imageBase64,
-      this.cloudConfigProvider());
+      this.cloudConfigProvider(), this.phoneCloudOptions());
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Agent Step] model response:\n' + response);
@@ -609,7 +615,8 @@ export class AgentLoopRunner {
 
   private async runCloudDeciderPrompt(prompt: string, imageBase64: string): Promise<string> {
     AgentExecutionController.updateFloatText('Cloud thinking...');
-    let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider());
+    let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider(),
+      this.phoneCloudOptions());
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Action] model response:\n' + response);
@@ -630,6 +637,14 @@ export class AgentLoopRunner {
       throw new Error('User rejected');
     }
     return response;
+  }
+
+  private phoneCloudOptions(): PhoneAgentCloudOptions | undefined {
+    if (this.phoneBridge === null) { return undefined; }
+    return {
+      onDiagnostic: (message: string): void => { this.log('cloud', message); },
+      ensureActive: (): void => { this.checkCancellation(); }
+    };
   }
 
   private async resetLocalContext(): Promise<void> {
