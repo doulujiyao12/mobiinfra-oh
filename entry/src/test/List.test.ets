@@ -10,6 +10,7 @@ import collectionReminderUnitTest from './CollectionReminderUnit.test';
 import galleryHdcPolicyUnitTest from './GalleryHdcPolicyUnit.test';
 import galleryWorkQueueUnitTest from './GalleryWorkQueueUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
+import codexPolicyUnitTest from './CodexPolicyUnit.test';
 import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
@@ -69,6 +70,7 @@ export default function testsuite() {
   galleryHdcPolicyUnitTest();
   galleryWorkQueueUnitTest();
   mainTabConfigUnitTest();
+  codexPolicyUnitTest();
   firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();
   digitalAvatarTypesUnitTest();

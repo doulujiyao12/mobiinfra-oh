@@ -13,6 +13,7 @@ import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
+import { CodexPage } from './codex/CodexPage';
 import { ChatVoiceOrchestrator, ChatVoiceTtsConfig } from './chat/ChatVoiceOrchestrator';
 import {
   CHAT_MODE_CLOUD_AGENT,
@@ -7200,6 +7201,9 @@ struct Index {
     if (icon === 'tab_chat') {
       return $r('app.media.tab_chat');
     }
+    if (icon === 'tab_codex') {
+      return $r('app.media.tab_codex');
+    }
     if (icon === 'tab_task') {
       return $r('app.media.tab_task');
     }
@@ -7608,6 +7612,13 @@ struct Index {
       })
     }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .tabBar(this.tabBarStyle(MainTabIndex.Chat))
+    TabContent() {
+      CodexPage({
+        active: this.pageVisible && this.currentTab === MainTabIndex.Codex,
+        navigationBottomInset: this.mainTabBottomInset()
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Codex))
     TabContent() {
       TaskPage({
         active: this.pageVisible && this.currentTab === MainTabIndex.Task,

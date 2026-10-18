@@ -3,7 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { http } from '@kit.NetworkKit';
 
 export const PRIVACY_STATE_KEY: string = 'privacyConsentState';
-export const PRIVACY_VERSION: string = '2026-09-30-v2';
+export const PRIVACY_VERSION: string = '2026-10-19-v3';
 export const PRIVACY_REQUIRED_MESSAGE: string = '请先阅读并同意隐私声明，再执行任务或使用云端分析。';
 
 export function normalizePrivacyChoice(value: string): string {
@@ -23,6 +23,8 @@ export class PrivacyConsent {
   private static saving: boolean = false;
   private static requests: http.HttpRequest[] = [];
   private static cancellers: Map<http.HttpRequest, () => void> = new Map();
+  private static externalRequests: Map<number, () => void> = new Map();
+  private static externalSequence: number = 0;
   private static revokeHandler: (() => void) | null = null;
 
   static initialize(context: common.Context): Promise<void> {
@@ -74,6 +76,11 @@ export class PrivacyConsent {
     AppStorage.setOrCreate(PRIVACY_STATE_KEY, PrivacyConsent.choice);
     try {
       if (!accepted) {
+        const external = Array.from(PrivacyConsent.externalRequests.values());
+        PrivacyConsent.externalRequests.clear();
+        external.forEach((cancel: () => void) => {
+          try { cancel(); } catch (e) { }
+        });
         let pending = PrivacyConsent.requests.slice();
         pending.forEach((request: http.HttpRequest) => {
           try {
@@ -137,5 +144,13 @@ export class PrivacyConsent {
   static onHttpCancel(request: http.HttpRequest, cancel: () => void): void {
     PrivacyConsent.requireAccepted();
     PrivacyConsent.cancellers.set(request, cancel);
+  }
+
+  // RCP and other transports participate in the same immediate consent revocation.
+  static registerExternalRequest(cancel: () => void): () => void {
+    PrivacyConsent.requireAccepted();
+    const id = ++PrivacyConsent.externalSequence;
+    PrivacyConsent.externalRequests.set(id, cancel);
+    return () => { PrivacyConsent.externalRequests.delete(id); };
   }
 }
