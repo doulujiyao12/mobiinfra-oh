@@ -214,6 +214,11 @@ public:
         return config_.value("max_new_tokens", 512);
     }
 
+    // Fixed-length generation for benchmarks; normal responses still stop at EOS.
+    bool ignore_eos() const {
+        return config_.value("ignore_eos", false);
+    }
+
     bool reuse_kv() const {
         return config_.value("reuse_kv", false);
     }
@@ -266,6 +271,74 @@ public:
 
     std::string talker_embedding_file() const {
         return base_dir_ + config_.value("talker_embedding_file", "talker_embeddings_bf16.bin");
+    }
+
+    std::string talker_text_embedding_file() const {
+        return base_dir_ + config_.value("talker_text_embedding_file", "talker_text_embeddings_bf16.bin");
+    }
+
+    int talker_text_hidden_size() const { return config_.value("talker_text_hidden_size", 2048); }
+
+    int tts_bos_token_id() const { return config_.value("tts_bos_token_id", 151672); }
+
+    int tts_eos_token_id() const { return config_.value("tts_eos_token_id", 151673); }
+
+    int tts_pad_token_id() const { return config_.value("tts_pad_token_id", 151671); }
+
+    std::string talker_type() const { return config_.value("talker_type", ""); }
+
+    std::string audio_code_predictor_model() const {
+        return base_dir_ + config_.value("code_predictor_model", "code_predictor.mnn");
+    }
+
+    std::string audio_code_predictor_weight() const {
+        return base_dir_ + config_.value("code_predictor_weight", "code_predictor.mnn.weight");
+    }
+
+    std::string audio_code_predictor_embedding_file() const {
+        return base_dir_ + config_.value("code_predictor_embedding_file", "code_predictor_embeddings_bf16.bin");
+    }
+
+    int audio_code_predictor_vocab_size() const { return config_.value("code_predictor_vocab_size", 2048); }
+
+    int audio_code_predictor_groups() const { return config_.value("code_predictor_groups", 16); }
+
+    bool audio_code_predictor_incremental() const { return config_.value("code_predictor_incremental", false); }
+
+    std::string speech_decoder_model() const {
+        return base_dir_ + config_.value("speech_decoder_model", "speech_decoder.mnn");
+    }
+
+    std::string speech_decoder_weight() const {
+        return base_dir_ + config_.value("speech_decoder_weight", "speech_decoder.mnn.weight");
+    }
+
+    int speech_decoder_upsample_rate() const { return config_.value("speech_decoder_upsample_rate", 1920); }
+
+    std::string speaker_encoder_model() const {
+        return base_dir_ + config_.value("speaker_encoder_model", "speaker_encoder.mnn");
+    }
+
+    std::string speaker_encoder_weight() const {
+        return base_dir_ + config_.value("speaker_encoder_weight", "speaker_encoder.mnn.weight");
+    }
+
+    int speaker_encoder_sample_rate() const { return config_.value("speaker_encoder_sample_rate", 24000); }
+
+    std::string prompt_embedder_model() const {
+        return base_dir_ + config_.value("prompt_embedder_model", "prompt_embedder.mnn");
+    }
+
+    std::string prompt_embedder_weight() const {
+        return base_dir_ + config_.value("prompt_embedder_weight", "prompt_embedder.mnn.weight");
+    }
+
+    std::string codec_embedder_model() const {
+        return base_dir_ + config_.value("codec_embedder_model", "codec_embedder.mnn");
+    }
+
+    std::string codec_embedder_weight() const {
+        return base_dir_ + config_.value("codec_embedder_weight", "codec_embedder.mnn.weight");
     }
 
     std::string predit_model() const {
@@ -326,6 +399,12 @@ public:
         return config_.value("is_mrope", false);
     }
 
+    int mrope_axes() const { return config_.value("mrope_axes", 3); }
+
+    int max_position_embeddings() const {
+        return config_.value("max_position_embeddings", 0);
+    }
+
     bool has_talker() const {
         return config_.value("has_talker", false);
     }
@@ -358,9 +437,17 @@ public:
         return config_.value("attn_scale", 0.0f);
     }
 
+    int num_kv_shared_layers() const {
+        return config_.value("num_kv_shared_layers", 0);
+    }
+
     bool use_template() const {
         return config_.value("use_template", true);
     }
+
+    bool asr_use_audio_template() const { return config_.value("asr_use_audio_template", false); }
+
+    std::string asr_language() const { return config_.value("asr_language", "Chinese"); }
 
     bool use_mmap() const {
         return config_.value("use_mmap", false);
@@ -440,7 +527,56 @@ public:
     }
 
     std::vector<int64_t> tie_embeddings() const {
-        return config_.value("tie_embeddings", std::vector<int64_t>{});
+        // Legacy positional getter; only valid if the field is a list.
+        auto v = config_.at("tie_embeddings");
+        if (v.is_array()) {
+            return config_.value("tie_embeddings", std::vector<int64_t>{});
+        }
+        return {};
+    }
+
+    // Structured view for both legacy positional list and new dict format.
+    struct TieEmbeddingsInfo {
+        int64_t weight_offset = 0;
+        int64_t alpha_offset = 0;
+        int64_t alpha_size = 0;
+        int64_t quant_bit = 0;
+        int64_t quant_block = 0;
+        bool alpha_fp16 = false;
+        bool valid = false;
+    };
+
+    static TieEmbeddingsInfo parseTieEmbeddings(const std::vector<int64_t>& v) {
+        TieEmbeddingsInfo info;
+        if (v.size() >= 5) {
+            info.weight_offset = v[0];
+            info.alpha_offset = v[1];
+            info.alpha_size = v[2];
+            info.quant_bit = v[3];
+            info.quant_block = v[4];
+            if (v.size() >= 6)
+                info.alpha_fp16 = (v[5] != 0);
+            info.valid = true;
+        }
+        return info;
+    }
+
+    TieEmbeddingsInfo tie_embeddings_info() const {
+        if (!config_.contains("tie_embeddings"))
+            return {};
+        auto v = config_.at("tie_embeddings");
+        if (v.is_array()) {
+            return parseTieEmbeddings(tie_embeddings());
+        }
+        TieEmbeddingsInfo info;
+        info.weight_offset = v.value("weight_offset", int64_t(0));
+        info.alpha_offset = v.value("alpha_offset", int64_t(0));
+        info.alpha_size = v.value("alpha_size", int64_t(0));
+        info.quant_bit = v.value("quant_bit", int64_t(0));
+        info.quant_block = v.value("quant_block", int64_t(0));
+        info.alpha_fp16 = (v.value("alpha_dtype", std::string("fp32")) == "fp16");
+        info.valid = true;
+        return info;
     }
     // llm model config end >
 
@@ -616,6 +752,40 @@ public:
     int eagle_topk() const {
         return config_.value("eagle_topk", 1);
     }
+    // ========= dflash config start ===============
+    std::string dflash_model() const {
+        return base_dir_ + config_.value("dflash_model", "dflash.mnn");
+    }
+    std::string dflash_fc() const {
+        return base_dir_ + config_.value("dflash_fc", "dflash_fc.mnn");
+    }
+    // Mandatory: the draft attention consumes per-layer kv_k_i/kv_v_i, not raw context rows.
+    std::string dflash_kvmat() const {
+        return base_dir_ + config_.value("dflash_kvmat", "dflash_kvmat.mnn");
+    }
+    // Must equal the block size baked into dflash.mnn.
+    int dflash_block_size() const {
+        return config_.value("dflash_block_size", 8);
+    }
+    int dflash_mask_token_id() const {
+        return config_.value("dflash_mask_token_id", 0);
+    }
+    // true: the draft-hidden row at index k predicts block slot k+1.
+    bool dflash_shift_label() const {
+        return config_.value("dflash_shift_label", false);
+    }
+    std::vector<int> dflash_target_layer_ids() const {
+        return config_.value("dflash_target_layer_ids", std::vector<int>{});
+    }
+    // Target's post-final-norm tensor name in llm.mnn; the engine loads the subgraph
+    // {this tensor -> logits} so the draft reuses the target's lm_head. Empty = disabled.
+    // Target's post-final-norm tensor name in llm.mnn; mandatory for DFlash (the draft has
+    // no lm_head of its own). Empty = refused at load with a re-export hint.
+    std::string dflash_shared_lmhead_input() const {
+        return config_.value("dflash_shared_lmhead_input", std::string{});
+    }
+    // ========= dflash config end ===============
+
     // speculative decoding config end >
 };
 } // Transformer

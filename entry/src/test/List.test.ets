@@ -40,6 +40,8 @@ import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
 import phoneAgentCloudOutputUnitTest from './PhoneAgentCloudOutputUnit.test';
+import phoneAgentValidationUnitTest from './PhoneAgentValidationUnit.test';
+import agentRouterRequestBufferUnitTest from './AgentRouterRequestBufferUnit.test';
 import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
 import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
@@ -96,6 +98,8 @@ export default function testsuite() {
   mobileGuiTaskWorkflowAdapterUnitTest();
   agentActionParserUnitTest();
   phoneAgentCloudOutputUnitTest();
+  phoneAgentValidationUnitTest();
+  agentRouterRequestBufferUnitTest();
   captureOverlayPolicyUnitTest();
   agentLoopTimingPolicyUnitTest();
   localPlannerFastPathUnitTest();

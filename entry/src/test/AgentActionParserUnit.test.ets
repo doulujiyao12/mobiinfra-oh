@@ -1,6 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { AgentActionParser } from '../main/ets/utils/AgentActionParser';
 import { stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
+import { phoneAgentValidateAction } from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
 import {
   AgentActionParseRetry,
   AgentActionParseRetryInfo
@@ -153,7 +154,7 @@ export default function agentActionParserUnitTest() {
         requestCount += 1;
         return requestCount === 1 ? truncated :
           '{"action":"click","parameters":{"target_element":"底部输入框","bbox":[50,900,900,960]}}';
-      }, (info: AgentActionParseRetryInfo): void => { diagnostics.push(info.errorMessage); }, true);
+      }, (info: AgentActionParseRetryInfo): void => { diagnostics.push(info.errorMessage); }, phoneAgentValidateAction);
       expect(requestCount).assertEqual(2);
       expect(diagnostics[0]).assertContain('truncated');
       expect(parsed.action).assertEqual('click');
@@ -166,9 +167,9 @@ export default function agentActionParserUnitTest() {
         requestCount += 1;
         return requestCount === 1 ? '{"action":"click_input","parameters":{"text":"需求"}}' :
           '{"action":"click_input","parameters":{"bbox":[20,880,950,960],"text":"完整需求"}}';
-      }, (info: AgentActionParseRetryInfo): void => { diagnostic = info.errorMessage; }, true);
+      }, (info: AgentActionParseRetryInfo): void => { diagnostic = info.errorMessage; }, phoneAgentValidateAction);
       expect(requestCount).assertEqual(2);
-      expect(diagnostic).assertContain('bbox or coords');
+      expect(diagnostic).assertContain('PHONE_AGENT_COORDINATE: missing bbox');
       expect(AgentActionParser.getMapString(parsed.parameters, 'text')).assertEqual('完整需求');
     });
 
@@ -198,7 +199,7 @@ export default function agentActionParserUnitTest() {
         await AgentActionParseRetry.request(async (): Promise<string> => {
           requests += 1;
           throw new Error('cancelled');
-        }, (): void => { retries += 1; }, true);
+        }, (): void => { retries += 1; }, phoneAgentValidateAction);
       } catch (e) { failure = (e as Error).message; }
       expect(requests).assertEqual(1);
       expect(retries).assertEqual(0);

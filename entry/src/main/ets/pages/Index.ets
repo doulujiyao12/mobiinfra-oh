@@ -2938,7 +2938,34 @@ struct Index {
     }
   }
 
+  private onlineCompileNoticeTimerId: number = -1;
+  private onlineCompileNoticeCount: number = 0;
+  private onlineCompileNoticeTime: number = 0;
+
+  private startOnlineCompileNotices(): void {
+    if (this.onlineCompileNoticeTimerId !== -1) {
+      clearInterval(this.onlineCompileNoticeTimerId);
+    }
+    try {
+      this.onlineCompileNoticeCount = mnnllm.getOnlineCompileCount();
+    } catch {
+      return;
+    }
+    this.onlineCompileNoticeTimerId = setInterval(() => {
+      let count = mnnllm.getOnlineCompileCount();
+      if (count === this.onlineCompileNoticeCount) { return; }
+      this.onlineCompileNoticeCount = count;
+      if (!this.isThinking) { return; }
+      let now = new Date().getTime();
+      if (now - this.onlineCompileNoticeTime < 8000) { return; }
+      this.onlineCompileNoticeTime = now;
+      showToastSafely('首次加载，在线编译中，请等待', 4000);
+      AppLogger.info('LocalChat.NPU', '首次加载，在线编译中，请等待');
+    }, 500);
+  }
+
   aboutToAppear() {
+    this.startOnlineCompileNotices();
     PrivacyConsent.setRevokeHandler(() => {
       this.cancelCurrentCloudChat();
       if (this.chatVoiceOrchestrator !== null) {
@@ -3133,6 +3160,10 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    if (this.onlineCompileNoticeTimerId !== -1) {
+      clearInterval(this.onlineCompileNoticeTimerId);
+      this.onlineCompileNoticeTimerId = -1;
+    }
     if (this.desktopCompanionReminderResolver !== null) {
       this.finishDesktopCompanionReminder(false);
     }
@@ -4341,7 +4372,8 @@ struct Index {
     } catch {
     }
     let normalizedName = baseName.toLowerCase();
-    if (!currentInsideChunk || (normalizedName !== 'vision.om' && normalizedName !== 'vision.om.tmp')) {
+    if (!currentInsideChunk || (normalizedName !== 'vision.om' && normalizedName !== 'vision.om.tmp' &&
+      !normalizedName.startsWith('vision.om.tmp-'))) {
       return;
     }
     let fileSize = 0;
@@ -4378,18 +4410,28 @@ struct Index {
       }
       let files = this.scanChunkOmCacheFiles();
       let totalSize = 0;
+      let readyCount = 0;
+      let incompleteCount = 0;
       let lines: string[] = [];
       for (let file of files) {
         totalSize += file.size;
-        lines.push(`${file.relativePath} (${this.formatSize(file.size)})`);
+        let ready = file.path.toLowerCase().endsWith('/vision.om') && file.size > 0;
+        if (ready) {
+          readyCount++;
+        } else {
+          incompleteCount++;
+        }
+        lines.push(`${ready ? '' : '[未完成] '}${file.relativePath} (${this.formatSize(file.size)})`);
       }
       if (files.length === 0) {
-        this.chunkOmCacheOutput = `当前模型尚无 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
-          `目录: ${this.modelDir}`;
+        this.chunkOmCacheOutput = `当前模型未发现 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
+          `已扫描目录: ${this.modelDir}\n` +
+          '纯文字对话不会触发 ViT 编图。若已执行图片推理，请在 Native 日志中查看 [NPU_CACHE]，确认实际后端、缓存目录及写入结果。';
         return;
       }
       this.chunkOmCacheOutput = `模型: ${this.getCurrentModelFolderName()}\n` +
-        `缓存文件: ${files.length} 个，共 ${this.formatSize(totalSize)}\n` + lines.join('\n');
+        `缓存文件: ${readyCount} 个，未完成文件: ${incompleteCount} 个，共 ${this.formatSize(totalSize)}\n` +
+        lines.join('\n');
     } catch (e) {
       let err = e as Error;
       this.chunkOmCacheOutput = `查看 chunk OM 缓存失败: ${err.message}`;

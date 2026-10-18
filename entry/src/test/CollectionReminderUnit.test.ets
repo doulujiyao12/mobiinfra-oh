@@ -64,6 +64,15 @@ export default function collectionReminderUnitTest(): void {
         .assertEqual(localTime(2026, 10, 15, 21));
     });
 
+    it('keepsTheNextScheduledReminderAfterAManualCollectionOnTheSameDay', 0, (): void => {
+      let state = enabledPlan();
+      state.lastCollectedAt = localTime(2026, 10, 15, 20, 58);
+      let due = collectionReminderNextTime(state.hour, state.minute, state.lastCollectedAt);
+      expect(due).assertEqual(localTime(2026, 10, 15, 21));
+      expect(collectionReminderCanClaim(state, intentFor(due), due + 1000)).assertTrue();
+      expect(collectionReminderContent(state.lastCollectedAt, due, true)).assertContain('今天已采集过');
+    });
+
     it('countsLocalCalendarDaysRatherThanElapsedHours', 0, (): void => {
       expect(collectionReminderMissedDays(localTime(2026, 10, 14, 23, 59), localTime(2026, 10, 15, 0, 1)))
         .assertEqual(1);

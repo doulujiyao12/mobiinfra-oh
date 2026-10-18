@@ -17,7 +17,9 @@ import { getAppBundleName } from './AppIdentity';
 import { AgentLoopNativeApi } from 'libentry.so';
 import { localVisionPromptHw } from './LocalVisionImageShape';
 import { PhoneHdcWorkflowBridge } from './selfhdc/PhoneHdcWorkflowBridge';
-import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from './selfhdc/PhoneAgentPolicy';
+import {
+  phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize, phoneAgentValidateAction
+} from './selfhdc/PhoneAgentPolicy';
 
 type AgentLoopMode = 'local' | 'cloud';
 export type AgentPromptMode = 'local' | 'cloud';
@@ -356,7 +358,7 @@ export class AgentLoopRunner {
           AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS +
             (this.phoneBridge !== null ? ': 动作校验失败，同屏重试 ' : ': JSON解析失败，同屏重试 ') +
             String(info.retryNumber) + '/' + String(info.maxRetries));
-        }, this.phoneBridge !== null);
+        }, this.phoneBridge !== null ? phoneAgentValidateAction : undefined);
         let response = parsed.raw;
         if (parsed.action === 'error') {
           throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
@@ -448,7 +450,7 @@ export class AgentLoopRunner {
           ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS +
           (this.phoneBridge !== null ? ': 动作校验失败，同屏重试 ' : ': JSON解析失败，同屏重试 ') +
           String(info.retryNumber) + '/' + String(info.maxRetries));
-      }, this.phoneBridge !== null);
+      }, this.phoneBridge !== null ? phoneAgentValidateAction : undefined);
       let response = parsed.raw;
       if (AgentActionParser.isTerminal(parsed.action)) {
         if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }

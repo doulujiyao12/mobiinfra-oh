@@ -394,6 +394,34 @@ export struct SettingsCenterPage {
     }).catch(() => {});
   }
 
+  private selectLocalNpuExecutionMode(mode: string): void {
+    this.closeSensitiveInputs();
+    if (mode === 'full_npu') {
+      promptAction.showDialog({
+        title: '开发中',
+        message: '全图 NPU 功能正在开发中，暂未开放使用。',
+        buttons: [{ text: '知道了', color: settingsActionColor(SettingsActionKind.Primary) }]
+      }).catch(() => {});
+      return;
+    }
+    if (mode === 'offline_npu2') {
+      promptAction.showDialog({
+        title: '离线 NPU 使用提示',
+        message: '离线 NPU 目前仅支持 Kirin 9030 芯片。其他芯片请使用全 CPU 或在线 NPU。',
+        buttons: [
+          { text: '取消', color: settingsActionColor(SettingsActionKind.Secondary) },
+          { text: '继续使用', color: settingsActionColor(SettingsActionKind.Primary) }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        if (data.index === 1) {
+          this.onLocalNpuExecutionModeChange(mode);
+        }
+      }).catch(() => {});
+      return;
+    }
+    this.onLocalNpuExecutionModeChange(mode);
+  }
+
   private confirmClearScreenshots(): void {
     this.confirmDanger({
       title: '清理截图',
@@ -1396,7 +1424,7 @@ export struct SettingsCenterPage {
       (this.localNpuExecutionMode === 'offline_npu2' ?
         '离线NPU：ViT 使用单张预编译 OMC，图与权重分离；LLM 和 KV 使用 CPU。需配套单图模型包。' :
       (this.localNpuExecutionMode === 'full_npu' ?
-        '全图 NPU（实验）：需专用模型包，ViT、LLM prefill/decode 均使用离线图。上下文 2048 token；开启 Debug 后可导出图接口、执行及 KV 日志。' :
+        '全图 NPU：开发中，暂未开放使用。' :
         '在线 NPU：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。')))
       .fontSize(12)
       .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
@@ -1426,8 +1454,7 @@ export struct SettingsCenterPage {
       .borderRadius(SETTINGS_CONTROL_RADIUS)
       .border({ width: 1, color: AppTheme.border(settingsActionColor(SettingsActionKind.Primary)) })
       .onClick(() => {
-        this.closeSensitiveInputs();
-        this.onLocalNpuExecutionModeChange(mode);
+        this.selectLocalNpuExecutionMode(mode);
       })
   }
 

@@ -178,16 +178,19 @@ export default function selfHdcProtocolUnitTest(): void {
       expect(actions.plan(payload).commands[0].command).assertEqual('uitest uiInput click 540 1222');
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click', x: 2160, y: 100 })); })).assertTrue();
     });
-    it('focusesClearsAndQuotesInputBeforeSubmittingAsThePcDriverDoes', 0, () => {
+    it('typesQuotedTextWithoutImplicitlySendingOrSubmittingIt', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
       let plan = actions.plan(phoneTestMap({ action: 'click_input', x: 200, y: 300, text: "中文 a'b;$(id)" }));
       expect(plan.commands.map((command): string => command.label).join('|')).assertEqual(
-        'activate/click|select-all|clear-input|input-text chars=12|submit-enter');
+        'activate/click|select-all|clear-input|input-text chars=12');
       expect(plan.commands[1].command).assertEqual('uitest uiInput keyEvent 2072 2017');
       expect(plan.commands[2].command).assertEqual('uitest uiInput keyEvent 2071');
       expect(plan.commands[3].command).assertEqual("uitest uiInput text '中文 a'\\''b;$(id)'");
       expect(plan.commands[3].sensitive).assertTrue();
-      expect(plan.commands[4].command).assertEqual('uitest uiInput keyEvent 2054');
+      expect(plan.commands.length).assertEqual(4);
+      let explicit = actions.plan(phoneTestMap({ action: 'click_input', x: 200, y: 300, text: 'search', submit_enter: true }));
+      expect(explicit.commands[4].command).assertEqual('uitest uiInput keyEvent 2054');
+      expect(explicit.inputTarget === null).assertTrue();
     });
     it('refusesBlindInputAndClearsRememberedFocusAfterNavigation', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
@@ -201,13 +204,16 @@ export default function selfHdcProtocolUnitTest(): void {
       expect(input.commands.length).assertEqual(3);
       expect(input.commands.some((command): boolean => command.label === 'activate/click')).assertFalse();
       actions.commit(actions.plan(phoneTestMap({ action: 'sleep' })));
-      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after wait' })).commands.length).assertEqual(4);
+      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after wait' })).commands.length).assertEqual(3);
       actions.commit(actions.plan(phoneTestMap({ action: 'keyevent', key: 'ENTER' })));
-      expect(actions.plan(phoneTestMap({ action: 'input', text: 'after enter' })).commands.length).assertEqual(4);
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', text: 'after enter' })); })).assertTrue();
       actions.commit(actions.plan(phoneTestMap({ action: 'keyevent', key: 'BACK' })));
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', text: 'hello' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'input', x: 20, text: 'hello' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click_input', x: 20, y: 30, text: 'a\0b' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'click_input', x: 20, y: 30 })); })).assertTrue();
+      let invalid: WorkflowJsonMap = { action: 'click_input', x: 200, y: 300, text: 'hello', submit_enter: 'true' };
+      expect(rejects((): void => { actions.plan(invalid); })).assertTrue();
     });
     it('reproducesPcSwipeDirectionsAndRejectsShellInjectionInKeys', 0, () => {
       let actions = new PhoneHdcActions(); actions.setScreen(1080, 2444);
@@ -217,6 +223,8 @@ export default function selfHdcProtocolUnitTest(): void {
         .assertEqual('uitest uiInput swipe 324 1222 756 1222');
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'keyevent', key: '2; id' })); })).assertTrue();
       expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'swipe', direction: 'diagonal' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'swipe' })); })).assertTrue();
+      expect(rejects((): void => { actions.plan(phoneTestMap({ action: 'keyevent' })); })).assertTrue();
     });
     it('resolvesAliasesAndTheHomeAbilityInsteadOfGuessingEntryAbility', 0, () => {
       expect(phoneHdcBundle('淘宝', '')).assertEqual('com.taobao.taobao4hmos');

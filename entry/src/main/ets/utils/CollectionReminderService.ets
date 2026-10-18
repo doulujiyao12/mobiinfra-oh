@@ -28,6 +28,10 @@ const REMINDER_GROUP: string = 'clawmate.daily.collection';
 const REMINDER_ACTION: string = 'clawmate.collect.enabled';
 const STATE_KEY: string = 'state';
 const NOTIFICATION_ID: number = 21900;
+// A user-scheduled collection is a service reminder. CONTENT_INFORMATION defaults to silent LEVEL_MIN.
+const REMINDER_SLOT_TYPE: notificationManager.SlotType = notificationManager.SlotType.SERVICE_INFORMATION;
+// Force existing registrations to pick up notification request changes after an App upgrade.
+const REMINDER_REGISTRATION_VERSION: string = 'service-slot-v2';
 
 interface ReminderServiceError { code?: number; message?: string; }
 
@@ -156,9 +160,21 @@ export class CollectionReminderService {
     let valid: reminderAgentManager.ReminderInfo[] = await reminderAgentManager.getAllValidReminders();
     let owned = valid.filter((item: reminderAgentManager.ReminderInfo): boolean =>
       item.reminderReq.groupId !== undefined && item.reminderReq.groupId.startsWith(REMINDER_GROUP + '.'));
-    let stamp = collectionReminderStamp(state, Date.now());
-    if (state.enabled && !await notificationManager.isNotificationEnabled()) {
-      throw new Error('通知未授权，请在系统设置中允许 ClawMate 发送通知');
+    AppLogger.info('CollectionReminder', 'REMINDER_RECONCILE enabled=' + state.enabled +
+      ' savedIds=' + state.reminderIds.join(',') + ' systemIds=' +
+      owned.map((item: reminderAgentManager.ReminderInfo): number => item.reminderId).join(','));
+    let stamp = collectionReminderStamp(state, Date.now()) + ':' + REMINDER_REGISTRATION_VERSION;
+    if (state.enabled) {
+      if (!await notificationManager.isNotificationEnabled()) {
+        throw new Error('通知未授权，请在系统设置中允许 ClawMate 发送通知');
+      }
+      await notificationManager.addSlot(REMINDER_SLOT_TYPE);
+      let slot = await notificationManager.getSlot(REMINDER_SLOT_TYPE);
+      AppLogger.info('CollectionReminder', 'REMINDER_CHANNEL type=SERVICE_INFORMATION enabled=' +
+        String(slot.enabled) + ' level=' + String(slot.notificationLevel === undefined ? slot.level : slot.notificationLevel));
+      if (slot.enabled === false) {
+        throw new Error('请在系统设置中打开 ClawMate 的“服务提醒”通知');
+      }
     }
     if (state.enabled && state.registeredStamp === stamp && state.reminderIds.length > 0 &&
       state.reminderIds.every((id: number): boolean => owned.some(
@@ -182,8 +198,9 @@ export class CollectionReminderService {
     CollectionReminderService.save(state);
     if (remaining.length > 0) { throw new Error('旧采集提醒取消失败，请稍后重试，尚未创建新提醒'); }
     if (!state.enabled) { AppLogger.info('CollectionReminder', 'REMINDER_DISABLED'); return; }
-    await notificationManager.addSlot(notificationManager.SlotType.CONTENT_INFORMATION);
     let nextTime = collectionReminderNextTime(state.hour, state.minute, Date.now());
+    AppLogger.info('CollectionReminder', 'REMINDER_PUBLISH_BEGIN now=' + new Date().toString() +
+      ' next=' + new Date(nextTime).toString() + ' slot=SERVICE_INFORMATION');
     let newIds: number[] = [];
     try {
       // Precise date-specific text for the next two weeks. The daily recurring fallback never goes silent.
@@ -192,9 +209,26 @@ export class CollectionReminderService {
         let id = await reminderAgentManager.publishReminder(CollectionReminderService.buildRequest(state, dueAt, false));
         newIds.push(id);
         CollectionReminderService.persistPublishedIds(newIds);
+        AppLogger.info('CollectionReminder', 'REMINDER_PUBLISHED id=' + id + ' due=' + new Date(dueAt).toString());
       }
       let fallbackAt = collectionReminderAddDays(nextTime, COLLECTION_REMINDER_DETAIL_DAYS);
-      newIds.push(await reminderAgentManager.publishReminder(CollectionReminderService.buildRequest(state, fallbackAt, true)));
+      let fallbackId = await reminderAgentManager.publishReminder(CollectionReminderService.buildRequest(state, fallbackAt, true));
+      newIds.push(fallbackId);
+      AppLogger.info('CollectionReminder', 'REMINDER_PUBLISHED id=' + fallbackId + ' recurring=true firstDue=' +
+        new Date(fallbackAt).toString());
+      // Publishing returning an ID is not enough: confirm that future occurrences remain in the system.
+      // An occurrence that fell due during registration may already have expired legitimately.
+      let registered = await reminderAgentManager.getAllValidReminders();
+      let checkedAt = Date.now();
+      let missing = newIds.filter((id: number, index: number): boolean =>
+        collectionReminderAddDays(nextTime, index) > checkedAt &&
+        !registered.some((item: reminderAgentManager.ReminderInfo): boolean => item.reminderId === id));
+      AppLogger.info('CollectionReminder', 'REMINDER_VERIFIED published=' + newIds.length +
+        ' retained=' + registered.filter((item: reminderAgentManager.ReminderInfo): boolean =>
+          newIds.indexOf(item.reminderId) >= 0).length + ' missingFutureIds=' + missing.join(','));
+      if (missing.length > 0) {
+        throw new Error('系统未保留 ' + missing.length + ' 条待触发采集提醒，请点击重试并查看调试日志');
+      }
       state = CollectionReminderService.load();
       state.reminderIds = newIds;
       state.registeredStamp = stamp;
@@ -234,7 +268,7 @@ export class CollectionReminderService {
       notificationId: NOTIFICATION_ID,
       // Closing a grouped reminder can cancel the whole group: each occurrence owns a separate group.
       groupId: REMINDER_GROUP + '.' + (recurring ? 'daily' : collectionReminderDayKey(dueAt)),
-      slotType: notificationManager.SlotType.CONTENT_INFORMATION,
+      slotType: REMINDER_SLOT_TYPE,
       ringDuration: 1,
       snoozeTimes: 0,
       tapDismissed: true,
@@ -305,6 +339,7 @@ export class CollectionReminderService {
       state.errorText = '提醒未生效：系统提醒数量已达上限，请稍后重试。';
     } else { state.errorText = '提醒未生效：' + error.message; }
     CollectionReminderService.save(state);
-    AppLogger.errorCause('CollectionReminder', 'REMINDER_ERROR', error);
+    AppLogger.error('CollectionReminder', 'REMINDER_ERROR code=' + String(cause.code) +
+      ' message=' + (cause.message || error.message));
   }
 }

@@ -46,6 +46,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"chat", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat", nullptr, Disabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isChatRunning", nullptr, False, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getOnlineCompileCount", nullptr, [](napi_env env, napi_callback_info) -> napi_value { napi_value value; napi_create_uint32(env, 0, &value); return value; }, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreChatHistory", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
