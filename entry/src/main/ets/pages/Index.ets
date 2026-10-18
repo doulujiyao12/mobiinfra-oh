@@ -2959,8 +2959,8 @@ struct Index {
       let now = new Date().getTime();
       if (now - this.onlineCompileNoticeTime < 8000) { return; }
       this.onlineCompileNoticeTime = now;
-      showToastSafely('首次加载，在线编译加速中', 4000);
-      AppLogger.info('LocalChat.NPU', '首次加载，在线编译加速中');
+      showToastSafely('首次加载，在线编译中，请等待', 4000);
+      AppLogger.info('LocalChat.NPU', '首次加载，在线编译中，请等待');
     }, 500);
   }
 
