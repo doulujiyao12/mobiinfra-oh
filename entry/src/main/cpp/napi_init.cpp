@@ -1443,7 +1443,8 @@ static void LoadModelExecute(napi_env env, void* data) {
         }
         LOGI("NPU execution mode=offline, strict precompiled OM loading enabled");
     } else {
-        LOGI("NPU execution mode=online, MNN HiAI compile/cache path enabled");
+        LOGI("NPU execution mode=online requested; image inference triggers visual HiAI compilation. "
+             "See [NPU_CACHE] for the actual backend, cache directory and save/hit/failure result.");
     }
 
     // tmp_path 指向模型目录或 custom_opp 沙箱，供 MNN/HiAI 运行时写临时编译产物。

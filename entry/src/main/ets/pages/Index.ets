@@ -4384,8 +4384,9 @@ struct Index {
         lines.push(`${file.relativePath} (${this.formatSize(file.size)})`);
       }
       if (files.length === 0) {
-        this.chunkOmCacheOutput = `当前模型尚无 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
-          `目录: ${this.modelDir}`;
+        this.chunkOmCacheOutput = `当前模型未发现 chunk OM 缓存。\n模型: ${this.getCurrentModelFolderName()}\n` +
+          `已扫描目录: ${this.modelDir}\n` +
+          '纯文字对话不会触发 ViT 编图。若已执行图片推理，请在 Native 日志中查看 [NPU_CACHE]，确认实际后端、缓存目录及写入结果。';
         return;
       }
       this.chunkOmCacheOutput = `模型: ${this.getCurrentModelFolderName()}\n` +
