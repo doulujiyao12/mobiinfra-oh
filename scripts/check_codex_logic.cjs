@@ -27,6 +27,7 @@ let deferred = false;
 let resolveScan;
 let resolveCamera;
 let deferCamera = false;
+let helpNavigation;
 let cameraResult = { resultCode: 0, resultUri: '', mediaType: 'photo' };
 let attachmentSize = 3;
 const removedCameraFiles = [];
@@ -64,6 +65,7 @@ const asset = {
   remove: async query => { storedAssets.delete(query.get(1).toString()); }
 };
 const kitMocks = {
+  '@kit.ArkUI': { router: { pushUrl: async options => { helpNavigation = options; } } },
   '@kit.AbilityKit': {}, '@kit.BasicServicesKit': { zlib: {
     ReturnStatus: { OK: 0, STREAM_END: 1 }, CompressFlushMode: { FINISH: 4 },
     createZip: async () => {
@@ -511,7 +513,13 @@ async function main() {
   };
   await weakPage.poll(); assert.equal(syncReads, 2); assert.equal(weakPage.task.revision, 2, 'a missing delta base triggers a full read');
   weakPage.disconnect(); captureTimers = false; timerJobs = [];
-  console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, privacy cancellation, Asset Store size/trust policy, one-time pairing and task reconciliation.');
+  for (const section of ['download', 'connect', 'tailscale']) {
+    await page.openHelp(section);
+    assert.equal(helpNavigation.url, 'pages/codex/CodexHelpPage');
+    assert.deepEqual(Object.keys(helpNavigation.params), ['section']);
+    assert.equal(helpNavigation.params.section, section, 'help routes carry no credentials or pairing data');
+  }
+  console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, privacy cancellation, Asset Store size/trust policy, one-time pairing, task reconciliation, and help navigation.');
   console.log('ArkUI rendering and HarmonyOS API type checking require the full DevEco SDK.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

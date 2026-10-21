@@ -2,9 +2,11 @@
 
 安装这一个程序即可从鸿蒙 ClawMate 使用电脑上的 Codex。运行组件已随程序内置，不需要安装 Node.js、npm、Git 或查找源代码。项目本身需要的编译器和依赖仍由项目决定。
 
+[下载安装包与分平台步骤](../docs/codex/README.md) · [Windows](../docs/codex/windows.md) · [macOS](../docs/codex/macos.md) · [Linux CLI](../docs/codex/linux.md) · [Tailscale 组网教程](../docs/codex/tailscale.md)
+
 ## 桌面使用
 
-1. Windows 运行安装向导；macOS 将应用拖入“应用程序”；Linux 安装 `.deb` 或解压桌面便携包后打开 ClawMate Codex。
+1. Windows 运行安装向导；macOS 解压 ZIP 后将应用移入“应用程序”；Linux 解压桌面便携包后打开 ClawMate Codex，无桌面环境请使用终端包。当前发布的 Mac 包仅支持 Apple Silicon，所有包均未签名、Mac 未公证，Mac / Linux 桌面包仍需对应系统运行验证。
 2. 打开程序，在“连接设置”点击“使用浏览器登录”。在打开的官方页面登录自己的 Codex/ChatGPT 账号。没有浏览器的服务器可使用设备验证码登录。
 3. 点击“选择项目”，添加允许手机操作的项目文件夹。保留“局域网 · 自动安全配对”，点击“保存设置”和“启动手机连接”。
 4. 确认手机和电脑网络可互访。如系统防火墙询问是否允许此程序接收局域网连接，按所使用的可信网络设置。

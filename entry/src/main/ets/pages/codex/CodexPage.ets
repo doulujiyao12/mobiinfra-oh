@@ -5,6 +5,7 @@ import { camera, cameraPicker } from '@kit.CameraKit';
 import { filePreview } from '@kit.PreviewKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { router } from '@kit.ArkUI';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { AppTheme } from '../../utils/AppTheme';
 import { PrivacyConsent, PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
@@ -21,6 +22,7 @@ import { CodexConnectionsView, CodexConnectionSetup } from './CodexConnectionVie
 import { CodexWorkspaceHeader, CodexHistoryDrawer } from './CodexChatViews';
 import { chatComposerBarHeight, chatComposerTextAreaHeight } from '../chat/ChatPageTypes';
 import { parseCodexPairingInput } from './CodexPairingInput';
+import { CodexHelpParams, CodexHelpSection } from './CodexHelpContent';
 import {
   CODEX_MAX_FILE_BYTES, CodexConnection, CodexModel, CodexWorkspace, CodexTask, CodexTaskSummary,
   CodexAttachment, CodexItem, CodexApproval, CodexAnswer, CodexEffort, CodexArtifact, CodexLocalArtifact,
@@ -781,6 +783,15 @@ export struct CodexPage {
     finally { if (output !== null) { try { await fileIo.close(output); } catch (e) { } } }
   }
 
+  private async openHelp(section: CodexHelpSection): Promise<void> {
+    const params: CodexHelpParams = { section: section };
+    try {
+      await router.pushUrl({ url: 'pages/codex/CodexHelpPage', params: params });
+    } catch (e) {
+      this.errorText = '无法打开连接指南，请稍后重试';
+    }
+  }
+
   @Builder private ConnectionForm() {
     CodexConnectionSetup({ origin: $originInput, token: $tokenInput, pairing: $pairingInput, remember: $remember,
       busy: this.busy, onScan: () => { this.scanPairingCode(); }, onImport: () => { this.importPairingFile(); },
@@ -1035,6 +1046,7 @@ export struct CodexPage {
               currentOrigin: this.connected ? this.connectedOrigin : '', currentName: this.serverName, currentStatus: this.linkLabel(),
               connectingOrigin: this.connectingOrigin, busy: this.busy,
               onCreate: () => { this.openConnectionSetup(); },
+              onHelp: (section: CodexHelpSection) => { this.openHelp(section); },
               onConnect: (item: CodexSavedConnection) => { this.openSavedConnection(item); },
               onForget: (item: CodexSavedConnection) => { this.forgetSavedConnection(item); },
               onDisconnect: () => { this.disconnect(); },

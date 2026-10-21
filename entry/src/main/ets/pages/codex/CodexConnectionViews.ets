@@ -1,5 +1,6 @@
 import { AppTheme } from '../../utils/AppTheme';
 import { CodexSavedConnection, codexConnectionLabel } from './CodexTypes';
+import { CodexHelpSection } from './CodexHelpContent';
 
 @Component
 struct ConnectionActionRow {
@@ -40,6 +41,7 @@ export struct CodexConnectionsView {
   onForget: (item: CodexSavedConnection) => void = () => {};
   onResume: () => void = () => {};
   onDisconnect: () => void = () => {};
+  onHelp: (section: CodexHelpSection) => void = () => {};
 
   private connectionMenu(item: CodexSavedConnection): MenuElement[] {
     const entries: MenuElement[] = [];
@@ -114,6 +116,16 @@ export struct CodexConnectionsView {
         ConnectionActionRow({ title: '创建连接', subtitle: '扫描二维码，或导入配对文件', rowEnabled: !this.busy,
           icon: $r('app.media.codex_scan'), onAction: () => { this.onCreate(); } })
       }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20)
+      Column() {
+        ConnectionActionRow({ title: '下载 PC 端的 Codex 连接器', subtitle: 'Windows、macOS 和 Linux',
+          icon: $r('app.media.codex_download'), onAction: () => { this.onHelp(CodexHelpSection.Download); } })
+        Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 60, right: 18 })
+        ConnectionActionRow({ title: '连接指南', subtitle: '分平台说明，跟着步骤完成配对',
+          icon: $r('app.media.codex_document'), onAction: () => { this.onHelp(CodexHelpSection.Connect); } })
+        Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 60, right: 18 })
+        ConnectionActionRow({ title: 'Tailscale 组网教程', subtitle: '让手机与异地电脑、服务器互联',
+          icon: $r('app.media.codex_network'), onAction: () => { this.onHelp(CodexHelpSection.Tailscale); } })
+      }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).clip(true)
       Text('连接凭据保存在手机安全存储中').fontSize(11).fontColor(AppTheme.text('#9198A5')).width('100%')
     }.width('100%').alignItems(HorizontalAlign.Start)
   }

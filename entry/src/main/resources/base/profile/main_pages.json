@@ -5,6 +5,7 @@
     "pages/FloatWindow",
     "pages/task/WorkflowFileViewer",
     "pages/settings/DesktopCompanionPage",
+    "pages/codex/CodexHelpPage",
     "pages/settings/SelfHdcTestPage",
     "pages/settings/SelfHdcInputTestPage",
     "pages/collection/CollectionGroupDetailPage",

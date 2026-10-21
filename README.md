@@ -80,7 +80,9 @@ cd mobiinfra-oh
 | 端侧模型推理 | 我的 → 模型与智能体 | 下载模型，选择 CPU / NPU，进行本地推理 |
 | 主动服务 | 首页 → 为你提醒 / 猜你喜欢 | 根据个人记忆生成待办与个性化建议 |
 
-Codex 电脑端支持 Windows、Linux 与 macOS，提供桌面安装程序和内置终端工具。普通用户无需安装 Node.js、运行 npm 或寻找源码：安装电脑端、登录、选择项目，再在手机打开「Codex → 创建连接 → 扫描二维码」完成配对，也可导入配对文件或粘贴配对信息。已保存的电脑显示在「我的连接」，点击即可重连。见 [电脑端使用指南](pc-companion/USER-GUIDE.md)；维护者构建见 [PC companion](pc-companion/README.md)，底层协议和高级部署见 [Codex 桥接指南](docs/codex-bridge.md)。
+Codex 电脑端支持 Windows、Linux 与 macOS。前往 [GitHub Release 下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.11)，按 [Windows / macOS / Linux 连接指南](docs/codex/README.md) 完成登录、选择项目和手机配对；异地电脑或云服务器可参考 [Tailscale 组网教程](docs/codex/tailscale.md)。Mac 当前仅提供 Apple Silicon 版本，Linux 服务器可直接使用 CLI。
+
+普通用户无需安装 Node.js、运行 npm 或寻找源码。手机打开「Codex → 创建连接 → 扫描二维码」，也可导入配对文件或粘贴配对信息。已保存的电脑在「我的连接」点击即可重连；下载与教程也可在该页面直接查看。完整能力见 [电脑端使用指南](pc-companion/USER-GUIDE.md)；维护者构建见 [PC companion](pc-companion/README.md)，底层协议和高级部署见 [Codex 桥接指南](docs/codex-bridge.md)。
 
 ### 1. 手机 GUI 操控：手机自己控制自己
 
