@@ -38,7 +38,7 @@ assert.equal(data.codexHelpSection('tailscale'), 'tailscale');
 assert.equal(data.codexHelpSection('invalid'), 'connect');
 assert.equal(data.codexHelpSection(''), 'connect');
 assert.ok(guides.find(g => g.id === 'macos').notice.includes('Apple Silicon'));
-assert.ok(guides.find(g => g.id === 'tailscale').notice.includes('鸿蒙 NEXT'));
+assert.ok(guides.find(g => g.id === 'tailscale').notice.includes('卓易通'));
 const linux = guides.find(g => g.id === 'linux');
 const commands = linux.steps.map(step => step.command).join('\n');
 for (const command of ['setup --project', ' login', ' start', ' status', 'pair --origin https://100.', '--output phone.', 'cat phone.']) {
@@ -64,8 +64,9 @@ for (const guide of guides) {
     (s.command ? `\n\`\`\`bash\n${s.command}\n\`\`\`\n` : '')).join('\n');
   const links = guide.links.filter(link => !link.url.includes('/docs/codex/')).map(link => `- [${link.title}](${link.url})`).join('\n');
   const markdown = `# ${guide.title}\n\n[返回下载与指南](README.md) · ClawMate Codex ${data.CODEX_BRIDGE_VERSION}\n\n` +
-    `${guide.intro}\n\n> ${guide.notice}\n\n${steps}\n## 常见问题与注意事项\n\n` +
-    guide.notes.map(note => `- ${note}`).join('\n') + `\n\n## 相关链接\n\n${links}\n\n` +
+    `${guide.intro}\n\n> ${guide.notice}\n\n${steps}` +
+    (guide.notes.length ? '\n## 常见问题与注意事项\n\n' + guide.notes.map(note => `- ${note}`).join('\n') + '\n' : '') +
+    `\n## 相关链接\n\n${links}\n\n` +
     `<!-- 内容源：${sourceFile}；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->\n`;
   files.set(guide.id + '.md', markdown);
 }

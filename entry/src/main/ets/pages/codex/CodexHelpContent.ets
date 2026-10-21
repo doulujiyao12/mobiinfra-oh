@@ -4,7 +4,8 @@ export const CODEX_BRIDGE_TAG: string = 'codex-bridge-v' + CODEX_BRIDGE_VERSION;
 export const CODEX_REPOSITORY_URL: string = 'https://github.com/doulujiyao12/mobiinfra-oh';
 export const CODEX_RELEASE_URL: string = CODEX_REPOSITORY_URL + '/releases/tag/' + CODEX_BRIDGE_TAG;
 const DOWNLOAD_ROOT: string = CODEX_REPOSITORY_URL + '/releases/download/' + CODEX_BRIDGE_TAG + '/';
-const GUIDE_ROOT: string = CODEX_REPOSITORY_URL + '/blob/' + CODEX_BRIDGE_TAG + '/docs/codex/';
+// Guides can be corrected independently of the versioned installation packages.
+const GUIDE_ROOT: string = CODEX_REPOSITORY_URL + '/blob/coevomind-app/docs/codex/';
 
 export enum CodexHelpSection { Download = 'download', Connect = 'connect', Tailscale = 'tailscale' }
 export enum CodexPlatform { Windows = 'windows', Mac = 'macos', Linux = 'linux' }
@@ -46,7 +47,7 @@ export function codexDownloads(): CodexDownload[] {
   ];
 }
 
-export const CODEX_DOWNLOAD_NOTICE: string = '当前为预览版，安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。Mac / Linux 桌面包已核对内容，仍需在对应系统验证运行。';
+export const CODEX_DOWNLOAD_NOTICE: string = '当前为预览版，安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。';
 export const CODEX_PAIRING_NOTE: string = '配对码 5 分钟内有效，只能使用一次。请粘贴完整配对信息或导入配对文件；证书指纹不是 token。不要公开配对码和文件。';
 
 const DESKTOP_NOTES: string[] = [
@@ -118,28 +119,18 @@ export function codexConnectionGuide(platform: CodexPlatform): CodexGuide {
 export function codexTailscaleGuide(): CodexGuide {
   return {
     id: 'tailscale', title: 'Tailscale 组网教程',
-    intro: '让异地的手机和电脑通过私有网络互访。组网成功后，ClawMate 使用电脑的 Tailscale 地址连接，无需把桥接端口开放到公网。',
-    notice: '手机需有适配当前系统的 Tailscale 兼容客户端。官方安装文档目前未列出鸿蒙 NEXT；不能把 Android APK 当作鸿蒙原生安装包。没有兼容客户端时，先使用同一 Wi-Fi 连接。',
+    intro: '把手机和电脑、云服务器加入同一个虚拟局域网，即使不在同一个 Wi-Fi 下，也能互相连接。',
+    notice: '鸿蒙手机可以通过卓易通安装 Tailscale，使用微软或 Apple 账号登录，无需翻墙。',
     steps: [
-      { title: '电脑安装 Tailscale', body: 'Windows / macOS 从 Tailscale 官网下载安装并登录。Linux 有管理员权限时可使用下方官方命令，或按官方文档用软件包安装。没有权限或没有 TUN 的服务器，需参考官方用户态模式文档配置。', command:
+      { title: '电脑安装 Tailscale', body: 'Windows / macOS 从 Tailscale 官网下载安装。Linux 服务器可使用下方命令安装并启动，或查看 Linux 官方安装指南。', command:
         'curl -fsSL https://tailscale.com/install.sh | sh\nsudo tailscale up' },
-      { title: '手机加入同一网络', body: '在兼容客户端登录同一 Tailscale 网络的账号，或由该网络管理员邀请加入。按系统提示允许 VPN，确认手机和目标电脑均在线。可在控制台的设备列表核对。', command: '' },
-      { title: '记下电脑的私有 IP', body: '使用目标电脑的 Tailscale IPv4，例如 100.101.102.103。Linux 可运行下方命令；Windows / Mac 可在客户端复制地址。这个地址属于电脑，不能填成本机手机的 IP。', command:
-        'tailscale status\ntailscale ip -4' },
-      { title: '启动连接器并生成新配对', body: '先启动 Tailscale，再启动 ClawMate 连接器，选择自动安全配对并允许远程设备访问。在「手机配对」选 100 开头地址。Linux 使用 pair --origin 指定该地址；默认端口 8787。', command:
-        './bin/clawmate-codex pair --origin https://100.101.102.103:8787 --output phone.clawmate-codex-pair.json' },
-      { title: '手机用新地址连接', body: '扫描新二维码，或粘贴完整配对信息。原先保存的 192.168 开头连接不会自动切换，请回「我的连接」使用新连接。连接器应与 Tailscale 位于可互访的网络环境中。', command: '' },
-      { title: '不通时逐层确认', body: '先确认两端 Tailscale 在线且能互访，再检查连接器 status。网络访问策略及电脑防火墙需允许手机访问桥接 TCP 端口。下方命令在能使用 Tailscale CLI 的设备执行，目标应换成另一端 IP；单向 ping 成功也不能代替手机到桥接端口的检查。', command:
-        'tailscale ping <另一台设备的Tailscale-IP>\n./bin/clawmate-codex status' }
+      { title: '手机通过卓易通安装', body: '在鸿蒙手机上打开卓易通，搜索并安装 Tailscale，安装后打开。', command: '' },
+      { title: '两端登录同一个账号', body: '电脑和手机都选择微软或 Apple 登录，并使用同一个账号。手机按提示允许 VPN 连接，保持 Tailscale 开启。两端请选择相同的登录方式。', command: '' },
+      { title: '确认已加入同一网络', body: '登录后，在 Tailscale 设备列表中能看到电脑和手机，且两台设备都显示在线，即表示已加入同一个虚拟局域网。设备地址通常以 100. 开头。', command: '' }
     ],
-    notes: [
-      '两端直接加入同一个 Tailscale 网络时，一般不需要出口节点、子网路由或公网端口映射。公司或学校网络的管理策略仍可能限制连接。',
-      'Linux 用户态模式可能没有 tailscale0 网卡。连接器 1.1.11 可读取本机 Tailscale socket 获取地址；必要时在后台启动前指定 CLAWMATE_TAILSCALE_SOCKET。它不会替你安装、登录 Tailscale 或更改网络策略。',
-      'Tailscale 负责网络互访，连接器仍负责 Codex 任务和独立配对。电脑休眠、服务退出或 VPN 断开时，手机无法继续连接。'
-    ],
+    notes: [],
     links: [{ title: 'Tailscale 官方下载与安装', url: 'https://tailscale.com/docs/install' },
       { title: 'Linux 官方安装指南', url: 'https://tailscale.com/docs/install/linux' },
-      { title: '无 TUN：用户态模式', url: 'https://tailscale.com/docs/concepts/userspace-networking' },
       { title: '网页版组网教程', url: GUIDE_ROOT + 'tailscale.md' }]
   };
 }

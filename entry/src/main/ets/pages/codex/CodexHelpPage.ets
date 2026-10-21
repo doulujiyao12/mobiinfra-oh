@@ -153,12 +153,14 @@ struct CodexHelpPage {
         this.Step(item, index)
       }, (item: CodexGuideStep) => this.guide().id + ':' + item.title)
     }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).clip(true)
-    Column({ space: 14 }) {
-      Text('你可能还想知道').fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
-      ForEach(this.guide().notes, (note: string) => {
-        Text(note).fontSize(13).lineHeight(22).fontColor(AppTheme.text('#747B87')).width('100%')
-      }, (note: string) => note)
-    }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 4, right: 4 })
+    if (this.guide().notes.length > 0) {
+      Column({ space: 14 }) {
+        Text('你可能还想知道').fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+        ForEach(this.guide().notes, (note: string) => {
+          Text(note).fontSize(13).lineHeight(22).fontColor(AppTheme.text('#747B87')).width('100%')
+        }, (note: string) => note)
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 4, right: 4 })
+    }
     Column() {
       ForEach(this.guide().links, (link: CodexHelpLink, index: number) => {
         if (index > 0) { Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 18, right: 18 }) }

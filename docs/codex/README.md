@@ -14,7 +14,7 @@
 
 [Release 与 SHA256 校验清单](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.11)
 
-当前为预览版，安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。Mac / Linux 桌面包已核对内容，仍需在对应系统验证运行。
+当前为预览版，安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。
 
 Windows 是安装向导；macOS ZIP 内为应用，解压后移入「应用程序」；Linux 为解压使用的便携包，服务器优先选 CLI。当前没有 Intel Mac、Linux ARM64、DMG、DEB 或 RPM 安装包。
 
