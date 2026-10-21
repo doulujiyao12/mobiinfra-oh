@@ -2,10 +2,11 @@ const $ = id => document.getElementById(id);
 let snapshot; let projects = []; let dirty = false; let working = false;
 const titles = { setup: '让手机连接你的开发电脑', pairing: '与自己的手机安全配对', devices: '设备和任务，一眼掌握', terminal: '你熟悉的终端，同样可用' };
 function notice(message, error = false) { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', error); }
+function errorText(error) { return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
 async function act(action) {
   if (working) return; working = true;
   try { await action(); await refresh(); }
-  catch (error) { notice(error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''), true); }
+  catch (error) { notice(errorText(error), true); }
   finally { working = false; }
 }
 function view(name) {
@@ -35,6 +36,7 @@ function formConfig() {
 }
 async function refresh() {
   snapshot = await window.companion.call('status');
+  document.querySelector('.version').textContent = 'v' + snapshot.version;
   const running = snapshot.state === 'running';
   $('sideState').textContent = running ? '手机连接服务已启动' : snapshot.state === 'error' ? '服务需要检查' : '手机连接服务未启动';
   $('sideDot').classList.toggle('running', running);
@@ -61,7 +63,7 @@ async function refresh() {
   }));
   if (!snapshot.devices.length) $('deviceList').textContent = '暂无配对设备。';
   $('taskList').replaceChildren();
-  const statuses = { completed: '已完成', running: '执行中', starting: '正在提交', waitingApproval: '等待手机确认', interrupted: '已中断', failed: '失败', idle: '等待任务', stopping: '正在停止' };
+  const statuses = { completed: '已完成', running: '执行中', starting: '正在提交', waitingApproval: '等待手机确认', interrupted: '已中断', failed: '失败', idle: '等待任务', stopping: '正在停止', releasing: '保存并释放会话' };
   for (const task of snapshot.tasks.slice(0, 20)) $('taskList').append(row(task.title, `${statuses[task.status] || task.status} · ${task.model}`,
     ['running', 'starting', 'waitingApproval'].includes(task.status) ? '停止任务' : '', async () => { await window.companion.call('interrupt', { id: task.id }); }));
   if (!snapshot.tasks.length) $('taskList').textContent = '手机发送的任务会在这里显示。';
@@ -97,5 +99,5 @@ $('installTerminal').addEventListener('click', () => act(async () => notice(awai
 $('resetPairing').addEventListener('click', () => act(async () => { if (await window.companion.resetPairing()) { $('pairingResult').hidden = true; notice('配对已重置，请启动连接服务后重新配对手机。'); } }));
 $('autoStart').addEventListener('change', () => act(async () => { await window.companion.autoStart($('autoStart').checked); notice('开机启动设置已更新。'); }));
 $('shutdown').addEventListener('click', () => act(() => window.companion.shutdown()));
-refresh().catch(error => notice('本机服务启动失败：' + error.message, true));
-setInterval(() => { if (!working) refresh().catch(error => notice(error.message, true)); }, 3000);
+refresh().catch(error => notice('本机服务启动失败：' + errorText(error), true));
+setInterval(() => { if (!working) refresh().catch(error => notice(errorText(error), true)); }, 3000);

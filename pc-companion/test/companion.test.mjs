@@ -2,16 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import https from 'node:https';
 import net from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, X509Certificate } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CompanionManager } from '../host/manager.mjs';
 import { Settings } from '../host/settings.mjs';
 import { serveControl, controlRequest, controlEndpoint } from '../host/control.mjs';
+import { TailscaleDiscovery } from '../host/tailscale.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporaryDirectories = [];
@@ -63,6 +64,10 @@ test('desktop and CLI configure one service, generate trusted LAN pairing and re
   const starting = manager.start();
   await assert.rejects(manager.start(), /正在启动/);
   const started = await starting; assert.equal(started.state, 'running');
+  manager.core.locks.add('history-import');
+  await assert.rejects(manager.stop(), /仍有任务/);
+  assert.equal(manager.state, 'running'); assert.equal(manager.core.ready, true);
+  manager.core.locks.delete('history-import');
   const pairing = await manager.createPairing(`https://127.0.0.1:${port}`);
   assert.ok(pairing.qr.startsWith('data:image/png;base64,'));
   assert.ok(pairing.encoded.startsWith('CLAWMATE-CODEX-PAIR:'));
@@ -71,11 +76,26 @@ test('desktop and CLI configure one service, generate trusted LAN pairing and re
   const paired = await request(port, ca, '/v1/pair', { code: pairing.bundle.code, deviceName: 'Phone' });
   assert.equal(paired.status, 200); const token = paired.body.token;
   assert.equal((await request(port, ca, '/v1/info', null, token)).status, 200);
+  const task = await manager.core.create({ workspaceId: manager.core.workspaces[0].id, model: 'test', effort: '', mode: 'workspace-write' });
+  await manager.core.start(task.id, { requestId: randomUUID(), text: '生成报告', attachments: [], model: 'test', effort: '' });
+  await assert.rejects(manager.stop(), /仍有任务/);
+  const finalPath = path.join(task.cwd, 'final.pdf'); writeFileSync(finalPath, '%PDF-final-delivery');
+  manager.rpc.emit('message', { method: 'item/completed', params: { threadId: task.id, turnId: task.turnId,
+    item: { id: 'final', type: 'agentMessage', phase: 'final_answer', text: `[报告](<${finalPath}>)` } } });
+  manager.rpc.emit('message', { method: 'turn/completed', params: { threadId: task.id, turn: { id: task.turnId, status: 'completed' } } });
+  const snapshot = await request(port, ca, '/v1/tasks/' + task.id, null, token);
+  assert.equal(snapshot.body.task.artifacts.length, 1);
+  const artifact = snapshot.body.task.artifacts[0];
+  const artifactRoute = '/v1/tasks/' + task.id + '/artifacts/' + artifact.id + '?offset=0';
+  const fileResult = await request(port, ca, artifactRoute, null, token);
+  assert.equal(fileResult.status, 200);
+  assert.equal(Buffer.from(fileResult.body.artifactChunk.base64, 'base64').toString(), '%PDF-final-delivery');
   assert.equal((await request(port, ca, '/v1/pair', { code: pairing.bundle.code, deviceName: 'Phone' })).status, 401);
   const restarted = new CompanionManager(manager.settings.directory, { launcher }, { rpcFactory: () => new Rpc() });
   assert.ok(restarted.pairing.authenticates(token));
   await manager.dispatch('revoke', { id: paired.body.deviceId });
   assert.equal((await request(port, ca, '/v1/info', null, token)).status, 401);
+  assert.equal((await request(port, ca, artifactRoute, null, token)).status, 401);
   assert.throws(() => manager.configure({}), /先停止/);
   await manager.stop(); assert.equal(manager.state, 'stopped');
 });
@@ -86,6 +106,42 @@ test('settings refuse broad credential directories and keep root tokens private'
   assert.equal(settings.publicValue().token, undefined);
   if (process.platform !== 'win32') assert.equal(statSync(settings.filename).mode & 0o777, 0o600);
 });
+
+test('Linux userspace Tailscale participates in pairing and SANs without replacing the CA or trusting stale IPs', async t => {
+  const dir = fixture(t); const port = await freePort();
+  let state = { BackendState: 'Running', Self: { Online: true, TailscaleIPs: ['100.124.13.114'] } };
+  const tailscale = new TailscaleDiscovery({ platform: 'linux', discover: () => ['/test.sock'], query: async () => state });
+  const manager = new CompanionManager(path.join(dir, 'private'), { launcher }, { rpcFactory: () => new Rpc(), tailscale });
+  await manager.initialize(); t.after(() => manager.close());
+  manager.configure({ name: 'Server', host: '0.0.0.0', port, networkMode: 'lan', workspaces: [{ name: 'Project', path: path.join(dir, 'project') }] });
+  await manager.start();
+  const origin = `https://100.124.13.114:${port}`;
+  assert.equal(manager.status().origins[0], origin);
+  assert.equal(manager.status().network.tailscale.state, 'Running');
+  const caBefore = manager.certificates.caCertificate;
+  const pairing = await manager.createPairing(origin);
+  assert.equal(pairing.bundle.origin, origin);
+  assert.equal(pairing.bundle.caCertificate, caBefore);
+  assert.equal(new X509Certificate(readFileSync(manager.certificates.cert)).checkIP('100.124.13.114'), '100.124.13.114');
+  assert.equal((await request(port, caBefore, '/v1/info')).status, 401);
+  const paired = await request(port, caBefore, '/v1/pair', { code: pairing.bundle.code, deviceName: 'Phone' });
+  assert.equal(paired.status, 200);
+  assert.equal((await request(port, caBefore, '/v1/info', null, paired.body.token)).status, 200);
+  state = { BackendState: 'NeedsLogin' };
+  await assert.rejects(manager.createPairing(origin), /当前可用/);
+  assert.ok(!manager.status().origins.includes(origin));
+  state = { BackendState: 'Running', Self: { Online: true, TailscaleIPs: ['100.100.1.2'] } };
+  const updated = await manager.createPairing(`https://100.100.1.2:${port}`);
+  assert.equal(updated.bundle.caCertificate, caBefore);
+  const certificate = new X509Certificate(readFileSync(manager.certificates.cert));
+  assert.equal(certificate.checkIP('100.100.1.2'), '100.100.1.2');
+  assert.equal(certificate.checkIP('100.124.13.114'), undefined);
+  assert.equal((await request(port, caBefore, '/v1/info', null, paired.body.token)).status, 200);
+  await manager.stop();
+  manager.configure({ ...manager.settings.publicValue(), host: '127.0.0.1' });
+  await manager.start(); assert.deepEqual(manager.status().origins, [`https://127.0.0.1:${port}`]);
+  await assert.rejects(manager.createPairing(`https://100.100.1.2:${port}`), /当前可用/);
+});
 test('native crypto creates matching SANs and retains pairing identity when IP changes', t => {
   const dir = fixture(t);
   const create = ips => JSON.parse(execFileSync(launcher, ['--internal-certificates', dir, JSON.stringify(ips)], { encoding: 'utf8' }));
@@ -95,7 +151,7 @@ test('native crypto creates matching SANs and retains pairing identity when IP c
   assert.ok(second.fingerprint.length === 95);
 });
 test('local control uses authenticated OS IPC and rejects unsupported commands', async t => {
-  const dir = fixture(t); const manager = { settings: { directory: dir }, async dispatch(method) {
+  const dir = fixture(t); const manager = { layout: { launcher }, settings: { directory: dir }, async dispatch(method) {
     if (method === 'status') return { state: 'running' }; throw new Error('Unsupported');
   } };
   const close = await serveControl(manager, () => {}); t.after(close);
@@ -116,7 +172,7 @@ test('staged native terminal runs without Node or npm on PATH', t => {
   const executable = path.join(root, 'out', target, 'resources', 'bin', 'clawmate-codex' + (process.platform === 'win32' ? '.exe' : ''));
   if (!existsSync(executable)) return t.skip('Build stage first to test the standalone distribution');
   const result = execFileSync(executable, ['--version'], { encoding: 'utf8', env: { ...process.env, PATH: '/no-system-node', NODE_OPTIONS: '--invalid-user-option' } });
-  assert.equal(result.trim(), '1.1.0');
+  assert.equal(result.trim(), JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version);
 });
 test('Windows control endpoint uses the correct named pipe prefix', () => {
   const slash = String.fromCharCode(92);

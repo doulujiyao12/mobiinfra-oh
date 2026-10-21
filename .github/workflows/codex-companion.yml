@@ -30,7 +30,15 @@ jobs:
         with:
           go-version: '1.23.x'
           cache: false
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+      - run: python pc-companion/test/portable.test.py
+        if: runner.os == 'Windows'
       - run: npm ci --prefix pc-companion
+      - run: npm ci --prefix bridge/codex --ignore-scripts --omit=optional
+      - run: npm audit --omit=dev --prefix bridge/codex
       - run: npm audit --omit=dev --prefix pc-companion
       - run: npm test --prefix bridge/codex
       - run: go test -C pc-companion/launcher ./...

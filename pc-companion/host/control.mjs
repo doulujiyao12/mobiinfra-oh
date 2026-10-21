@@ -1,9 +1,12 @@
 import net from 'node:net';
-import { readFileSync, mkdirSync, chmodSync, lstatSync, realpathSync, writeFileSync, unlinkSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, mkdirSync, chmodSync, lstatSync, realpathSync, unlinkSync } from 'node:fs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { writePrivate } from './settings.mjs';
+import { acquireDaemonLock } from './process-lock.mjs';
+import { installLayout } from './paths.mjs';
+export { acquireDaemonLock } from './process-lock.mjs';
 
 const digest = value => createHash('sha256').update(String(value || '')).digest();
 export function controlEndpoint(directory, platform = process.platform) {
@@ -18,37 +21,16 @@ export function controlEndpoint(directory, platform = process.platform) {
   chmodSync(folder, 0o700);
   return path.join(folder, 'control.sock');
 }
-function acquireLock(directory) {
-  const filename = path.join(directory, 'daemon.lock');
-  try {
-    const fd = openSync(filename, 'wx', 0o600); writeFileSync(fd, JSON.stringify({ pid: process.pid })); closeSync(fd);
-    return () => { try { unlinkSync(filename); } catch {} };
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    let pid;
-    try { pid = JSON.parse(readFileSync(filename, 'utf8')).pid; } catch { throw new Error('本机进程锁损坏，请检查 PC 应用状态。'); }
-    if (!Number.isInteger(pid) || pid < 1) throw new Error('本机进程锁无效。');
-    try { process.kill(pid, 0); }
-    catch (e) {
-      if (e.code === 'ESRCH') { unlinkSync(filename); return acquireLock(directory); }
-      throw e;
-    }
-    throw new Error('PC 服务已经运行，请使用 status、stop 或桌面控制界面。');
-  }
-}
-export function acquireDaemonLock(directory) {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  return acquireLock(directory);
-}
-
 export async function serveControl(manager, onQuit, existingUnlock) {
   const directory = manager.settings.directory;
-  const unlock = existingUnlock || acquireLock(directory);
+  const unlock = existingUnlock || acquireDaemonLock(directory, manager.layout || installLayout());
   const address = controlEndpoint(directory);
   const token = randomBytes(32).toString('base64url');
   const secret = digest(token);
+  const sockets = new Set();
   if (process.platform !== 'win32') { try { unlinkSync(address); } catch (e) { if (e.code !== 'ENOENT') { unlock(); throw e; } } }
   const server = net.createServer(socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket));
     socket.setEncoding('utf8');
     socket.setTimeout(60000, () => socket.destroy());
     let input = ''; let answered = false;
@@ -77,6 +59,7 @@ export async function serveControl(manager, onQuit, existingUnlock) {
     writePrivate(path.join(directory, 'control.json'), { address, token, pid: process.pid });
   } catch (error) { server.close(); unlock(); throw error; }
   return async () => {
+    for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
     try { unlinkSync(path.join(directory, 'control.json')); } catch {}
     unlock();

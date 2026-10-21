@@ -120,6 +120,7 @@ import {
   shouldShowFirstLaunchOnboarding
 } from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
+import { CodexScreen } from './codex/CodexTypes';
 import {
   SETTINGS_SECTION_NONE, SettingsSectionId, isSettingsSectionSelected, settingsParentSection
 } from './settings/SettingsCenterTypes';
@@ -552,6 +553,9 @@ struct Index {
   @State taskScene: number = 0;
   @State private taskConfigViewOpen: boolean = false;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
+  @State private codexScreen: number = CodexScreen.Connections;
+  @State private codexHistoryOpen: boolean = false;
+  @State private codexSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('localNpuExecutionMode') localNpuExecutionMode: string = 'cpu';
@@ -3088,6 +3092,18 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.currentTab === MainTabIndex.Codex && this.codexHistoryOpen) {
+      this.codexHistoryOpen = false;
+      return true;
+    }
+    if (this.currentTab === MainTabIndex.Codex && this.codexSettingsOpen) {
+      this.codexSettingsOpen = false;
+      return true;
+    }
+    if (this.currentTab === MainTabIndex.Codex && this.codexScreen !== CodexScreen.Connections) {
+      this.codexScreen = CodexScreen.Connections;
+      return true;
+    }
     if (this.currentTab === MainTabIndex.Task && this.taskConfigViewOpen) {
       this.taskConfigViewOpen = false;
       return true;
@@ -7614,6 +7630,9 @@ struct Index {
     .tabBar(this.tabBarStyle(MainTabIndex.Chat))
     TabContent() {
       CodexPage({
+        screen: $codexScreen,
+        historyOpen: $codexHistoryOpen,
+        taskSettingsOpen: $codexSettingsOpen,
         active: this.pageVisible && this.currentTab === MainTabIndex.Codex,
         navigationBottomInset: this.mainTabBottomInset()
       })

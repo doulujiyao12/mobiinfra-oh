@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { dataDirectory, installLayout } from '../host/paths.mjs';
-import { ensureDaemon } from '../host/daemon-client.mjs';
+import { ensureDaemon, quitDaemon } from '../host/daemon-client.mjs';
+import { DesktopLifecycle } from './lifecycle.mjs';
 import { controlRequest } from '../host/control.mjs';
 import { writePrivate } from '../host/settings.mjs';
 
@@ -14,8 +15,14 @@ const layout = installLayout(app.isPackaged ? process.resourcesPath : undefined)
 const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui', 'index.html');
 const rendererUrl = pathToFileURL(entry).href;
 let window; let tray; let quitting = false; let pairing;
+const lifecycle = new DesktopLifecycle({ hasTray: () => !!tray,
+  confirm: options => window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
+  hide: () => window?.hide(), show: showWindow,
+  shutdown: () => quitDaemon(directory, layout), quit: () => { quitting = true; app.quit(); },
+  report: error => dialog.showMessageBox(window, { type: 'error', title: '未能关闭后台服务', message: error.message }) });
 const allowed = new Set(['status', 'configure', 'login', 'cancelLogin', 'logout', 'start', 'stop', 'pair', 'revoke', 'interrupt']);
 function trusted(event) {
+  if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');
   if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== rendererUrl) {
     throw new Error('本机界面校验失败。');
   }
@@ -36,7 +43,7 @@ async function createWindow() {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  window.on('close', event => { if (!quitting && tray) { event.preventDefault(); window.hide(); } });
+  window.on('close', event => { if (!quitting) { event.preventDefault(); void lifecycle.requestClose(); } });
   await window.loadFile(entry);
   const iconFile = path.join(layout.base, 'icon.png');
   const image = nativeImage.createFromPath(iconFile);
@@ -44,7 +51,7 @@ async function createWindow() {
     tray = new Tray(image.resize({ width: 22, height: 22 }));
     tray.setToolTip('ClawMate Codex');
     tray.setContextMenu(Menu.buildFromTemplate([{ label: '打开 ClawMate Codex', click: showWindow },
-      { label: '退出界面（电脑任务继续）', click: () => { quitting = true; app.quit(); } }]));
+      { label: '关闭应用', click: () => { void lifecycle.requestClose(false); } }]));
     tray.on('double-click', showWindow);
   }
 }
@@ -67,6 +74,7 @@ ipcMain.handle('companion:call', async (event, method, body) => {
   trusted(event);
   if (!allowed.has(method)) throw new Error('不支持的操作。');
   await ensureDaemon(directory, layout);
+  if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');
   const result = await controlRequest(directory, method, body);
   if (method === 'pair') pairing = result;
   if (method === 'login') {
@@ -111,16 +119,14 @@ ipcMain.handle('companion:autoStart', (event, enabled) => {
 });
 ipcMain.handle('companion:shutdown', async event => {
   trusted(event);
-  const choice = await dialog.showMessageBox(window, { type: 'warning', title: '退出电脑端服务',
-    message: '退出服务会中断正在执行的电脑任务。', buttons: ['取消', '退出服务'], defaultId: 0, cancelId: 0 });
-  if (choice.response !== 1) return false;
-  await controlRequest(directory, 'quit'); quitting = true; app.quit(); return true;
+  return lifecycle.requestClose(false);
 });
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', showWindow);
-  app.whenReady().then(createWindow).catch(error => { dialog.showErrorBox('ClawMate Codex', error.message); app.quit(); });
+  app.whenReady().then(createWindow).catch(error => { dialog.showErrorBox('ClawMate Codex', error.message); quitting = true; app.quit(); });
+  app.on('before-quit', event => { if (!quitting) { event.preventDefault(); void lifecycle.requestClose(false); } });
   app.on('activate', showWindow);
   app.on('window-all-closed', () => { if (!tray) app.quit(); });
 }

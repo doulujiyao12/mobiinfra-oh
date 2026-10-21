@@ -11,12 +11,16 @@ const [platform, arch] = target.split('-');
 const destination = path.join(root, 'vendor', target); mkdirSync(destination, { recursive: true });
 const temporary = path.join(root, '.cache', target); mkdirSync(temporary, { recursive: true });
 const nodeArchive = download(lock.targets[target].node.url, path.join(temporary, path.basename(lock.targets[target].node.url)), lock.targets[target].node.sha256);
+const nodeName = `node-v${lock.nodeVersion}-${platform === 'win32' ? 'win' : platform}-${arch}`;
 if (platform === 'win32') {
   // Windows/macOS/Linux tar implementations used by CI support zip extraction through their native tool.
   if (process.platform === 'win32') execFileSync('tar', ['-xf', nodeArchive, '-C', temporary], { stdio: 'inherit' });
   else execFileSync('unzip', ['-o', '-q', nodeArchive, '-d', temporary], { stdio: 'inherit' });
-} else execFileSync('tar', ['-xzf', nodeArchive, '-C', temporary], { stdio: 'inherit' });
-const nodeFolder = path.join(temporary, `node-v${lock.nodeVersion}-${platform === 'win32' ? 'win' : platform}-${arch}`);
+} else {
+  // Only these two files ship in the runtime. Avoid npm/corepack symlinks when cross-building on Windows.
+  execFileSync('tar', ['-xzf', nodeArchive, '-C', temporary, `${nodeName}/bin/node`, `${nodeName}/LICENSE`], { stdio: 'inherit' });
+}
+const nodeFolder = path.join(temporary, nodeName);
 cpSync(path.join(nodeFolder, platform === 'win32' ? 'node.exe' : 'bin/node'), path.join(destination, platform === 'win32' ? 'node.exe' : 'node'));
 const codexArchive = download(lock.targets[target].codex.url, path.join(temporary, 'codex.tgz'), lock.targets[target].codex.sha512, 'sha512');
 execFileSync('tar', ['-xzf', codexArchive, '-C', temporary], { stdio: 'inherit' });

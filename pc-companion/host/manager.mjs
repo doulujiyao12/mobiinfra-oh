@@ -8,12 +8,14 @@ import { PairingManager, PAIRING_PREFIX } from '../../bridge/codex/pairing.mjs';
 import { Settings, writePrivate } from './settings.mjs';
 import { ensureCertificates, lanAddresses } from './certificates.mjs';
 import { VERSION } from './paths.mjs';
+import { TailscaleDiscovery } from './tailscale.mjs';
 import QRCode from 'qrcode';
 
 export class CompanionManager extends EventEmitter {
   server = null; core = null; rpc = null; state = 'stopped'; lastError = ''; account = null;
   constructor(directory, layout, dependencies = {}) {
     super(); this.settings = new Settings(directory); this.layout = layout;
+    this.tailscale = dependencies.tailscale || new TailscaleDiscovery();
     this.rpcFactory = dependencies.rpcFactory || (() => new CodexRpc(layout.codex, undefined, { env: {
       ...process.env, PATH: path.join(path.dirname(layout.codex), '..', 'codex-path') + path.delimiter + (process.env.PATH || '')
     } }));
@@ -31,7 +33,7 @@ export class CompanionManager extends EventEmitter {
       }
     });
     this.rpc.on('stopped', () => { this.state = 'error'; this.lastError = 'Codex 已退出。请关闭并重新打开 PC 应用。'; this.emit('change'); });
-    await this.rpc.initialize(); await this.readAccount();
+    await this.rpc.initialize(); await this.readAccount(); await this.tailscale.refresh();
   }
   async readAccount() {
     const result = await this.rpc.request('account/read', { refreshToken: false });
@@ -40,15 +42,19 @@ export class CompanionManager extends EventEmitter {
       email: result.account.email || '', planType: result.account.planType || '' } : null;
     return this.account;
   }
+  connectionAddresses() {
+    return [...new Set([...this.tailscale.status().addresses, ...lanAddresses()])];
+  }
   status() {
     const config = this.settings.publicValue();
-    const addresses = lanAddresses();
+    const addresses = this.connectionAddresses();
     const origins = config.networkMode === 'public' ? [config.publicOrigin].filter(Boolean) :
       (config.host === '127.0.0.1' ? ['127.0.0.1'] : addresses).map(ip => `https://${ip}:${config.port}`);
     return { version: VERSION, state: this.state, lastError: this.lastError, account: this.account,
       login: this.lastLogin || null, config, origins, devices: this.pairing.list(),
       fingerprint: this.certificates?.fingerprint || '', tasks: this.core?.list() || [],
-      dataDirectory: this.settings.directory, launcher: this.layout.launcher };
+      dataDirectory: this.settings.directory, launcher: this.layout.launcher,
+      ...(this.tailscale.enabled ? { network: { tailscale: this.tailscale.status() } } : {}) };
   }
   configure(body) {
     if (this.server || this.state === 'starting') throw new Error('请先停止手机连接服务，再修改项目或网络配置。');
@@ -79,9 +85,11 @@ export class CompanionManager extends EventEmitter {
       if (!this.account && this.requiresOpenaiAuth !== false) throw new Error('请先登录 Codex。');
       const config = this.settings.value;
       if (!config.workspaces.length) throw new Error('请先选择至少一个项目文件夹。');
-      this.certificates = config.networkMode === 'lan' ? ensureCertificates(this.settings.directory, lanAddresses(), this.layout.launcher) :
+      await this.tailscale.refresh({ force: true });
+      this.certificates = config.networkMode === 'lan' ? ensureCertificates(this.settings.directory, this.connectionAddresses(), this.layout.launcher) :
         { cert: config.certFile, key: config.keyFile, caCertificate: '', fingerprint: '' };
-      const bridgeConfig = { ...config, stateDir: path.join(this.settings.directory, 'tasks'), tls: this.certificates };
+      const bridgeConfig = { ...config, stateDir: path.join(this.settings.directory, 'tasks'), tls: this.certificates,
+        desktopCoordination: true };
       if (this.core) { this.core.close(); this.core = null; await this.initialize(); }
       this.core = new BridgeCore(bridgeConfig, this.rpc);
       await this.core.initialize({ initializeRpc: false });
@@ -99,7 +107,7 @@ export class CompanionManager extends EventEmitter {
   }
   async stop() {
     if (this.core) this.core.ready = false;
-    if (this.core?.list().some(task => ['running', 'starting', 'waitingApproval', 'stopping'].includes(task.status))) {
+    if (this.core?.locks.size || this.core?.list().some(task => ['running', 'starting', 'waitingApproval', 'stopping', 'releasing'].includes(task.status))) {
       this.core.ready = true;
       throw new Error('仍有任务在运行或等待审批。请先在手机中停止这些任务，再停止服务。');
     }
@@ -113,9 +121,11 @@ export class CompanionManager extends EventEmitter {
   }
   async createPairing(origin) {
     if (this.state !== 'running') throw new Error('请先启动手机连接服务。');
+    await this.tailscale.refresh({ force: true });
+    if (this.state !== 'running' || !this.server) throw new Error('手机连接服务已停止，请重新启动后配对。');
     if (!this.status().origins.includes(origin)) throw new Error('请选择本机当前可用的连接地址。');
     if (this.settings.value.networkMode === 'lan') {
-      this.certificates = ensureCertificates(this.settings.directory, lanAddresses(), this.layout.launcher);
+      this.certificates = ensureCertificates(this.settings.directory, this.connectionAddresses(), this.layout.launcher);
       this.server.setSecureContext({ cert: readFileSync(this.certificates.cert), key: readFileSync(this.certificates.key) });
     }
     const bundle = this.pairing.create({ origin, name: this.settings.value.name, caCertificate: this.certificates.caCertificate });
@@ -129,7 +139,7 @@ export class CompanionManager extends EventEmitter {
   }
   async dispatch(method, body = {}) {
     switch (method) {
-      case 'status': await this.readAccount(); return this.status();
+      case 'status': await this.readAccount(); await this.tailscale.refresh(); return this.status();
       case 'configure': return this.configure(body);
       case 'login': return this.login(body.type);
       case 'cancelLogin': await this.cancelLogin(); return this.status();
@@ -152,6 +162,8 @@ export class CompanionManager extends EventEmitter {
   async close() {
     this.pairing.cancel();
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null; }
-    if (this.core) this.core.close(); else this.rpc?.close();
+    const executors = [this.rpc, ...[...(this.core?.sharedSessions.entries.values() || [])].map(entry => entry.rpc)].filter(Boolean);
+    try { if (this.core) this.core.close(); else this.rpc?.close(); }
+    finally { await Promise.all(executors.map(rpc => rpc.shutdown?.())); }
   }
 }

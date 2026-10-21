@@ -18,11 +18,13 @@ execFileSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', path.join(reso
 cpSync(path.join(root, 'vendor', target), path.join(resources, 'runtime'), { recursive: true });
 cpSync(path.resolve(root, '../AppScope/resources/base/media/Icon.png'), path.join(resources, 'icon.png'));
 const banner = "import { createRequire as __makeRequire } from 'node:module'; const require = __makeRequire(import.meta.url);";
+// Node 22 provides UTF-8 validation; keep optional native WebSocket addons out of all portable bundles.
+const define = { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' };
 await build({ entryPoints: [path.join(root, 'host', 'cli.mjs')], outfile: path.join(resources, 'host', 'cli.mjs'),
-  bundle: true, platform: 'node', format: 'esm', target: 'node22', banner: { js: banner } });
+  bundle: true, platform: 'node', format: 'esm', define, external: ['bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
 await build({ entryPoints: [path.join(root, 'desktop', 'main.mjs')], outfile: path.join(app, 'desktop', 'main.mjs'),
-  bundle: true, platform: 'node', format: 'esm', external: ['electron'], target: 'node22', banner: { js: banner } });
+  bundle: true, platform: 'node', format: 'esm', define, external: ['electron', 'bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
 cpSync(path.join(root, 'desktop', 'preload.cjs'), path.join(app, 'desktop', 'preload.cjs'));
 cpSync(path.join(root, 'desktop', 'ui'), path.join(app, 'desktop', 'ui'), { recursive: true });
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -32,16 +34,17 @@ const licenseRoot = path.join(resources, 'licenses'); mkdirSync(licenseRoot, { r
 cpSync(path.join(resources, 'runtime', 'licenses'), licenseRoot, { recursive: true });
 // Include the production JS dependency tree's license texts with the bundled CLI.
 const visited = new Set();
-function licenses(packageName) {
-  if (visited.has(packageName)) return; visited.add(packageName);
-  const location = path.join(root, 'node_modules', packageName);
+function licenses(packageName, dependencyRoot = root) {
+  const location = path.join(dependencyRoot, 'node_modules', packageName);
+  if (visited.has(location)) return; visited.add(location);
   const metadata = JSON.parse(readFileSync(path.join(location, 'package.json'), 'utf8'));
   const folder = path.join(licenseRoot, packageName.replace(/[@/]/g, '_')); mkdirSync(folder, { recursive: true });
   for (const filename of readdirSync(location)) if (/^(LICENSE|COPYING|NOTICE)/i.test(filename)) cpSync(path.join(location, filename), path.join(folder, filename));
   writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ name: metadata.name, version: metadata.version, license: metadata.license }, null, 2));
-  for (const dependency of Object.keys(metadata.dependencies || {})) licenses(dependency);
+  for (const dependency of Object.keys(metadata.dependencies || {})) licenses(dependency, dependencyRoot);
 }
 licenses('qrcode');
+licenses('ws', path.resolve(root, '../bridge/codex'));
 cpSync(path.join(root, 'USER-GUIDE.md'), path.join(resources, '使用说明.md'));
 writeFileSync(path.join(output, 'target.json'), JSON.stringify({ platform, arch, target }));
 console.log('Staged desktop application and standalone terminal runtime:', output);

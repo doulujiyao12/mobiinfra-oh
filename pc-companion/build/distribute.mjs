@@ -11,7 +11,9 @@ const output = path.join(root, 'dist', target); mkdirSync(output, { recursive: t
 const version = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const resources = path.join(root, 'out', target, 'resources');
 const archive = `ClawMate-Codex-Terminal-${version}-${target}.${platform === 'win32' ? 'zip' : 'tar.gz'}`;
-if (platform === 'win32' && process.platform !== 'win32') execFileSync('bsdtar', ['-a', '-cf', path.join(output, archive), '-C', resources, '.'], { stdio: 'inherit' });
+if (platform === 'win32' || process.platform === 'win32') execFileSync(process.env.CLAWMATE_PYTHON || 'python',
+  [path.join(root, 'build', 'portable-desktop.py'), '--terminal', '--stage', path.join(root, 'out', target),
+    '--target', target, '--version', version, '--output', path.join(output, archive)], { stdio: 'inherit' });
 else execFileSync('tar', [platform === 'win32' ? '-a' : '-z', '-cf', path.join(output, archive), '-C', resources, '.'], { stdio: 'inherit' });
 if (!cliOnly) {
   const builder = path.join(root, 'node_modules', 'electron-builder', 'cli.js');

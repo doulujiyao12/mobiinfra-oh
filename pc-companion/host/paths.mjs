@@ -2,7 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.1.11';
 export function dataDirectory(env = process.env, platform = process.platform) {
   if (env.CLAWMATE_CODEX_DATA_DIR) return path.resolve(env.CLAWMATE_CODEX_DATA_DIR);
   if (platform === 'win32') return path.join(env.LOCALAPPDATA || os.homedir(), 'ClawMateCodex');

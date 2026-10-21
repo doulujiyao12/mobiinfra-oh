@@ -30,13 +30,17 @@ clawmate-codex --version             显示版本
 function flag(args, name) { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; }
 
 async function daemon(directory, layout, startOnReady) {
-  const unlock = acquireDaemonLock(directory);
+  const unlock = acquireDaemonLock(directory, layout);
   let manager;
   let closeControl;
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await manager?.close(); await closeControl?.(); unlock(); process.exit(0);
+    let failed = false;
+    try { await manager?.close(); }
+    catch (error) { console.error('关闭运行组件失败：' + error.message); failed = true; }
+    finally { try { await closeControl?.(); } finally { unlock(); } }
+    process.exit(failed ? 1 : 0);
   };
   process.on('SIGTERM', close); process.on('SIGINT', close);
   try {
@@ -45,7 +49,11 @@ async function daemon(directory, layout, startOnReady) {
     closeControl = await serveControl(manager, close, unlock);
     if (startOnReady) await manager.start();
     console.log('ClawMate Codex 本机服务就绪。');
-  } catch (error) { await manager?.close(); await closeControl?.(); unlock(); throw error; }
+  } catch (error) {
+    try { await manager?.close(); }
+    finally { try { await closeControl?.(); } finally { unlock(); } }
+    throw error;
+  }
 }
 async function main() {
   const [command = 'help', ...args] = process.argv.slice(2);
@@ -58,6 +66,7 @@ async function main() {
     try { await controlRequest(directory, 'status'); attached = true; }
     catch (error) { if (!['ENOENT', 'ECONNREFUSED', 'ENOTSOCK'].includes(error.code)) throw error; }
     if (!attached) return daemon(directory, layout, true);
+    await ensureDaemon(directory, layout);
     await controlRequest(directory, 'start');
     console.log('已连接本机后台服务，按 Ctrl+C 停止手机连接。');
     await new Promise(resolve => {
@@ -95,6 +104,14 @@ async function main() {
     }
     await controlRequest(directory, 'configure', config);
     return console.log('配置已保存。接下来执行 clawmate-codex login，再执行 clawmate-codex start。');
+  }
+  // Inspection and explicit shutdown must remain available even for an older daemon.
+  if (['status', 'stop', 'quit'].includes(command)) {
+    try { return console.log(JSON.stringify(await controlRequest(directory, command), null, 2)); }
+    catch (error) {
+      if (!['ENOENT', 'ECONNREFUSED', 'ENOTSOCK'].includes(error.code)) throw error;
+      if (command !== 'status') return console.log(JSON.stringify({ state: 'stopped' }));
+    }
   }
   await ensureDaemon(directory, layout);
   if (command === 'login') {

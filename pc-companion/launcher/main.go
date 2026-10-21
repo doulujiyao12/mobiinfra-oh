@@ -7,10 +7,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--internal-process-info" {
+		if len(os.Args) != 3 {
+			fatal("Invalid process arguments")
+		}
+		pid, err := strconv.Atoi(os.Args[2])
+		if err != nil || pid < 1 || uint64(pid) > 0xffffffff {
+			fatal("Invalid process ID")
+		}
+		info, err := inspectProcess(pid)
+		if err != nil {
+			fatal("Cannot inspect process: " + err.Error())
+		}
+		json.NewEncoder(os.Stdout).Encode(info)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--internal-certificates" {
 		if len(os.Args) != 4 {
 			fatal("Invalid certificate arguments")

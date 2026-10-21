@@ -7,17 +7,18 @@ import os from 'node:os';
 import assert from 'node:assert/strict';
 import { serveControl } from '../host/control.mjs';
 import QRCode from 'qrcode';
+import { VERSION, installLayout } from '../host/paths.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dir = mkdtempSync(path.join(os.tmpdir(), 'clawmate-ui-smoke-'));
 process.env.CLAWMATE_CODEX_DATA_DIR = dir;
 process.env.CLAWMATE_CODEX_RESOURCES = path.join(root, 'out', `${process.platform}-${process.arch}`, 'resources');
 mkdirSync(path.join(dir, 'electron'), { recursive: true }); app.setPath('userData', path.join(dir, 'electron'));
-const status = { version: '1.1.0', state: 'stopped', account: { type: 'chatgpt', email: 'demo@example.invalid', planType: 'plus' },
+const status = { version: VERSION, state: 'stopped', account: { type: 'chatgpt', email: 'demo@example.invalid', planType: 'plus' },
   config: { name: '我的开发电脑', host: '0.0.0.0', port: 8787, networkMode: 'lan', publicOrigin: '', certFile: '', keyFile: '',
     workspaces: [{ id: 'project', name: '鸿蒙项目', path: '/projects/harmony-app' }] },
-  origins: ['https://192.168.1.20:8787'], devices: [], tasks: [], fingerprint: 'DEMO · ONLY USED IN UI TEST', dataDirectory: '/private/app-data', launcher: '/app/bin/clawmate-codex' };
-const manager = { settings: { directory: dir }, async dispatch(method, body) {
+  origins: ['https://192.168.1.20:8787'], devices: [], tasks: [], fingerprint: 'DEMO · ONLY USED IN UI TEST', dataDirectory: '/private/app-data', launcher: installLayout().launcher };
+const manager = { layout: installLayout(), settings: { directory: dir }, async dispatch(method, body) {
   if (method === 'status') return status;
   if (method === 'configure') { status.config = body; return status; }
   if (method === 'start') { status.state = 'running'; return status; }

@@ -23,6 +23,7 @@ const TITLE_GLASS_FADE_HEIGHT: number = 32;
 @Component
 export struct FrostedPage {
   @Prop pageBackgroundColor: string = '#FFFFFF';
+  @Prop titleFadeHeight: number = TITLE_GLASS_FADE_HEIGHT;
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   scrollers: Scroller[] = [];
   @BuilderParam headerBuilder: () => void = this.EmptyContent;
@@ -60,7 +61,7 @@ export struct FrostedPage {
   private titleOptions(): HdsNavigationTitleBarOptions {
     let scrollBackground: HdsNavigationBackgroundStyle = {
       backgroundColor: $r('app.color.ui_glass_title'),
-      maskExtraHeight: TITLE_GLASS_FADE_HEIGHT
+      maskExtraHeight: this.titleFadeHeight
     };
     let scrollEffect: ScrollEffectType = ScrollEffectType.GRADIENT_BLUR;
     if (deviceInfo.sdkApiVersion >= 23) {

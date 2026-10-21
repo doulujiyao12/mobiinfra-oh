@@ -3,7 +3,6 @@ import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppH
 import { FrostedPage } from '../../components/FrostedPage';
 import { inputMethod } from '@kit.IMEKit';
 import {
-  CHAT_COMPOSER_MAX_LINES,
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
   chatComposerBarHeight,
@@ -915,7 +914,7 @@ export struct ChatPage {
             .caretColor($r('app.color.ui_accent_blue'))
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
-            .maxLines(CHAT_COMPOSER_MAX_LINES)
+            .barState(BarState.Auto)
             .fontSize(15)
             .lineHeight(20)
             .fontColor(AppTheme.text('#4B5563'))

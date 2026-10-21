@@ -7,6 +7,8 @@ import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import https from 'node:https';
+import http from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import { BridgeCore, MAX_FILE_BYTES } from '../core.mjs';
 import { createBridgeServer, initializeConfig } from '../server.mjs';
 
@@ -38,6 +40,124 @@ async function fixture(t) {
 }
 const createBody = { workspaceId: 'project', model: 'test', effort: 'medium', mode: 'workspace-write' };
 const turnBody = () => ({ requestId: randomUUID(), text: '修复这个问题', attachments: [], model: 'test', effort: 'medium' });
+
+test('health is authenticated, independent of the executor and advertises bounded delta transport', async t => {
+  const { config, core } = await fixture(t); const server = createBridgeServer(config, core);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const headers = { Authorization: 'Bearer ' + config.token };
+  const info = await (await fetch(base + '/v1/info', { headers })).json();
+  assert.equal(info.healthSupported, true); assert.equal(info.taskDeltaSupported, true); assert.equal(info.artifactChunkBytes, 262144);
+  core.ready = false;
+  assert.equal((await fetch(base + '/v1/health')).status, 401);
+  assert.equal((await (await fetch(base + '/v1/health', { headers })).json()).ready, false);
+  assert.equal((await fetch(base + '/v1/health?token=x', { headers })).status, 400);
+});
+
+test('gzip, delta, unchanged and full fallback responses preserve the same task content', async t => {
+  const { config, core } = await fixture(t); const task = await core.create(createBody);
+  core.item(task, 'one', 'assistant', 'initial', true); task.items[0].text = 'history '.repeat(1500); core.touch(task);
+  const server = createBridgeServer(config, core);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port; const headers = { Authorization: 'Bearer ' + config.token };
+  const readRaw = encoding => new Promise((resolve, reject) => {
+    http.get(base + '/v1/tasks/' + task.id + '?sync=delta', { headers: { ...headers, 'Accept-Encoding': encoding } }, res => {
+      const buffers = []; res.on('data', chunk => buffers.push(chunk));
+      res.on('end', () => resolve({ headers: res.headers, bytes: Buffer.concat(buffers) }));
+    }).on('error', reject);
+  });
+  const compressed = await readRaw('gzip'); const plain = await readRaw('identity'); const disabled = await readRaw('gzip;q=0');
+  assert.equal(compressed.headers['content-encoding'], 'gzip'); assert.equal(plain.headers['content-encoding'], undefined);
+  assert.equal(disabled.headers['content-encoding'], undefined);
+  assert.deepEqual(gunzipSync(compressed.bytes), plain.bytes);
+  assert.ok(compressed.bytes.length < plain.bytes.length / 4);
+  const before = task.revision; task.items[0].text += ' more'; core.touch(task);
+  const delta = await (await fetch(base + '/v1/tasks/' + task.id + '?sync=delta&revision=' + before, { headers })).json();
+  assert.equal(delta.taskDelta.items[0].text, ' more'); assert.equal(delta.taskDelta.items[0].append, true);
+  assert.equal((await (await fetch(base + '/v1/tasks/' + task.id + '?revision=' + before, { headers })).json()).task.items[0].text, task.items[0].text);
+  assert.equal((await (await fetch(base + '/v1/tasks/' + task.id + '?sync=delta&revision=999999', { headers })).json()).task.id, task.id);
+  assert.equal((await (await fetch(base + '/v1/tasks/' + task.id + '?sync=delta&revision=' + task.revision, { headers })).json()).unchanged, true);
+  for (const query of ['sync=bad', 'sync=delta&sync=delta']) assert.equal((await fetch(base + '/v1/tasks/' + task.id + '?' + query, { headers })).status, 400);
+});
+
+test('new sessions default to workspace writes; idle sessions can select ask, auto-review and full access per turn', async t => {
+  const { core, rpc } = await fixture(t);
+  const task = await core.create({ workspaceId: 'project', model: 'test', effort: 'medium' });
+  assert.equal(task.mode, 'workspace-write'); assert.equal(task.approvalMode, 'ask');
+  for (const settings of [
+    { mode: 'workspace-write', approvalMode: 'auto' }, { mode: 'danger-full-access', approvalMode: 'full' },
+    { mode: 'read-only', approvalMode: 'ask' }
+  ]) {
+    const input = { ...turnBody(), ...settings }; await core.start(task.id, input);
+    const params = rpc.calls.filter(call => call.method === 'turn/start').at(-1).params;
+    assert.equal(params.approvalPolicy, settings.approvalMode === 'full' ? 'never' : 'on-request');
+    assert.equal(params.approvalsReviewer, settings.approvalMode === 'auto' ? 'auto_review' : 'user');
+    assert.equal(params.sandboxPolicy.type, settings.mode === 'danger-full-access' ? 'dangerFullAccess' : settings.mode === 'read-only' ? 'readOnly' : 'workspaceWrite');
+    assert.equal(task.mode, settings.mode); assert.equal(task.approvalMode, settings.approvalMode);
+    await assert.rejects(core.start(task.id, { ...turnBody(), mode: 'read-only', approvalMode: 'ask' }), /already running/);
+    await assert.rejects(core.start(task.id, { ...input, approvalMode: 'ask' === input.approvalMode ? 'auto' : 'ask' }), /different input/);
+    core.onMessage({ method: 'turn/completed', params: { threadId: task.id, turn: { id: task.turnId, status: 'completed' } } });
+  }
+});
+
+test('full access requires both explicit selections and unknown approval modes fail before execution', async t => {
+  const { core, rpc } = await fixture(t); const task = await core.create(createBody);
+  for (const input of [
+    { mode: 'danger-full-access' }, { approvalMode: 'full' }, { approvalMode: 'never' }, { approvalMode: null }, { mode: null }
+  ]) await assert.rejects(core.start(task.id, { ...turnBody(), ...input }), /approval|sandbox|Full access/);
+  assert.equal(rpc.calls.filter(call => call.method === 'turn/start').length, 0);
+  assert.equal(task.mode, 'workspace-write'); assert.equal(task.approvalMode, 'ask');
+});
+
+test('retry events are nonterminal and immediate, recover on activity and clear at turn completion', async t => {
+  const { core } = await fixture(t); const task = await core.create(createBody);
+  await core.start(task.id, turnBody());
+  const before = task.revision;
+  core.onMessage({ method: 'error', params: { threadId: task.id, turnId: task.turnId, willRetry: true, error: { message: 'Reconnecting... 2/5' } } });
+  assert.equal(task.status, 'running'); assert.equal(task.error, ''); assert.equal(task.progress.kind, 'reconnecting');
+  assert.equal(task.progress.attempt, 2); assert.equal(task.progress.total, 5); assert.ok(task.revision > before);
+  const since = task.progress.since;
+  core.onMessage({ method: 'error', params: { threadId: task.id, willRetry: true, error: { message: 'Reconnecting... 3/5' } } });
+  assert.equal(task.progress.since, since); assert.equal(task.progress.attempt, 3);
+  core.onMessage({ method: 'item/agentMessage/delta', params: { threadId: task.id, itemId: 'recovered', delta: 'Back online' } });
+  assert.equal(task.progress, undefined);
+  core.onMessage({ method: 'item/autoApprovalReview/started', params: { threadId: task.id, reviewId: 'r', review: { status: 'inProgress' } } });
+  assert.equal(task.progress.kind, 'reviewing');
+  core.onMessage({ method: 'item/autoApprovalReview/completed', params: { threadId: task.id, reviewId: 'r', review: { status: 'denied' } } });
+  assert.match(task.progress.message, /未批准/); assert.equal(task.approvals.length, 0);
+  core.onMessage({ method: 'error', params: { threadId: task.id, willRetry: false, error: { message: 'Retries exhausted' } } });
+  assert.equal(task.error, 'Retries exhausted'); assert.equal(task.progress, undefined);
+  core.onMessage({ method: 'turn/completed', params: { threadId: task.id, turn: { id: task.turnId, status: 'failed', error: { message: 'Retries exhausted' } } } });
+  assert.equal(task.status, 'failed'); assert.equal(task.progress, undefined);
+});
+
+test('task update waits wake on revision, time out, cancel and release all listeners', async t => {
+  const { core } = await fixture(t); const task = await core.create(createBody);
+  const changed = core.waitForChange(task.id, task.revision, 15000);
+  assert.equal(core.waiters.size, 1); core.touch(task); await changed; assert.equal(core.waiters.size, 0);
+  const abort = new AbortController(); const cancelled = core.waitForChange(task.id, task.revision, 15000, abort.signal);
+  abort.abort(); await cancelled; assert.equal(core.waiters.size, 0);
+  await core.waitForChange(task.id, task.revision, 1); assert.equal(core.waiters.size, 0);
+  await core.waitForChange(task.id, task.revision - 1, 15000); assert.equal(core.waiters.size, 0);
+});
+
+test('authenticated long polling delivers retry state without waiting for timeout and validates query limits', { timeout: 5000 }, async t => {
+  const { core, config } = await fixture(t); const task = await core.create(createBody); await core.start(task.id, turnBody());
+  const server = createBridgeServer(config, core);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  const root = 'http://127.0.0.1:' + server.address().port;
+  const headers = { Authorization: 'Bearer ' + config.token };
+  for (const query of ['waitMs=15001&revision=0', 'waitMs=10', 'waitMs=-1&revision=0', 'revision=1&revision=2', 'revision=x', 'waitMs=1&token=x']) {
+    assert.equal((await fetch(root + '/v1/tasks/' + task.id + '?' + query, { headers })).status, 400);
+  }
+  const waiting = fetch(root + '/v1/tasks/' + task.id + '?revision=' + task.revision + '&waitMs=15000', { headers });
+  const deadline = Date.now() + 2000;
+  while (!core.waiters.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(core.waiters.size, 1);
+  core.onMessage({ method: 'error', params: { threadId: task.id, willRetry: true, error: { message: 'Reconnecting 1/5' } } });
+  const result = await (await waiting).json(); assert.equal(result.task.progress.attempt, 1);
+  assert.equal(core.waiters.size, 0);
+});
 
 test('server binds only loopback without TLS and rejects weak tokens', async t => {
   const { config, core } = await fixture(t);
@@ -110,7 +230,7 @@ test('upload is bounded, exclusive, detects image bytes and cannot cross workspa
   const stored = core.uploads.get(upload.id);
   assert.deepEqual(readFileSync(stored.path), png);
   assert.ok(stored.path.startsWith(workspace + path.sep));
-  assert.equal(statSync(stored.path).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(stored.path).mode & 0o777, 0o600);
   await assert.rejects(core.upload({ workspaceId: 'project', name: '../attack', base64: 'dGVzdA==' }), /filename/);
   await assert.rejects(core.upload({ workspaceId: 'project', name: 'fake.png', base64: 'dGVzdA==', image: true }), /Images must/);
   await assert.rejects(core.upload({ workspaceId: 'project', name: 'x', base64: 'invalid!!!' }), /base64/);
@@ -225,7 +345,7 @@ test('config initialization uses fresh secret and never overwrites existing conf
   const filename = path.join(dir, 'config.json');
   const config = initializeConfig(filename, workspace);
   assert.equal(config.token.length, 43);
-  assert.equal(statSync(filename).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(filename).mode & 0o777, 0o600);
   assert.throws(() => initializeConfig(filename, workspace), /EEXIST/);
 });
 
@@ -234,6 +354,10 @@ test('symlink replacement of uploaded file is rejected before submission', async
   const upload = await core.upload({ workspaceId: 'project', name: 'data', base64: 'dGVzdA==' });
   const file = core.uploads.get(upload.id).path;
   const outside = path.join(dir, 'outside'); writeFileSync(outside, 'secret');
-  rmSync(file); symlinkSync(outside, file);
+  rmSync(file);
+  try { symlinkSync(outside, file); } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('File symlinks require Windows Developer Mode or elevated privileges');
+    throw error;
+  }
   await assert.rejects(core.start(task.id, { ...turnBody(), attachments: [upload.id] }), /moved or replaced/);
 });
