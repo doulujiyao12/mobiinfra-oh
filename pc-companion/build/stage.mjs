@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { mkdirSync, cpSync, readFileSync, writeFileSync, chmodSync, readdirSync } from 'node:fs';
+import { mkdirSync, cpSync, copyFileSync, readFileSync, writeFileSync, chmodSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,8 @@ const banner = "import { createRequire as __makeRequire } from 'node:module'; co
 const define = { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' };
 await build({ entryPoints: [path.join(root, 'host', 'cli.mjs')], outfile: path.join(resources, 'host', 'cli.mjs'),
   bundle: true, platform: 'node', format: 'esm', define, external: ['bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
+await build({ entryPoints: [path.join(root, 'host', 'update-helper.mjs')], outfile: path.join(resources, 'host', 'update-helper.mjs'),
+  bundle: true, platform: 'node', format: 'esm', target: 'node22' });
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
 await build({ entryPoints: [path.join(root, 'desktop', 'main.mjs')], outfile: path.join(app, 'desktop', 'main.mjs'),
   bundle: true, platform: 'node', format: 'esm', define, external: ['electron', 'bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
@@ -45,6 +47,7 @@ function licenses(packageName, dependencyRoot = root) {
 }
 licenses('qrcode');
 licenses('ws', path.resolve(root, '../bridge/codex'));
-cpSync(path.join(root, 'USER-GUIDE.md'), path.join(resources, '使用说明.md'));
+// Copy a single UTF-8 filename without fs.cp's unlink-before-overwrite path on Windows.
+copyFileSync(path.join(root, 'USER-GUIDE.md'), path.join(resources, '使用说明.md'));
 writeFileSync(path.join(output, 'target.json'), JSON.stringify({ platform, arch, target }));
 console.log('Staged desktop application and standalone terminal runtime:', output);

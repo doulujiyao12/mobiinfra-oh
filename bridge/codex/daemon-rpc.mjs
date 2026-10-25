@@ -76,7 +76,7 @@ export class DaemonRpc extends EventEmitter {
   }
   async initialize() {
     await this.request('initialize', {
-      clientInfo: { name: 'clawmate_harmony', title: 'ClawMate', version: '1.1.11' },
+      clientInfo: { name: 'clawmate_harmony', title: 'ClawMate', version: '1.1.13' },
       capabilities: { experimentalApi: false }
     });
     this.send({ method: 'initialized', params: {} });

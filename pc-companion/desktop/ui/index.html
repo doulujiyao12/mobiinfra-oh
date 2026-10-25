@@ -1,14 +1,23 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-<title>ClawMate Codex</title><link rel="stylesheet" href="styles.css"></head>
+<title>ClawMate Codex</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="updates.css"></head>
 <body>
 <aside><div class="brand"><span class="brand-mark">⌘</span><div>ClawMate<span>CODEX COMPANION</span></div></div>
 <p class="side-caption">你的电脑，随身协作</p>
-<nav aria-label="主导航"><button class="nav active" data-view="setup">连接设置</button><button class="nav" data-view="pairing">手机配对</button><button class="nav" data-view="devices">设备与任务</button><button class="nav" data-view="terminal">终端与启动</button></nav>
+<nav aria-label="主导航"><button class="nav active" data-view="setup">连接设置</button><button class="nav" data-view="pairing">手机配对</button><button class="nav" data-view="devices">设备与任务</button><button class="nav" data-view="terminal">终端与启动</button><button class="nav" data-view="updates">应用更新 <span id="updateDot" hidden>●</span></button></nav>
 <div class="side-bottom"><span class="dot" id="sideDot"></span><span id="sideState">正在连接本机服务</span><small>HTTPS · 本机执行 · 独立设备凭据</small></div></aside>
-<main><header><div><span class="eyebrow">CLAWMATE WORKSPACE</span><h1 id="pageTitle">让手机连接你的开发电脑</h1><p>登录、选项目、配对，然后从鸿蒙 App 继续工作。</p></div><span class="version">v1.1.11</span></header>
+<main><header><div><span class="eyebrow">CLAWMATE WORKSPACE</span><h1 id="pageTitle">让手机连接你的开发电脑</h1><p>登录、选项目、配对，然后从鸿蒙 App 继续工作。</p></div><span class="version">v1.1.13</span></header>
 <div id="notice" role="status" hidden></div>
+<div id="updateBanner" class="update-banner" hidden><span id="updateBannerText"></span><div><button id="laterUpdate">稍后</button><button id="viewUpdate">查看更新</button></div></div>
+<section id="updates" class="view" hidden>
+<article class="update-card"><div class="card-head"><div><h2>ClawMate Codex</h2><p id="updateVersion">正在读取版本…</p></div><span id="updateBadge" class="badge">自动检查</span></div>
+<p id="updateMessage" role="status">启动后自动检查 GitHub 上的连接器版本。</p><progress id="updateProgress" max="100" value="0" hidden></progress><p id="updateBytes" class="muted" hidden></p>
+<p id="updateError" class="update-error" role="alert" hidden></p><pre id="updateNotes" class="update-notes" hidden></pre>
+<div class="actions"><button id="checkUpdate">检查更新</button><button id="downloadUpdate" class="primary" hidden>下载更新</button><button id="pauseUpdate" hidden>暂停下载</button><button id="installUpdate" class="primary" hidden>重启并安装</button><button id="openUpdate" hidden>打开安装文件</button><button id="releasePage">发布记录</button></div>
+<p id="updateManual" class="muted" hidden></p></article>
+<article class="update-preferences"><label class="checkbox"><input id="autoCheckUpdates" type="checkbox" checked>自动检查更新</label><label class="checkbox"><input id="previewUpdates" type="checkbox">接收测试版更新</label><p class="muted">正式版默认不包含预发布版本。更新会保留配对、项目目录和任务记录；任务执行中暂缓安装。</p></article>
+</section>
 <section id="setup" class="view">
 <div class="steps"><span>01 登录 Codex</span><span>02 选择项目</span><span>03 连接手机</span></div>
 <article><div class="card-head"><div><h2>Codex 账号</h2><p>使用官方登录，凭据保存在这台电脑。</p></div><span id="accountBadge" class="badge">尚未登录</span></div>

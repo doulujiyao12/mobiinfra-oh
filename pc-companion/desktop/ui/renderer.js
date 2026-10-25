@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let snapshot; let projects = []; let dirty = false; let working = false;
-const titles = { setup: '让手机连接你的开发电脑', pairing: '与自己的手机安全配对', devices: '设备和任务，一眼掌握', terminal: '你熟悉的终端，同样可用' };
+const titles = { setup: '让手机连接你的开发电脑', pairing: '与自己的手机安全配对', devices: '设备和任务，一眼掌握', terminal: '你熟悉的终端，同样可用', updates: '保持最新，继续协作' };
 function notice(message, error = false) { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', error); }
 function errorText(error) { return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
 async function act(action) {
@@ -101,3 +101,44 @@ $('autoStart').addEventListener('change', () => act(async () => { await window.c
 $('shutdown').addEventListener('click', () => act(() => window.companion.shutdown()));
 refresh().catch(error => notice('本机服务启动失败：' + errorText(error), true));
 setInterval(() => { if (!working) refresh().catch(error => notice(errorText(error), true)); }, 3000);
+
+let updateState;
+function renderUpdate(state) {
+  updateState = state;
+  const downloading = state.phase === 'downloading'; const checking = state.phase === 'checking'; const installing = state.phase === 'installing';
+  const ready = state.phase === 'ready'; const labels = { idle: '等待检查', checking: '正在检查', latest: '当前已是最新可用版本', available: '发现新版本', downloading: '正在下载', ready: '下载完成', installing: '正在准备安装', error: '检查未完成' };
+  $('updateVersion').textContent = `当前版本 ${state.currentVersion}` + (state.hasUpdate ? ` · 新版本 ${state.latestVersion}` : '');
+  $('updateBadge').textContent = labels[state.phase] || '应用更新';
+  $('updateBadge').classList.toggle('good', ready || state.phase === 'latest');
+  $('updateMessage').textContent = installing ? '正在安全退出连接服务，配对与项目配置会保留。' : downloading ? `正在下载 ${state.latestVersion}，可暂停后继续。` : ready ? '更新已下载并通过完整性校验。' : state.hasUpdate ? `发现 ClawMate Codex ${state.latestVersion}` : state.phase === 'latest' ? 'GitHub 上暂时没有更高版本的匹配发布。' : '自动检查连接器的 GitHub Release，不影响手机任务。';
+  $('updateProgress').hidden = !downloading; $('updateProgress').value = state.progress;
+  $('updateBytes').hidden = !downloading;
+  $('updateBytes').textContent = `${state.progress}% · ${(state.downloadedBytes / 1048576).toFixed(1)} / ${(state.totalBytes / 1048576).toFixed(1)} MB`;
+  $('updateError').hidden = !state.error; $('updateError').textContent = state.error || '';
+  $('updateNotes').hidden = !state.notes; $('updateNotes').textContent = state.notes || '';
+  $('checkUpdate').disabled = checking || downloading || installing;
+  $('checkUpdate').textContent = checking ? '正在检查…' : '检查更新';
+  $('downloadUpdate').hidden = !state.hasUpdate || ready || downloading || checking || installing;
+  $('pauseUpdate').hidden = !downloading;
+  $('installUpdate').hidden = !ready || !state.canInstall; $('openUpdate').hidden = !ready || state.canInstall;
+  $('autoCheckUpdates').checked = state.autoCheck; $('previewUpdates').checked = state.channel === 'preview';
+  $('autoCheckUpdates').disabled = $('previewUpdates').disabled = checking || downloading || installing;
+  $('updateManual').hidden = !state.hasUpdate || state.canInstall;
+  $('updateManual').textContent = state.platform === 'darwin' ? '当前 Mac 包未签名：下载后打开安装文件，退出旧连接器并将新应用移入“应用程序”。配对信息会保留。' : '此安装方式需要打开下载包后手动替换程序，保留原有应用数据目录即可。';
+  $('updateBanner').hidden = !state.hasUpdate || state.ignoredVersion === state.latestVersion; $('updateDot').hidden = !state.hasUpdate;
+  $('updateBannerText').textContent = ready ? `版本 ${state.latestVersion} 已就绪` : `ClawMate Codex ${state.latestVersion} 可更新`;
+}
+async function updateAction(method, body) {
+  try { renderUpdate(await window.companion.updates(method, body)); }
+  catch (error) { $('updateError').hidden = false; $('updateError').textContent = errorText(error); }
+}
+$('viewUpdate').addEventListener('click', () => view('updates'));
+for (const [id, method] of [['checkUpdate', 'check'], ['downloadUpdate', 'download'], ['pauseUpdate', 'cancel'], ['installUpdate', 'install'], ['openUpdate', 'open'], ['releasePage', 'release'], ['laterUpdate', 'later']]) {
+  $(id).addEventListener('click', () => updateAction(method));
+}
+for (const id of ['autoCheckUpdates', 'previewUpdates']) $(id).addEventListener('change', () => updateAction('configure', {
+  autoCheck: $('autoCheckUpdates').checked, channel: $('previewUpdates').checked ? 'preview' : 'stable'
+}));
+window.companion.onUpdate(renderUpdate);
+window.companion.updates('status').then(renderUpdate).catch(() => {});
+setInterval(() => { if (!updateState) window.companion.updates('status').then(renderUpdate).catch(() => {}); }, 1000);

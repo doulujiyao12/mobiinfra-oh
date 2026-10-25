@@ -1,12 +1,13 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { CompanionManager } from './manager.mjs';
 import { Settings, writePrivate } from './settings.mjs';
 import { dataDirectory, installLayout, VERSION } from './paths.mjs';
 import { controlRequest, serveControl, acquireDaemonLock } from './control.mjs';
-import { ensureDaemon } from './daemon-client.mjs';
+import { ensureDaemon, quitDaemon } from './daemon-client.mjs';
+import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from './updates.mjs';
 
 const HELP = `ClawMate Codex ${VERSION}
 无需 Node.js、npm 或源码。桌面安装程序已内置相同命令行工具。
@@ -23,6 +24,9 @@ clawmate-codex revoke DEVICE_ID      撤销设备连接权限
 clawmate-codex stop                  停止接受手机连接（有运行任务时拒绝停止）
 clawmate-codex quit                  退出 PC 服务，会中断正在执行的任务
 clawmate-codex reset-pairing --confirm 重置所有设备与本机配对证书（需要先 stop）
+clawmate-codex check-update          检查 GitHub 上的连接器新版本
+clawmate-codex update                下载、校验并更新（Linux 可自动替换并恢复连接）
+clawmate-codex update --yes          无交互确认更新；--download-only 只下载
 clawmate-codex --version             显示版本
 
 可选：--origin https://IP:PORT 选择配对地址；setup --config FILE 导入公网 TLS 配置。
@@ -47,7 +51,12 @@ async function daemon(directory, layout, startOnReady) {
     manager = new CompanionManager(directory, layout);
     await manager.initialize();
     closeControl = await serveControl(manager, close, unlock);
-    if (startOnReady) await manager.start();
+    let resume;
+    try { resume = JSON.parse(readFileSync(path.join(directory, 'update-resume.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') console.error('更新后的连接恢复标记不可用，请手动启动服务。'); }
+    if (startOnReady || resume?.version === VERSION && resume.wasRunning) {
+      try { await manager.start(); if (resume?.version === VERSION) unlinkSync(path.join(directory, 'update-resume.json')); }
+      catch (error) { if (startOnReady) throw error; console.error('更新完成，连接服务需手动启动：' + error.message); }
+    } else if (resume?.version === VERSION) unlinkSync(path.join(directory, 'update-resume.json'));
     console.log('ClawMate Codex 本机服务就绪。');
   } catch (error) {
     try { await manager?.close(); }
@@ -60,6 +69,27 @@ async function main() {
   if (['help', '--help', '-h'].includes(command)) return console.log(HELP);
   if (command === '--version') return console.log(VERSION);
   const directory = dataDirectory(); const layout = installLayout();
+  if (['check-update', 'update'].includes(command)) {
+    const updater = new ReleaseUpdater(directory);
+    if (args.includes('--preview')) updater.configure({ autoCheck: updater.preferences.autoCheck, channel: 'preview' });
+    const info = await updater.check();
+    if (command === 'check-update' || !info.hasUpdate) return console.log(JSON.stringify(info, null, 2));
+    console.log(`发现连接器 ${info.latestVersion}：\n${info.notes}`);
+    if (!args.includes('--yes')) {
+      if (!stdin.isTTY) throw new Error('非交互更新请使用 update --yes；只查看版本可使用 check-update。');
+      const rl = createInterface({ input: stdin, output: stdout });
+      try { if (!/^(y|yes)$/i.test((await rl.question('下载并更新？[y/N] ')).trim())) return; } finally { rl.close(); }
+    }
+    let last = -1;
+    updater.on('change', state => { if (state.phase === 'downloading' && state.progress >= last + 5) { last = state.progress; console.log(`下载更新 ${state.progress}%`); } });
+    await updater.download(); const filename = await updater.verifiedFile(); console.log('下载校验完成：' + filename);
+    if (args.includes('--download-only') || !updater.state.canInstall) return console.log('请打开下载包手动安装，原配置与配对信息保留在应用数据目录。');
+    const prepared = await updater.prepareJob({ layout, installRoot: layout.base, dataDir: directory });
+    const { wasRunning } = await quiesceForUpdate(directory, layout, controlRequest, quitDaemon);
+    try { await startUpdateJob(prepared, wasRunning); }
+    catch (error) { if (wasRunning) { await ensureDaemon(directory, layout); await controlRequest(directory, 'start'); } throw error; }
+    return console.log('更新程序已启动，当前命令将退出；进度和结果位于应用数据目录 updates/install-result.json。');
+  }
   if (command === 'daemon') return daemon(directory, layout, false);
   if (command === 'serve') {
     let attached = false;

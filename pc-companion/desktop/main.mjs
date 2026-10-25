@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Tray, nativeImage, net } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdirSync, symlinkSync, existsSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -9,12 +9,14 @@ import { ensureDaemon, quitDaemon } from '../host/daemon-client.mjs';
 import { DesktopLifecycle } from './lifecycle.mjs';
 import { controlRequest } from '../host/control.mjs';
 import { writePrivate } from '../host/settings.mjs';
+import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from '../host/updates.mjs';
 
 const directory = dataDirectory();
 const layout = installLayout(app.isPackaged ? process.resourcesPath : undefined);
 const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui', 'index.html');
 const rendererUrl = pathToFileURL(entry).href;
 let window; let tray; let quitting = false; let pairing;
+let updater; let installingUpdate = false;
 const lifecycle = new DesktopLifecycle({ hasTray: () => !!tray,
   confirm: options => window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
   hide: () => window?.hide(), show: showWindow,
@@ -45,6 +47,12 @@ async function createWindow() {
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.on('close', event => { if (!quitting) { event.preventDefault(); void lifecycle.requestClose(); } });
   await window.loadFile(entry);
+  updater = new ReleaseUpdater(directory, { kind: 'desktop', fetcher: (url, options) => net.fetch(url, options) });
+  updater.on('change', state => { if (window && !window.isDestroyed()) window.webContents.send('companion:update-state', state); });
+  const check = () => { if (!lifecycle.closing && !installingUpdate && updater.preferences.autoCheck) updater.check().catch(() => {}); };
+  const firstCheck = setTimeout(check, 12000); firstCheck.unref();
+  const checkTimer = setInterval(check, 6 * 60 * 60000); checkTimer.unref();
+  app.once('will-quit', () => { clearTimeout(firstCheck); clearInterval(checkTimer); updater.cancel(); });
   const iconFile = path.join(layout.base, 'icon.png');
   const image = nativeImage.createFromPath(iconFile);
   if (!image.isEmpty()) {
@@ -120,6 +128,45 @@ ipcMain.handle('companion:autoStart', (event, enabled) => {
 ipcMain.handle('companion:shutdown', async event => {
   trusted(event);
   return lifecycle.requestClose(false);
+});
+
+ipcMain.handle('companion:updates', async (event, method, body) => {
+  trusted(event);
+  if (!updater) throw new Error('更新服务正在准备，请稍后重试');
+  if (installingUpdate && method !== 'status') throw new Error('正在准备更新，请稍候');
+  switch (method) {
+    case 'status': return updater.snapshot();
+    case 'check': return updater.check();
+    case 'download': return updater.download();
+    case 'cancel': updater.cancel(); return updater.snapshot();
+    case 'later': return updater.later();
+    case 'configure': return updater.configure(body);
+    case 'release': await shell.openExternal(updater.releaseUrl()); return updater.snapshot();
+    case 'open': {
+      const filename = await updater.verifiedFile(); const error = await shell.openPath(filename);
+      if (error) throw new Error(error); return updater.snapshot();
+    }
+    case 'install': {
+      if (!updater.state.canInstall) throw new Error('当前版本请打开下载文件后手动安装');
+      installingUpdate = true; let wasRunning = false;
+      try {
+        const choice = await dialog.showMessageBox(window, { type: 'question', title: '安装连接器更新',
+          message: `重启并安装 ${updater.state.latestVersion}？`, detail: '任务完成后才能安装。配对和项目配置会保留，手机连接将在更新后恢复。',
+          buttons: ['稍后', '重启并安装'], defaultId: 1, cancelId: 0, noLink: true });
+        if (choice.response !== 1) return updater.snapshot();
+        const prepared = await updater.prepareJob({ layout, installRoot: process.platform === 'win32' ? path.dirname(process.execPath) : path.dirname(layout.base), dataDir: directory });
+        lifecycle.closing = true; updater.change({ phase: 'installing', error: '' });
+        ({ wasRunning } = await quiesceForUpdate(directory, layout, controlRequest, quitDaemon));
+        await startUpdateJob(prepared, wasRunning);
+        quitting = true; app.quit(); return updater.snapshot();
+      } catch (error) {
+        lifecycle.closing = false; updater.change({ phase: 'ready', error: error.message });
+        if (wasRunning) { await ensureDaemon(directory, layout); await controlRequest(directory, 'start'); }
+        throw error;
+      } finally { installingUpdate = false; }
+    }
+    default: throw new Error('不支持的更新操作');
+  }
 });
 
 if (!app.requestSingleInstanceLock()) app.quit();

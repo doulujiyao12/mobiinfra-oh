@@ -138,6 +138,7 @@ export class CompanionManager extends EventEmitter {
     writePrivate(filename, bundle); return { filename };
   }
   async dispatch(method, body = {}) {
+    if (this.updatePreparing && !['status', 'cancelUpdate'].includes(method)) throw new Error('正在准备安装更新，请稍候');
     switch (method) {
       case 'status': await this.readAccount(); await this.tailscale.refresh(); return this.status();
       case 'configure': return this.configure(body);
@@ -149,6 +150,18 @@ export class CompanionManager extends EventEmitter {
       case 'pair': return this.createPairing(body.origin);
       case 'revoke': this.pairing.revoke(body.id); return this.status();
       case 'interrupt': if (!this.core) throw new Error('没有活动任务。'); await this.core.interrupt(body.id); return this.status();
+      case 'prepareUpdate': {
+        if (this.core?.locks.size || this.core?.list().some(task => ['starting', 'running', 'waitingApproval', 'stopping', 'releasing', 'unknown'].includes(task.status))) {
+          throw new Error('还有任务正在执行或状态未确认，请等待完成后再更新');
+        }
+        this.updateWasRunning = this.state === 'running'; this.updatePreparing = true;
+        try { await this.stop(); return { wasRunning: this.updateWasRunning }; }
+        catch (error) { this.updatePreparing = false; throw error; }
+      }
+      case 'cancelUpdate': {
+        const restart = this.updatePreparing && this.updateWasRunning; this.updatePreparing = false;
+        if (restart) await this.start(); return this.status();
+      }
       case 'resetPairing':
         if (this.server) throw new Error('请先停止手机连接服务，再重置配对。');
         this.pairing.reset();

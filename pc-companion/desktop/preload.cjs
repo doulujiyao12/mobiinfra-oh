@@ -7,5 +7,11 @@ contextBridge.exposeInMainWorld('companion', Object.freeze({
   installTerminal: () => ipcRenderer.invoke('companion:installTerminal'),
   resetPairing: () => ipcRenderer.invoke('companion:resetPairing'),
   autoStart: enabled => ipcRenderer.invoke('companion:autoStart', enabled),
+  updates: (method, body = {}) => ipcRenderer.invoke('companion:updates', method, body),
+  onUpdate: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('companion:update-state', listener);
+    return () => ipcRenderer.removeListener('companion:update-state', listener);
+  },
   shutdown: () => ipcRenderer.invoke('companion:shutdown')
 }));
