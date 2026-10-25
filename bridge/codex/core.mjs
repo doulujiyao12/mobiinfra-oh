@@ -160,6 +160,7 @@ export class BridgeCore {
     return task;
   }
   async attachShared(task) {
+    if (task.sharedThread) await this.history.reconcileWorkspace(task);
     if (this.daemonSessions.has(task.id)) return this.daemonSessions.attach(task);
     if (await this.desktopSessions.attach(task)) return true;
     return this.daemonSessions.attach(task);
@@ -246,7 +247,13 @@ export class BridgeCore {
       if (task.lastRequestFingerprint !== fingerprint) throw new BridgeError(409, 'Request ID was already used with different input; refresh the task');
       return task;
     }
-    if (task.sharedThread) await this.attachShared(task);
+    if (task.sharedThread) {
+      const workspaceId = task.workspaceId; const cwd = task.cwd;
+      await this.attachShared(task);
+      if (workspaceId !== task.workspaceId || cwd !== task.cwd) {
+        throw new BridgeError(409, '会话工作目录已更新，请重新打开此会话后再发送；本次任务尚未下发');
+      }
+    }
     if (this.desktopSessions.has(id) && !this.desktopSessions.synchronized(id)) throw new BridgeError(409, '桌面状态尚未同步，未下发本轮任务，请稍后重试');
     if (BUSY.has(task.status) || this.locks.has(id)) throw new BridgeError(409, 'Task is already running');
     check(text(body.text) && Array.isArray(body.attachments) && body.attachments.length <= 6, 'Invalid input');

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -11,12 +11,13 @@ import { applyDesktopPatches, desktopTurns, desktopInputs } from '../desktop-ses
 async function fixture(t) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'clawmate-desktop-share-'));
   const cwd = path.join(directory, 'project'); mkdirSync(cwd); const calls = [];
+  let threadCwd = cwd;
   const rpc = new EventEmitter(); rpc.initialize = async () => {}; rpc.close = () => {};
   rpc.createPeer = () => { throw new Error('Must not start a second executor for a desktop-owned session'); };
   rpc.request = async (method, params) => {
     calls.push({ method, params });
     if (method === 'model/list') return { data: [{ model: 'test', supportedReasoningEfforts: [] }] };
-    if (method === 'thread/read') return { thread: { id: params.threadId, cwd, name: 'Shared', model: 'test', source: 'appServer', status: { type: 'notLoaded' } } };
+    if (method === 'thread/read') return { thread: { id: params.threadId, cwd: threadCwd, name: 'Shared', model: 'test', source: 'appServer', status: { type: 'notLoaded' } } };
     if (method === 'thread/items/list') return { data: [], nextCursor: null };
     throw new Error('Unexpected native call ' + method);
   };
@@ -45,8 +46,111 @@ async function fixture(t) {
     workspaces: [{ id: 'project', name: 'Project', path: cwd }] }, rpc, { desktopIpc: ipc });
   await core.initialize(); t.after(() => { core.close(); rmSync(directory, { recursive: true, force: true }); });
   const turn = () => ({ requestId: randomUUID(), text: 'Phone request', attachments: [], model: 'test', effort: '', mode: 'workspace-write', approvalMode: 'ask' });
-  return { core, ipc, rpc, calls, cwd, directory, turn };
+  return { core, ipc, rpc, calls, cwd, directory, turn, setThreadCwd: value => { threadCwd = value; } };
 }
+
+function moveThread(f, authorized = true) {
+  const cwd = path.join(f.directory, 'new-chat'); mkdirSync(cwd);
+  if (authorized) f.core.workspaces.push({ id: 'new-chat', name: 'New chat', path: cwd });
+  f.setThreadCwd(cwd); f.ipc.state.cwd = cwd; f.ipc.state.workspaceKind = 'projectless';
+  return cwd;
+}
+
+test('explicitly authorized local projectless sessions support the original shared executor', async t => {
+  const f = await fixture(t); f.ipc.state.workspaceKind = 'projectless';
+  const task = await f.core.history.read('original');
+  assert.equal(task.desktopConnected, true); assert.equal(task.workspaceId, 'project');
+  await f.core.start(task.id, f.turn());
+  const sent = f.ipc.calls.find(call => call.method === 'thread-follower-start-turn');
+  assert.deepEqual(sent.params.turnStart.request.sandboxPolicy.writableRoots, [f.cwd]);
+  assert.equal(f.calls.some(call => ['thread/resume', 'thread/fork', 'turn/start'].includes(call.method)), false);
+});
+
+test('cached workspace rebind preserves session, artifacts and uncertain request IDs without replay', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original');
+  const filename = path.join(f.cwd, 'old.pdf'); writeFileSync(filename, '%PDF-old-delivery');
+  task.turnId = 'old-turn'; task.artifacts = f.core.artifacts.publish(task, `[Old](${filename})`).artifacts;
+  task.lastRequestId = 'uncertain-request-id'; task.lastRequestFingerprint = 'saved-fingerprint'; task.lastRequestConfirmed = false;
+  task.approvals = [{ id: 'stale-approval' }]; task.progress = { kind: 'reconnecting' };
+  const originalArtifacts = structuredClone(task.artifacts); const next = moveThread(f);
+  const rebound = await f.core.history.read(task.id);
+  assert.equal(rebound, task); assert.equal(task.id, 'original'); assert.equal(task.cwd, next);
+  assert.equal(task.workspaceId, 'new-chat'); assert.equal(task.desktopConnected, true);
+  assert.equal(task.lastRequestId, 'uncertain-request-id'); assert.equal(task.lastRequestFingerprint, 'saved-fingerprint');
+  assert.equal(task.lastRequestConfirmed, false); assert.deepEqual(task.artifacts, originalArtifacts);
+  assert.deepEqual(task.approvals, []); assert.equal(task.progress, undefined);
+  assert.equal(Buffer.from(f.core.artifacts.chunk(task.id, task.artifacts[0].id, 0).base64, 'base64').toString(), '%PDF-old-delivery');
+  assert.equal(f.ipc.calls.some(call => call.method === 'thread-follower-start-turn'), false);
+  const saved = JSON.parse(readFileSync(f.core.stateFile, 'utf8')).tasks.find(item => item.id === task.id);
+  assert.equal(saved.workspaceId, 'new-chat'); assert.equal(saved.cwd, next);
+  await f.core.start(task.id, f.turn());
+  const sent = f.ipc.calls.find(call => call.method === 'thread-follower-start-turn');
+  assert.equal(sent.params.turnStart.request.cwd, next);
+  assert.deepEqual(sent.params.turnStart.request.sandboxPolicy.writableRoots, [next]);
+  const newFile = path.join(next, 'new.pdf'); writeFileSync(newFile, '%PDF-new-delivery');
+  f.ipc.state.turns.at(-1).status = 'completed'; f.ipc.state.threadRuntimeStatus = { type: 'idle' };
+  f.ipc.state.turns.at(-1).items.push({ id: 'final', type: 'agentMessage', phase: 'final_answer', text: `[New](${newFile})` });
+  f.ipc.snapshot();
+  assert.deepEqual(task.artifacts.map(item => item.name), ['old.pdf', 'new.pdf']);
+});
+
+test('polling a stale registration refreshes its authorized workspace and live status', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original');
+  f.core.desktopSessions.detach(task.id); moveThread(f);
+  const result = await f.core.snapshot(task.id);
+  assert.equal(result.workspaceId, 'new-chat'); assert.equal(result.desktopConnected, true);
+  assert.equal(result.error, ''); assert.equal(result.status, 'idle');
+});
+
+test('a send discovering a directory change stops before submission and requires reopening', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original'); moveThread(f);
+  const body = f.turn();
+  await assert.rejects(f.core.start(task.id, body), /重新打开.*尚未下发/);
+  assert.equal(f.ipc.calls.some(call => call.method === 'thread-follower-start-turn'), false);
+  assert.equal(task.lastRequestId, undefined);
+  await f.core.history.read(task.id); await f.core.start(task.id, body);
+  assert.equal(f.ipc.calls.filter(call => call.method === 'thread-follower-start-turn').length, 1);
+});
+
+test('registering a moved session reconciles before acquiring its own registration lock', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original'); moveThread(f);
+  const result = await f.core.history.resume(task.id, { requestId: randomUUID(), workspaceId: 'new-chat',
+    model: 'test', mode: 'workspace-write', approvalMode: 'ask' });
+  assert.equal(result, task); assert.equal(result.workspaceId, 'new-chat');
+  assert.equal(f.ipc.calls.some(call => call.method === 'thread-follower-start-turn'), false);
+  assert.equal(f.core.locks.has(task.id), false);
+});
+
+test('an unauthorized changed directory never replaces the saved binding or submits a task', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original'); moveThread(f, false);
+  await assert.rejects(f.core.history.read(task.id), /已授权/);
+  await assert.rejects(f.core.start(task.id, f.turn()), /已授权/);
+  assert.equal(task.workspaceId, 'project'); assert.equal(task.cwd, f.cwd);
+  assert.equal(f.ipc.calls.some(call => call.method === 'thread-follower-start-turn'), false);
+});
+
+test('workspace rebind waits for active execution or a pending control operation', async t => {
+  const f = await fixture(t); const task = await f.core.history.read('original'); moveThread(f);
+  task.status = 'waitingApproval';
+  await assert.rejects(f.core.history.read(task.id), /当前操作结束/);
+  task.status = 'idle'; f.core.locks.add(task.id);
+  await assert.rejects(f.core.history.read(task.id), /当前操作结束/);
+  f.core.locks.delete(task.id);
+  f.core.sharedSessions.entries.set(task.id, {});
+  await assert.rejects(f.core.history.read(task.id), /当前操作结束/);
+  f.core.sharedSessions.entries.delete(task.id);
+  assert.equal(task.cwd, f.cwd);
+  await f.core.history.read(task.id); assert.equal(task.workspaceId, 'new-chat');
+});
+
+test('projectless status never permits foreign hosts, subagents or unauthorized live cwd', async t => {
+  const f = await fixture(t); f.ipc.state.workspaceKind = 'projectless';
+  const task = await f.core.history.read('original');
+  for (const change of [{ hostId: 'remote' }, { parentThreadId: 'parent' },
+    { environments: [{ environmentId: 'remote' }] }, { cwd: f.directory }]) {
+    assert.throws(() => f.core.desktopSessions.validate(task, { ...f.ipc.state, ...change }), /本地项目|授权项目/);
+  }
+});
 test('opening a computer session follows its live owner without resuming or starting inference', async t => {
   const f = await fixture(t); const task = await f.core.history.read('original');
   assert.equal(task.external, false); assert.equal(task.desktopConnected, true); assert.equal(task.executionTransport, 'desktop');

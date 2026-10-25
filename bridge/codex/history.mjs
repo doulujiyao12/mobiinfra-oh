@@ -57,6 +57,40 @@ export class CodexHistory {
     if (result.thread?.id !== id) throw unavailable();
     return { thread: result.thread, workspace: this.workspace(result.thread) };
   }
+  async reconcileWorkspace(task) {
+    // A saved bridge registration is not the thread's authoritative cwd. The
+    // desktop may have moved the original thread since it was first imported.
+    // metadata() still requires an exact, explicitly authorized directory.
+    let workspace;
+    try { ({ workspace } = await this.metadata(task.id)); }
+    catch (error) {
+      // A directory leaving the allowlist invalidates existing observers too;
+      // no cached approval/control may survive a failed authorization check.
+      const desktop = this.core.desktopSessions.entries.get(task.id);
+      if (desktop) this.core.desktopSessions.unavailable(desktop, error.message);
+      const daemon = this.core.daemonSessions.entries.get(task.id);
+      if (daemon) this.core.daemonSessions.unavailable(daemon, error.message);
+      throw error;
+    }
+    if (workspace.id === task.workspaceId && samePath(workspace.path, task.cwd)) return false;
+    if (busy(task) || this.core.locks.has(task.id) || this.core.sharedSessions.entries.has(task.id) ||
+        this.core.desktopSessions.attaching.has(task.id) || this.core.daemonSessions.attaching.has(task.id)) {
+      throw new BridgeError(409, '会话目录已变化，请等待当前操作结束后重新打开会话');
+    }
+    // Retire observers, never stop the original executor. Old approvals and
+    // progress belong to the old binding and must not remain actionable.
+    this.core.desktopSessions.detach(task.id);
+    const daemon = this.core.daemonSessions.entries.get(task.id);
+    if (daemon) this.core.daemonSessions.unavailable(daemon, '会话目录已更新，正在重新同步');
+    task.workspaceId = workspace.id; task.cwd = workspace.path;
+    task.approvals = []; task.desktopConnected = false; task.status = 'unknown'; task.error = '';
+    delete task.progress; this.core.finalReplies.delete(task.id);
+    // Keep history, deliverables and submission IDs. An uncertain submission is
+    // observed again, never retried automatically against a different directory.
+    this.core.touch(task);
+    if (this.core.tasks.has(task.id)) this.core.save();
+    return true;
+  }
   async list(cursor) {
     this.core.requireReady();
     for (const workspace of this.core.workspaces) this.core.workspace(workspace.id);
@@ -146,6 +180,8 @@ export class CodexHistory {
     const settings = executionSettings(body);
     // Registration does not load the thread or start inference. A fresh native
     // executor acquires the original writer lock at each turn/start.
+    const cached = this.core.tasks.get(id);
+    if (cached?.sharedThread) await this.reconcileWorkspace(cached);
     if (this.core.locks.has(id)) throw new BridgeError(409, '会话正在接入或提交，请稍后重试');
     this.core.locks.add(id);
     try {

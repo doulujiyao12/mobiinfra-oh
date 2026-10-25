@@ -52,6 +52,19 @@ async function fixture(t) {
   return { core, rpc, source, task, emit, body, cwd, peers: () => peers, setReplay: message => { replay = message; } };
 }
 
+test('a cached session moved to another authorized directory reconnects to the original daemon', async t => {
+  const f = await fixture(t); const next = path.join(path.dirname(f.cwd), 'new-chat'); mkdirSync(next);
+  f.core.workspaces.push({ id: 'new-chat', name: 'New chat', path: next }); f.source.cwd = next;
+  const task = await f.core.history.read(f.task.id);
+  assert.equal(task, f.task); assert.equal(task.workspaceId, 'new-chat'); assert.equal(task.cwd, next);
+  assert.equal(task.executionBackend, 'daemon'); assert.equal(task.desktopConnected, true);
+  assert.equal(f.rpc.calls.some(call => call.method === 'turn/start'), false);
+  await f.core.start(task.id, f.body());
+  const start = f.rpc.calls.find(call => call.method === 'turn/start').params;
+  assert.equal(start.cwd, next); assert.deepEqual(start.sandboxPolicy.writableRoots, [next]);
+  assert.equal(f.peers(), 0);
+});
+
 test('daemon owns original session; phone sends one explicitly sandboxed turn; completion keeps shared backend connected', async t => {
   const f = await fixture(t); const request = f.body();
   await f.core.start(f.task.id, request);

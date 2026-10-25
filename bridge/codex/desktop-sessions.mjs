@@ -108,7 +108,9 @@ export class DesktopSessions {
   has(id) { return this.entries.has(id); }
   synchronized(id) { return this.entries.get(id)?.synchronized === true; }
   validate(task, state) {
-    if (state.id !== task.id || state.hostId !== 'local' || state.parentThreadId || state.workspaceKind === 'projectless' ||
+    // A projectless desktop thread is safe to follow when its actual cwd is an
+    // explicitly authorized workspace. Project attachment alone grants nothing.
+    if (state.id !== task.id || state.hostId !== 'local' || state.parentThreadId ||
         (state.environments || []).some(environment => environment.environmentId !== 'local')) throw new Error('桌面会话不属于当前本地项目');
     const workspace = this.core.workspace(task.workspaceId);
     if (!samePath(realpathSync(state.cwd), workspace.path) || !samePath(task.cwd, workspace.path)) throw new Error('桌面会话目录与手机授权项目不一致');
