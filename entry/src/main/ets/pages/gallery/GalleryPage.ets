@@ -1,5 +1,7 @@
 import { AppTheme } from '../../utils/AppTheme';
 import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormSwitch,
+  CollectionFormAction, CollectionSourceRow } from '../../components/CollectionFormControls';
 import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
 import { applyPageStatusBar } from '../../utils/PageStatusBar';
@@ -61,7 +63,6 @@ import {
   hiddenDefaultSettingPlaceholder,
   migrateDefaultSettingValue
 } from '../../utils/DefaultSettingVisibility';
-import { SensitiveSettingInput } from '../settings/SettingsCenterControls';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -1368,8 +1369,8 @@ struct GalleryPage {
       .width(38)
       .height(38)
       .textAlign(TextAlign.Center)
-      .backgroundColor(AppTheme.background('#EEF3FF'))
-      .borderRadius(10)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(19)
       .onClick(() => {
         if (actionId === 0) {
           router.back();
@@ -1379,49 +1380,31 @@ struct GalleryPage {
       })
   }
 
-  @Builder ToolbarAction(title: string, color: string, bg: string, actionId: number) {
-    Button(title)
-      .height(38)
-      .layoutWeight(1)
-      .fontSize(12)
-      .fontColor(AppTheme.text(color))
-      .backgroundColor(AppTheme.background(bg))
-      .borderRadius(9)
-      .enabled(!(this.hdcStarting && !this.analyzing) && !(this.analyzing && actionId !== 3))
-      .onClick(() => { this.runAction(actionId); })
+  @Builder GalleryActionFields() {
+    CollectionSourceRow({ title: '选择照片', detail: '从相册选择需要理解的图片', icon: $r('app.media.source_gallery'),
+      tint: '#AF52DE', onOpen: (): void => { this.runAction(1); } })
+      .enabled(!this.analyzing && !this.hdcStarting)
+    CollectionFormDivider()
+    CollectionSourceRow({ title: this.autoActionTitle(), detail: '通过手机 HDC 读取最近的图片',
+      icon: $r('app.media.source_gallery'), onOpen: (): void => { this.runAction(0); } })
+      .enabled(!this.analyzing && !this.hdcStarting)
+    CollectionFormDivider()
+    if (this.analyzing) {
+      CollectionFormAction({ label: this.autoScanStatus === 'pausing' ? '正在暂停…' : '暂停分析',
+        onAction: (): void => { this.runAction(3); } })
+    } else {
+      CollectionFormAction({ label: '清空分析结果', destructive: true,
+        onAction: (): void => { this.runAction(2); } }).enabled(!this.hdcStarting)
+    }
   }
 
   @Builder ActionToolbar() {
     Column() {
       ForEach([this.scanRevision + this.progressRevision + this.resultRevision], (_revision: number) => {
-        Column() {
-          Row() {
-            this.StatCell('已分析', this.analyzedCountText(), '#2F5BEA')
-            Divider().vertical(true).height(38).color(AppTheme.border('#E5E8F0'))
-            this.StatCell('最近分析', this.lastRunText, '#202636')
-          }.width('100%')
-
-          Row() {
-            this.ToolbarAction('选择图片', '#FFFFFF', '#2F5BEA', 1)
-            Blank().width(8)
-            this.ToolbarAction(this.autoActionTitle(), '#2F5BEA', '#EEF3FF', 0)
-            Blank().width(8)
-            if (this.analyzing) {
-              this.ToolbarAction(this.autoScanStatus === 'pausing' ? '暂停中' : '暂停', '#B55A00', '#FFF4E8', 3)
-            } else {
-              this.ToolbarAction('清空分析', '#B55A00', '#FFF4E8', 2)
-            }
-          }
-          .width('100%')
-          .margin({ top: 14 })
-        }.width('100%')
-      }, (revision: number) => revision.toString())
-    }
-    .width('90%')
-    .padding(14)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(12)
-    .margin({ top: 14 })
+        CollectionFormGroup({ footer: '已分析 ' + this.analyzedCountText() + ' · 最近分析 ' + this.lastRunText,
+          contentBuilder: (): void => { this.GalleryActionFields(); } })
+      }, (revision: number): string => String(revision))
+    }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12 })
   }
 
   private shouldShowProgressStrip(): boolean {
@@ -1617,197 +1600,120 @@ struct GalleryPage {
 
   @Builder SettingInput(label: string, value: string, placeholder: string, fieldId: number,
     defaultValue: string = '', hideDefaultValue: boolean = false) {
-    Column() {
-      Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
-      TextInput({
-        placeholder: hideDefaultValue ? hiddenDefaultSettingPlaceholder(value, defaultValue, placeholder) : placeholder,
-        text: hideDefaultValue ? hiddenDefaultSettingEditorValue(value, defaultValue) : value
-      })
-        .fontColor($r('app.color.ui_text_primary'))
-        .placeholderColor($r('app.color.ui_text_placeholder'))
-        .caretColor($r('app.color.ui_accent_blue'))
-        .width('100%')
-        .height(42)
-        .fontSize(12)
-        .backgroundColor(AppTheme.inputBackground())
-        .borderRadius(12)
-        .padding({ left: 12, right: 12 })
-        .margin({ top: 8 })
-        .onChange((next: string) => { this.updateSetting(fieldId, next); })
-    }
-    .width('100%')
-    .margin({ top: 12 })
+    CollectionFormInput({ label: label,
+      value: hideDefaultValue ? hiddenDefaultSettingEditorValue(value, defaultValue) : value,
+      placeholder: hideDefaultValue ? hiddenDefaultSettingPlaceholder(value, defaultValue, placeholder) : placeholder,
+      onChangeValue: (input: string): void => { this.updateSetting(fieldId, input); } })
+    CollectionFormDivider()
+  }
+
+  @Builder SecretInput(label: string, value: string, defaultValue: string, fieldId: number) {
+    CollectionFormInput({ label: label, secret: true, value: hiddenDefaultSettingEditorValue(value, defaultValue),
+      placeholder: hiddenDefaultSettingPlaceholder(value, defaultValue, '输入服务密钥'),
+      onChangeValue: (input: string): void => { this.updateSetting(fieldId, input); } })
+    CollectionFormDivider()
   }
 
   @Builder ConcurrencyInput(label: string, value: string, rangeText: string, maxValue: number, fieldId: number) {
-    Column() {
-      Row() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).layoutWeight(1)
-        Text(rangeText).fontSize(11).fontColor(AppTheme.text('#8A92A3'))
-      }.width('100%')
-      TextInput({ placeholder: value, text: value })
-        .fontColor($r('app.color.ui_text_primary'))
-        .placeholderColor($r('app.color.ui_text_placeholder'))
-        .caretColor($r('app.color.ui_accent_blue'))
-        .width('100%')
-        .height(42)
-        .fontSize(12)
-        .backgroundColor(AppTheme.inputBackground())
-        .borderRadius(12)
-        .padding({ left: 12, right: 12 })
-        .margin({ top: 8 })
-        .onChange((next: string) => { this.updateConcurrency(fieldId, next, maxValue); })
-    }
-    .width('100%')
-    .margin({ top: 12 })
+    CollectionFormInput({ label: label + ' · ' + rangeText, value: value, placeholder: rangeText, inputType: InputType.Number,
+      onChangeValue: (input: string): void => { this.updateConcurrency(fieldId, input, maxValue); } })
+    CollectionFormDivider()
   }
 
-  @Builder SettingToggle(label: string, desc: string, enabled: boolean, fieldId: number) {
-    Row() {
-      Column() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#2F3645')).width('100%')
-        Text(desc).fontSize(11).fontColor(AppTheme.text('#8A92A3')).margin({ top: 4 }).width('100%')
-      }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: enabled })
-        .selectedColor(AppTheme.background('#5B68FF'))
-        .onChange((next: boolean) => { this.updateSetting(fieldId, next ? 'true' : 'false'); })
+  @Builder SettingToggle(label: string, desc: string, selected: boolean, fieldId: number) {
+    CollectionFormSwitch({ label: label, detail: desc, selected: selected,
+      onChangeValue: (value: boolean): void => { this.updateSetting(fieldId, value ? 'true' : 'false'); } })
+    CollectionFormDivider()
+  }
+
+  private resetGallerySettings(): void {
+    this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
+    this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
+    this.galleryModel = DEFAULT_GALLERY_MODEL;
+    this.gallerySkipOcr = DEFAULT_GALLERY_SKIP_OCR;
+    this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
+    this.galleryOcrConcurrency = DEFAULT_GALLERY_OCR_CONCURRENCY;
+    this.galleryModelConcurrency = DEFAULT_GALLERY_MODEL_CONCURRENCY;
+    this.galleryEmbeddingConcurrency = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
+    this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
+    this.galleryEmbeddingMode = DEFAULT_GALLERY_EMBEDDING_MODE;
+    this.galleryEmbeddingBaseUrl = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
+    this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
+    this.galleryEmbeddingModel = DEFAULT_GALLERY_EMBEDDING_MODEL;
+    this.galleryImageScale = DEFAULT_GALLERY_IMAGE_SCALE;
+    this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
+    this.settingsRevision += 1;
+  }
+
+  @Builder GalleryCloudFields() {
+    this.SettingInput('API Base URL', this.galleryApiBaseUrl, '输入云端 API Base URL', 0, DEFAULT_GALLERY_API_BASE_URL, true)
+    this.SecretInput('API Key', this.galleryApiKey, DEFAULT_GALLERY_API_KEY, 1)
+    this.SettingInput('模型名称', this.galleryModel, '输入模型名称', 2)
+    this.ConcurrencyInput('模型并发', this.galleryModelConcurrency, '1–4', 4, 1)
+    this.SettingToggle('字段并发分析', '并行分析图片的标题、分类与摘要', this.galleryParallelFieldRequests === 'true', 11)
+  }
+
+  @Builder GalleryOcrFields() {
+    this.SettingToggle('跳过本地 OCR', '设备不支持本地文字识别时开启', this.gallerySkipOcr === 'true', 3)
+    this.SettingToggle('关键词预筛', '自动分析前先过滤图片，手动选择不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
+    this.ConcurrencyInput('OCR 并发', this.galleryOcrConcurrency, '1–6', 6, 0)
+  }
+
+  @Builder GalleryLocationFields() {
+    this.SettingInput('图片分析缩放比例', this.galleryImageScale, '0.10–1.00，默认 0.25', 8)
+    this.SecretInput('高德 Web 服务 Key', this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY, 10)
+  }
+
+  @Builder GalleryIndexFields() {
+    this.SettingToggle('使用云端 Embedding', '用于建立图片内容的检索索引', this.galleryEmbeddingMode === 'remote', 4)
+    if (this.galleryEmbeddingMode === 'remote') {
+      this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, '输入 Embedding Base URL', 5,
+        DEFAULT_GALLERY_EMBEDDING_BASE_URL, true)
+      this.SecretInput('Embedding API Key', this.galleryEmbeddingApiKey, DEFAULT_GALLERY_EMBEDDING_API_KEY, 6)
+      this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, 'BAAI/bge-m3', 7)
     }
-    .width('100%')
-    .margin({ top: 12 })
+    this.ConcurrencyInput('索引写入并发', this.galleryEmbeddingConcurrency, '1–4', 4, 2)
+  }
+
+  @Builder GalleryResetFields() {
+    CollectionFormAction({ label: '恢复默认设置', centered: true, onAction: (): void => { this.resetGallerySettings(); } })
+  }
+
+  @Builder GallerySettingsFields() {
+    CollectionFormGroup({ title: '云端图片分析', footer: '留空使用默认服务。修改自动保存。',
+      contentBuilder: (): void => { this.GalleryCloudFields(); } })
+    CollectionFormGroup({ title: '文字识别', contentBuilder: (): void => { this.GalleryOcrFields(); } })
+    CollectionFormGroup({ title: '图片与位置', contentBuilder: (): void => { this.GalleryLocationFields(); } })
+    CollectionFormGroup({ title: '语义索引', footer: '本地模式使用华为端侧 Embedding；云端模式使用下方服务。',
+      contentBuilder: (): void => { this.GalleryIndexFields(); } })
+    CollectionFormGroup({ contentBuilder: (): void => { this.GalleryResetFields(); } })
   }
 
   @Builder SettingsPanel() {
     if (this.settingsOpen) {
-      Stack({ alignContent: Alignment.Center }) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor(AppTheme.background('#66000000'))
-          .onClick(() => {
-            this.activeSensitiveInputId = '';
-            this.settingsOpen = false;
-          })
-
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column().width('100%').height('100%').backgroundColor(AppTheme.background('#66000000'))
+          .onClick((): void => { this.activeSensitiveInputId = ''; this.settingsOpen = false; })
         Column() {
           Row() {
-            Column() {
-              Text('图库采集设置').fontSize(18).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F'))
-              Text('云端模型、OCR 与索引写入并发').fontSize(12).fontColor(AppTheme.text('#7B8290')).margin({ top: 4 })
-            }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-            Text('关闭')
-              .fontSize(13)
-              .fontColor(AppTheme.text('#5B68FF'))
-              .onClick(() => {
-                this.activeSensitiveInputId = '';
-                this.settingsOpen = false;
+            Text('图库设置').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).layoutWeight(1)
+            Button('完成', { type: ButtonType.Normal }).fontSize(16).fontWeight(FontWeight.Medium)
+              .fontColor(AppTheme.text('#007AFF')).backgroundColor(Color.Transparent).height(44)
+              .onClick((): void => {
+                this.activeSensitiveInputId = ''; this.settingsOpen = false;
+                showToastSafely('图库采集设置已保存', 1200);
               })
-          }.width('100%')
-
+          }.width('100%').padding({ left: 22, right: 12, top: 10, bottom: 8 })
           Scroll() {
             Column() {
               ForEach([this.settingsRevision], (_revision: number) => {
-                Column() {
-                  this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, '输入云端 API Base URL', 0,
-                    DEFAULT_GALLERY_API_BASE_URL, true)
-                  SensitiveSettingInput({
-                    sensitiveId: 'galleryPageApiKey',
-                    activeSensitiveId: this.activeSensitiveInputId,
-                    label: 'API Key',
-                    value: this.galleryApiKey,
-                    defaultValue: DEFAULT_GALLERY_API_KEY,
-                    placeholder: 'Bearer token 或服务密钥',
-                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
-                    onValueChange: (value: string) => { this.updateSetting(1, value); }
-                  })
-                  this.SettingInput('大模型名称', this.galleryModel, '留空则不发送 model 字段', 2)
-                  this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
-                  this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
-                  this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)
-                  SensitiveSettingInput({
-                    sensitiveId: 'galleryPageAmapWebKey',
-                    activeSensitiveId: this.activeSensitiveInputId,
-                    label: '高德 Web 服务 Key',
-                    value: this.galleryAmapWebKey,
-                    defaultValue: DEFAULT_GALLERY_AMAP_WEB_KEY,
-                    placeholder: '用于拍摄位置逆地理编码',
-                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
-                    onValueChange: (value: string) => { this.updateSetting(10, value); }
-                  })
-                  this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
-                  this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
-                  this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding；开启时使用 SiliconFlow / bge-m3', this.galleryEmbeddingMode === 'remote', 4)
-                  this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, '输入 Embedding Base URL', 5,
-                    DEFAULT_GALLERY_EMBEDDING_BASE_URL, true)
-                  SensitiveSettingInput({
-                    sensitiveId: 'galleryPageEmbeddingApiKey',
-                    activeSensitiveId: this.activeSensitiveInputId,
-                    label: 'Embedding API Key',
-                    value: this.galleryEmbeddingApiKey,
-                    defaultValue: DEFAULT_GALLERY_EMBEDDING_API_KEY,
-                    placeholder: 'SiliconFlow 服务密钥',
-                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
-                    onValueChange: (value: string) => { this.updateSetting(6, value); }
-                  })
-                  this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, 'BAAI/bge-m3', 7)
-                  this.ConcurrencyInput('Embedding 并发请求数', this.galleryEmbeddingConcurrency, '范围 1-4，默认 2', 4, 2)
-                  this.SettingInput('图片分析缩放比例', this.galleryImageScale, '0.10 - 1.00，默认 0.25', 8)
-                }.width('100%')
-              }, (revision: number) => revision.toString())
-            }.width('100%')
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .margin({ top: 6 })
-
-          Row() {
-            Button('恢复默认')
-              .height(40)
-              .layoutWeight(1)
-              .fontSize(12)
-              .backgroundColor(AppTheme.background('#EEF4FF'))
-              .fontColor(AppTheme.text('#4F68FF'))
-              .borderRadius(12)
-              .onClick(() => {
-                this.galleryApiBaseUrl = DEFAULT_GALLERY_API_BASE_URL;
-                this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
-                this.galleryModel = DEFAULT_GALLERY_MODEL;
-                this.gallerySkipOcr = DEFAULT_GALLERY_SKIP_OCR;
-                this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
-                this.galleryOcrConcurrency = DEFAULT_GALLERY_OCR_CONCURRENCY;
-                this.galleryModelConcurrency = DEFAULT_GALLERY_MODEL_CONCURRENCY;
-                this.galleryEmbeddingConcurrency = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
-                this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
-                this.galleryEmbeddingMode = DEFAULT_GALLERY_EMBEDDING_MODE;
-                this.galleryEmbeddingBaseUrl = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
-                this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
-                this.galleryEmbeddingModel = DEFAULT_GALLERY_EMBEDDING_MODEL;
-                this.galleryImageScale = DEFAULT_GALLERY_IMAGE_SCALE;
-                this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
-                this.settingsRevision += 1;
-              })
-            Button('保存')
-              .height(40)
-              .layoutWeight(1)
-              .fontSize(12)
-              .backgroundColor(AppTheme.background('#5B68FF'))
-              .borderRadius(12)
-              .margin({ left: 10 })
-              .onClick(() => {
-                this.activeSensitiveInputId = '';
-                this.settingsOpen = false;
-                showToastSafely('图库采集设置已保存', 1200);
-              })
-          }.width('100%').margin({ top: 16 })
-        }
-        .width('86%')
-        .height('82%')
-        .padding(18)
-        .backgroundColor(AppTheme.background(Color.White))
-        .borderRadius(18)
-        .shadow({ radius: 24, color: AppTheme.shadow('#24000000'), offsetX: 0, offsetY: 10 })
-      }
-      .width('100%')
-      .height('100%')
+                this.GallerySettingsFields()
+              }, (revision: number): string => String(revision))
+            }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 28 })
+          }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
+        }.width('100%').constraintSize({ maxWidth: 720 }).height('90%')
+          .backgroundColor(AppTheme.pageBackground()).borderRadius({ topLeft: 28, topRight: 28 }).clip(true)
+      }.width('100%').height('100%')
     }
   }
 
@@ -3752,9 +3658,9 @@ struct GalleryPage {
     .width('100%')
     .height('100%')
     .bindSheet($$this.hdcSheetOpen, this.HdcBatchSheet(), {
-      height: 400,
+      height: SheetSize.FIT_CONTENT,
       title: { title: '批量读图' },
-      backgroundColor: AppTheme.background('#FFFFFF'),
+      backgroundColor: AppTheme.pageBackground(),
       showClose: true
     })
   }

@@ -2,7 +2,6 @@ import { common } from '@kit.AbilityKit';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
-import { filePreview } from '@kit.PreviewKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
@@ -18,6 +17,7 @@ import { CodexCredentialStore } from './CodexCredentialStore';
 import { CodexApprovalCard } from './CodexApprovalCard';
 import { CodexArtifactStore } from './CodexArtifactStore';
 import { CodexArtifactCard } from './CodexArtifactCard';
+import { openCodexArtifact, exportCodexArtifact } from './CodexArtifactActions';
 import { CodexConnectionsView, CodexConnectionSetup } from './CodexConnectionViews';
 import { CodexWorkspaceHeader, CodexHistoryDrawer } from './CodexChatViews';
 import { chatComposerBarHeight, chatComposerTextAreaHeight } from '../chat/ChatPageTypes';
@@ -758,29 +758,22 @@ export struct CodexPage {
     if (saved === undefined) { return; }
     try {
       const context = this.getUIContext().getHostContext();
-      if (context === undefined || !canIUse('SystemCapability.FileManagement.FilePreview.Core')) {
+      if (context === undefined) {
         throw new Error('此设备暂不支持系统预览，请使用“另存为”打开');
       }
-      const uri = fileUri.getUriFromPath(saved.localPath);
-      if (!await filePreview.canPreview(context, uri)) { throw new Error('该格式暂不支持预览，请使用“另存为”导出'); }
-      await filePreview.openPreview(context, { uri: uri, title: saved.name, mimeType: saved.mimeType });
+      await openCodexArtifact(context as common.UIAbilityContext, saved);
     } catch (e) { this.artifactError = (e as Error).message || '文件预览失败，可另存为后打开'; }
   }
 
   private async exportArtifact(artifact: CodexArtifact): Promise<void> {
     const saved = this.localArtifact(artifact.id);
     if (saved === undefined) { return; }
-    let output: fileIo.File | null = null;
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const options = new picker.DocumentSaveOptions(); options.newFileNames = [saved.name];
-      const destinations = await new picker.DocumentViewPicker(context).save(options);
-      if (!destinations.length) { return; }
-      output = await fileIo.open(destinations[0], fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-      await fileIo.copyFile(saved.localPath, output.fd);
-      this.getUIContext().getPromptAction().showToast({ message: '文件已另存，原件保留在此会话中' });
+      if (await exportCodexArtifact(context, saved)) {
+        this.getUIContext().getPromptAction().showToast({ message: '文件已另存，原件保留在此会话中' });
+      }
     } catch (e) { this.artifactError = (e as Error).message || '文件另存失败'; }
-    finally { if (output !== null) { try { await fileIo.close(output); } catch (e) { } } }
   }
 
   private async openHelp(section: CodexHelpSection): Promise<void> {

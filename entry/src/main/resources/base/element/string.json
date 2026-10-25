@@ -1,6 +1,10 @@
 {
   "string": [
     {
+      "name": "reason_for_calendar_memory",
+      "value": "用于在您开启日历记忆后读取日程，提供近期安排提醒、聊天查询及个人画像线索"
+    },
+    {
       "name": "module_desc",
       "value": "module description"
     },

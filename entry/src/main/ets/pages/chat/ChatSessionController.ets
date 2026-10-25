@@ -140,7 +140,8 @@ export class ChatSessionController {
       collapsed: lastMessage.collapsed,
       createdAt: lastMessage.createdAt,
       imagePath: chatMessageImagePath(lastMessage),
-      imagePaths: chatMessageImagePaths(lastMessage)
+      imagePaths: chatMessageImagePaths(lastMessage),
+      codexRunId: lastMessage.codexRunId
     };
     let traceVoiceMetadata = chatMessageVoiceMetadataForStorage(lastMessage);
     if (traceVoiceMetadata !== undefined) {
@@ -374,7 +375,8 @@ export class ChatSessionController {
         collapsed: message.collapsed,
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
-        imagePaths: chatMessageImagePaths(message)
+        imagePaths: chatMessageImagePaths(message),
+        codexRunId: message.codexRunId
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
@@ -423,7 +425,8 @@ export class ChatSessionController {
         collapsed: message.collapsed,
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
-        imagePaths: chatMessageImagePaths(message)
+        imagePaths: chatMessageImagePaths(message),
+        codexRunId: message.codexRunId
       };
       let voiceMetadata = optionalChatVoiceMetadata(voice);
       if (voiceMetadata !== undefined) {

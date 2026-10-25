@@ -1,4 +1,5 @@
 import { AppTheme } from '../../utils/AppTheme';
+import { CodexChatRunCard } from '../codex/CodexChatRunCard';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -1303,24 +1304,30 @@ export struct ChatMessageList {
       List({ scroller: this.messageScroller }) {
         LazyForEach(this.messageDataSource, (message: ChatMessageUiModel, index: number) => {
           ListItem() {
-            ChatMessageRow({
-              message: message,
-              messageId: message.id,
-              role: message.role,
-              kind: message.kind,
-              createdAt: message.createdAt,
-              shouldRenderFull: this.shouldRenderFullMessage(index),
-              modeLabel: this.modeLabel,
-              modeMark: this.modeMark,
-              onToggleTaskTrace: this.onToggleTaskTrace,
-              onToggleThinking: this.onToggleThinking,
-              onPreviewDebugImage: this.onPreviewDebugImage,
-              onPlayVoiceMessage: this.onPlayVoiceMessage,
-              onReplayVoiceMessage: this.onReplayVoiceMessage,
-              voiceActiveMessageId: this.voiceActiveMessageId,
-              voiceStatus: this.voiceStatus,
-              voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked()
-            })
+            Column() {
+              if (message.detail.codexRunId) {
+                CodexChatRunCard({ runId: message.detail.codexRunId })
+              } else {
+                ChatMessageRow({
+                  message: message,
+                  messageId: message.id,
+                  role: message.role,
+                  kind: message.kind,
+                  createdAt: message.createdAt,
+                  shouldRenderFull: this.shouldRenderFullMessage(index),
+                  modeLabel: this.modeLabel,
+                  modeMark: this.modeMark,
+                  onToggleTaskTrace: this.onToggleTaskTrace,
+                  onToggleThinking: this.onToggleThinking,
+                  onPreviewDebugImage: this.onPreviewDebugImage,
+                  onPlayVoiceMessage: this.onPlayVoiceMessage,
+                  onReplayVoiceMessage: this.onReplayVoiceMessage,
+                  voiceActiveMessageId: this.voiceActiveMessageId,
+                  voiceStatus: this.voiceStatus,
+                  voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked()
+                })
+              }
+            }.width('100%').alignItems(HorizontalAlign.Start)
           }
           .selectable(false)
         }, (message: ChatMessageUiModel, _index: number) => this.messageDataSource.keyFor(message))

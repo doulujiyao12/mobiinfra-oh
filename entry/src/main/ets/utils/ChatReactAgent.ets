@@ -16,6 +16,7 @@ import {
   MobileGuiTaskConfirmCallback,
   MobileGuiTaskRunCallback
 } from './MobileGuiTaskTypes';
+import { CodexChatRunCallback } from '../pages/codex/CodexChatTypes';
 
 export type ChatReactTraceHandler = (line: string) => void;
 export type ChatReactContentDeltaHandler = (delta: string) => void;
@@ -27,6 +28,7 @@ export interface ChatReactAgentRunOptions {
   userMessage?: string;
   confirmMobileGuiTask?: MobileGuiTaskConfirmCallback;
   runMobileGuiTask?: MobileGuiTaskRunCallback;
+  runCodexTask?: CodexChatRunCallback;
   enableThinking?: boolean;
   enableTools?: boolean;
   maxTokens?: number;
@@ -119,7 +121,8 @@ export class ChatReactAgent {
           sessionId: options.sessionId === undefined ? '' : options.sessionId,
           userMessage: options.userMessage === undefined ? '' : options.userMessage,
           confirmMobileGuiTask: options.confirmMobileGuiTask,
-          runMobileGuiTask: options.runMobileGuiTask
+          runMobileGuiTask: options.runMobileGuiTask,
+          runCodexTask: options.runCodexTask
         };
         let toolResult = await this.registry.executeToolCall(toolCall, toolContext);
         toolCallCount += 1;

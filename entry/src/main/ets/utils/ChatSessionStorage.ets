@@ -358,6 +358,9 @@ export class ChatSessionStorage {
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
       };
+      if (typeof message.codexRunId === 'string' && /^[a-zA-Z0-9-]{32,36}$/.test(message.codexRunId)) {
+        normalizedMessage.codexRunId = message.codexRunId;
+      }
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
         normalizedMessage.voice = voiceMetadata;

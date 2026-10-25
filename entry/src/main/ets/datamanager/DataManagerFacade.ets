@@ -63,6 +63,10 @@ import {
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
+import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
+import { MailStore } from '../utils/mail/MailStore';
+import { mailOverview, visibleMail } from '../utils/mail/MailReminderPolicy';
+
 interface DailyLogSnapshotFile {
   path: string;
   sha256: string;
@@ -314,6 +318,11 @@ export class DataManagerFacade {
   }
 
   hasDataToSync(): boolean {
+    if (this.hasBuiltIndexes() && this.loadDailyLogSnapshot().tree_hash !== this.buildDailyLogSnapshot().tree_hash) {
+      return true;
+    }
+    let calendar = new CalendarMemoryStore(this.paths.filesDir);
+    if (calendar.settings().enabled || calendar.snapshot().syncedAt.length > 0) { return true; }
     if (this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync()) {
       return true;
     }
@@ -480,7 +489,7 @@ export class DataManagerFacade {
     files.sort((left: DailyLogSnapshotFile, right: DailyLogSnapshotFile) => left.path.localeCompare(right.path));
     let fingerprint = files.map((file: DailyLogSnapshotFile) => {
       return [file.path, file.sha256, String(file.entry_count)].join('\u001f');
-    }).join('\u001e');
+    }).join('\u001e') + '\u001fcalendar:' + new CalendarMemoryStore(this.paths.filesDir).indexFingerprint();
     let snapshot: DailyLogSnapshot = {
       generated_at: nowIsoLocal(),
       root: 'workflows/daily-log',
@@ -692,12 +701,22 @@ export class DataManagerFacade {
 
   loadHomeViewModel(): HomeProfileViewModel {
     this.homeRecommendationService.pruneInactiveRecommendationsForToday();
+    // Mail belongs only to the presentation cache, never the event index/profile pipeline.
+    let mailStore = new MailStore(this.paths.filesDir);
+    let mailSnapshot = mailStore.current();
+    let mailReminder = mailStore.settings().enabled ? mailOverview(mailSnapshot) : undefined;
+    let mailPreview = visibleMail(mailSnapshot.items, false, false).slice(0, 8).map((item): string => item.subject);
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
       let empty = createEmptyHomeProfileViewModel();
       let avatar = this.avatarService.currentHomeView();
       empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
       empty.avatarMessageForegroundUri = avatar.avatarMessageForegroundUri;
+      empty.recommendations = new CalendarMemoryStore(this.paths.filesDir).reminders();
+      empty.calendarEnabled = new CalendarMemoryStore(this.paths.filesDir).settings().enabled;
+      empty.calendarError = new CalendarMemoryStore(this.paths.filesDir).snapshot().error;
+      empty.mailReminder = mailReminder;
+      empty.mailPreview = mailPreview;
       return empty;
     }
     let domains = this.homeProfileDomains(profile);
@@ -716,6 +735,10 @@ export class DataManagerFacade {
       updatedLabel: this.lastSyncLabel([]),
       completeness: completeness,
       totalEvents: profile.event_count,
+      calendarEnabled: new CalendarMemoryStore(this.paths.filesDir).settings().enabled,
+      calendarError: new CalendarMemoryStore(this.paths.filesDir).snapshot().error,
+      mailReminder: mailReminder,
+      mailPreview: mailPreview,
       domains: domains,
       recommendations: recommendations,
       empty: false
@@ -723,6 +746,9 @@ export class DataManagerFacade {
   }
 
   setHomeRecommendationCompleted(id: string, completed: boolean): boolean {
+    if (id.startsWith('calendar:')) {
+      return new CalendarMemoryStore(this.paths.filesDir).setCompleted(id, completed);
+    }
     let targetId = normalizeFreeText(id);
     if (targetId.length === 0) {
       return false;
@@ -1107,7 +1133,9 @@ export class DataManagerFacade {
         result.push(recommendation);
       }
     });
-    return result;
+    // Deterministic calendar reminders precede AI-generated reminders. They are
+    // filtered at read time, even if the user has not rebuilt their profile yet.
+    return new CalendarMemoryStore(this.paths.filesDir).reminders().concat(result);
   }
 
   private recommendationTag(value: string, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {

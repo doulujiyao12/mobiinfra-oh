@@ -22,11 +22,13 @@ export class ChatMessageDetailUiModel {
   collapsed: boolean = false;
   imagePath: string = '';
   imagePaths: string[] = [];
+  codexRunId: string = '';
   streamingActive: boolean = false;
   streamingVersion: number = 0;
   voice: ChatVoiceMetadata = createEmptyChatVoiceMetadata();
 
   apply(message: ChatMessage): void {
+    if (this.codexRunId !== (message.codexRunId || '')) { this.codexRunId = message.codexRunId || ''; }
     if (this.content !== message.content) {
       this.content = message.content;
     }
@@ -150,7 +152,8 @@ export class ChatMessageUiModel {
       imagePaths: this.detail.imagePaths.slice(),
       streamingActive: this.detail.streamingActive,
       streamingVersion: this.detail.streamingVersion,
-      voice: this.detail.voice
+      voice: this.detail.voice,
+      codexRunId: this.detail.codexRunId
     };
   }
 }

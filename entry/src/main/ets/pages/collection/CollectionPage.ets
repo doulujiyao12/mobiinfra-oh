@@ -1,7 +1,11 @@
 import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
+import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormAction,
+  CollectionSourceRow } from '../../components/CollectionFormControls';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
+import { WechatAutoSummarySettings, WechatCollectionForm } from '../../utils/wechat/WechatAutoSummarySettings';
 import {
   CollectionGroupViewModel,
   CollectionViewModel
@@ -59,16 +63,50 @@ export struct CollectionPage {
     DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @Prop wechatAutoSummaryRunning: boolean = false;
+  @Prop wechatAutoSummaryCanStop: boolean = false;
   @Prop wechatAutoSummaryStatus: string = '';
   @State private groupPageIndex: number = 0;
   @StorageLink('wechatAutoSummaryCollectionMode') wechatMode: string = WECHAT_AUTO_SUMMARY_MODE_RECENT;
   @StorageLink('wechatAutoSummaryCollectionDaysInput') wechatDaysInput: string = '';
   @StorageLink('wechatAutoSummaryCollectionMaxContactsInput') wechatMaxContactsInput: string = '';
   @StorageLink('wechatAutoSummaryCollectionTargetContactInput') wechatTargetContactInput: string = '';
+  @State private wechatFormError: string = '';
   onRefresh: () => void = () => {};
   onOpenDataCollectionSettings: () => void = () => {};
+  onOpenCalendarAnalysis: () => void = () => {};
+  onOpenMailAnalysis: () => void = () => {};
   onRunWechatAutoSummary: (request: WechatAutoSummaryRequest) => Promise<void> =
     async (request: WechatAutoSummaryRequest) => {};
+  onStopWechatAutoSummary: () => void = (): void => {};
+
+  aboutToAppear(): void {
+    try {
+      let form = WechatAutoSummarySettings.load(getContext(this) as common.Context);
+      this.wechatMode = form.mode;
+      this.wechatDaysInput = form.daysInput;
+      this.wechatMaxContactsInput = form.maxContactsInput;
+      this.wechatTargetContactInput = form.targetContactInput;
+      this.wechatFormError = '';
+    } catch (e) {
+      this.wechatFormError = '采集参数读取失败：' + (e as Error).message;
+    }
+  }
+
+  private saveWechatForm(): boolean {
+    let form = new WechatCollectionForm();
+    form.mode = normalizeWechatAutoSummaryMode(this.wechatMode);
+    form.daysInput = this.wechatDaysInput;
+    form.maxContactsInput = this.wechatMaxContactsInput;
+    form.targetContactInput = this.wechatTargetContactInput;
+    try {
+      WechatAutoSummarySettings.save(getContext(this) as common.Context, form);
+      this.wechatFormError = '';
+      return true;
+    } catch (e) {
+      this.wechatFormError = '采集参数未保存：' + (e as Error).message;
+      return false;
+    }
+  }
 
   private currentView(): CollectionViewModel {
     return collectionViewModelByTabIndex(this.viewModels, this.collectionModule);
@@ -152,12 +190,13 @@ export struct CollectionPage {
     return this.wechatInputOrDefault(this.wechatMaxContactsInput, this.wechatAutoSummaryDefaultMaxContacts);
   }
 
-  private wechatDefaultSummaryText(): string {
+  private wechatCurrentSummaryText(): string {
+    let days = normalizeWechatAutoSummaryDays(this.wechatDaysText());
     if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
-      return '当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，指定联系人模式';
+      return '本次采集：近 ' + days + ' 天，指定联系人模式';
     }
-    return '当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，最近 ' +
-      this.wechatAutoSummaryDefaultMaxContacts + ' 个联系人';
+    return '本次采集：近 ' + days + ' 天，最近 ' +
+      normalizeWechatAutoSummaryMaxContacts(this.wechatMaxContactsText()) + ' 个联系人';
   }
 
   private buildWechatRequest(): WechatAutoSummaryRequest {
@@ -180,128 +219,69 @@ export struct CollectionPage {
     promptAction.showToast({ message: message, duration: 1600 });
   }
 
+  private async beginWechatCollection(): Promise<void> {
+    if (this.wechatAutoSummaryRunning) { this.onStopWechatAutoSummary(); return; }
+    let request = this.buildWechatRequest();
+    let error = validateWechatAutoSummaryRequest(request);
+    if (error.length > 0) { this.showWechatToast(error); return; }
+    if (!this.saveWechatForm()) { this.showWechatToast('采集参数保存失败，请重试'); return; }
+    await this.onRunWechatAutoSummary(request);
+  }
+
   @Builder WechatModeButton(label: string, mode: string) {
-    Button(label)
-      .height(38)
-      .layoutWeight(1)
-      .fontSize(13)
-      .fontColor(AppTheme.text(this.wechatMode === mode ? Color.White : '#4F68FF'))
-      .backgroundColor(AppTheme.background(this.wechatMode === mode ? '#4F68FF' : '#EEF3FF'))
-      .borderRadius(10)
-      .onClick(() => {
-        if (this.wechatAutoSummaryRunning) {
-          return;
-        }
-        this.wechatMode = mode;
+    Button(label, { type: ButtonType.Normal }).height(36).layoutWeight(1).fontSize(14)
+      .fontWeight(this.wechatMode === mode ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(AppTheme.text('#172033'))
+      .backgroundColor(this.wechatMode === mode ? AppTheme.background(Color.White) : Color.Transparent)
+      .borderRadius(9).onClick((): void => {
+        if (this.wechatAutoSummaryRunning) { return; }
+        this.wechatMode = mode; this.saveWechatForm();
       })
   }
 
-  @Builder WechatInput(label: string, value: string, placeholder: string, onValueChange: (value: string) => void) {
-    Column() {
-      Text(label)
-        .fontSize(12)
-        .fontColor(AppTheme.text('#6F7684'))
-        .width('100%')
-        .maxLines(1)
-      TextInput({ placeholder: placeholder, text: value })
-        .placeholderColor($r('app.color.ui_text_placeholder'))
-        .caretColor($r('app.color.ui_accent_blue'))
-        .height(42)
-        .width('100%')
-        .fontSize(13)
-        .fontColor(AppTheme.text('#161B28'))
-        .backgroundColor(AppTheme.inputBackground())
-        .borderRadius(12)
-        .padding({ left: 12, right: 12 })
-        .enabled(!this.wechatAutoSummaryRunning)
-        .margin({ top: 6 })
-        .onChange((input: string) => { onValueChange(input); })
+  @Builder WechatFields() {
+    Row({ space: 3 }) {
+      this.WechatModeButton('最近联系人', WECHAT_AUTO_SUMMARY_MODE_RECENT)
+      this.WechatModeButton('指定联系人', WECHAT_AUTO_SUMMARY_MODE_TARGET)
+    }.width('100%').padding(3).backgroundColor(AppTheme.background('#F2F2F7')).borderRadius(12)
+      .margin({ bottom: 8 })
+    CollectionFormInput({ label: '时间范围（天）', value: this.wechatDaysInput,
+      placeholder: '默认 ' + this.wechatAutoSummaryDefaultDays, inputType: InputType.Number,
+      onChangeValue: (value: string): void => { this.wechatDaysInput = value; this.saveWechatForm(); } })
+    CollectionFormDivider()
+    if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_RECENT) {
+      CollectionFormInput({ label: '最近联系人数量', value: this.wechatMaxContactsInput,
+        placeholder: '默认 ' + this.wechatAutoSummaryDefaultMaxContacts, inputType: InputType.Number,
+        onChangeValue: (value: string): void => { this.wechatMaxContactsInput = value; this.saveWechatForm(); } })
+    } else {
+      CollectionFormInput({ label: '指定联系人', value: this.wechatTargetContactInput, placeholder: '请输入微信联系人名称',
+        onChangeValue: (value: string): void => { this.wechatTargetContactInput = value; this.saveWechatForm(); } })
     }
-    .width('100%')
-    .margin({ top: 12 })
+  }
+
+  @Builder WechatCaptureContent() {
+    Column() {
+      this.WechatFields()
+    }.width('100%').enabled(!this.wechatAutoSummaryRunning)
+    CollectionFormDivider()
+    CollectionFormAction({ label: this.wechatAutoSummaryRunning ?
+      (this.wechatAutoSummaryCanStop ? '停止采集' : '正在采集…') : '开始采集',
+      destructive: this.wechatAutoSummaryCanStop,
+      onAction: (): void => { this.beginWechatCollection(); } })
+      .enabled(!this.wechatAutoSummaryRunning || this.wechatAutoSummaryCanStop)
   }
 
   @Builder WechatAutoSummaryCard() {
     if (this.wechatAutoSummaryEnabled === 'true') {
       Column() {
-        Text('微信消息自动汇总')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#151A28'))
-          .width('100%')
-          .maxLines(1)
-        Text('调用 PC 侧采集服务读取微信会话，保存原始产物并写入 daily-log。')
-          .fontSize(12)
-          .fontColor(AppTheme.text('#6F7684'))
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 6 })
-        Text(this.wechatDefaultSummaryText())
-          .fontSize(12)
-          .fontColor(AppTheme.text('#4F68FF'))
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 6 })
-
-        Row() {
-          this.WechatModeButton('最近联系人', WECHAT_AUTO_SUMMARY_MODE_RECENT)
-          Blank().width(10)
-          this.WechatModeButton('指定联系人', WECHAT_AUTO_SUMMARY_MODE_TARGET)
+        CollectionFormGroup({ title: '微信快速采集', footer: '沿用任务页控制方式，采集结果可同步到个人记忆。',
+          contentBuilder: (): void => { this.WechatCaptureContent(); } })
+        if (this.wechatFormError.length > 0 || this.wechatAutoSummaryStatus.length > 0) {
+          Text(this.wechatFormError || this.wechatAutoSummaryStatus).fontSize(12).lineHeight(20)
+            .fontColor(AppTheme.text(this.wechatFormError || this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#747C8A'))
+            .width('100%').padding({ left: 16, right: 16 }).margin({ bottom: 16 })
         }
-        .width('100%')
-        .margin({ top: 14 })
-
-        this.WechatInput('时间范围（天）', this.wechatDaysInput, '默认 ' + this.wechatAutoSummaryDefaultDays,
-          (value: string) => { this.wechatDaysInput = value; })
-        if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_RECENT) {
-          this.WechatInput('最近联系人数量', this.wechatMaxContactsInput,
-            '默认 ' + this.wechatAutoSummaryDefaultMaxContacts,
-            (value: string) => { this.wechatMaxContactsInput = value; })
-        } else {
-          this.WechatInput('指定联系人', this.wechatTargetContactInput, '请输入微信联系人名称',
-            (value: string) => { this.wechatTargetContactInput = value; })
-        }
-
-        Button(this.wechatAutoSummaryRunning ? '采集中' : '开始采集')
-          .height(44)
-          .width('100%')
-          .fontSize(15)
-          .fontColor(AppTheme.text(Color.White))
-          .backgroundColor(AppTheme.filledBackground(this.wechatAutoSummaryRunning ? '#A9B0C2' : '#4F68FF'))
-          .borderRadius(12)
-          .enabled(!this.wechatAutoSummaryRunning)
-          .margin({ top: 16 })
-          .onClick(async () => {
-            // 点击时即时归一化并校验，避免设置页默认值和卡片输入不一致。
-            let request = this.buildWechatRequest();
-            let error = validateWechatAutoSummaryRequest(request);
-            if (error.length > 0) {
-              this.showWechatToast(error);
-              return;
-            }
-            await this.onRunWechatAutoSummary(request);
-          })
-
-        if (this.wechatAutoSummaryStatus.length > 0) {
-          Text(this.wechatAutoSummaryStatus)
-            .fontSize(12)
-            .fontColor(AppTheme.text(this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#52606D'))
-            .width('100%')
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .margin({ top: 10 })
-        }
-      }
-      .alignItems(HorizontalAlign.Start)
-      .width('92%')
-      .constraintSize({ maxWidth: 720 })
-      .padding(18)
-      .backgroundColor(AppTheme.background(Color.White))
-      .border({ width: 1, color: AppTheme.border('#E8ECF3') })
-      .borderRadius(20)
-      .margin({ top: COLLECTION_SECTION_GAP })
+      }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: COLLECTION_SECTION_GAP })
     }
   }
 
@@ -489,46 +469,6 @@ export struct CollectionPage {
       .maxLines(1)
   }
 
-  @Builder CollectionActionRow(icon: string, title: string, description: string,
-    accentColor: string, softColor: string, onTap: () => void) {
-    Row() {
-      Text(icon)
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text(accentColor))
-        .width(38)
-        .height(38)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(AppTheme.background(softColor))
-        .borderRadius(12)
-      Column() {
-        Text(title)
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#172033'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(description)
-          .fontSize(11)
-          .fontColor(AppTheme.text('#747C8C'))
-          .margin({ top: 4 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12 })
-      Text('›')
-        .fontSize(22)
-        .fontColor(AppTheme.text('#A0A6B2'))
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .height(68)
-    .padding({ left: 14, right: 14 })
-    .onClick(onTap)
-  }
-
   @Builder CollectionOverview() {
     Stack({ alignContent: Alignment.Center }) {
       Row() {
@@ -639,6 +579,20 @@ export struct CollectionPage {
     AppHeader({ title: '你的足迹' })
   }
 
+  @Builder CollectionSourceEntries() {
+    CollectionSourceRow({ title: '新增采集源', detail: '管理已接入的数据来源', icon: $r('app.media.source_add'),
+      tint: '#8E8E93', onOpen: (): void => { this.onOpenDataCollectionSettings(); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '图库分析', detail: '理解照片与截图中的内容', icon: $r('app.media.source_gallery'),
+      tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '日历分析', detail: '日程同步与一周安排', icon: $r('app.media.source_calendar'),
+      tint: '#FF9500', onOpen: (): void => { this.onOpenCalendarAnalysis(); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '邮箱分析', detail: '邮箱设置与今日邮件筛选', icon: $r('app.media.source_mail'),
+      onOpen: (): void => { this.onOpenMailAnalysis(); } })
+  }
+
   @Builder PageContent() {
     Scroll(this.pageScroller) {
       Column() {
@@ -680,25 +634,9 @@ export struct CollectionPage {
         this.WechatAutoSummaryCard()
 
         Column() {
-          this.CollectionActionRow('＋', '新增采集源', '连接更多平台与数据源',
-            '#725CFF', '#F1EEFF', () => {
-              this.onOpenDataCollectionSettings();
-            })
-          Divider()
-            .color(AppTheme.border('#E8EBF2'))
-            .margin({ left: 64 })
-          this.CollectionActionRow('图', '图库分析', '相册、截图 OCR 与分类整理',
-            '#3F7FEF', '#EDF4FF', () => {
-              router.pushUrl({ url: 'pages/gallery/GalleryPage' });
-            })
-        }
-        .width('92%')
-        .constraintSize({ maxWidth: 720 })
-        .backgroundColor(AppTheme.background(Color.White))
-        .border({ width: 1, color: AppTheme.border('#E8ECF3') })
-        .borderRadius(20)
-        .clip(true)
-        .margin({ top: COLLECTION_SECTION_GAP })
+          CollectionFormGroup({ title: '采集与分析',
+            contentBuilder: (): void => { this.CollectionSourceEntries(); } })
+        }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: COLLECTION_SECTION_GAP })
         Blank().height(110)
       }
       .width('100%')

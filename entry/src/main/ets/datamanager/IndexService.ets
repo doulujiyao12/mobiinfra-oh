@@ -3,6 +3,8 @@ import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { dataManagerInfo, dataManagerWarn } from './DataManagerLog';
+import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
+import { calendarProfileEvents } from '../utils/calendar/CalendarMemoryPolicy';
 import {
   AggregatedRecord,
   BooleanMap,
@@ -385,6 +387,8 @@ export class IndexService {
     await this.buildSourcesConcurrently(statePaths, previousManifest, previousEvents, reuseAllowed, imageReferences,
       modelConfig, events, sources, counters, progress);
 
+    await this.buildCalendarEvents(events, previousEvents, modelConfig);
+
     this.emitProgress(progress, '写入索引', '正在写入事件索引', 85, 100, 85);
     this.writeEventPartitions(events);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'inverted', 'index.json'), this.buildInvertedDocument(events));
@@ -423,6 +427,46 @@ export class IndexService {
       profileClaimCount: profile.claim_count,
       updatedAt: profile.generated_at
     };
+  }
+
+  private async buildCalendarEvents(events: EventMap, previous: EventMap, config: DataManagerModelConfig): Promise<void> {
+    let store = new CalendarMemoryStore(this.paths.filesDir);
+    let current = store.events();
+    let pending: IndexedEvent[] = [];
+    let enrichedMap: EventMap = {};
+    let representatives: EventMap = {};
+    current.forEach((event: IndexedEvent) => {
+      let old = previous[event.event_id];
+      let seriesKey = event.calendar ? event.calendar.seriesKey : event.event_id;
+      if (old && old.normalized_fact === event.normalized_fact &&
+        (old.enrichment_method === 'model' || !config.enabled)) {
+        enrichedMap[seriesKey] = old;
+      }
+      if (!representatives[seriesKey]) { representatives[seriesKey] = event; }
+    });
+    // Classify each series once; expanding a weekly series must not multiply
+    // identical model requests by the number of its occurrences.
+    Object.keys(representatives).forEach((key: string) => {
+      if (!enrichedMap[key]) { pending.push(representatives[key]); }
+    });
+    let enriched = await this.modelClient.enrichEvents(pending, config);
+    let keyById: StringMap = {};
+    Object.keys(representatives).forEach((key: string) => keyById[representatives[key].event_id] = key);
+    enriched.forEach((event: IndexedEvent) => enrichedMap[keyById[event.event_id]] = event);
+    current.forEach((base: IndexedEvent) => {
+      let enrichment = enrichedMap[base.calendar ? base.calendar.seriesKey : base.event_id];
+      if (enrichment) {
+        base.domains = enrichment.domains;
+        base.entity_mentions = enrichment.entity_mentions;
+        base.entities = enrichment.entities;
+        base.keywords = stableUnique(base.keywords.concat(enrichment.keywords));
+        base.enrichment_method = enrichment.enrichment_method;
+      }
+      // Model enrichment may classify topics, but cannot change dates, fabricate
+      // attendance, create GUI tasks, or turn a calendar plan into a past action.
+      base.profile_domains = deriveProfileDomains(base);
+      events[base.event_id] = base;
+    });
   }
 
   private loadOutputStatePaths(): string[] {
@@ -675,11 +719,25 @@ export class IndexService {
   }
 
   loadProfileState(): ProfileState {
-    return this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+    let profile = this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+    if (profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) {
+      Object.keys(profile.domains).forEach((key: string) => {
+        let domain = profile.domains[key];
+        let current = domain.claims.filter((claim: ProfileClaim): boolean =>
+          !claim.event_ids.some((id: string): boolean => id.startsWith('calendar:')));
+        if (current.length !== domain.claims.length) {
+          domain.claims = current;
+          domain.summary = ''; domain.short_summary = ''; domain.input_hash = ''; domain.generation = 'stale';
+        }
+      });
+      profile.claim_count = this.profileClaimCount(profile);
+    }
+    return profile;
   }
 
   loadProfileMarkdown(): string {
-    return this.storage.readText(this.storage.join(this.paths.indexesRoot, 'profile', 'profile.md'), '').trim();
+    let profile = this.loadProfileState();
+    return profile.event_count > 0 ? this.renderProfileMarkdown(profile) : '';
   }
 
   loadEvents(): EventMap {
@@ -694,6 +752,18 @@ export class IndexService {
           });
         }
       });
+    return this.filterCurrentCalendarEvents(result);
+  }
+
+  private filterCurrentCalendarEvents(events: EventMap): EventMap {
+    let current: EventMap = {};
+    let result: EventMap = {};
+    new CalendarMemoryStore(this.paths.filesDir).events().forEach((event: IndexedEvent) => current[event.event_id] = event);
+    Object.keys(events).forEach((id: string) => {
+      if (!id.startsWith('calendar:') || (current[id] && current[id].normalized_fact === events[id].normalized_fact)) {
+        result[id] = events[id];
+      }
+    });
     return result;
   }
 
@@ -719,7 +789,7 @@ export class IndexService {
         .filter((name: string) => loadedPartitions[name] !== true)
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
-    return result;
+    return this.filterCurrentCalendarEvents(result);
   }
 
   private eventPartitionNames(): string[] {
@@ -1131,6 +1201,7 @@ export class IndexService {
 
   private copyEvent(event: IndexedEvent): IndexedEvent {
     let copied: IndexedEvent = {
+      calendar: event.calendar,
       event_id: event.event_id,
       source_state_file: event.source_state_file,
       record_id: event.record_id,
@@ -2354,8 +2425,7 @@ export class IndexService {
     let byDomain: EventGroupMap = {};
     let profileDomains = this.profileDomainKeys();
     profileDomains.forEach((domain: string) => byDomain[domain] = []);
-    Object.keys(events).forEach((eventId: string) => {
-      let event = events[eventId];
+    calendarProfileEvents(Object.keys(events).map((id: string) => events[id]), Date.now()).forEach((event: IndexedEvent) => {
       // 个人信息只供按需查询，避免自动进入每轮云端聊天携带的画像摘要及碰一碰分享。
       if ((event.workflow_scene_ids || []).indexOf(PERSONAL_INFO_MEMORY_SCENE_ID) >= 0) {
         return;
@@ -2416,6 +2486,7 @@ export class IndexService {
       domainIndex++;
     }
     let profile: ProfileState = {
+      calendar_input_hash: new CalendarMemoryStore(this.paths.filesDir).fingerprint(),
       generated_at: nowIsoLocal(),
       event_count: Object.keys(events).length,
       event_date_range: this.eventDateRange(Object.keys(events).map((eventId: string) => events[eventId])),
@@ -2507,11 +2578,14 @@ export class IndexService {
         continue;
       }
       let evidenceEvents = ids.map((id: string) => eventMap[id]).filter((event: IndexedEvent) => event !== undefined);
+      let calendarOnly = evidenceEvents.every((event: IndexedEvent): boolean => event.calendar !== undefined);
+      let kind = this.normalizeProfileKind(raw.kind);
+      if (calendarOnly && kind !== 'topic' && kind !== 'observation') { continue; }
       let dateRange = this.eventDateRange(evidenceEvents);
       let claim: ProfileClaim = {
         statement: statement,
-        kind: this.normalizeProfileKind(raw.kind),
-        confidence: this.normalizeConfidence(raw.confidence),
+        kind: kind,
+        confidence: calendarOnly && this.normalizeConfidence(raw.confidence) === 'high' ? 'medium' : this.normalizeConfidence(raw.confidence),
         event_ids: ids,
         evidence_count: ids.length,
         start_date: dateRange.start_date,

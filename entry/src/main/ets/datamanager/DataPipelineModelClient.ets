@@ -441,6 +441,8 @@ const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '输出名称和别名必须来自输入候选，不要补充输入中不存在的名称，不要输出 markdown 或解释。';
 
 const PROFILE_SYSTEM_PROMPT: string =
+  '同一安排在日历、聊天、图片等来源重复出现时，应视为同一事件的佐证，不能当作多次独立活动来推断频率。\n' +
+  '日历来源仅证明用户曾有某项安排，不证明出席、完成或真实行为。只能归纳安排中的关注主题，不可据此断言习惯或已完成活动；重复系列只是一项证据。不得把具体日程、地址、参与者姓名写入画像摘要。\n' +
   '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。\n\n' +
   '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：\n' +
   '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。\n\n' +
@@ -456,6 +458,7 @@ const PROFILE_SYSTEM_PROMPT: string =
   'relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。只依据输入事件内容归纳。不要输出 markdown。';
 
 const PROFILE_MERGE_SYSTEM_PROMPT: string =
+  '日历安排不证明实际参加或完成，不得合并推断为真实习惯；日历相关画像仅保留保守的主题或安排倾向，避免具体日程与私人细节。\n' +
   '你是用户画像归并助手。输入是同一领域内多个分块已经生成的候选画像结论，以及上一版该领域画像结论。\n\n' +
   '请去重、合并相近含义，并输出适合 App 前端展示的最终用户画像，返回严格 JSON：\n' +
   '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。\n\n' +

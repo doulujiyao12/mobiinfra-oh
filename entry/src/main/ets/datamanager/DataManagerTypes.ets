@@ -209,6 +209,7 @@ export interface IndexedEventTodo {
 }
 
 export interface IndexedEvent {
+  calendar?: CalendarEventMetadata;
   event_id: string;
   source_state_file: string;
   record_id: number;
@@ -228,6 +229,13 @@ export interface IndexedEvent {
   enrichment_method: string;
   entities: string[];
   profile_domains: string[];
+}
+
+export interface CalendarEventMetadata {
+  seriesKey: string;
+  start: number;
+  end: number;
+  profileEnabled: boolean;
 }
 
 export interface EventPartition {
@@ -260,6 +268,7 @@ export interface ProfileDomainState {
 }
 
 export interface ProfileState {
+  calendar_input_hash?: string;
   generated_at: string;
   event_count: number;
   event_date_range: StringMap;
@@ -330,6 +339,10 @@ export interface HomeDomainViewModel {
 }
 
 export interface HomeRecommendationViewModel {
+  calendarStart?: number;
+  calendarEnd?: number;
+  calendarAllDay?: boolean;
+  calendarLocation?: string;
   id: string;
   domain: string;
   tag: string;
@@ -379,6 +392,10 @@ export interface HomeRecommendationPlannerEvent {
 }
 
 export interface HomeProfileViewModel extends AvatarHomeViewModel {
+  calendarEnabled?: boolean;
+  calendarError?: string;
+  mailReminder?: HomeRecommendationViewModel;
+  mailPreview?: string[];
   updatedLabel: string;
   completeness: number;
   totalEvents: number;

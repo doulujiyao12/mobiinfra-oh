@@ -1,4 +1,6 @@
 import { AppTheme } from '../../utils/AppTheme';
+import { CalendarMemoryPanel } from '../../components/CalendarMemoryPanel';
+import { MailSettingsPanel } from '../../components/MailSettingsPanel';
 import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -107,6 +109,8 @@ import {
   SettingsOutputPanel,
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
+import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormSwitch,
+  CollectionFormAction, CollectionSourceRow } from '../../components/CollectionFormControls';
 import { HuaweiAccountCard } from './HuaweiAccountCard';
 import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
 import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
@@ -127,6 +131,7 @@ export struct SettingsCenterPage {
   @Link threadNumInput: string;
   @Prop localNpuExecutionMode: string = 'cpu';
   @Link @Watch('onSelectedSectionChanged') selectedSectionId: number;
+  onBackRequest: () => boolean = (): boolean => false;
   @Link output: string;
   @Link chunkOmCacheOutput: string;
   @Link cloudOutput: string;
@@ -221,6 +226,10 @@ export struct SettingsCenterPage {
   onSwitchDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onDeleteDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onRefreshDownloadedModels: () => void = () => {};
+  @Prop calendarMemoryRefreshing: boolean = false;
+  onSyncCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
+  onMailChanged: () => void = (): void => {};
+  onSyncMail: () => Promise<void> = async (): Promise<void> => {};
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
@@ -350,6 +359,7 @@ export struct SettingsCenterPage {
 
   private closeSection(): void {
     this.closeSensitiveInputs();
+    if (this.onBackRequest()) { return; }
     this.selectedSectionId = settingsParentSection(this.selectedSectionId);
   }
 
@@ -370,25 +380,12 @@ export struct SettingsCenterPage {
   }
 
   private activeSectionTitle(): string {
-    if (this.selectedSectionId === SettingsSectionId.CloudModelAdvanced) {
-      return settingsSectionTitle(SettingsSectionId.CloudModelAdvanced);
-    }
-    if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
-      return settingsSectionTitle(SettingsSectionId.PersonalPrivacy);
-    }
-    if (this.selectedSectionId === SettingsSectionId.DataCollection) {
-      return settingsSectionTitle(SettingsSectionId.DataCollection);
-    }
-    if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
-      return settingsSectionTitle(SettingsSectionId.ModelAgents);
-    }
-    if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
-      return settingsSectionTitle(SettingsSectionId.TaskAutomation);
-    }
-    if (this.selectedSectionId === SettingsSectionId.StorageAbout) {
-      return settingsSectionTitle(SettingsSectionId.StorageAbout);
-    }
-    return '';
+    return settingsSectionTitle(this.selectedSectionId as SettingsSectionId);
+  }
+
+  private isCollectionSection(): boolean {
+    return this.selectedSectionId === SettingsSectionId.DataCollection ||
+      settingsParentSection(this.selectedSectionId) === SettingsSectionId.DataCollection;
   }
 
   private confirmDanger(config: SettingsConfirmConfig, action: () => void): void {
@@ -570,20 +567,9 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
     onValueChange: (value: string) => void, onNormalize: () => void) {
-    SettingInput({
-      label: label,
-      value: value,
-      placeholder: placeholder,
-      onValueChange: (input: string) => {
-        // 编辑期间保留原文，避免小数和临时空值被立即改写。
-        onValueChange(input);
-      },
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onInputBlur: () => {
-        // 失焦后由调用点读取当前字段再归一化，避免使用上一轮渲染入参。
-        onNormalize();
-      }
-    })
+    CollectionFormDivider()
+    CollectionFormInput({ label: label, value: value, placeholder: placeholder,
+      onChangeValue: onValueChange, onBlurValue: onNormalize })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
@@ -693,8 +679,9 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummarySettings() {
     Column() {
-      this.SettingToggle('微信消息自动汇总', '开启后采集任务会按默认参数汇总最近微信会话',
-        this.isWechatAutoSummaryEnabled(), (value: boolean) => { this.setWechatAutoSummaryEnabled(value); })
+      CollectionFormSwitch({ label: '微信消息自动汇总', detail: '采集任务按默认参数汇总最近会话',
+        selected: this.isWechatAutoSummaryEnabled(),
+        onChangeValue: (value: boolean): void => { this.setWechatAutoSummaryEnabled(value); } })
       if (this.isWechatAutoSummaryEnabled()) {
         this.WechatAutoSummaryInput('默认时间范围（天）', this.wechatAutoSummaryDefaultDays,
           DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
@@ -710,16 +697,16 @@ export struct SettingsCenterPage {
             this.wechatAutoSummaryDefaultMaxContacts = String(
               normalizeWechatAutoSummaryMaxContacts(this.wechatAutoSummaryDefaultMaxContacts));
           })
-      Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
+        Text('采集结果保存在本机，同步后可整理到个人记忆。')
         .fontSize(12)
-        .fontColor(AppTheme.text('#D26B31'))
+        .fontColor(AppTheme.text('#747C8A'))
           .width('100%')
-          .margin({ top: 8, bottom: 8 })
+          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
 
         Row() {
           Text('高级参数')
             .fontSize(14)
-            .fontWeight(FontWeight.Bold)
+            .fontWeight(FontWeight.Medium)
             .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           Text(this.wechatAutoSummaryAdvancedOpen ? '收起' : '展开')
@@ -727,7 +714,7 @@ export struct SettingsCenterPage {
             .fontColor(AppTheme.text('#5B68FF'))
         }
         .width('100%')
-        .padding({ top: 12, bottom: 8 })
+        .padding({ left: 16, right: 16, top: 16, bottom: 14 })
         .onClick(() => { this.wechatAutoSummaryAdvancedOpen = !this.wechatAutoSummaryAdvancedOpen; })
 
         if (this.wechatAutoSummaryAdvancedOpen) {
@@ -769,7 +756,7 @@ export struct SettingsCenterPage {
       }
     }
     .width('100%')
-    .margin({ bottom: 12 })
+    .margin({ bottom: 0 })
   }
 
   @Builder ModelDownloadProgressPanel() {
@@ -992,6 +979,8 @@ export struct SettingsCenterPage {
         this.PrivacySection()
       } else if (this.selectedSectionId === SettingsSectionId.DataCollection) {
         this.DataCollectionSection()
+      } else if (settingsParentSection(this.selectedSectionId) === SettingsSectionId.DataCollection) {
+        this.CollectionSourceSection()
       } else if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
         this.ModelAgentsSection()
       } else if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
@@ -1115,30 +1104,55 @@ export struct SettingsCenterPage {
     })
   }
 
+  @Builder CollectionSourceEntries() {
+    CollectionSourceRow({ title: '日历分析', detail: '同步日程与个人记忆', icon: $r('app.media.source_calendar'),
+      tint: '#FF9500', onOpen: (): void => { this.openSection(SettingsSectionId.CalendarAnalysis); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '邮箱分析', detail: '账号设置与今日邮件筛选', icon: $r('app.media.source_mail'),
+      onOpen: (): void => { this.openSection(SettingsSectionId.MailAnalysis); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '微信采集', detail: '默认范围与高级参数', icon: $r('app.media.source_wechat'),
+      tint: '#34C759', onOpen: (): void => { this.openSection(SettingsSectionId.WechatCollection); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '图库分析', detail: '读取照片、截图并理解内容', icon: $r('app.media.source_gallery'),
+      tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
+  }
+
+  @Builder CollectionAuxiliaryEntries() {
+    CollectionSourceRow({ title: '文字识别', detail: 'OCR 预筛与并发', icon: $r('app.media.source_gallery'),
+      tint: '#8E8E93', onOpen: (): void => { this.openSection(SettingsSectionId.OcrCollection); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '图片位置', detail: '拍摄位置解析与图片缩放', icon: $r('app.media.source_gallery'),
+      tint: '#8E8E93', onOpen: (): void => { this.openSection(SettingsSectionId.MapCollection); } })
+  }
+
   @Builder DataCollectionSection() {
     Column() {
-      this.SectionTitle(SettingsSectionId.DataCollection)
-      SettingsGroupCard({
-        title: '微信汇总',
-        subtitle: '默认采集范围和高级滑动参数',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.WechatAutoSummarySettings() }
-      })
-      SettingsGroupCard({
-        title: 'OCR',
-        subtitle: '本地 OCR 回退、关键词预筛和并发控制',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.OcrSettingsGroup() }
-      })
-      SettingsGroupCard({
-        title: '地图服务',
-        subtitle: '图片位置解析和分析缩放参数',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.MapSettingsGroup() }
-      })
-    }
-    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
-    .margin({ top: 16, bottom: 110 })
+      CollectionFormGroup({ title: '采集来源', contentBuilder: (): void => { this.CollectionSourceEntries(); } })
+      CollectionFormGroup({ title: '辅助设置', contentBuilder: (): void => { this.CollectionAuxiliaryEntries(); } })
+    }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12, bottom: 110 })
+  }
+
+  @Builder CollectionSourceSection() {
+    Column() {
+      if (this.selectedSectionId === SettingsSectionId.CalendarAnalysis) {
+        CalendarMemoryPanel({ memoryRefreshing: this.calendarMemoryRefreshing,
+          onMemoryChanged: async (): Promise<void> => { await this.onSyncCalendarMemory(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.MailAnalysis) {
+        MailSettingsPanel({ memoryRefreshing: this.calendarMemoryRefreshing,
+          onChanged: (): void => { this.onMailChanged(); },
+          onSync: async (): Promise<void> => { await this.onSyncMail(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.WechatCollection) {
+        CollectionFormGroup({ title: '默认采集', footer: '设置自动保存。汇总页可以为本次采集调整联系人与时间范围。',
+          contentBuilder: (): void => { this.WechatAutoSummarySettings(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.OcrCollection) {
+        CollectionFormGroup({ title: '文字识别', footer: '设置自动保存，用于图库分析的本地文字识别。',
+          contentBuilder: (): void => { this.OcrSettingsGroup(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.MapCollection) {
+        CollectionFormGroup({ title: '图片位置', footer: '设置自动保存，位置解析需要有效的地图服务 Key。',
+          contentBuilder: (): void => { this.MapSettingsGroup(); } })
+      }
+    }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12, bottom: 110 })
   }
 
   @Builder GalleryAnalysisGroup() {
@@ -1180,18 +1194,17 @@ export struct SettingsCenterPage {
   }
 
   @Builder OcrSettingsGroup() {
-    this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启', this.gallerySkipOcr === 'true',
-      (value: boolean) => { this.gallerySkipOcr = value ? 'true' : 'false'; })
-    this.SettingToggle('OCR 关键词预筛', '自动分析时先用 OCR 关键词过滤图片',
-      this.galleryUseOcrKeywordFilter === 'true',
-      (value: boolean) => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; })
-    SettingInput({
-      label: 'OCR 并发请求数',
-      value: this.galleryOcrConcurrency,
-      placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.galleryOcrConcurrency = value; }
-    })
+    CollectionFormSwitch({ label: '跳过本地 OCR', detail: '设备不支持本地 OCR 时开启',
+      selected: this.gallerySkipOcr === 'true',
+      onChangeValue: (value: boolean): void => { this.gallerySkipOcr = value ? 'true' : 'false'; } })
+    CollectionFormDivider()
+    CollectionFormSwitch({ label: 'OCR 关键词预筛', detail: '自动分析前先用关键词过滤图片',
+      selected: this.galleryUseOcrKeywordFilter === 'true',
+      onChangeValue: (value: boolean): void => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; } })
+    CollectionFormDivider()
+    CollectionFormInput({ label: 'OCR 并发请求数', value: this.galleryOcrConcurrency,
+      placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY, inputType: InputType.Number,
+      onChangeValue: (value: string): void => { this.galleryOcrConcurrency = value; } })
   }
 
   @Builder EmbeddingSettingsGroup() {
@@ -1233,23 +1246,12 @@ export struct SettingsCenterPage {
   }
 
   @Builder MapSettingsGroup() {
-    SettingInput({
-      label: '图片分析缩放比例',
-      value: this.galleryImageScale,
-      placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.galleryImageScale = value; }
-    })
-    SensitiveSettingInput({
-      sensitiveId: 'galleryAmapWebKey',
-      activeSensitiveId: this.activeSensitiveInputId,
-      label: '高德 Web 服务 Key',
-      value: this.galleryAmapWebKey,
-      defaultValue: DEFAULT_GALLERY_AMAP_WEB_KEY,
+    CollectionFormInput({ label: '图片分析缩放比例', value: this.galleryImageScale, placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
+      onChangeValue: (value: string): void => { this.galleryImageScale = value; } })
+    CollectionFormDivider()
+    CollectionFormInput({ label: '高德 Web 服务 Key', value: this.galleryAmapWebKey, secret: true,
       placeholder: '用于拍摄位置逆地理编码',
-      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
-      onValueChange: (value: string) => { this.galleryAmapWebKey = value; }
-    })
+      onChangeValue: (value: string): void => { this.galleryAmapWebKey = value; } })
   }
 
   @Builder ModelAgentsSection() {
@@ -1911,7 +1913,7 @@ export struct SettingsCenterPage {
   build() {
     if (isSettingsSectionSelected(this.selectedSectionId)) {
       FrostedPage({
-        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        pageBackgroundColor: this.isCollectionSection() ? '#F2F2F7' : SETTINGS_PAGE_BACKGROUND_COLOR,
         scrollers: [this.detailScroller],
         headerBuilder: (): void => { this.SettingsDetailHeader(); },
         contentBuilder: (): void => { this.SettingsDetailContent(); }

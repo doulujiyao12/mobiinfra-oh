@@ -9,6 +9,14 @@
     ],
     "requestPermissions": [
       {
+        "name": "ohos.permission.READ_WHOLE_CALENDAR",
+        "reason": "$string:reason_for_calendar_memory",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
         "name": "ohos.permission.INTERNET"
       },
       {

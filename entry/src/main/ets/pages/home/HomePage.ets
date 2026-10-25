@@ -31,6 +31,11 @@ import { HomeComfortSection } from './HomeComfortSection';
 import { HomeComfortChatStore } from './HomeComfortChatStore';
 import { HomeCategoryIcon } from '../../components/HomeCategoryIcon';
 import { HomeEmptyHint } from '../../components/HomeEmptyHint';
+import { showCalendarWeekDialog } from '../../components/CalendarWeekDialog';
+import { showMailTodayDialog } from '../../components/MailTodayDialog';
+import { MAIL_REMINDER_OVERVIEW_ID } from '../../utils/mail/MailReminderPolicy';
+import { CalendarReminderOverview, CALENDAR_REMINDER_OVERVIEW_ID, calendarReminderOverview,
+  calendarTime } from '../../utils/calendar/CalendarMemoryPolicy';
 
 // ClawMate 首页展示层：展示动态画像、提醒和推荐，不承载推理/Agent 逻辑。
 @Component
@@ -45,6 +50,9 @@ export struct HomePage {
   @Prop taskSuggestionError: string = '';
   onRefreshTaskSuggestions: () => Promise<void> = async () => {};
   onOpenTasks: () => void = (): void => {};
+  onOpenCalendarSettings: () => void = (): void => {};
+  onOpenMailSettings: () => void = (): void => {};
+  onMailChanged: () => void = (): void => {};
   @Prop comfortConcerns: HomeComfortConcern[] = [];
   @Prop comfortConcernsLoading: boolean = false;
   @Prop comfortConcernError: string = '';
@@ -70,6 +78,8 @@ export struct HomePage {
   @State private executionSheetOpen: boolean = false;
   @State private executionCandidate: HomeTaskSuggestion = { id: '', title: '', task: '', reason: '', category: 'life', evidence: [] };
   @State showAllRecommendations: boolean = false;
+  private calendarWeekDialogOpen: boolean = false;
+  private mailDialogOpen: boolean = false;
   @State avatarGenerationOpen: boolean = false;
   @State avatarGenerating: boolean = false;
   @State avatarHistoryOpen: boolean = false;
@@ -1055,7 +1065,11 @@ export struct HomePage {
   }
 
   @Builder RecommendationImage(item: HomeRecommendationViewModel) {
-    if (item.thumbnailUri.length > 0) {
+    if (item.id === CALENDAR_REMINDER_OVERVIEW_ID) {
+      this.CalendarReminderPreview()
+    } else if (item.id === MAIL_REMINDER_OVERVIEW_ID) {
+      this.MailReminderPreview()
+    } else if (item.thumbnailUri.length > 0) {
       Image(item.thumbnailUri)
         .width(56)
         .height(56)
@@ -1071,6 +1085,78 @@ export struct HomePage {
       .borderRadius(17)
       .clip(true)
     }
+  }
+
+  private calendarOverview(): CalendarReminderOverview {
+    return calendarReminderOverview(this.profile.recommendations, Date.now(), this.showAllRecommendations,
+      this.profile.calendarError || '');
+  }
+
+  @Builder MailReminderPreview() {
+    Stack({ alignContent: Alignment.Center }) {
+      if ((this.profile.mailPreview || []).length > 0) {
+        Swiper() {
+          ForEach(this.profile.mailPreview || [], (subject: string) => {
+            Column({ space: 3 }) {
+              Text('今日邮件').fontSize(9).fontColor(AppTheme.text('#8C82BD'))
+              Text(subject).fontSize(10).lineHeight(13).fontWeight(FontWeight.Medium)
+                .fontColor(AppTheme.text('#6372D8')).textAlign(TextAlign.Center).maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+            }.width('100%').height('100%').justifyContent(FlexAlign.Center).padding(4)
+          }, (subject: string, index: number): string => String(index) + subject)
+        }.width('100%').height('100%').vertical(true).indicator(false)
+          .autoPlay((this.profile.mailPreview || []).length > 1).loop((this.profile.mailPreview || []).length > 1)
+          .interval(3500).duration(450)
+      } else {
+        Text('邮件').fontSize(15).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#6372D8'))
+      }
+    }.width(56).height(56).backgroundColor(AppTheme.background('#F1EEFA')).borderRadius(17).clip(true)
+      .onClick(() => { this.openMailToday(); })
+  }
+
+  private async openMailToday(): Promise<void> {
+    if (this.mailDialogOpen) { return; }
+    this.mailDialogOpen = true;
+    try {
+      let settings = await showMailTodayDialog(this.getUIContext(), (): void => { this.onMailChanged(); });
+      if (settings) { this.onOpenMailSettings(); }
+    } catch (e) { showToastSafely('邮件提醒打开失败，请重试'); }
+    finally { this.mailDialogOpen = false; }
+  }
+
+  @Builder CalendarReminderPreview() {
+    Stack({ alignContent: Alignment.Center }) {
+      if (this.calendarOverview().preview.length > 0) {
+        Swiper() {
+          ForEach(this.calendarOverview().preview, (item: HomeRecommendationViewModel) => {
+            Column({ space: 3 }) {
+              Text(item.calendarAllDay ? '全天' : calendarTime(item.calendarStart || 0, false).substring(11))
+                .fontSize(9).fontColor(AppTheme.text('#8C82BD')).maxLines(1)
+              Text(item.title).fontSize(10).lineHeight(13).fontWeight(FontWeight.Medium)
+                .fontColor(AppTheme.text('#6372D8')).textAlign(TextAlign.Center).maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+            }.width('100%').height('100%').justifyContent(FlexAlign.Center).padding(4)
+          }, (item: HomeRecommendationViewModel): string => item.id)
+        }.width('100%').height('100%').vertical(true).indicator(false)
+          .autoPlay(this.calendarOverview().preview.length > 1).loop(this.calendarOverview().preview.length > 1)
+          .interval(3500).duration(450)
+      } else {
+        Text('日历').fontSize(15).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#6372D8'))
+      }
+    }.width(56).height(56).backgroundColor(AppTheme.background('#F1EEFA')).borderRadius(17).clip(true)
+      .onClick(() => { this.openCalendarWeek(); })
+  }
+
+  private async openCalendarWeek(): Promise<void> {
+    if (this.calendarWeekDialogOpen) { return; }
+    this.calendarWeekDialogOpen = true;
+    try {
+      let openSettings = await showCalendarWeekDialog(this.getUIContext(), this.profile.recommendations,
+        this.showAllRecommendations, this.profile.calendarError || '',
+        (id: string, completed: boolean): void => { this.onSetRecommendationCompleted(id, completed); });
+      if (openSettings) { this.onOpenCalendarSettings(); }
+    } catch (e) { showToastSafely('日历提醒打开失败，请重试'); }
+    finally { this.calendarWeekDialogOpen = false; }
   }
 
   private recommendationDisplayTag(item: HomeRecommendationViewModel): string {
@@ -1092,6 +1178,8 @@ export struct HomePage {
   }
 
   private openRecommendationDetail(item: HomeRecommendationViewModel): void {
+    if (item.id === CALENDAR_REMINDER_OVERVIEW_ID) { this.openCalendarWeek(); return; }
+    if (item.id === MAIL_REMINDER_OVERVIEW_ID) { this.openMailToday(); return; }
     this.selectedRecommendationId = item.id;
     this.selectedRecommendationCompletedOverrideId = item.id;
     this.selectedRecommendationCompletedOverrideValue = item.completed;
@@ -1170,7 +1258,7 @@ export struct HomePage {
 
   @Builder EmptyRecommendationCard() {
     Column() {
-      if (this.profile.recommendations.length > 0) {
+      if (this.nonCalendarRecommendations().length > 0) {
         HomeEmptyHint({
           messageText: '提醒都处理好啦，歇一会儿～',
           accentTone: '#148F73',
@@ -1207,12 +1295,19 @@ export struct HomePage {
   }
 
   private visibleRecommendations(): HomeRecommendationViewModel[] {
+    let reminders = this.nonCalendarRecommendations();
+    if (this.profile.calendarEnabled === true) { reminders.unshift(this.calendarOverview().reminder); }
+    if (this.profile.mailReminder !== undefined) { reminders.push(this.profile.mailReminder); }
     if (this.showAllRecommendations) {
-      let pending = this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
-      let completed = this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.completed);
+      let pending = reminders.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
+      let completed = reminders.filter((item: HomeRecommendationViewModel): boolean => item.completed);
       return pending.concat(completed);
     }
-    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
+    return reminders.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
+  }
+
+  private nonCalendarRecommendations(): HomeRecommendationViewModel[] {
+    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.id.startsWith('calendar:'));
   }
 
   private recommendationPageItems(): HomeRecommendationViewModel[] {
@@ -1923,8 +2018,9 @@ export struct HomePage {
             .padding({ left: 9, right: 9, top: 5, bottom: 5 })
             .backgroundColor(AppTheme.filledBackground(item.color))
             .borderRadius(8)
-          AiGeneratedBadge({ compact: true })
-            .margin({ left: 8 })
+          if (!item.id.startsWith('calendar:')) {
+            AiGeneratedBadge({ compact: true }).margin({ left: 8 })
+          }
           Text('关闭')
             .fontSize(13)
             .fontColor(AppTheme.text('#7C8494'))
@@ -1938,6 +2034,7 @@ export struct HomePage {
           .fontSize(20)
           .fontWeight(FontWeight.Bold)
           .fontColor(AppTheme.text('#151A28'))
+          .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
           .margin({ top: 14 })
         this.RecommendationDetailImages(item)
@@ -1946,6 +2043,11 @@ export struct HomePage {
           .fontColor(AppTheme.text('#4E5668'))
           .width('100%')
           .margin({ top: 14 })
+        if (item.id.startsWith('calendar:')) {
+          Scroll() {
+            Text(item.detail).fontSize(13).lineHeight(21).fontColor(AppTheme.text('#60697C')).width('100%')
+          }.width('100%').constraintSize({ maxHeight: 240 }).scrollBar(BarState.Auto).margin({ top: 12 })
+        }
         this.RecommendationCompletedCheckbox(item)
         if (item.agentTask.length > 0) {
           Column() {
@@ -2038,8 +2140,9 @@ export struct HomePage {
         Row() {
           Text('为你提醒').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#11182F')).layoutWeight(1)
           if (this.profile.recommendations.length > 0) {
-            AiGeneratedBadge({ compact: true })
-              .margin({ right: 8 })
+            if (this.profile.recommendations.some((item: HomeRecommendationViewModel): boolean => !item.id.startsWith('calendar:'))) {
+              AiGeneratedBadge({ compact: true }).margin({ right: 8 })
+            }
             this.RecommendationFilterButton('未完成', false)
             Blank().width(8)
             this.RecommendationFilterButton('全部', true)
@@ -2058,7 +2161,10 @@ export struct HomePage {
                   .color(AppTheme.border('#E9ECF3'))
                   .margin({ left: 73 })
               }
-            }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
+            }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.desc + '-' + item.domain + '-' +
+              String(item.completed) + (item.id === CALENDAR_REMINDER_OVERVIEW_ID ? this.calendarOverview().preview.map(
+                (preview: HomeRecommendationViewModel): string => preview.id + preview.title).join('|') : '') +
+              (item.id === MAIL_REMINDER_OVERVIEW_ID ? (this.profile.mailPreview || []).join('|') : ''))
           }
           .width('92%')
           .padding({ left: 8, right: 8 })

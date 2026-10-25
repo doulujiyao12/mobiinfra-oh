@@ -4,11 +4,13 @@ import {
 } from './CloudModelClient';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { MobileGuiTaskExecutionCallbacks } from './MobileGuiTaskTypes';
+import { CodexChatRunCallback } from '../pages/codex/CodexChatTypes';
 
 export interface ChatToolExecutionContext extends MobileGuiTaskExecutionCallbacks {
   filesDir: string;
   sessionId: string;
   userMessage: string;
+  runCodexTask?: CodexChatRunCallback;
 }
 
 export interface ChatTool {
