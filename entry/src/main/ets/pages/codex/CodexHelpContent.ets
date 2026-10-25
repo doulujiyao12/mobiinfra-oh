@@ -1,5 +1,5 @@
 // Keep downloads pinned to a verified release; never guess the latest asset name.
-export const CODEX_BRIDGE_VERSION: string = '1.1.11';
+export const CODEX_BRIDGE_VERSION: string = '1.1.13';
 export const CODEX_BRIDGE_TAG: string = 'codex-bridge-v' + CODEX_BRIDGE_VERSION;
 export const CODEX_REPOSITORY_URL: string = 'https://github.com/doulujiyao12/mobiinfra-oh';
 export const CODEX_RELEASE_URL: string = CODEX_REPOSITORY_URL + '/releases/tag/' + CODEX_BRIDGE_TAG;
@@ -47,7 +47,7 @@ export function codexDownloads(): CodexDownload[] {
   ];
 }
 
-export const CODEX_DOWNLOAD_NOTICE: string = '当前为预览版，安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。';
+export const CODEX_DOWNLOAD_NOTICE: string = '安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。';
 export const CODEX_PAIRING_NOTE: string = '配对码 5 分钟内有效，只能使用一次。请粘贴完整配对信息或导入配对文件；证书指纹不是 token。不要公开配对码和文件。';
 
 const DESKTOP_NOTES: string[] = [

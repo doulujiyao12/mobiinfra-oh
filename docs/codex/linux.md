@@ -1,6 +1,6 @@
 # Linux CLI 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.11
+[返回下载与指南](README.md) · ClawMate Codex 1.1.13
 
 适用于 x64 Linux 服务器，无需桌面环境。下面命令在服务器执行；把项目目录和示例 IP 换成自己的实际值。
 
@@ -11,10 +11,10 @@
 下载终端版，先比对 Release 的 SHA256 校验清单，再解压到用户目录。目标目录应为空；升级时先结束任务并退出旧服务。
 
 ```bash
-curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.11-linux-x64.tar.gz \
-  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.11/ClawMate-Codex-Terminal-1.1.11-linux-x64.tar.gz
+curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.13-linux-x64.tar.gz \
+  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.13/ClawMate-Codex-Terminal-1.1.13-linux-x64.tar.gz
 mkdir -p "$HOME/ClawMate-Codex"
-tar -xzf ClawMate-Codex-Terminal-1.1.11-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
+tar -xzf ClawMate-Codex-Terminal-1.1.13-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
 cd "$HOME/ClawMate-Codex"
 ```
 
@@ -78,6 +78,6 @@ cat phone.clawmate-codex-pair.json
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.11)
+- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.13)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->

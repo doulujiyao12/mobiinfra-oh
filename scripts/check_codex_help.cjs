@@ -78,7 +78,7 @@ files.set('README.md', `# ClawMate Codex 连接器\n\n在手机中继续自己�
   `Windows 是安装向导；macOS ZIP 内为应用，解压后移入「应用程序」；Linux 为解压使用的便携包，服务器优先选 CLI。当前没有 Intel Mac、Linux ARM64、DMG、DEB 或 RPM 安装包。\n\n` +
   `## 连接指南\n\n- [Windows](windows.md)\n- [macOS · Apple Silicon](macos.md)\n- [Linux · CLI](linux.md)\n- [Tailscale：异地手机与服务器组网](tailscale.md)\n\n` +
   `手机入口：**Codex → 我的连接 → 下载 PC 端的 Codex 连接器 / 连接指南 / Tailscale 组网教程**。内置指南无需加载网页；下载文件和打开外部资料需要网络。\n\n` +
-  `## 校验与升级\n\n从同一 Release 下载 SHA256SUMS-${version}.txt，核对对应文件的哈希，再安装或解压。\n\n` +
+  `## 校验与升级\n\n从同一 Release 下载 SHA256SUMS.txt，核对对应文件的哈希，再安装或解压。\n\n` +
   `- Windows PowerShell：\`Get-FileHash .\\ClawMate-Codex-${version}-win-x64.exe -Algorithm SHA256\`\n` +
   `- macOS：\`shasum -a 256 ClawMate-Codex-${version}-darwin-arm64-unsigned.zip\`\n` +
   `- Linux：\`sha256sum ClawMate-Codex-Terminal-${version}-linux-x64.tar.gz\`\n\n` +

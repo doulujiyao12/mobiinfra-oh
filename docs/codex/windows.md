@@ -1,6 +1,6 @@
 # Windows 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.11
+[返回下载与指南](README.md) · ClawMate Codex 1.1.13
 
 在自己的电脑安装 ClawMate Codex 连接器，登录、选择项目，再用手机扫码。运行组件已经内置，无需另装 Node.js 或 npm。
 
@@ -44,6 +44,6 @@
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.11)
+- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.13)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->
