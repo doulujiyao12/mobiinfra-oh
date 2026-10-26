@@ -2,10 +2,11 @@ import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
-import { IndexService } from './IndexService';
+import { IndexService, IndexSourceSelection } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
+import { SyncMetrics } from './SyncMetrics';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
@@ -42,6 +43,7 @@ import {
   QueryResult,
   RefreshSummary,
   DataManagerProgressCallback,
+  DataManagerProgress,
   NumberMap,
   StringMap,
   createDataManagerProgress,
@@ -65,7 +67,7 @@ import {
 
 import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
 import { MailStore } from '../utils/mail/MailStore';
-import { mailOverview, visibleMail } from '../utils/mail/MailReminderPolicy';
+import { mailOverview, visibleMail, todayMail } from '../utils/mail/MailReminderPolicy';
 
 interface DailyLogSnapshotFile {
   path: string;
@@ -73,7 +75,13 @@ interface DailyLogSnapshotFile {
   entry_count: number;
 }
 
+export interface DataManagerPresentation {
+  home: HomeProfileViewModel;
+  collections: CollectionViewModel[];
+}
+
 interface DailyLogSnapshot {
+  pipeline_hash?: string;
   generated_at: string;
   root: string;
   file_count: number;
@@ -270,6 +278,7 @@ export class DataManagerFacade {
   private homeRecommendationService: HomeRecommendationService;
   private imageResolver: DataManagerImageResolver;
   private avatarService: AvatarService;
+  private syncRunning: boolean = false;
 
   constructor(filesDir: string) {
     this.storage = new DataManagerStorage();
@@ -346,6 +355,61 @@ export class DataManagerFacade {
   }
 
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
+    if (this.syncRunning) { throw new Error('个人记忆正在同步，请稍候'); }
+    this.syncRunning = true;
+    let metrics = new SyncMetrics(); let success = false;
+    this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead();
+    this.modelClient.resetSyncMetrics();
+    try {
+      let result = await this.refreshInternal(modelConfig, (value: DataManagerProgress): void => {
+        metrics.mark(value.stage);
+        if (progress) { progress(value); }
+      }, groupingModelConfig);
+      success = true; return result;
+    } finally {
+      this.indexService.endSyncRead();
+      let hits = this.storage.endReadSession();
+      dataManagerInfo('SYNC_READ_CACHE hits=' + hits);
+      this.modelClient.reportSyncMetrics(); metrics.finish(success); this.syncRunning = false;
+    }
+  }
+
+  async refreshAutomaticSources(modelConfig: DataManagerModelConfig, chat: boolean, calendar: boolean,
+    progress?: DataManagerProgressCallback): Promise<void> {
+    if (this.syncRunning) { throw new Error('个人记忆正在同步，请稍候'); }
+    this.syncRunning = true;
+    this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead();
+    this.modelClient.resetSyncMetrics();
+    let metrics = new SyncMetrics(); let success = false;
+    let report: DataManagerProgressCallback = (value: DataManagerProgress): void => {
+      metrics.mark(value.stage);
+      if (progress) { progress(value); }
+    };
+    try {
+      this.ensureReady();
+      let statePaths: string[] = [];
+      if (chat) {
+        this.emitProgress(report, '检查新增聊天', '正在检查尚未处理的聊天内容', 0, 0, 2);
+        await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, report);
+        statePaths = await this.consolidationService.consolidateChat(modelConfig, report);
+      }
+      this.emitProgress(report, '检查记忆变化', '正在检查聊天和日历是否需要更新索引', 0, 0, 60);
+      let selection: IndexSourceSelection = { chat: chat, calendar: calendar, statePaths: statePaths };
+      if (this.indexService.selectedSourcesNeedRefresh(selection)) {
+        await this.indexService.build(modelConfig, report, selection);
+      }
+      this.emitProgress(report, '个人记忆已更新', '已完成本次聊天和日历检查', 1, 1, 100);
+      success = true;
+      // No gallery export, full daily-log scan, collection grouping, suggestion
+      // generation or full-sync snapshot: these remain explicit manual actions.
+    } finally {
+      this.indexService.endSyncRead(); this.storage.endReadSession();
+      this.modelClient.reportSyncMetrics(); metrics.finish(success); this.syncRunning = false;
+    }
+  }
+
+  private async refreshInternal(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
     this.ensureReady();
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
@@ -355,6 +419,8 @@ export class DataManagerFacade {
     let chatMessage = chatSummary.processedParts > 0 ?
       `已检查近 7 天未处理聊天，提取 ${chatSummary.factCount} 条相关信息` : '';
     let currentSnapshot = this.buildDailyLogSnapshot();
+    currentSnapshot.pipeline_hash = this.storage.sha256Text('sync-v2:' + this.modelClient.profileCacheIdentity(modelConfig) +
+      ':' + groupingConfig.baseUrl + ':' + (groupingConfig.model || '') + ':' + String(groupingConfig.enabled));
     let previousSnapshot = this.loadDailyLogSnapshot();
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
       this.emitProgress(progress, '索引', '正在更新采集分组', 96, 100, 96);
@@ -469,6 +535,13 @@ export class DataManagerFacade {
   private buildDailyLogSnapshot(): DailyLogSnapshot {
     let files: DailyLogSnapshotFile[] = [];
     let paths = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
+    // Registered sources survive transient directory-enumeration failures.
+    this.loadDailyLogSnapshot().files.forEach((file: DailyLogSnapshotFile) => {
+      if (/^\d{4}-\d{2}-\d{2}\/[^/\\]+\.md$/.test(file.path)) {
+        let known = this.storage.join(this.paths.dailyLogRoot, file.path);
+        if (this.storage.exists(known)) { paths.push(known); }
+      }
+    });
     GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
       paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
     });
@@ -476,8 +549,10 @@ export class DataManagerFacade {
       paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
     });
     stableUnique(paths).forEach((path: string) => {
+      if (!this.storage.exists(path)) { return; }
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
-      let content = this.storage.readText(path, '');
+      let content = this.storage.readText(path, '\u0000SYNC_UNREADABLE\u0000');
+      if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
       let document = parseDailyLogDocument(content);
       let entryCount = parseNumberedEntries(document.body).length;
       files.push({
@@ -503,10 +578,11 @@ export class DataManagerFacade {
 
   private loadDailyLogSnapshot(): DailyLogSnapshot {
     let snapshot = this.storage.readJson<DailyLogSnapshot>(this.dailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
+    if (!snapshot || typeof snapshot.tree_hash !== 'string' || !Array.isArray(snapshot.files)) { return this.emptyDailyLogSnapshot(); }
     if (snapshot.tree_hash.length === 0 && !this.storage.exists(this.dailyLogSnapshotPath())) {
       snapshot = this.storage.readJson<DailyLogSnapshot>(this.legacyDailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
     }
-    if (!snapshot || !Array.isArray(snapshot.files)) {
+    if (!snapshot || typeof snapshot.tree_hash !== 'string' || !Array.isArray(snapshot.files)) {
       return this.emptyDailyLogSnapshot();
     }
     return snapshot;
@@ -520,10 +596,12 @@ export class DataManagerFacade {
     let previousCounts: Record<string, number> = new Object() as Record<string, number>;
     previous.files.forEach((file: DailyLogSnapshotFile) => previousCounts[file.path] = file.entry_count);
     return current.files.some((file: DailyLogSnapshotFile): boolean =>
+      !/^app-chat__(local|cloud)__\d+\.md$/.test(this.storage.basename(file.path)) &&
       file.entry_count > (previousCounts[file.path] || 0));
   }
 
   private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+    if (!current.pipeline_hash || previous.pipeline_hash !== current.pipeline_hash) { return false; }
     if (previous.tree_hash.length === 0 || previous.tree_hash !== current.tree_hash) {
       return false;
     }
@@ -534,16 +612,22 @@ export class DataManagerFacade {
   }
 
   private hasGeneratedDataForSnapshot(snapshot: DailyLogSnapshot): boolean {
-    if (snapshot.entry_count === 0) {
-      return false;
-    }
     let profile = this.indexService.loadProfileState();
     let eventCount = Object.keys(this.indexService.loadEvents()).length;
+    if (snapshot.entry_count === 0 && new CalendarMemoryStore(this.paths.filesDir).events().length === 0) {
+      return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json')) && profile.event_count === 0 && eventCount === 0;
+    }
     return eventCount > 0 && profile.event_count > 0;
   }
 
   private canRecoverIndexesFromConsolidatedOutputs(previous: DailyLogSnapshot, snapshot: DailyLogSnapshot): boolean {
     if (snapshot.entry_count === 0) {
+      return false;
+    }
+    // Edited/deleted sources need consolidation to retract merged evidence,
+    // even when every remaining source reference is already covered.
+    if (previous.files.some((old: DailyLogSnapshotFile): boolean =>
+      !snapshot.files.some((current: DailyLogSnapshotFile): boolean => current.path === old.path && current.sha256 === old.sha256))) {
       return false;
     }
     if (this.sameDailyLogSnapshot(previous, snapshot) && this.hasConsolidatedOutputFilesForSnapshot(snapshot)) {
@@ -705,7 +789,7 @@ export class DataManagerFacade {
     let mailStore = new MailStore(this.paths.filesDir);
     let mailSnapshot = mailStore.current();
     let mailReminder = mailStore.settings().enabled ? mailOverview(mailSnapshot) : undefined;
-    let mailPreview = visibleMail(mailSnapshot.items, false, false).slice(0, 8).map((item): string => item.subject);
+    let mailPreview = visibleMail(todayMail(mailSnapshot.items), false, false).slice(0, 8).map((item): string => item.summary || item.subject);
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
       let empty = createEmptyHomeProfileViewModel();
@@ -797,6 +881,18 @@ export class DataManagerFacade {
 
   listAvatarVersions(): AvatarVersionViewModel[] {
     return this.avatarService.listVersionViewModels();
+  }
+
+  loadPresentationSnapshot(): DataManagerPresentation {
+    let ownScope = !this.syncRunning; let started = Date.now();
+    if (ownScope) { this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead(); }
+    try { return { home: this.loadHomeViewModel(), collections: this.loadCollectionViewModels() }; }
+    finally {
+      if (ownScope) {
+        this.indexService.endSyncRead();
+        dataManagerInfo('PRESENTATION_READ elapsedMs=' + (Date.now() - started) + ' readCacheHits=' + this.storage.endReadSession());
+      }
+    }
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {

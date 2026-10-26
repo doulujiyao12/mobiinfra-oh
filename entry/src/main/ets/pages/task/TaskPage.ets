@@ -130,6 +130,9 @@ export struct TaskPage {
     async (_task: WorkflowTask, _cancellation: WorkflowCancellation): Promise<void> => {
     throw new Error('手机任务执行器未连接');
   };
+  onSyncCollectedTasks: () => Promise<void> = async (): Promise<void> => {
+    throw new Error('采集结果同步器未连接');
+  };
   @State private taskControlMode: string = 'phone';
   @StorageLink('selfHdcRunning') private phoneControlBusy: boolean = false;
   @StorageLink('agentExecutionActive') private agentExecutionBusy: boolean = false;
@@ -172,6 +175,7 @@ export struct TaskPage {
   @Link @Watch('onConfigViewChanged') configViewOpen: boolean;
   @State private focusedConfigTaskId: string = '';
   @State batchRunning: boolean = false;
+  @State private batchSyncing: boolean = false;
   @State private batchStopRequested: boolean = false;
   @State batchRunStatusText: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
@@ -613,6 +617,7 @@ export struct TaskPage {
   }
 
   private batchRunButtonText(): string {
+    if (this.batchSyncing) { return '正在同步分析…'; }
     if (this.batchRunning) {
       return this.batchStopRequested ? '正在停止…' : '停止执行';
     }
@@ -624,12 +629,13 @@ export struct TaskPage {
   }
 
   private batchRunButtonEnabled(): boolean {
+    if (this.batchSyncing) { return false; }
     return this.batchRunning ? !this.batchStopRequested :
       this.enabledTaskCount() > 0 && !this.batchPreparing && !this.isTaskExecutionBusy();
   }
 
   private stopEnabledTasks(): void {
-    if (!this.batchRunning || this.batchStopRequested || this.batchCancellation === null) { return; }
+    if (!this.batchRunning || this.batchSyncing || this.batchStopRequested || this.batchCancellation === null) { return; }
     // Set the queue stop flag before cancelling the current asynchronous operation.
     this.batchStopRequested = true;
     this.batchRunStatusText = '正在停止当前任务，后续任务不再下发…';
@@ -921,6 +927,7 @@ export struct TaskPage {
     this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
     let stoppedByError = false;
     let stoppedByCancel = false;
+    let attemptedTasks = 0;
     try {
       for (let i = 0; i < queue.length; i++) {
         if (cancellation.isCancelled()) {
@@ -939,6 +946,7 @@ export struct TaskPage {
         this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
         this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
+          attemptedTasks++;
           await this.runSelectedWorkflow(currentTask, cancellation);
           this.tasks = WorkflowStorage.loadTasks(this.filesDir);
           if (cancellation.isCancelled() || this.isTaskCancelled(currentTask.id)) {
@@ -962,13 +970,26 @@ export struct TaskPage {
       }
       if (stoppedByCancel || cancellation.isCancelled()) {
         showToastSafely('批量执行已停止，剩余任务未下发', 1800);
-      } else if (!stoppedByError) {
-        showToastSafely('已完成开启任务的依次执行', 1500);
+      } else if (attemptedTasks > 0) {
+        // Runners have finished deferred summaries and written daily-log before returning.
+        // Keep the batch locked until its one follow-up sync settles.
+        this.batchSyncing = true;
+        this.batchRunStatusText = '采集结束，正在同步分析…';
+        AppLogger.info('Workflow.Batch', 'COLLECTION_SYNC_BEGIN tasks=' + attemptedTasks + ' partial=' + stoppedByError);
+        try {
+          await this.onSyncCollectedTasks();
+          AppLogger.info('Workflow.Batch', 'COLLECTION_SYNC_SUCCESS');
+          showToastSafely(stoppedByError ? '部分任务未完成，已同步现有采集结果' : '任务已完成并同步分析', 2200);
+        } catch (e) {
+          AppLogger.errorCause('Workflow.Batch', 'COLLECTION_SYNC_FAILED; collected files retained', e as Error);
+          showToastSafely('采集结果已保留，同步分析未完成，可到汇总页重新同步', 3000);
+        }
       }
     } finally {
       cancellation.setHandler(null);
       this.batchCancellation = null;
       this.batchStopRequested = false;
+      this.batchSyncing = false;
       this.batchRunning = false;
       this.runningTaskId = '';
       this.batchRunStatusText = '';
@@ -983,14 +1004,11 @@ export struct TaskPage {
     cancellation.throwIfCancelled();
     if (this.taskControlMode === 'phone') {
       await this.onRunPhoneWorkflow(task, cancellation);
-      if (this.batchRunning) {
-        let saved = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
-        if (saved && (saved.lastStatus === 'failed' || saved.lastStatus === '失败')) {
-          throw new Error(saved.lastMessage || '手机任务失败，停止后续批量任务');
-        }
-      }
     } else { await this.onRunWorkflow(task, cancellation); }
     let savedTask = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
+    if (this.batchRunning && savedTask && (savedTask.lastStatus === 'failed' || savedTask.lastStatus === '失败')) {
+      throw new Error(savedTask.lastMessage || '任务失败，停止后续批量任务');
+    }
     if (!cancellation.isCancelled() && savedTask !== undefined && savedTask.lastStatus === 'success') {
       CollectionReminderService.recordSuccessfulCollection().catch((e: Error): void => {
         AppLogger.errorCause('CollectionReminder', 'Collection history save failed', e);
@@ -3982,7 +4000,7 @@ export struct TaskPage {
         .fontSize(15)
         .fontWeight(FontWeight.Bold)
         .fontColor(AppTheme.text(Color.White))
-        .backgroundColor(AppTheme.filledBackground(this.batchRunning ? '#B42318' :
+        .backgroundColor(AppTheme.filledBackground(this.batchSyncing ? '#276EF1' : this.batchRunning ? '#B42318' :
           (this.batchRunButtonEnabled() ? '#276EF1' : '#A9B7E9')))
         .borderRadius(12)
         .enabled(this.batchRunButtonEnabled())

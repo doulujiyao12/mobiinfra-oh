@@ -3,7 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { http } from '@kit.NetworkKit';
 
 export const PRIVACY_STATE_KEY: string = 'privacyConsentState';
-export const PRIVACY_VERSION: string = '2026-10-19-v3';
+export const PRIVACY_VERSION: string = '2026-10-26-v4';
 export const PRIVACY_REQUIRED_MESSAGE: string = '请先阅读并同意隐私声明，再执行任务或使用云端分析。';
 
 export function normalizePrivacyChoice(value: string): string {

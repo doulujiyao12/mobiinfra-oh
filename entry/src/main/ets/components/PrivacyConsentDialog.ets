@@ -19,7 +19,9 @@ export const PRIVACY_DECLARATION: string =
   '仅在您主动连接并发送任务或选择附件后，Codex 页面的任务文本、所选图片和文件才会发送到您配置的电脑或服务器。该服务会保存任务记录与附件，并由该电脑上的 Codex 按其配置调用模型服务；这部分数据不适用上述云端临时处理后删除的说明。请仅连接您信任的服务器，按该服务器的规则管理和删除数据。手机仅通过系统安全存储记住桥接连接，不保存电脑的 OpenAI 登录凭据。\n\n' +
   'Codex 任务在电脑端执行，断开连接、退出 App 或撤回隐私同意会停止手机通信，但不会自动停止已经下发的电脑端任务；如需停止，请先在 Codex 页点击“停止”，或在电脑端终止任务。\n\n' +
   '7. 邮箱提醒（可选）\n' +
-  '仅在您配置并开启邮箱后，点击同步时才通过加密IMAP连接读取今天收件箱的发件人、主题和文本正文，不下载附件，也不修改邮箱的已读状态。邮件副本和处理标记保存在本应用沙箱中，客户端授权码单独保存在系统安全存储中。开启“允许AI筛选”需另外确认，确认后必要的邮件文本和关注偏好会发送到您配置的云端模型，处理规则以所选模型服务为准。邮箱授权码不会发送给模型。邮件暂不进入个人画像、个人记忆检索或小艺记忆分享；可在“我的 > 数据采集 > 邮箱提醒”关闭接入或移除本机邮件与授权码。\n\n' +
+  '仅在您配置并开启邮箱后，手动同步或跨天首次打开应用时，通过加密IMAP连接读取今天及前两天收件箱的发件人、主题和文本正文，不下载附件，也不修改邮箱的已读状态。近三天邮件副本和处理标记保存在本应用沙箱中，客户端授权码单独保存在系统安全存储中。开启“允许AI筛选”需另外确认，确认后必要的邮件文本和关注偏好会发送到您配置的云端模型，处理规则以所选模型服务为准。邮箱授权码不会发送给模型。邮件暂不进入个人画像、个人记忆检索或小艺记忆分享；可在“汇总 > 邮箱分析”关闭接入或移除本机邮件与授权码。\n\n' +
+  '8. 打开应用后的自动更新\n' +
+  '在您同意本声明并开启对应来源后，跨天首次打开应用会更新邮箱和已授权的日历，并提取近7天尚未处理的用户文字聊天，补充本机个人记忆。未授权日历、未配置邮箱会自动跳过。日历和聊天分析所需文本按当前记忆模型配置处理，使用云端模型时会发送至该服务。图库和任务采集记录仍需手动同步，开屏不会自动操控手机。可在“我的 > 数据采集 > 每日自动更新”关闭自动更新，手动同步仍可使用；也可关闭邮箱、日历来源或撤回本声明的同意。\n\n' +
   '声明版本：' + PRIVACY_VERSION;
 
 // Native ArkUI alert dialog supplies system layout, scrollable body and accessible buttons.
@@ -43,6 +45,12 @@ export class PrivacyConsentDialog {
       }
       return await new Promise<boolean>((resolve) => {
         let choiceMade = false;
+        let disappeared = false;
+        let saved = false;
+        let acceptedChoice = false;
+        let finish = (): void => {
+          if (disappeared && saved) { resolve(acceptedChoice); }
+        };
         let choose = (accepted: boolean): void => {
           if (choiceMade) {
             return;
@@ -52,10 +60,10 @@ export class PrivacyConsentDialog {
             if (!accepted) {
               showToastSafely('已拒绝云端处理，可继续查看本地内容');
             }
-            resolve(accepted);
+            acceptedChoice = accepted; saved = true; finish();
           }).catch(() => {
             showToastSafely('隐私选择保存失败，任务与上传保持关闭，请重试');
-            resolve(false);
+            saved = true; finish();
           });
         };
         uiContext.showAlertDialog({
@@ -65,9 +73,9 @@ export class PrivacyConsentDialog {
           alignment: DialogAlignment.Center,
           onWillDismiss: () => {},
           onDidDisappear: () => {
-            if (!choiceMade) {
-              resolve(false);
-            }
+            disappeared = true;
+            if (!choiceMade) { saved = true; }
+            finish();
           },
           primaryButton: { value: '不同意', action: () => { choose(false); } },
           secondaryButton: { value: '同意', action: () => { choose(true); } }

@@ -3,7 +3,7 @@ import { ComponentContent, UIContext } from '@kit.ArkUI';
 import { AppTheme, APP_DARK_MODE_KEY } from '../utils/AppTheme';
 import { MailStore } from '../utils/mail/MailStore';
 import { MailItem, MailSnapshot, emptyMailSnapshot, mailDay } from '../utils/mail/MailTypes';
-import { visibleMail } from '../utils/mail/MailReminderPolicy';
+import { visibleMail, mailForDay } from '../utils/mail/MailReminderPolicy';
 import { showToastSafely } from '../utils/PromptSafe';
 
 class MailTodayParams {
@@ -21,15 +21,20 @@ struct MailTodayContent {
   @State private expanded: string = '';
   @State private original: string = '';
   private timer: number = -1;
+  private shownDay: string = '';
   private store(): MailStore { return new MailStore((getContext(this) as common.Context).filesDir); }
   aboutToAppear(): void {
     this.snapshot = this.store().current();
+    this.shownDay = mailDay();
     this.timer = setInterval((): void => {
-      if (this.snapshot.day && this.snapshot.day !== mailDay()) { this.snapshot = this.store().current(); this.params.onChanged(); }
+      if (this.shownDay !== mailDay()) {
+        this.shownDay = mailDay(); this.snapshot = this.store().current(); this.params.onChanged();
+      }
     }, 60000);
   }
   aboutToDisappear(): void { if (this.timer !== -1) { clearInterval(this.timer); } }
   private items(): MailItem[] { return visibleMail(this.snapshot.items, this.all, this.completed); }
+  private dayItems(daysAgo: number): MailItem[] { return mailForDay(this.items(), daysAgo); }
   private receivedTime(item: MailItem): string {
     let date = new Date(item.receivedAt);
     return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
@@ -98,13 +103,25 @@ struct MailTodayContent {
     }.width('100%').alignItems(HorizontalAlign.Start).padding(18)
       .backgroundColor(AppTheme.background(Color.White)).borderRadius(18)
   }
+  @Builder MailDaySection(label: string, daysAgo: number) {
+    if (this.dayItems(daysAgo).length > 0) {
+      Column({ space: 12 }) {
+        Row({ space: 12 }) {
+          Text(label).fontSize(17).fontWeight(FontWeight.Bold)
+            .fontColor(AppTheme.text(daysAgo === 0 ? '#007AFF' : '#60697C'))
+          Divider().strokeWidth(1).color(AppTheme.border('#CFD4DF')).layoutWeight(1)
+        }.width('100%').padding({ left: 4, right: 4, top: 8, bottom: 4 })
+        ForEach(this.dayItems(daysAgo), (item: MailItem) => { this.MailRow(item) },
+          (item: MailItem): string => item.id + ':' + String(item.completed))
+      }.width('100%')
+    }
+  }
   build() {
     Column({ space: 14 }) {
       Row() {
-        Text('今日邮件').fontSize(21).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).layoutWeight(1)
+        Text('近三天邮件').fontSize(21).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).layoutWeight(1)
         Text('关闭').fontSize(14).fontColor(AppTheme.text('#7C8496')).padding(8).onClick(() => { this.params.onFinish(false); })
       }.width('100%')
-      Text('已读取' + this.snapshot.items.length + '封 · 仅收件箱 · 附件暂不读取').fontSize(12).fontColor(AppTheme.text('#7C8496')).width('100%')
       Row({ space: 16 }) {
         Text(this.all ? '全部邮件 ▾' : '关心与待判断 ▾').fontSize(13).fontColor(AppTheme.text('#6372D8')).layoutWeight(1)
           .onClick(() => { this.all = !this.all; })
@@ -115,17 +132,16 @@ struct MailTodayContent {
         Text(this.snapshot.error + (this.snapshot.stale && this.snapshot.syncedAt ? ' 当前显示上次成功读取的缓存。' : ''))
           .fontSize(12).lineHeight(20).fontColor(AppTheme.text('#D54A59')).width('100%')
       }
-      if (this.snapshot.notice) {
-        Text(this.snapshot.notice).fontSize(12).lineHeight(20).fontColor(AppTheme.text('#7C8496')).width('100%')
-      }
       Scroll() {
-        Column({ space: 14 }) {
+        Column({ space: 20 }) {
           if (this.items().length === 0) {
-            Text(this.snapshot.syncedAt ? '暂时没有符合当前筛选的邮件～\n可以切换全部邮件，或在邮箱设置中调整关注偏好。' : '还没有读取今天的邮件，去邮箱设置中同步一下吧～')
-              .fontSize(14).lineHeight(24).fontColor(AppTheme.text('#7C8496')).width('100%').margin({ top: 30 })
+            Text(this.snapshot.syncedAt ? '暂无符合筛选的邮件' : '暂无邮件')
+              .fontSize(14).lineHeight(24).fontColor(AppTheme.text('#7C8496')).textAlign(TextAlign.Center)
+              .width('100%').margin({ top: 30 })
           }
-          ForEach(this.items(), (item: MailItem) => { this.MailRow(item) },
-            (item: MailItem): string => item.id + ':' + String(item.completed))
+          this.MailDaySection('今天', 0)
+          this.MailDaySection('昨天', 1)
+          this.MailDaySection('前天', 2)
         }.width('100%')
       }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
       Text('管理邮箱与关注偏好').fontSize(13).fontColor(AppTheme.text('#6372D8')).width('100%')

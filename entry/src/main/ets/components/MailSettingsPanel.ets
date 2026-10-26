@@ -38,8 +38,8 @@ export struct MailSettingsPanel {
   private reloadStatus(): void {
     let snapshot = this.store().current();
     this.failed = snapshot.error.length > 0;
-    this.status = snapshot.error || (snapshot.syncedAt ? '已读取今日' + snapshot.items.length + '封 · ' +
-      new Date(snapshot.syncedAt).toLocaleTimeString() + (snapshot.partial ? ' · 部分读取' : '') : '只在点击同步时读取今天的收件箱');
+    this.status = snapshot.error || (snapshot.syncedAt ? '近三天已读取' + snapshot.items.length + '封 · ' +
+      new Date(snapshot.syncedAt).toLocaleString() + (snapshot.partial ? ' · 部分读取' : '') : '保留近三天邮件，首页展示今天的关注项');
   }
   private draft(): MailSettings {
     let settings = defaultMailSettings();
@@ -71,7 +71,7 @@ export struct MailSettingsPanel {
       await this.persist();
       if (sync) {
         if (!this.mailEnabled) { throw new Error('请先开启邮件提醒'); }
-        this.status = '正在读取并筛选今日邮件…';
+        this.status = '正在读取并筛选近三天邮件…';
         await this.onSync();
         this.reloadStatus();
       } else { this.status = '设置已保存，下次同步生效'; }
@@ -81,7 +81,7 @@ export struct MailSettingsPanel {
   private async changeAi(value: boolean): Promise<void> {
     if (!value) { this.aiAllowed = false; return; }
     let answer = await promptAction.showDialog({ title: '允许AI筛选邮件？',
-      message: '将今天读取的发件人、主题和正文发送到你配置的云端模型进行摘要与关注筛选；附件和邮箱授权码不会发送。邮件不参与个人画像。',
+      message: '将近三天读取的发件人、主题和正文发送到你配置的云端模型进行摘要与关注筛选；附件和邮箱授权码不会发送。邮件不参与个人画像。',
       buttons: [{ text: '取消', color: AppTheme.dialogText('#7C8496') }, { text: '允许', color: AppTheme.dialogText('#6372D8') }] });
     this.aiAllowed = answer.index === 1;
   }
@@ -143,14 +143,14 @@ export struct MailSettingsPanel {
   }
   @Builder ReadFields() {
     Row({ space: 12 }) {
-      Text('今日读取上限').fontSize(16).fontColor(AppTheme.text('#172033')).layoutWeight(1)
+      Text('每天读取上限').fontSize(16).fontColor(AppTheme.text('#172033')).layoutWeight(1)
       Select([{ value: '20 封' }, { value: '50 封' }, { value: '100 封' }])
         .selected([20, 50, 100].indexOf(this.maxMessages)).value(this.maxMessages + ' 封')
         .font({ size: 15 }).fontColor(AppTheme.text('#60697C')).optionFont({ size: 15 })
         .backgroundColor(Color.Transparent).onSelect((index: number): void => { this.maxMessages = [20, 50, 100][index]; })
     }.width('100%').constraintSize({ minHeight: 56 }).padding({ left: 16, right: 12 })
     CollectionFormDivider()
-    CollectionFormAction({ label: this.busy ? '正在读取今日邮件…' : '保存并读取今日邮件',
+    CollectionFormAction({ label: this.busy ? '正在读取近三天邮件…' : '保存并读取近三天邮件',
       onAction: (): void => { this.save(true); } })
     CollectionFormDivider()
     CollectionFormAction({ label: '仅保存设置', onAction: (): void => { this.save(false); } })
@@ -167,7 +167,7 @@ export struct MailSettingsPanel {
 
   build() {
     Column() {
-      CollectionFormGroup({ footer: '下方保存后生效。开启后，点击汇总页“同步”也会更新今日收件箱。',
+      CollectionFormGroup({ footer: '下方保存后生效。跨天后首次打开应用会自动更新；也可点击汇总页“同步”。保留今天和前两天，首页只突出今日邮件。',
         contentBuilder: (): void => { this.AccessFields(); } })
       CollectionFormGroup({ title: '邮箱账号',
         footer: '先在邮箱网页开启 IMAP 并生成客户端授权码。支持 IMAP 加密收信，暂不支持 Outlook、Gmail 的 OAuth 登录。',

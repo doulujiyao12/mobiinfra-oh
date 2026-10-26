@@ -7,6 +7,20 @@ const EMPTY_SHA256: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4
 type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
 
 export class DataManagerStorage {
+  private readPrefix: string = '';
+  private readCache: Map<string, string> = new Map<string, string>();
+  private readBytes: number = 0;
+  private readHits: number = 0;
+  beginReadSession(prefix: string): void {
+    this.readPrefix = prefix + '/'; this.readCache.clear(); this.readBytes = 0; this.readHits = 0;
+  }
+  endReadSession(): number {
+    let hits = this.readHits; this.readPrefix = ''; this.readCache.clear(); this.readBytes = 0; return hits;
+  }
+  private invalidateRead(path: string): void {
+    let cached = this.readCache.get(path);
+    if (cached !== undefined) { this.readBytes -= cached.length * 2; this.readCache.delete(path); }
+  }
   join(...parts: string[]): string {
     let filtered = parts
       .filter((part: string) => part.length > 0)
@@ -84,6 +98,10 @@ export class DataManagerStorage {
   }
 
   readText(path: string, fallback: string = ''): string {
+    let cached = this.readCache.get(path);
+    if (this.readPrefix.length > 0 && path.startsWith(this.readPrefix) && cached !== undefined) {
+      this.readHits++; return cached;
+    }
     try {
       if (!this.exists(path)) {
         return fallback;
@@ -93,7 +111,11 @@ export class DataManagerStorage {
         let stat = fs.statSync(path);
         let buf = new ArrayBuffer(stat.size);
         fs.readSync(file.fd, buf);
-        return this.decodeText(new Uint8Array(buf));
+        let text = this.decodeText(new Uint8Array(buf));
+        if (this.readPrefix.length > 0 && path.startsWith(this.readPrefix) && this.readBytes + text.length * 2 <= 16 * 1024 * 1024) {
+          this.readCache.set(path, text); this.readBytes += text.length * 2;
+        }
+        return text;
       } finally {
         fs.closeSync(file);
       }
@@ -103,6 +125,7 @@ export class DataManagerStorage {
   }
 
   writeText(path: string, content: string): void {
+    this.invalidateRead(path);
     try {
       let parent = this.dirname(path);
       if (parent.length > 0) {
@@ -122,6 +145,7 @@ export class DataManagerStorage {
   }
 
   writeBytes(path: string, bytes: Uint8Array): void {
+    this.invalidateRead(path);
     try {
       let parent = this.dirname(path);
       if (parent.length > 0) {
@@ -141,6 +165,7 @@ export class DataManagerStorage {
   }
 
   writeBytesAtomic(path: string, bytes: Uint8Array): void {
+    this.invalidateRead(path);
     let temporary = path + '.tmp';
     this.writeBytes(temporary, bytes);
     try {
@@ -161,6 +186,7 @@ export class DataManagerStorage {
   }
 
   writeTextAtomic(path: string, content: string): void {
+    this.invalidateRead(path);
     let temporary = path + '.tmp';
     this.writeText(temporary, content);
     try {
@@ -197,6 +223,7 @@ export class DataManagerStorage {
   }
 
   removeFile(path: string): void {
+    this.invalidateRead(path);
     try {
       if (this.exists(path)) {
         fs.unlinkSync(path);

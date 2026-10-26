@@ -2,6 +2,8 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
+import { ProfileBlockCache, PROFILE_BLOCK_POLICY } from './ProfileBlockCache';
+import { IndexWriteBatch } from './IndexWriteBatch';
 import { dataManagerInfo, dataManagerWarn } from './DataManagerLog';
 import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
 import { calendarProfileEvents } from '../utils/calendar/CalendarMemoryPolicy';
@@ -10,6 +12,7 @@ import {
   BooleanMap,
   ConsolidatedState,
   DataManagerModelConfig,
+  DataManagerProgress,
   DataManagerProgressCallback,
   DOMAIN_DISPLAY_NAMES,
   DOMAIN_KEYS,
@@ -91,7 +94,9 @@ interface EnrichmentManifest {
   schema: string;
   mode: string;
   base_url: string;
+  model_name?: string;
 }
+interface EventCheckpoint { hash: string; eventHash: string; event: IndexedEvent; }
 
 interface IndexManifest {
   generated_at: string;
@@ -211,9 +216,6 @@ type ImageReferenceCandidateMap = Record<string, ImageReferenceCandidate[]>;
 
 const ENTITY_TYPE_KEYS: string[] = ['person', 'place', 'merchant'];
 
-const PROFILE_MODEL_MAX_TOKENS: number = 3000;
-const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
-const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 
 interface TemporalDayNode {
   date: string;
@@ -353,20 +355,53 @@ export function buildProfileDomainStateFromPayload(domain: string, inputHash: st
   return domainState;
 }
 
+export interface IndexSourceSelection {
+  chat: boolean;
+  calendar: boolean;
+  statePaths: string[];
+}
+
 export class IndexService {
   private paths: DataManagerPaths;
   private storage: DataManagerStorage;
   private modelClient: DataPipelineModelClient;
+  private readScope: boolean = false;
+  private syncEvents: EventMap | null = null;
+  private dirtyMonths: BooleanMap = {};
+  beginSyncRead(): void { this.readScope = true; this.syncEvents = null; }
+  endSyncRead(): void { this.readScope = false; this.syncEvents = null; }
+  private ensureCommitted(): void {
+    if (this.storage.exists(this.paths.indexesRoot + '.pending-sync/prepared.json')) {
+      IndexWriteBatch.recover(this.paths.indexesRoot, this.storage); this.syncEvents = null;
+    }
+  }
 
   constructor(paths: DataManagerPaths, storage: DataManagerStorage, modelClient: DataPipelineModelClient) {
     this.paths = paths;
     this.storage = storage;
     this.modelClient = modelClient;
+    this.ensureCommitted();
   }
 
-  async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<IndexBuildResult> {
+  async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    selection?: IndexSourceSelection): Promise<IndexBuildResult> {
+    this.ensureCommitted();
+    let batch = new IndexWriteBatch(this.paths.indexesRoot, this.storage);
+    let worker = new IndexService(this.paths, batch, this.modelClient);
+    try {
+      let result = await worker.buildPrepared(modelConfig, progress, selection);
+      batch.commit();
+      this.syncEvents = this.readScope ? worker.syncEvents : null;
+      return result;
+    } catch (e) { this.syncEvents = null; throw new Error((e as Error).message || '索引构建失败，请重试'); }
+  }
+
+  private async buildPrepared(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    selection?: IndexSourceSelection): Promise<IndexBuildResult> {
     this.paths.ensureBaseDirs();
-    let statePaths = this.loadOutputStatePaths();
+    // Startup reads only selected chat outputs. It must not discover pending
+    // task/gallery output files or acknowledge them as manually synchronized.
+    let statePaths = selection ? selection.statePaths : this.loadOutputStatePaths();
     this.emitProgress(progress, '索引', `发现 ${statePaths.length} 个整理文件`, 0, Math.max(1, statePaths.length), 62);
     dataManagerInfo(`Index build start: stateFiles=${statePaths.length}, outputsRoot=${this.paths.outputsRoot}, modelEnabled=${modelConfig.enabled}`);
     if (statePaths.length === 0) {
@@ -374,11 +409,33 @@ export class IndexService {
     }
     let enrichment = this.currentEnrichment(modelConfig);
     let previousManifest = this.loadManifest();
-    let previousEvents = this.loadEvents();
+    let previousEvents = this.loadStoredEvents();
     let reuseAllowed = this.canReuseIndex(previousManifest, enrichment);
-    let imageReferences = this.buildImageReferenceMap();
+    let imageReferences: StringArrayMap = selection ? {} : this.buildImageReferenceMap();
     let events: EventMap = {};
     let sources: SourceManifestMap = {};
+    if (selection) {
+      Object.keys(previousManifest.sources).forEach((relative: string) => {
+        if (selection.chat && /^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative))) { return; }
+        let source = previousManifest.sources[relative];
+        sources[relative] = source;
+        source.event_ids.forEach((id: string) => {
+          if (!previousEvents[id]) { throw new Error('历史索引不完整，请先手动同步修复'); }
+          events[id] = previousEvents[id];
+        });
+      });
+      statePaths.forEach((path: string) => {
+        if (!selection.chat || !path.startsWith(this.paths.outputsRoot + '/') ||
+          !/^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(path))) {
+          throw new Error('自动同步来源无效');
+        }
+      });
+      if (!selection.calendar) {
+        Object.keys(previousEvents).forEach((id: string) => {
+          if (previousEvents[id].calendar) { events[id] = previousEvents[id]; }
+        });
+      }
+    }
     let counters: IndexBuildCounters = {
       completedSources: 0,
       reusedEvents: 0,
@@ -387,23 +444,43 @@ export class IndexService {
     await this.buildSourcesConcurrently(statePaths, previousManifest, previousEvents, reuseAllowed, imageReferences,
       modelConfig, events, sources, counters, progress);
 
-    await this.buildCalendarEvents(events, previousEvents, modelConfig);
+    if (!selection || selection.calendar) { await this.buildCalendarEvents(events, previousEvents, modelConfig); }
+
+    let changed: BooleanMap = {};
+    let oldChanged: EventMap = {};
+    let newChanged: EventMap = {};
+    stableUnique(Object.keys(previousEvents).concat(Object.keys(events))).forEach((id: string) => {
+      if (ArkJSON.stringify(previousEvents[id] || null) !== ArkJSON.stringify(events[id] || null)) {
+        changed[id] = true;
+        if (previousEvents[id]) { oldChanged[id] = previousEvents[id]; this.dirtyMonths[monthKeyFromDate(previousEvents[id].event_date)] = true; }
+        if (events[id]) { newChanged[id] = events[id]; this.dirtyMonths[monthKeyFromDate(events[id].event_date)] = true; }
+      }
+    });
+    dataManagerInfo('SYNC_EVENT_DELTA total=' + Object.keys(events).length + ' changed=' + Object.keys(changed).length +
+      ' enriched=' + counters.enrichedEvents + ' reused=' + counters.reusedEvents);
 
     this.emitProgress(progress, '写入索引', '正在写入事件索引', 85, 100, 85);
     this.writeEventPartitions(events);
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'inverted', 'index.json'), this.buildInvertedDocument(events));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.buildSourceDocument(events));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'domain', 'index.json'), this.buildDomainDocument(events));
+    this.writePostingIndex('inverted', this.buildInvertedDocument(oldChanged).postings, this.buildInvertedDocument(newChanged).postings,
+      events, changed, reuseAllowed);
+    this.writePostingIndex('source', this.buildSourceDocument(oldChanged).postings, this.buildSourceDocument(newChanged).postings,
+      events, changed, reuseAllowed);
+    this.writePostingIndex('domain', this.buildDomainDocument(oldChanged).postings, this.buildDomainDocument(newChanged).postings,
+      events, changed, reuseAllowed);
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'workflow-scene'));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.buildWorkflowSceneDocument(events));
+    this.writePostingIndex('workflow-scene', this.buildWorkflowSceneDocument(oldChanged).postings,
+      this.buildWorkflowSceneDocument(newChanged).postings, events, changed, reuseAllowed);
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'home-todo'));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.buildHomeTodoDocument(events));
+    // A skipped/revoked calendar may still have old published records. Retain
+    // those files, but never send unavailable calendar facts to model analysis.
+    let analysisEvents = selection && !selection.calendar ? this.filterCurrentCalendarEvents(events) : events;
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
-    let entityDocument = await this.buildEntityDocument(events, modelConfig, previousEntity, reuseAllowed && this.hasEntityIndexData(previousEntity));
+    let entityDocument = await this.buildEntityDocument(analysisEvents, modelConfig, previousEntity, reuseAllowed && this.hasEntityIndexData(previousEntity));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
     this.writeTemporalDocuments(events);
-    this.emitProgress(progress, '生成画像', '正在生成用户画像', 90, 100, 90);
-    let profile = await this.buildProfileDocument(events, modelConfig, reuseAllowed, progress);
+    this.emitProgress(progress, '生成画像', '正在检查画像分块', 0, this.profileDomainKeys().length, 85);
+    let profile = await this.buildProfileDocument(analysisEvents, modelConfig, reuseAllowed, progress);
     dataManagerInfo(`Index profile built: eventCount=${profile.event_count}, claimCount=${profile.claim_count}`);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), profile as Object);
     this.storage.writeTextAtomic(this.storage.join(this.paths.indexesRoot, 'profile', 'profile.md'), this.renderProfileMarkdown(profile));
@@ -413,11 +490,15 @@ export class IndexService {
       input_root: 'workflows/profile-consolidation/outputs',
       index_dir: 'workflows/profile-consolidation/indexes',
       run_root: 'workflows/runs',
-      enrichment: enrichment,
+      // Unselected historical sources retain their previous model identity;
+      // a partial startup update cannot mark the whole corpus as reclassified.
+      enrichment: selection ? previousManifest.enrichment : enrichment,
       entity_types: ENTITY_TYPE_KEYS,
-      sources: this.orderedSourcesByStatePaths(sources, statePaths)
+      sources: this.orderedSourcesByStatePaths(sources, selection ?
+        Object.keys(sources).map((relative: string): string => this.storage.join(this.paths.outputsRoot, relative)) : statePaths)
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
+    this.syncEvents = events;
     dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${counters.reusedEvents}, enriched=${counters.enrichedEvents}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
     // Keep the index handoff aligned with DataManagerFacade's collection grouping range.
     this.emitProgress(progress, '写入索引', '索引写入完成', 96, 100, 96);
@@ -427,6 +508,25 @@ export class IndexService {
       profileClaimCount: profile.claim_count,
       updatedAt: profile.generated_at
     };
+  }
+
+  selectedSourcesNeedRefresh(selection: IndexSourceSelection): boolean {
+    this.ensureCommitted();
+    let previous = this.loadManifest();
+    if (selection.chat) {
+      let selected = selection.statePaths.map((path: string): string => this.storage.relativePath(this.paths.outputsRoot, path));
+      if (Object.keys(previous.sources).some((relative: string): boolean =>
+        /^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative)) && selected.indexOf(relative) < 0)) { return true; }
+      for (let path of selection.statePaths) {
+        let relative = this.storage.relativePath(this.paths.outputsRoot, path);
+        if (!previous.sources[relative] || previous.sources[relative].sha256 !== this.storage.sha256Text(this.storage.readText(path))) { return true; }
+      }
+    }
+    if (selection.calendar) {
+      let profile = this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+      if (profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) { return true; }
+    }
+    return false;
   }
 
   private async buildCalendarEvents(events: EventMap, previous: EventMap, config: DataManagerModelConfig): Promise<void> {
@@ -449,7 +549,7 @@ export class IndexService {
     Object.keys(representatives).forEach((key: string) => {
       if (!enrichedMap[key]) { pending.push(representatives[key]); }
     });
-    let enriched = await this.modelClient.enrichEvents(pending, config);
+    let enriched = await this.enrichWithCheckpoint(pending, config);
     let keyById: StringMap = {};
     Object.keys(representatives).forEach((key: string) => keyById[representatives[key].event_id] = key);
     enriched.forEach((event: IndexedEvent) => enrichedMap[keyById[event.event_id]] = event);
@@ -470,6 +570,15 @@ export class IndexService {
   }
 
   private loadOutputStatePaths(): string[] {
+    let index = this.storage.readJson<JsonMap>(this.storage.join(this.paths.outputsRoot, 'state-index.json'), createJsonMap());
+    if (index['schema'] === 'datamanager-consolidation-output-state-index-v1') {
+      if (!Array.isArray(index['state_paths'])) { throw new Error('日志整理清单损坏，请重试同步'); }
+      // An authoritative empty list means sources were removed. Directory scans
+      // must not resurrect orphaned output states from previous synchronizations.
+      let indexed = this.outputStatePathsFromIndex();
+      if (indexed.some((file: string): boolean => !this.storage.exists(file))) { throw new Error('日志整理尚未完成，请重试同步'); }
+      return indexed.sort();
+    }
     let paths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
     paths = paths.concat(this.outputStatePathsFromIndex());
     return stableUnique(paths)
@@ -487,6 +596,10 @@ export class IndexService {
     (value as string[]).forEach((item: string) => {
       let relativePath = normalizeFreeText(item);
       if (relativePath.length > 0) {
+        if (relativePath.startsWith('/') || relativePath.indexOf('\\') >= 0 ||
+          relativePath.split('/').some((part: string): boolean => part === '..' || part === '.')) {
+          throw new Error('日志整理清单路径无效');
+        }
         paths.push(this.storage.join(this.paths.outputsRoot, relativePath));
       }
     });
@@ -561,6 +674,10 @@ export class IndexService {
     previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
     modelConfig: DataManagerModelConfig): Promise<IndexSourceBuildResult> {
     let content = this.storage.readText(statePath, '');
+    try {
+      let state = ArkJSON.parse(content) as ConsolidatedState;
+      if (!state || !Array.isArray(state.records)) { throw new Error('Invalid source state'); }
+    } catch (e) { throw new Error('日志整理结果无法读取，请重试同步'); }
     let digest = this.storage.sha256Text(content);
     let eventIds: string[] = [];
     let eventInputHashes: StringMap = createStringMap();
@@ -593,7 +710,7 @@ export class IndexService {
           eventsToEnrich.push(event);
         }
       });
-      let enrichedEvents = await this.modelClient.enrichEvents(eventsToEnrich, modelConfig);
+      let enrichedEvents = await this.enrichWithCheckpoint(eventsToEnrich, modelConfig);
       for (let enriched of enrichedEvents) {
         enriched.profile_domains = deriveProfileDomains(enriched);
         eventsById[enriched.event_id] = enriched;
@@ -626,6 +743,7 @@ export class IndexService {
   }
 
   query(options: QueryOptions): QueryResult {
+    this.ensureCommitted();
     let candidateIds = this.queryCandidateIds(options);
     let events = this.loadEventsByIds(candidateIds);
     return this.queryWithEvents(options, events);
@@ -719,6 +837,7 @@ export class IndexService {
   }
 
   loadProfileState(): ProfileState {
+    this.ensureCommitted();
     let profile = this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
     if (profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) {
       Object.keys(profile.domains).forEach((key: string) => {
@@ -741,18 +860,23 @@ export class IndexService {
   }
 
   loadEvents(): EventMap {
+    this.ensureCommitted();
+    if (this.readScope && this.syncEvents !== null) { return this.filterCurrentCalendarEvents(this.syncEvents); }
+    let result = this.loadStoredEvents();
+    if (this.readScope) { this.syncEvents = result; }
+    return this.filterCurrentCalendarEvents(result);
+  }
+
+  private loadStoredEvents(): EventMap {
     let result: EventMap = {};
     let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
-    this.eventPartitionNames()
-      .forEach((name: string) => {
-        let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
-        if (partition && Array.isArray(partition.events)) {
-          partition.events.forEach((event: IndexedEvent) => {
-            result[event.event_id] = this.copyEvent(event);
-          });
-        }
-      });
-    return this.filterCurrentCalendarEvents(result);
+    this.eventPartitionNames().forEach((name: string) => {
+      let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
+      if (partition && Array.isArray(partition.events)) {
+        partition.events.forEach((event: IndexedEvent) => result[event.event_id] = this.copyEvent(event));
+      }
+    });
+    return result;
   }
 
   private filterCurrentCalendarEvents(events: EventMap): EventMap {
@@ -768,6 +892,12 @@ export class IndexService {
   }
 
   loadEventsByIds(eventIds: string[]): EventMap {
+    this.ensureCommitted();
+    if (this.readScope) {
+      let all = this.loadEvents(); let selected: EventMap = {};
+      stableUnique(eventIds).forEach((id: string) => { if (all[id]) { selected[id] = this.copyEvent(all[id]); } });
+      return selected;
+    }
     let result: EventMap = {};
     let uniqueIds = stableUnique(eventIds);
     if (uniqueIds.length === 0) {
@@ -808,6 +938,7 @@ export class IndexService {
   }
 
   loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
+    this.ensureCommitted();
     let document = this.storage.readJson<HomeTodoDocument>(
       this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
     let deadlineEventIds: string[] = [];
@@ -1146,7 +1277,8 @@ export class IndexService {
     let enrichment: EnrichmentManifest = {
       schema: 'todo_signal_agent_task',
       mode: modelConfig.enabled ? 'model' : 'heuristic',
-      base_url: modelConfig.baseUrl
+      base_url: modelConfig.baseUrl,
+      model_name: modelConfig.model || ''
     };
     return enrichment;
   }
@@ -1164,6 +1296,7 @@ export class IndexService {
       previousManifest.enrichment.schema === enrichment.schema &&
       previousManifest.enrichment.mode === enrichment.mode &&
       previousManifest.enrichment.base_url === enrichment.base_url &&
+      (previousManifest.enrichment.model_name || '') === (enrichment.model_name || '') &&
       this.sameStringArrays(previousManifest.entity_types || [], ENTITY_TYPE_KEYS);
   }
 
@@ -1596,6 +1729,70 @@ export class IndexService {
       normalizeFreeText(record.normalized_fact).length > 0;
   }
 
+  private async enrichWithCheckpoint(events: IndexedEvent[], config: DataManagerModelConfig): Promise<IndexedEvent[]> {
+    if (!config.enabled || events.length === 0) { return await this.modelClient.enrichEvents(events, config); }
+    let directory = this.storage.join(this.paths.consolidationRoot, 'sync-cache', 'events');
+    let hashes: StringMap = {}; let ready: EventMap = {}; let pending: IndexedEvent[] = [];
+    let policy = 'event-checkpoint-v1:' + ArkJSON.stringify(this.currentEnrichment(config));
+    events.forEach((event: IndexedEvent) => {
+      let hash = this.storage.sha256Text(policy + ':' + ArkJSON.stringify(event)); hashes[event.event_id] = hash;
+      let receipt = this.storage.readJson<EventCheckpoint | null>(
+        this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.json'), null);
+      if (receipt && receipt.hash === hash && receipt.event && receipt.event.event_id === event.event_id &&
+        receipt.event.enrichment_method === 'model' && receipt.eventHash === this.storage.sha256Text(ArkJSON.stringify(receipt.event))) {
+        ready[event.event_id] = receipt.event;
+      } else { pending.push(event); }
+    });
+    let analyzed = await this.modelClient.enrichEvents(pending, config);
+    analyzed.forEach((event: IndexedEvent) => {
+      ready[event.event_id] = event;
+      if (event.enrichment_method === 'model' && hashes[event.event_id]) {
+        let receipt: EventCheckpoint = { hash: hashes[event.event_id], eventHash: this.storage.sha256Text(ArkJSON.stringify(event)), event: event };
+        this.storage.writeJsonAtomic(this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.json'), receipt);
+      }
+    });
+    dataManagerInfo('SYNC_ENRICH pending=' + pending.length + ' checkpointHits=' + (events.length - pending.length));
+    return events.map((event: IndexedEvent): IndexedEvent => ready[event.event_id] || event);
+  }
+
+  private writePostingIndex(kind: string, oldTerms: StringArrayMap, newTerms: StringArrayMap,
+    events: EventMap, changed: BooleanMap, incremental: boolean): void {
+    let filename = this.storage.join(this.paths.indexesRoot, kind, 'index.json');
+    let previous = this.storage.readJson<InvertedDocument | null>(filename, null);
+    let postings: StringArrayMap;
+    if (incremental && previous && previous.postings) {
+      postings = previous.postings;
+      let removedTerms = new Set<string>();
+      stableUnique(Object.keys(oldTerms).concat(Object.keys(newTerms))).forEach((term: string) => {
+        let ids = stableUnique((postings[term] || []).filter((id: string): boolean => !changed[id]).concat(newTerms[term] || [])).sort();
+        if (ids.length > 0 || kind === 'workflow-scene' || kind === 'domain') { postings[term] = ids; }
+        else { removedTerms.add(term); }
+      });
+      if (removedTerms.size > 0) {
+        let retained: StringArrayMap = {};
+        Object.keys(postings).forEach((term: string) => {
+          if (!removedTerms.has(term)) { retained[term] = postings[term]; }
+        });
+        postings = retained;
+      }
+    } else {
+      postings = kind === 'inverted' ? this.buildInvertedDocument(events).postings : kind === 'source' ?
+        this.buildSourceDocument(events).postings : kind === 'domain' ? this.buildDomainDocument(events).postings :
+          this.buildWorkflowSceneDocument(events).postings;
+    }
+    let document: InvertedDocument = { postings: postings };
+    this.storage.writeJsonAtomic(filename, document);
+  }
+
+  private writeMonthDocuments(directory: string, desired: ObjectMap, months: string[]): void {
+    Object.keys(desired).forEach((name: string) => this.storage.writeJsonAtomic(this.storage.join(directory, name), desired[name]));
+    this.storage.listDir(directory).forEach((name: string) => {
+      if (/^\d{4}-\d{2}\.json$/.test(name) && months.indexOf(name.substring(0, 7)) < 0) {
+        this.storage.removeFile(this.storage.join(directory, name));
+      }
+    });
+  }
+
   private writeEventPartitions(events: EventMap): void {
     let partitions: EventGroupMap = {};
     Object.keys(events).forEach((eventId: string) => {
@@ -1611,6 +1808,7 @@ export class IndexService {
     });
     let desired: ObjectMap = {};
     Object.keys(partitions).sort().forEach((month: string) => {
+      if (!this.dirtyMonths[month] && this.storage.exists(this.paths.eventPartitionPath(month))) { return; }
       let monthEvents = partitions[month].sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
           return left.event_date.localeCompare(right.event_date);
@@ -1630,7 +1828,7 @@ export class IndexService {
     };
     // 记录事件分区清单，避免查询阶段因目录枚举失败而读不到刚写入的图库事件。
     desired[EVENT_PARTITION_INDEX_FILE_NAME] = partitionIndex as Object;
-    this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'events'), desired);
+    this.writeMonthDocuments(this.storage.join(this.paths.indexesRoot, 'events'), desired, Object.keys(partitions));
   }
 
   private buildInvertedDocument(events: EventMap): InvertedDocument {
@@ -2350,6 +2548,7 @@ export class IndexService {
     });
     let desired: ObjectMap = {};
     for (let month of Object.keys(monthGroups).sort()) {
+      if (!this.dirtyMonths[month] && this.storage.exists(this.paths.temporalPath(month))) { continue; }
       let monthEvents = monthGroups[month].sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
           return left.event_date.localeCompare(right.event_date);
@@ -2404,7 +2603,7 @@ export class IndexService {
       };
       desired[month + '.json'] = temporalDocument as Object;
     }
-    this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'temporal'), desired);
+    this.writeMonthDocuments(this.storage.join(this.paths.indexesRoot, 'temporal'), desired, Object.keys(monthGroups));
   }
 
   private loadTemporalDocuments(): TemporalDocumentMap {
@@ -2443,7 +2642,8 @@ export class IndexService {
     let domainsState: ProfileDomainMap = {};
     let domainIndex = 0;
     for (let domain of profileDomains) {
-      this.emitProgress(progress, '生成画像', `生成${displayDomainName(domain)}画像`, domainIndex, profileDomains.length, 90 + Math.round(domainIndex * 7 / Math.max(1, profileDomains.length)));
+      this.emitProgress(progress, '生成画像', `检查${displayDomainName(domain)}画像`, domainIndex, profileDomains.length,
+        85 + Math.round(domainIndex * 10 / Math.max(1, profileDomains.length)));
       let domainEvents = byDomain[domain] || [];
       domainEvents.sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
@@ -2468,7 +2668,6 @@ export class IndexService {
           generation: 'empty'
         };
       } else {
-        let previousClaims = previous.domains && previous.domains[domain] ? previous.domains[domain].claims : [];
         let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
         if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
           domainState = this.copyProfileDomain(previousDomain);
@@ -2477,7 +2676,15 @@ export class IndexService {
           domainState.date_range = this.eventDateRange(domainEvents);
           dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
         } else {
-          let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
+          let cache = new ProfileBlockCache(this.paths, this.storage, this.modelClient);
+          let payload: ProfileModelPayload = await cache.build(domain, domainEvents, modelConfig,
+            (value: DataManagerProgress): void => {
+              if (progress) {
+                progress(createDataManagerProgress('生成画像', displayDomainName(domain) + '：' + value.message,
+                  value.current, value.total, 85 + Math.round((domainIndex + value.current / Math.max(1, value.total)) *
+                    10 / Math.max(1, profileDomains.length))));
+              }
+            });
           let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
           domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
         }
@@ -2509,27 +2716,8 @@ export class IndexService {
   }
 
   private profileDomainInputHash(domain: string, domainEvents: IndexedEvent[], modelConfig: DataManagerModelConfig): string {
-    let parts: string[] = [
-      domain,
-      'short_summary_v1',
-      modelConfig.enabled ? 'model' : 'model_unavailable',
-      modelConfig.enabled ? String(PROFILE_MODEL_MAX_TOKENS) : '0',
-      modelConfig.enabled ? String(PROFILE_MODEL_PROMPT_CHAR_LIMIT) : '0',
-      modelConfig.enabled ? String(PROFILE_MODEL_MERGE_CHAR_LIMIT) : '0'
-    ];
-    domainEvents.forEach((event: IndexedEvent) => {
-      parts.push([
-        event.event_id,
-        event.event_date,
-        summarizeText(event.summary, 220),
-        summarizeText(event.normalized_fact, 260),
-        (event.domains || []).join(','),
-        (event.sources || []).slice(0, 3).join(','),
-        (event.entities || []).slice(0, 8).join(','),
-        (event.keywords || []).slice(0, 12).join(',')
-      ].join('\u001f'));
-    });
-    return this.storage.sha256Text(parts.join('\u001e'));
+    return this.storage.sha256Text(PROFILE_BLOCK_POLICY + ':' + domain + ':' +
+      this.modelClient.profileCacheIdentity(modelConfig) + ':' + ArkJSON.stringify(domainEvents));
   }
 
   private copyProfileDomain(domain: ProfileDomainState): ProfileDomainState {

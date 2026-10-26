@@ -32,7 +32,7 @@ struct CalendarConsentContent {
         .fontColor(AppTheme.text('#172033')).width('100%')
       Text('在首页查看明天和未来7天的安排，也可以在聊天里问我你的日程。')
         .fontSize(15).lineHeight(23).fontColor(AppTheme.text('#4E586C')).width('100%')
-      Text('由系统向你申请日历读取权限。开启后，按当前记忆模型配置分析日程，可选择来源及是否参与画像。')
+      Text('由系统申请日历读取权限。开启后，跨天首次打开应用会更新日历，并按当前记忆模型配置分析日程。可选择来源及是否参与画像。')
         .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#7C8496')).width('100%')
       Row({ space: 9 }) {
         Checkbox({ name: 'calendarSkipStartupReminder' }).shape(CheckBoxShape.CIRCLE)
@@ -44,13 +44,13 @@ struct CalendarConsentContent {
           .onClick(() => { if (!this.closing) { this.setSkip(!this.skipReminder); } })
       }.width('100%').height(32)
       Text(this.skipReminder ? '之后想开启：汇总 → 日历分析，打开开关即可。' :
-        '也可以稍后到“汇总 → 日历分析”开启。')
+        '本次暂不开启后，不再自动弹出；可到“汇总 → 日历分析”开启。')
         .fontSize(12).lineHeight(19).fontColor(AppTheme.text(this.skipReminder ? '#6372D8' : '#7C8496')).width('100%')
       Row({ space: 10 }) {
-        Button('暂时不用').fontSize(15).height(44).layoutWeight(1).borderRadius(14)
+        Button('暂不开启').fontSize(15).height(44).layoutWeight(1).borderRadius(14)
           .backgroundColor(AppTheme.background('#F0F2F6')).fontColor(AppTheme.text('#60697C'))
           .enabled(!this.closing).onClick(() => { this.finish(false); })
-        Button('授权并同步').fontSize(15).height(44).layoutWeight(1).borderRadius(14)
+        Button('授权并开启').fontSize(15).height(44).layoutWeight(1).borderRadius(14)
           .backgroundColor(AppTheme.filledBackground('#6372D8')).fontColor(Color.White)
           .enabled(!this.closing).onClick(() => { this.finish(true); })
       }.width('100%')

@@ -1,18 +1,28 @@
-import { DataManagerModelConfig } from '../../datamanager/DataManagerTypes';
+import { DataManagerModelConfig, DataManagerProgress, DataManagerProgressCallback } from '../../datamanager/DataManagerTypes';
 import { AppLogger } from '../AppLogger';
 import { PrivacyConsent } from '../PrivacyConsent';
 import { MailAnalysis, MailDecision, mailAnalysisFailure } from './MailAnalysis';
 import { MailCredentialStore } from './MailCredentialStore';
 import { MailImapClient } from './MailImapClient';
 import { MailStore } from './MailStore';
-import { MailItem, MailSnapshot, emptyMailSnapshot, mailDay } from './MailTypes';
+import { MailItem, MailSnapshot, emptyMailSnapshot, mailDay, MAIL_RETENTION_DAYS, validateMailSettings } from './MailTypes';
 
 export class MailService {
   private static busy: boolean = false;
   static isBusy(): boolean { return MailService.busy; }
 
+  static async canAutoRefresh(filesDir: string): Promise<boolean> {
+    let store = new MailStore(filesDir);
+    let settings = store.settings();
+    if (!settings.enabled) { return false; }
+    try {
+      validateMailSettings(settings);
+      return (await MailCredentialStore.load(store.accountKey(settings))).length > 0;
+    } catch (e) { return false; }
+  }
+
   static async refresh(filesDir: string, config: DataManagerModelConfig,
-    progress: (message: string) => void = (_message: string): void => {}): Promise<void> {
+    progress: (message: string) => void = (_message: string): void => {}, workProgress?: DataManagerProgressCallback): Promise<void> {
     if (MailService.busy) { throw new Error('邮箱正在同步，请稍候'); }
     let store = new MailStore(filesDir);
     let settings = store.settings();
@@ -23,10 +33,15 @@ export class MailService {
     let old = store.current(startedAt);
     let saved: MailSnapshot = emptyMailSnapshot();
     MailService.busy = true;
+    let report: DataManagerProgressCallback = (value: DataManagerProgress): void => {
+      progress(value.message);
+      if (workProgress) { workProgress(value); }
+    };
     try {
-      progress('读取今天的收件箱…');
+      progress('读取最近三天的收件箱…');
       let secret = await MailCredentialStore.load(accountKey);
-      let result = await new MailImapClient().readToday(settings, secret, accountKey, old, startedAt);
+      let result = await new MailImapClient().readToday(settings, secret, accountKey, old, startedAt, MAIL_RETENTION_DAYS, report);
+      AppLogger.info('Mail', 'MAIL_READ_DONE count=' + result.items.length + ' elapsedMs=' + (Date.now() - startedAt));
       saved = { day: mailDay(startedAt), accountKey: accountKey, uidValidity: result.uidValidity,
         syncedAt: new Date().toISOString(), items: result.items, partial: result.partial, error: '', notice: '', stale: false };
       let model = config.baseUrl + ':' + (config.model || '');
@@ -37,11 +52,16 @@ export class MailService {
       });
       if (settings.aiAllowed) {
         for (let index = 0; index < pending.length; index += 5) {
-          progress('筛选今日邮件 ' + Math.min(index + 5, pending.length) + '/' + pending.length + '…');
+          let value: DataManagerProgress = { stage: 'AI筛选邮件',
+            message: '已筛选 ' + index + '/' + pending.length + ' 封，正在等待本批AI结果',
+            current: index, total: pending.length, percent: 60 + 35 * index / pending.length };
+          report(value);
           try {
             if (Date.now() - startedAt > 300000) { throw new Error('邮件筛选超时'); }
             let batch = pending.slice(index, index + 5);
+            let batchStarted = Date.now();
             let decisions = await MailAnalysis.analyze(batch, settings, config);
+            AppLogger.info('Mail', 'MAIL_ANALYSIS_BATCH count=' + batch.length + ' elapsedMs=' + (Date.now() - batchStarted));
             decisions.forEach((decision: MailDecision): void => {
               let item = batch.find((value: MailItem): boolean => value.id === decision.id);
               if (item === undefined) { return; }
@@ -62,7 +82,7 @@ export class MailService {
             break;
           }
         }
-      } else { saved.notice = '未开启AI筛选，今日邮件仅在本机展示。'; }
+      } else { saved.notice = '未开启AI筛选，近三天邮件仅在本机展示。'; }
       let longAnalysis = saved.items.some((item: MailItem): boolean => item.body.length > 12000);
       if (saved.partial || longAnalysis) {
         saved.notice += ' 本次有读取上限、长正文截取或无法解析的邮件，详情中已标明，请结合邮箱核对。';
@@ -79,8 +99,11 @@ export class MailService {
         if (current !== undefined) { item.completed = current.completed; }
       });
       store.save(saved);
-      progress(saved.error || '已读取今日' + saved.items.length + '封邮件');
+      progress(saved.error || '已读取近三天' + saved.items.length + '封邮件');
       if (saved.error) { throw new Error(saved.error); }
+      let completed: DataManagerProgress = { stage: '邮件已更新', message: '已保存近三天邮件结果',
+        current: saved.items.length, total: saved.items.length, percent: 100 };
+      report(completed);
     } catch (e) {
       let message = (e as Error).message;
       if (PrivacyConsent.isAccepted() && saved.syncedAt.length === 0 && store.settings().enabled && store.accountKey() === accountKey) {

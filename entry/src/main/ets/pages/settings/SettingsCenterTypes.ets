@@ -87,7 +87,7 @@ const CLOUD_MODEL_ADVANCED_SECTION: SettingsSectionItem = {
 // Source settings are child screens, not additional entries on the Mine page.
 const DATA_COLLECTION_DETAIL_SECTIONS: SettingsSectionItem[] = [
   { id: SettingsSectionId.CalendarAnalysis, title: '日历分析', subtitle: '同步日程与个人记忆' },
-  { id: SettingsSectionId.MailAnalysis, title: '邮箱分析', subtitle: '账号配置与今日邮件筛选' },
+  { id: SettingsSectionId.MailAnalysis, title: '邮箱分析', subtitle: '账号配置与近三天邮件筛选' },
   { id: SettingsSectionId.WechatCollection, title: '微信采集设置', subtitle: '默认采集范围与滑动参数' },
   { id: SettingsSectionId.OcrCollection, title: '文字识别', subtitle: '本地 OCR 与关键词预筛' },
   { id: SettingsSectionId.MapCollection, title: '图片位置', subtitle: '位置解析与图片缩放' }

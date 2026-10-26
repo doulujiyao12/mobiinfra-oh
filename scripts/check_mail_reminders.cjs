@@ -270,10 +270,15 @@ test('AI opt-out reads locally with zero model calls',async()=>{
   const settings=setup();settings.aiAllowed=false;store.saveSettings(settings);await MailCredentialStore.save(store.accountKey(),'fixture-code');
   messages=[fixture(1)];await MailService.refresh('/sandbox',config);assert.equal(aiCalls.length,0);assert.ok(store.current().notice.includes('本机'));
 });
-test('connection/auth failure keeps same-day cache and shows stale state; next day hides old mail',async()=>{
+test('connection/auth failure preserves the three-day cache, with old mail excluded from today overview',async()=>{
   setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];await MailService.refresh('/sandbox',config);
   failAuth=true;await assert.rejects(MailService.refresh('/sandbox',config));assert.equal(store.current().items.length,1);assert.ok(store.current().error);
-  now+=86400000;assert.equal(store.current().items.length,0);now-=86400000;
+  now+=86400000;
+  try {
+    assert.equal(store.current().items.length,1);assert.equal(policy.todayMail(store.current().items).length,0);
+    assert.equal(store.setCompleted(store.current().items[0].id,true),true);
+    now+=2*86400000;assert.equal(store.current().items.length,0);
+  } finally {now=new Date('2026-10-24T12:00:00+08:00').getTime();}
 });
 test('completion only updates local mail cache and overview, never the mailbox or profile',async()=>{
   setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];await MailService.refresh('/sandbox',config);
@@ -304,7 +309,7 @@ test('cached overview is compact with bounded preview inputs and no source-event
   const overview=policy.mailOverview(saved);assert.equal(overview.title,'今天有100封值得关注的邮件');
   assert.equal(overview.sourceEventIds.length,0);assert.equal(overview.agentTask,'');
 });
-test('home and settings only read cache; mail never enters daily logs, index or startup sync',()=>{
+test('home and settings only read cache; mail never enters daily logs or profile index',()=>{
   const facade=fs.readFileSync(path.join(root,base+'datamanager/DataManagerFacade.ets'),'utf8');
   const source=ts.createSourceFile('Index.ts',fs.readFileSync(path.join(root,base+'pages/Index.ets'),'utf8').replace(/\bstruct Index\b/,'class Index'),ts.ScriptTarget.Latest,true);
   const methods=[];function walk(node){if(ts.isMethodDeclaration(node))methods.push(node);ts.forEachChild(node,walk);}walk(source);
@@ -319,6 +324,61 @@ test('home and settings only read cache; mail never enters daily logs, index or 
   assert.ok(facade.includes('mailOverview(mailSnapshot)'));
   const avatar=methods.find(x=>x.name?.getText(source)==='mergeHomeAvatarView');
   assert.ok(avatar.getText(source).includes('mailReminder: this.homeProfile.mailReminder'));
+});
+test('three-day IMAP reads exclude older/future mail, retain decisions and keep today overview separate',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');
+  messages=[fixture(1,{date:'21-Oct-2026 23:59:59 +0800'}),fixture(2,{date:'22-Oct-2026 00:00:00 +0800'}),
+    fixture(3,{date:'23-Oct-2026 12:00:00 +0800'}),fixture(4,{date:'24-Oct-2026 10:00:00 +0800'}),
+    fixture(5,{date:'25-Oct-2026 00:00:00 +0800'})];
+  await MailService.refresh('/sandbox',config);
+  assert.deepEqual(clone(store.current().items.map(item=>item.uid)),[4,3,2]);
+  assert.equal(policy.todayMail(store.current().items).length,1);
+  assert.equal(policy.mailOverview(store.current()).title,'今天有1封值得关注的邮件');
+  const calls=aiCalls.length,bodies=commands.filter(c=>/BODY.PEEK\[1\]/.test(c)).length;
+  const yesterday=store.current().items.find(item=>item.uid===3);store.setCompleted(yesterday.id,true);
+  await MailService.refresh('/sandbox',config);assert.equal(aiCalls.length,calls);
+  assert.equal(commands.filter(c=>/BODY.PEEK\[1\]/.test(c)).length,bodies);
+  assert.equal(store.current().items.find(item=>item.uid===3).completed,true);
+  assert.ok(commands.some(c=>c.includes('UID SEARCH SINCE 21-Oct-2026')));
+});
+test('the read limit applies per day so today cannot evict both previous days',async()=>{
+  const settings=setup();settings.maxMessages=20;settings.aiAllowed=false;store.saveSettings(settings);
+  await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[];
+  for(let day=22;day<=24;day++)for(let i=0;i<21;i++)messages.push(fixture(day*100+i,{date:day+'-Oct-2026 10:00:00 +0800'}));
+  await MailService.refresh('/sandbox',config);assert.equal(store.current().items.length,60);assert.equal(store.current().partial,true);
+  for(let day=22;day<=24;day++)assert.equal(store.current().items.filter(item=>new Date(item.receivedAt).getDate()===day).length,20);
+});
+test('automatic mail checks skip disabled, incomplete and missing-credential mailboxes without network requests',async()=>{
+  const settings=setup();settings.username='';store.saveSettings(settings);assert.equal(await MailService.canAutoRefresh('/sandbox'),false);
+  settings.username='test@example.test';store.saveSettings(settings);assert.equal(await MailService.canAutoRefresh('/sandbox'),false);
+  await MailCredentialStore.save(store.accountKey(),'fixture-code');assert.equal(await MailService.canAutoRefresh('/sandbox'),true);
+  settings.enabled=false;store.saveSettings(settings);assert.equal(await MailService.canAutoRefresh('/sandbox'),false);
+  assert.equal(commands.length,0);assert.equal(aiCalls.length,0);
+});
+test('mail progress reaches the UI through connection, fetch, analysis and saved-result checkpoints',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1),fixture(2)];
+  const steps=[];await MailService.refresh('/sandbox',config,()=>{},value=>steps.push(clone(value)));
+  assert.ok(steps.some(value=>value.stage==='连接邮箱'&&value.percent>0));
+  assert.ok(steps.some(value=>value.stage==='读取邮件正文'&&value.total>0));
+  assert.ok(steps.some(value=>value.stage==='AI筛选邮件'&&value.current===0&&value.total===2));
+  assert.equal(steps.at(-1).percent,100);assert.equal(steps.at(-1).stage,'邮件已更新');
+  assert.ok(steps.every((value,index)=>value.percent>=0&&value.percent<=100&&(!index||value.percent>=steps[index-1].percent)));
+});
+test('mail day sections use local midnight across a year boundary and preserve active filters',()=>{
+  const at=new Date('2027-01-01T00:15:00+08:00').getTime();
+  const items=[
+    {id:'today',receivedAt:new Date('2027-01-01T00:00:00+08:00').getTime(),relevant:true,analysisKey:'ok',completed:false},
+    {id:'yesterday',receivedAt:new Date('2026-12-31T23:59:59+08:00').getTime(),relevant:true,analysisKey:'ok',completed:true},
+    {id:'before',receivedAt:new Date('2026-12-30T00:00:00+08:00').getTime(),relevant:false,analysisKey:'ok',completed:false},
+    {id:'old',receivedAt:new Date('2026-12-29T23:59:59+08:00').getTime(),relevant:true,analysisKey:'ok',completed:false},
+    {id:'future',receivedAt:new Date('2027-01-02T00:00:00+08:00').getTime(),relevant:true,analysisKey:'ok',completed:false}
+  ];
+  for(const [day,id]of [[0,'today'],[1,'yesterday'],[2,'before']])
+    assert.deepEqual(clone(policy.mailForDay(policy.visibleMail(items,true,true),day,at).map(item=>item.id)),[id]);
+  const filtered=policy.visibleMail(items,false,false);
+  assert.equal(policy.mailForDay(filtered,0,at).length,1);
+  assert.equal(policy.mailForDay(filtered,1,at).length,0);assert.equal(policy.mailForDay(filtered,2,at).length,0);
+  assert.equal(policy.mailForDay(items,3,at).length,0);assert.equal(policy.mailForDay(items,-1,at).length,0);
 });
 (async()=>{let failures=0;for(const [name,fn]of cases){try{await fn();console.log('PASS '+name);}catch(e){failures++;console.error('FAIL '+name+'\n'+e.stack);}}
  console.log(`${cases.length-failures}/${cases.length} mail checks passed`);process.exitCode=failures?1:0;})();

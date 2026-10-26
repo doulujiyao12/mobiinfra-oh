@@ -197,7 +197,7 @@ test('one overview handles empty tomorrow, completed filters and read errors wit
   assert.equal(error.reminder.title, '日历暂未更新'); assert.equal(error.preview.length, 0);
   assert.equal(policy.calendarReminderOverview([], now, false, '').reminder.title, '明天暂无日历提醒');
 });
-test('startup lifecycle does not trigger calendar provider reads or full index refresh', () => {
+test('startup lifecycle delegates to the guarded coordinator instead of directly starting a full sync', () => {
   const file = path.join(root, base, 'pages/Index.ets');
   const source = fs.readFileSync(file, 'utf8').replace(/\bstruct Index\b/, 'class Index');
   const tree = ts.createSourceFile(file.replace(/\.ets$/, '.ts'), source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -210,6 +210,18 @@ test('startup lifecycle does not trigger calendar provider reads or full index r
     assert.ok(!/refreshDataManager\s*\(|CalendarMemoryService\.refresh\s*\(|refreshCalendarOnForeground/.test(body), name);
   }
   assert.ok(!source.includes('refreshCalendarOnForeground'));
+  const coordinator=declaration.members.find(m=>ts.isMethodDeclaration(m)&&m.name.getText(tree)==='syncDailyStartupSources');
+  assert.ok(coordinator.body.getText(tree).includes('scheduler.hasDue(selection)'));
+  assert.ok(coordinator.body.getText(tree).includes('refreshAutomaticSources'));
+  assert.ok(!coordinator.body.getText(tree).includes('refreshDataManager('));
+});
+
+test('a denied calendar permission request is remembered, with manual authorization still available', async () => {
+  const context={filesDir:'/denied-startup',applicationInfo:{accessTokenId:1}},store=new CalendarMemoryStore('/denied-startup');
+  assert.equal(store.shouldOfferConsent(),true);granted=false;
+  try {await assert.rejects(CalendarMemoryService.requestAccess(context),/未获得/);assert.equal(store.shouldOfferConsent(),false);}
+  finally {granted=true;}
+  await CalendarMemoryService.requestAccess(context);assert.equal(store.shouldOfferConsent(),false);
 });
 test('repeat exceptions preserve edited content and query-window overlap does not duplicate', async () => {
   const old = clone(providerInstances);
@@ -256,13 +268,14 @@ test('excluded calendars and subscriptions are not read', async () => {
   assert.equal(reads, 0); assert.equal(store.snapshot().sources.length, 2);
 });
 test('permission denial preserves raw records but suppresses use; no foreground authorization popup', async () => {
+  const requestsBefore = accessRequests;
   calendars = [provider()];
   const d = definition(2); providerDefinitions = [d]; providerInstances = [instance(d, 86400000)];
   await CalendarMemoryService.refresh(ctx);
   granted = false;
   await assert.rejects(CalendarMemoryService.refresh(ctx), /权限/);
   assert.equal(store.snapshot().occurrences.length, 1); assert.equal(store.events().length, 0);
-  assert.equal(store.reminders(now).length, 0); assert.equal(accessRequests, 0);
+  assert.equal(store.reminders(now).length, 0); assert.equal(accessRequests, requestsBefore);
   granted = true;
 });
 test('provider failure never replaces valid data with a partial snapshot', async () => {
@@ -296,7 +309,7 @@ test('production index enrichment cannot fabricate completion, dates, or GUI act
   providerDefinitions = [a, b];
   providerInstances = [instance(a, -2 * 86400000), instance(a, -86400000), instance(b, -86400000), instance(a, 86400000)];
   await CalendarMemoryService.refresh(ctx);
-  const storage = new Storage(), paths = { filesDir: '/app', indexesRoot: '/indexes' };
+  const storage = new Storage(), paths = { filesDir: '/app', indexesRoot: '/indexes', consolidationRoot: '/consolidation' };
   let classified = 0;
   const model = { async enrichEvents(events) { classified += events.length; return events.map(e => ({ ...e, event_date: '1900-01-01',
     summary: '用户已经完成所有会议', domains: ['work'], enrichment_method: 'model',
@@ -308,7 +321,12 @@ test('production index enrichment cannot fabricate completion, dates, or GUI act
   assert.ok(Object.values(events).every(e => e.calendar && e.summary.includes('未确认实际参加或完成') && !e.todo.agent_task && e.event_date !== '1900-01-01'));
   assert.ok(service.copyEvent(Object.values(events)[0]).calendar);
   let profileInputs = [];
-  model.generateProfile = async (domain, entries) => { profileInputs = entries; return { claims: [], summary: '', short_summary: '' }; };
+  model.profileCacheIdentity = () => 'calendar-test';
+  model.summarizeProfileBlock = async (domain, entries) => {
+    profileInputs = entries;
+    return { claims: [], summary: '', short_summary: '', generation: 'model_block' };
+  };
+  model.combineProfileBlocks = async () => ({ claims: [], summary: '', short_summary: '', generation: 'model_empty' });
   const profile = await service.buildProfileDocument(events, { enabled: true }, false);
   assert.equal(profileInputs.length, 2); assert.equal(profile.calendar_input_hash, store.fingerprint());
   const ids = profileInputs.map(e => e.event_id);
@@ -324,6 +342,29 @@ test('production index enrichment cannot fabricate completion, dates, or GUI act
   assert.equal(Object.keys(service.filterCurrentCalendarEvents({ [first.event_id]: first })).length, 0);
   const clean = service.loadProfileState();
   assert.equal(clean.claim_count, 0); assert.equal(clean.domains.work.summary, '');
+});
+test('automatic calendar checks skip unavailable access without a provider read or permission popup',async()=>{
+  const localContext={filesDir:'/auto-skip',applicationInfo:{accessTokenId:1}},local=new CalendarMemoryStore('/auto-skip');
+  const beforeReads=reads,beforeRequests=accessRequests;assert.equal(await CalendarMemoryService.canAutoRefresh(localContext),false);
+  const settings=local.settings();settings.enabled=true;local.saveSettings(settings);
+  const snapshot=policy.emptyCalendarSnapshot();snapshot.available=true;
+  snapshot.occurrences=[{key:'preserved',seriesKey:'preserved',start:now,end:now+1000}];local.save(snapshot);granted=false;
+  try {
+    assert.equal(await CalendarMemoryService.canAutoRefresh(localContext),false);
+    assert.equal(local.snapshot().available,false);assert.equal(local.snapshot().occurrences.length,1);
+    assert.equal(reads,beforeReads);assert.equal(accessRequests,beforeRequests);
+  } finally {granted=true;}
+  assert.equal(await CalendarMemoryService.canAutoRefresh(localContext),true);
+  assert.equal(reads,beforeReads);assert.equal(accessRequests,beforeRequests);
+});
+test('calendar progress reports provider chunks, definition counts and durable snapshot completion',async()=>{
+  calendars=[provider()];failRead=false;granted=true;const settings=store.settings();settings.enabled=true;settings.excludedCalendarIds=[];store.saveSettings(settings);
+  const value=definition(90);providerDefinitions=[value];providerInstances=[instance(value,86400000)];
+  const steps=[];await CalendarMemoryService.refresh(ctx,progress=>steps.push(clone(progress)));
+  assert.ok(steps.some(step=>step.stage==='读取日历日程'&&step.total>0));
+  assert.ok(steps.some(step=>step.stage==='读取日程详情'&&step.current===1));
+  assert.equal(steps.at(-1).percent,100);assert.equal(store.snapshot().available,true);
+  assert.ok(steps.every((step,index)=>step.percent>=0&&step.percent<=100&&(!index||step.percent>=steps[index-1].percent)));
 });
 (async () => {
   for (const [name, run] of cases) { await run(); console.log('PASS ' + name); }

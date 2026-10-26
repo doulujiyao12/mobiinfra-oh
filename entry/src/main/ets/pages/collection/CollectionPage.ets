@@ -589,7 +589,7 @@ export struct CollectionPage {
     CollectionSourceRow({ title: '日历分析', detail: '日程同步与一周安排', icon: $r('app.media.source_calendar'),
       tint: '#FF9500', onOpen: (): void => { this.onOpenCalendarAnalysis(); } })
     CollectionFormDivider()
-    CollectionSourceRow({ title: '邮箱分析', detail: '邮箱设置与今日邮件筛选', icon: $r('app.media.source_mail'),
+    CollectionSourceRow({ title: '邮箱分析', detail: '邮箱设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
       onOpen: (): void => { this.onOpenMailAnalysis(); } })
   }
 

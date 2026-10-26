@@ -70,9 +70,11 @@ export function mailDay(now: number = Date.now()): string {
   return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
 }
 
-export function mailDayBounds(now: number): number[] {
+export const MAIL_RETENTION_DAYS: number = 3;
+
+export function mailDayBounds(now: number, days: number = 1): number[] {
   let date = new Date(now);
-  let start = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  let start = new Date(date.getFullYear(), date.getMonth(), date.getDate() - days + 1).getTime();
   let end = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
   return [start, end];
 }

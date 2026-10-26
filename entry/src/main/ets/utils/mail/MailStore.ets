@@ -1,5 +1,6 @@
 import { DataManagerStorage } from '../../datamanager/DataManagerStorage';
-import { MailSettings, MailSnapshot, MailItem, defaultMailSettings, emptyMailSnapshot, mailDay } from './MailTypes';
+import { MailSettings, MailSnapshot, MailItem, defaultMailSettings, emptyMailSnapshot, mailDay,
+  mailDayBounds, MAIL_RETENTION_DAYS } from './MailTypes';
 
 export class MailStore {
   private storage: DataManagerStorage = new DataManagerStorage();
@@ -19,7 +20,7 @@ export class MailStore {
     let saved = this.storage.readJson<MailSnapshot>(this.root + '/snapshot.json', emptyMailSnapshot());
     if (saved === null || typeof saved.day !== 'string' || typeof saved.accountKey !== 'string' ||
       typeof saved.uidValidity !== 'string' || typeof saved.syncedAt !== 'string' || typeof saved.error !== 'string' ||
-      typeof saved.notice !== 'string' || !Array.isArray(saved.items) || saved.items.length > 100 ||
+      typeof saved.notice !== 'string' || !Array.isArray(saved.items) || saved.items.length > 100 * MAIL_RETENTION_DAYS ||
       saved.items.some((item: MailItem): boolean => item === null || typeof item.id !== 'string' ||
         !item.id.startsWith('mail:') || !Number.isFinite(item.receivedAt) || typeof item.subject !== 'string' ||
         typeof item.from !== 'string' || typeof item.body !== 'string' || item.body.length > 32000 ||
@@ -41,8 +42,11 @@ export class MailStore {
   }
   current(now: number = Date.now()): MailSnapshot {
     let saved = this.snapshot();
-    // Yesterday's mail is not presented as today's, even without a network refresh.
-    return saved.day === mailDay(now) && saved.accountKey === this.accountKey() ? saved : emptyMailSnapshot();
+    if (saved.accountKey !== this.accountKey()) { return emptyMailSnapshot(); }
+    let bounds = mailDayBounds(now, MAIL_RETENTION_DAYS);
+    saved.items = saved.items.filter((item: MailItem): boolean => item.receivedAt >= bounds[0] && item.receivedAt < bounds[1]);
+    saved.stale = saved.stale || saved.day !== mailDay(now);
+    return saved;
   }
   setCompleted(id: string, completed: boolean): boolean {
     let saved = this.current();

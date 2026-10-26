@@ -1,4 +1,5 @@
 import { AppTheme } from '../../utils/AppTheme';
+import { StartupSourceSync, STARTUP_SOURCE_SYNC_ENABLED_KEY } from '../../utils/StartupSourceSync';
 import { CalendarMemoryPanel } from '../../components/CalendarMemoryPanel';
 import { MailSettingsPanel } from '../../components/MailSettingsPanel';
 import { FrostedPage } from '../../components/FrostedPage';
@@ -230,6 +231,7 @@ export struct SettingsCenterPage {
   onSyncCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
   onMailChanged: () => void = (): void => {};
   onSyncMail: () => Promise<void> = async (): Promise<void> => {};
+  @StorageLink(STARTUP_SOURCE_SYNC_ENABLED_KEY) private startupSyncEnabled: boolean = true;
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
@@ -238,6 +240,7 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    this.startupSyncEnabled = new StartupSourceSync((getContext(this) as common.Context).filesDir).isEnabled();
     try { DebugSettings.initialize(getContext(this) as common.Context); } catch (e) {
       showToastSafely('读取 Debug 设置失败：' + (e as Error).message, 2500);
     }
@@ -1108,7 +1111,7 @@ export struct SettingsCenterPage {
     CollectionSourceRow({ title: '日历分析', detail: '同步日程与个人记忆', icon: $r('app.media.source_calendar'),
       tint: '#FF9500', onOpen: (): void => { this.openSection(SettingsSectionId.CalendarAnalysis); } })
     CollectionFormDivider()
-    CollectionSourceRow({ title: '邮箱分析', detail: '账号设置与今日邮件筛选', icon: $r('app.media.source_mail'),
+    CollectionSourceRow({ title: '邮箱分析', detail: '账号设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
       onOpen: (): void => { this.openSection(SettingsSectionId.MailAnalysis); } })
     CollectionFormDivider()
     CollectionSourceRow({ title: '微信采集', detail: '默认范围与高级参数', icon: $r('app.media.source_wechat'),
@@ -1126,8 +1129,23 @@ export struct SettingsCenterPage {
       tint: '#8E8E93', onOpen: (): void => { this.openSection(SettingsSectionId.MapCollection); } })
   }
 
+  private changeStartupSyncEnabled(enabled: boolean): void {
+    try {
+      new StartupSourceSync((getContext(this) as common.Context).filesDir).setEnabled(enabled);
+      this.startupSyncEnabled = enabled;
+    } catch (e) { showToastSafely('自动更新设置未保存，请重试'); }
+  }
+
+  @Builder StartupSyncSettings() {
+    CollectionFormSwitch({ label: '每日自动更新', selected: this.startupSyncEnabled,
+      detail: '跨天打开应用时，更新已授权日历、已配置邮箱和新增聊天',
+      onChangeValue: (enabled: boolean): void => { this.changeStartupSyncEnabled(enabled); } })
+  }
+
   @Builder DataCollectionSection() {
     Column() {
+      CollectionFormGroup({ title: '同步', footer: '未授权的日历、未配置的邮箱会自动跳过。关闭后仍可手动同步；正在更新时，当前项完成后停止。',
+        contentBuilder: (): void => { this.StartupSyncSettings(); } })
       CollectionFormGroup({ title: '采集来源', contentBuilder: (): void => { this.CollectionSourceEntries(); } })
       CollectionFormGroup({ title: '辅助设置', contentBuilder: (): void => { this.CollectionAuxiliaryEntries(); } })
     }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12, bottom: 110 })

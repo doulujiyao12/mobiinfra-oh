@@ -71,6 +71,9 @@ interface ConsolidationOutputStateIndex {
   generated_at: string;
   state_paths: string[];
 }
+interface KnownDailySource { path: string; }
+interface KnownDailySources { files: KnownDailySource[]; }
+interface PublishedSourceIndex { sources: Record<string, Object>; }
 
 const DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY: number = 4;
 const OUTPUT_STATE_INDEX_FILE_NAME: string = 'state-index.json';
@@ -154,12 +157,52 @@ export class ConsolidationService {
     };
   }
 
-  private collectSourceEntries(): SourceEntry[] {
+  async consolidateChat(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<string[]> {
+    this.paths.ensureBaseDirs();
+    let groups = this.groupEntriesByMonth(this.collectSourceEntries(true));
+    let pending = this.planEntryGroups(groups).filter((plan: EntryGroupPlan): boolean => plan.pendingEntryCount > 0);
+    this.emitProgress(progress, '整理聊天', '需更新 ' + pending.length + ' 个聊天记录分组', 0, pending.length, 10);
+    for (let index = 0; index < pending.length; index++) {
+      await this.consolidateGroup(pending[index].group, modelConfig, 5, progress,
+        10 + 45 * index / pending.length, 10 + 45 * (index + 1) / pending.length);
+    }
+    this.emitProgress(progress, '整理聊天', '聊天记录整理完成', pending.length, pending.length, 58);
+    let relativePaths = groups.map((group: EntryGroup): string =>
+      this.storage.relativePath(this.paths.outputsRoot, this.paths.outputStatePath(group.month, group.fileName)));
+    let path = this.storage.join(this.paths.outputsRoot, OUTPUT_STATE_INDEX_FILE_NAME);
+    let previous = this.storage.readJson<ConsolidationOutputStateIndex | null>(path, null);
+    let oldPaths: string[];
+    if (previous) {
+      if (previous.schema !== 'datamanager-consolidation-output-state-index-v1' || !Array.isArray(previous.state_paths)) {
+        throw new Error('日志整理清单损坏，请手动同步检查');
+      }
+      oldPaths = previous.state_paths;
+    } else {
+      let published = this.storage.readJson<PublishedSourceIndex>(this.storage.join(this.paths.indexesRoot, 'manifest.json'), { sources: {} });
+      oldPaths = Object.keys(published.sources);
+    }
+    let retained = oldPaths.filter((relative: string): boolean =>
+      !/^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative)));
+    let payload: ConsolidationOutputStateIndex = { schema: 'datamanager-consolidation-output-state-index-v1',
+      generated_at: nowIsoLocal(), state_paths: stableUnique(retained.concat(relativePaths)).sort() };
+    this.storage.writeJsonAtomic(path, payload);
+    return relativePaths.map((relative: string): string => this.storage.join(this.paths.outputsRoot, relative));
+  }
+
+  private collectSourceEntries(chatOnly: boolean = false): SourceEntry[] {
     let entries: SourceEntry[] = [];
-    let exportedPaths = GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot)
-      .concat(ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage));
+    let exportedPaths = ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage);
+    if (!chatOnly) { exportedPaths = exportedPaths.concat(GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot)); }
+    let previous: KnownDailySources = chatOnly ? { files: [] } : this.storage.readJson<KnownDailySources>(
+      this.storage.join(this.paths.consolidationRoot, 'daily-log-snapshot.json'), { files: [] });
+    if (!chatOnly && previous && Array.isArray(previous.files)) {
+      previous.files.forEach((source: KnownDailySource) => {
+        if (/^\d{4}-\d{2}-\d{2}\/[^/\\]+\.md$/.test(source.path) &&
+          this.storage.exists(this.storage.join(this.paths.dailyLogRoot, source.path))) { exportedPaths.push(source.path); }
+      });
+    }
     let daySet: Record<string, boolean> = new Object() as Record<string, boolean>;
-    this.storage.listDir(this.paths.dailyLogRoot)
+    (chatOnly ? [] : this.storage.listDir(this.paths.dailyLogRoot))
       .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name))
       .forEach((name: string) => daySet[name] = true);
     exportedPaths.forEach((relativePath: string) => {
@@ -176,7 +219,9 @@ export class ConsolidationService {
     for (let day of dayDirs) {
       let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
       let fileSet: Record<string, boolean> = new Object() as Record<string, boolean>;
-      this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
+      if (!chatOnly) {
+        this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
+      }
       exportedPaths.forEach((relativePath: string) => {
         if (relativePath.startsWith(day + '/')) {
           let fileName = relativePath.substring(day.length + 1);
@@ -189,7 +234,9 @@ export class ConsolidationService {
       dataManagerInfo(`Consolidation day scan: day=${day}, mdFiles=${files.length}`);
       for (let fileName of files) {
         let path = this.storage.join(dayDir, fileName);
-        let content = this.storage.readText(path, '');
+        if (!this.storage.exists(path)) { continue; }
+        let content = this.storage.readText(path, '\u0000SYNC_UNREADABLE\u0000');
+        if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
         if (content.length === 0) {
           continue;
         }
@@ -250,7 +297,7 @@ export class ConsolidationService {
       let pending = this.pendingEntries(group.entries, state);
       return {
         group: group,
-        pendingEntryCount: pending.length,
+        pendingEntryCount: this.requiresGroupRebuild(group, state) ? group.entries.length : pending.length,
         existingRecordCount: state.records.length
       };
     });
@@ -273,6 +320,12 @@ export class ConsolidationService {
     let statePath = this.paths.outputStatePath(group.month, group.fileName);
     let markdownPath = this.paths.outputMarkdownPath(group.month, group.fileName);
     let state = this.readConsolidatedState(statePath);
+    if (this.requiresGroupRebuild(group, state)) {
+      // A merged record cannot be safely "subtracted" when one source changes.
+      // Rebuild only this month/source group from current inputs instead.
+      state = { metadata: this.emptyMetadata(group.month, [group.fileName], dedupWindow), records: [] };
+      dataManagerInfo('SYNC_SOURCE_REBUILD month=' + group.month + ' entries=' + group.entries.length);
+    }
     let records = state.records;
     let nextRecordId = this.nextRecordId(records);
     let pendingEntries = this.pendingEntries(group.entries, state);
@@ -378,6 +431,15 @@ export class ConsolidationService {
       metadata.processed_entry_hashes = createStringMap();
     }
     return metadata;
+  }
+
+  private requiresGroupRebuild(group: EntryGroup, state: ConsolidatedState): boolean {
+    let current: StringMap = {};
+    group.entries.forEach((entry: SourceEntry) => current[entry.source_ref] = sourceEntryProcessingHash(this.storage, entry));
+    let previous = state.metadata.processed_entry_hashes || createStringMap();
+    if (Object.keys(previous).some((ref: string): boolean => !current[ref] || previous[ref] !== current[ref])) { return true; }
+    return state.records.some((record: AggregatedRecord): boolean =>
+      (record.source_refs || []).some((ref: string): boolean => !current[ref] || !previous[ref]));
   }
 
   private pendingEntries(entries: SourceEntry[], state: ConsolidatedState): SourceEntry[] {

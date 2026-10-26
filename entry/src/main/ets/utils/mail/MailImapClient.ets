@@ -2,7 +2,8 @@ import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
 import { PrivacyConsent } from '../PrivacyConsent';
-import { MailSettings, MailItem, MailSnapshot, MailReadResult, mailDayBounds, validateMailSettings } from './MailTypes';
+import { DataManagerProgress, DataManagerProgressCallback } from '../../datamanager/DataManagerTypes';
+import { MailSettings, MailItem, MailSnapshot, MailReadResult, mailDay, mailDayBounds, validateMailSettings, MAIL_RETENTION_DAYS } from './MailTypes';
 import { ImapFrames, imapFetch, imapField, imapBody, mailBodyPart, mailQuoted, mailDecode, mailHeader,
   mailPlainHtml, mailInternalDate, mailSearchDate } from './MailImapCodec';
 
@@ -103,14 +104,23 @@ export class MailImapClient {
   }
 
   async readToday(settings: MailSettings, secret: string, accountKey: string, cached: MailSnapshot,
-    now: number = Date.now()): Promise<MailReadResult> {
-    let bounds = mailDayBounds(now);
-    AppLogger.info('Mail', 'read today begin limit=' + settings.maxMessages);
+    now: number = Date.now(), days: number = 1, progress?: DataManagerProgressCallback): Promise<MailReadResult> {
+    if (!Number.isInteger(days) || days < 1 || days > MAIL_RETENTION_DAYS) { throw new Error('邮件读取范围无效'); }
+    let bounds = mailDayBounds(now, days);
+    AppLogger.info('Mail', 'read begin days=' + days + ' limit=' + settings.maxMessages);
+    let report = (stage: string, message: string, current: number, total: number, percent: number): void => {
+      if (progress) {
+        let value: DataManagerProgress = { stage: stage, message: message, current: current, total: total, percent: percent };
+        progress(value);
+      }
+    };
     try {
       validateMailSettings(settings);
       if (!secret || /[\x00-\x1f\x7f]/.test(secret)) { throw new Error('请先保存邮箱客户端授权码'); }
+      report('连接邮箱', '正在建立加密连接，请稍候', 0, 0, 2);
       await this.open(settings);
       await this.command('LOGIN ' + mailQuoted(settings.username) + ' ' + mailQuoted(secret), '认证');
+      report('查询邮件', '连接成功，正在查询近 ' + days + ' 天的收件箱', 0, 0, 10);
       let capabilities = (await this.command('CAPABILITY', '查询能力')).join(' ');
       if (/(?:^|\s)ID(?:\s|$)/i.test(capabilities)) {
         // NetEase requires a client ID. It contains no personal/device identifiers.
@@ -121,7 +131,7 @@ export class MailImapClient {
       if (validity === null) { throw new Error('邮箱未提供UIDVALIDITY，无法安全复用邮件缓存'); }
       let uidValidity = validity[1];
       // IMAP dates have no timezone; widen search then filter INTERNALDATE using local midnight.
-      let search = await this.command('UID SEARCH SINCE ' + mailSearchDate(now, -1) + ' BEFORE ' + mailSearchDate(now, 2), '查询今日邮件');
+      let search = await this.command('UID SEARCH SINCE ' + mailSearchDate(now, -days) + ' BEFORE ' + mailSearchDate(now, 2), '查询近期邮件');
       let all: number[] = [];
       let seenUids: Set<number> = new Set();
       let searchSeen = false;
@@ -148,13 +158,21 @@ export class MailImapClient {
         let responses = await this.command('UID FETCH ' + uids.join(',') +
           ' (UID INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])', '读取邮件标题');
         metadata = metadata.concat(responses);
+        let completed = Math.min(offset + 25, candidates.length);
+        report('读取邮件标题', '已检查 ' + completed + '/' + candidates.length + ' 封邮件标题',
+          completed, candidates.length, 12 + 18 * completed / candidates.length);
       }
+      metadata = metadata.filter((response: string): boolean => imapFetch(response) !== null);
       metadata.sort((a: string, b: string): number => {
         let left = imapFetch(a); let right = imapFetch(b);
         return (right === null ? 0 : mailInternalDate(imapField(right, 'INTERNALDATE').text)) -
           (left === null ? 0 : mailInternalDate(imapField(left, 'INTERNALDATE').text));
       });
+      let checked = 0;
       for (let response of metadata) {
+          report('读取邮件正文', '正在检查第 ' + (checked + 1) + '/' + metadata.length + ' 封邮件，已读取 ' + items.length + ' 封',
+            checked, metadata.length, 30 + 30 * checked / Math.max(1, metadata.length));
+          checked++;
           let fetch = imapFetch(response);
           if (fetch === null) { continue; }
           let uid = Number(imapField(fetch, 'UID').text);
@@ -164,7 +182,9 @@ export class MailImapClient {
           let received = mailInternalDate(imapField(fetch, 'INTERNALDATE').text);
           if (!Number.isFinite(received)) { partial = true; continue; }
           if (received < bounds[0] || received >= bounds[1]) { continue; }
-          if (items.length >= settings.maxMessages) { partial = true; continue; }
+          if (items.filter((item: MailItem): boolean => mailDay(item.receivedAt) === mailDay(received)).length >= settings.maxMessages) {
+            partial = true; continue;
+          }
           let id = 'mail:' + accountKey + ':' + uidValidity + ':' + uid;
           let old = cached.accountKey === accountKey && cached.uidValidity === uidValidity ?
             cached.items.find((value: MailItem): boolean => value.id === id && !value.bodyError) : undefined;
@@ -201,6 +221,7 @@ export class MailImapClient {
       }
       if (candidates.some((uid: number): boolean => fetched.indexOf(uid) < 0)) { partial = true; }
       items.sort((a: MailItem, b: MailItem): number => b.receivedAt - a.receivedAt);
+      report('邮件读取完成', '已读取 ' + items.length + ' 封近 ' + days + ' 天邮件', items.length, items.length, 60);
       AppLogger.info('Mail', 'read finished count=' + items.length + ' partial=' + partial);
       return { uidValidity: uidValidity, items: items, partial: partial };
     } finally { this.close(); }

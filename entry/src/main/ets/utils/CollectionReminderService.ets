@@ -69,6 +69,17 @@ export class CollectionReminderService {
     return normalizeCollectionReminderState(ArkJSON.parse(raw) as CollectionReminderState, token);
   }
 
+  static shouldOfferStartupConsent(): boolean {
+    let store = CollectionReminderService.store;
+    return store !== undefined && store.getSync('startup_prompted', false) !== true;
+  }
+
+  static markStartupConsentPrompted(): void {
+    let store = CollectionReminderService.store;
+    if (store === undefined) { throw new Error('采集提醒尚未初始化'); }
+    store.putSync('startup_prompted', true); store.flushSync();
+  }
+
   private static save(state: CollectionReminderState): void {
     let store = CollectionReminderService.store;
     if (store === undefined) { throw new Error('采集提醒尚未初始化'); }
@@ -94,6 +105,7 @@ export class CollectionReminderService {
 
   static async setEnabled(enabled: boolean): Promise<void> {
     await CollectionReminderService.serialize(async (): Promise<void> => {
+      CollectionReminderService.markStartupConsentPrompted();
       let state = CollectionReminderService.load();
       state.enabled = enabled;
       state.planToken = util.generateRandomUUID(true);
