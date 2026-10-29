@@ -6,20 +6,24 @@ import path from 'node:path';
 import { writePrivate } from './settings.mjs';
 import { acquireDaemonLock } from './process-lock.mjs';
 import { installLayout } from './paths.mjs';
+import { controlAddress } from './control-address.mjs';
 export { acquireDaemonLock } from './process-lock.mjs';
 
 const digest = value => createHash('sha256').update(String(value || '')).digest();
 export function controlEndpoint(directory, platform = process.platform) {
-  const hash = createHash('sha256').update(directory).digest('hex').slice(0, 20);
-  if (platform === 'win32') return `\\\\.\\pipe\\clawmate-codex-${hash}`;
-  const folder = path.join(realpathSync(os.tmpdir()), `clawmate-codex-${process.getuid()}-${hash}`);
+  const address = controlAddress(directory, platform === 'win32' ? { platform } : {
+    platform, uid: process.getuid(), temporaryDirectory: realpathSync(os.tmpdir()),
+    fallbackDirectory: realpathSync('/tmp')
+  });
+  if (platform === 'win32') return address;
+  const folder = path.dirname(address);
   mkdirSync(folder, { mode: 0o700, recursive: true });
   const stat = lstatSync(folder);
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || realpathSync(folder) !== folder) {
     throw new Error('本机控制目录不安全。');
   }
   chmodSync(folder, 0o700);
-  return path.join(folder, 'control.sock');
+  return address;
 }
 export async function serveControl(manager, onQuit, existingUnlock) {
   const directory = manager.settings.directory;
@@ -57,7 +61,10 @@ export async function serveControl(manager, onQuit, existingUnlock) {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(address, resolve); });
     if (process.platform !== 'win32') chmodSync(address, 0o600);
     writePrivate(path.join(directory, 'control.json'), { address, token, pid: process.pid });
-  } catch (error) { server.close(); unlock(); throw error; }
+  } catch (error) {
+    server.close(); unlock();
+    throw new Error(`创建本机控制通道失败：${address}（${error.code || 'UNKNOWN'}）：${error.message}`, { cause: error });
+  }
   return async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));

@@ -69,11 +69,18 @@ async function refresh() {
   if (!snapshot.tasks.length) $('taskList').textContent = '手机发送的任务会在这里显示。';
 }
 for (const id of ['computerName', 'port', 'host', 'networkMode', 'publicOrigin']) $(id).addEventListener('input', () => { dirty = true; $('publicSettings').hidden = $('networkMode').value !== 'public'; });
-$('addProject').addEventListener('click', () => act(async () => {
-  const filename = await window.companion.choose('project'); if (!filename) return;
-  if (projects.some(p => p.path === filename)) throw new Error('这个项目已经添加。');
-  projects.push({ name: filename.split(/[/\\]/).filter(Boolean).pop(), path: filename }); dirty = true; renderProjects();
-}));
+let projectPicker;
+$('addProject').addEventListener('click', () => {
+  projectPicker ||= window.createProjectPicker({ canSelect: () => !working && !!snapshot && snapshot.state !== 'running',
+    isSelected: filename => projects.some(p => p.path === filename),
+    onSelect: project => {
+      if (projects.some(p => p.path === project.path)) throw new Error('这个项目已经添加。');
+      if (projects.length >= 20) throw new Error('最多配置 20 个项目，请先移除不需要的项目。');
+      projects.push({ name: project.name.slice(0, 80), path: project.path }); dirty = true; renderProjects();
+      notice('项目已添加，请保存设置以完成授权。');
+    } });
+  projectPicker.open();
+});
 for (const [id, kind, target] of [['chooseCert', 'cert', 'certFile'], ['chooseKey', 'key', 'keyFile']]) $(id).addEventListener('click', () => act(async () => { const filename = await window.companion.choose(kind); if (filename) { $(target).value = filename; dirty = true; } }));
 $('save').addEventListener('click', () => act(async () => { await window.companion.call('configure', formConfig()); dirty = false; notice('配置已保存。'); }));
 $('start').addEventListener('click', () => act(async () => {

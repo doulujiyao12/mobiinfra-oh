@@ -1,13 +1,13 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-<title>ClawMate Codex</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="updates.css"></head>
+<title>ClawMate Codex</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="updates.css"><link rel="stylesheet" href="projects.css"></head>
 <body>
 <aside><div class="brand"><span class="brand-mark">⌘</span><div>ClawMate<span>CODEX COMPANION</span></div></div>
 <p class="side-caption">你的电脑，随身协作</p>
 <nav aria-label="主导航"><button class="nav active" data-view="setup">连接设置</button><button class="nav" data-view="pairing">手机配对</button><button class="nav" data-view="devices">设备与任务</button><button class="nav" data-view="terminal">终端与启动</button><button class="nav" data-view="updates">应用更新 <span id="updateDot" hidden>●</span></button></nav>
 <div class="side-bottom"><span class="dot" id="sideDot"></span><span id="sideState">正在连接本机服务</span><small>HTTPS · 本机执行 · 独立设备凭据</small></div></aside>
-<main><header><div><span class="eyebrow">CLAWMATE WORKSPACE</span><h1 id="pageTitle">让手机连接你的开发电脑</h1><p>登录、选项目、配对，然后从鸿蒙 App 继续工作。</p></div><span class="version">v1.1.13</span></header>
+<main><header><div><span class="eyebrow">CLAWMATE WORKSPACE</span><h1 id="pageTitle">让手机连接你的开发电脑</h1><p>登录、选项目、配对，然后从鸿蒙 App 继续工作。</p></div><span class="version">v1.1.15</span></header>
 <div id="notice" role="status" hidden></div>
 <div id="updateBanner" class="update-banner" hidden><span id="updateBannerText"></span><div><button id="laterUpdate">稍后</button><button id="viewUpdate">查看更新</button></div></div>
 <section id="updates" class="view" hidden>
@@ -33,4 +33,11 @@
 <p class="muted">只将配对文件发送给自己的手机。二维码、配对内容和文件均包含一次性秘密，请勿公开分享。</p></article><article><h2>连接保护</h2><p>手机校验证书和电脑身份，再换取独立设备令牌。每台手机都可以单独撤销，电脑上的 OpenAI 登录不会传给手机。</p><code id="fingerprint">启动连接后显示电脑证书 SHA-256 指纹</code></article></section>
 <section id="devices" class="view" hidden><article><h2>已配对设备</h2><p>撤销后，该手机下一次请求会被拒绝，其他设备不受影响。</p><div id="deviceList"></div><button id="resetPairing">重置所有配对与本机证书</button></article><article><h2>最近任务</h2><p>点“×”可隐藏窗口或关闭应用。关闭会断开手机并中断独立任务，官方桌面端持有的共享任务继续运行。</p><div id="taskList"></div><button class="danger" id="shutdown">关闭应用</button></article></section>
 <section id="terminal" class="view" hidden><article><h2>桌面和终端，共用一份配置</h2><p>终端工具已经随安装程序内置，不需要 npm、Node.js 或源码。</p><div class="terminal"><div>clawmate-codex setup</div><div>clawmate-codex login</div><div>clawmate-codex start</div><div>clawmate-codex pair --output phone.clawmate-codex-pair.json</div></div><button class="primary" id="installTerminal">安装终端命令</button><p class="muted">Linux 安装包会提供系统命令入口；便携版及 macOS 可在此添加当前用户入口。Windows 设置后重新打开终端。</p><code id="launcherPath"></code></article><article><h2>启动与版本</h2><label class="checkbox"><input type="checkbox" id="autoStart">登录电脑时打开桌面应用（Windows / macOS）</label><p>升级时直接安装新版，配置、设备与任务保存在应用数据目录，不会写入安装目录。</p><code id="dataPath"></code><p class="muted">正式发行由应用维护者提供签名安装包。Codex、运行时与第三方许可随安装程序一同提供。</p></article></section>
-</main><script src="renderer.js"></script></body></html>
+</main>
+<dialog id="projectPicker" aria-labelledby="projectPickerTitle">
+<header class="picker-heading"><div><h2 id="projectPickerTitle">选择 Codex 项目</h2><p>选择已有项目，或浏览其他文件夹。</p></div><button id="closeProjects" aria-label="关闭">×</button></header>
+<div class="picker-search"><input id="projectSearch" type="search" placeholder="搜索名称或路径" aria-label="搜索项目"><button id="refreshProjects">刷新</button></div>
+<p id="projectPickerStatus" role="status"></p><div id="existingProjects" class="existing-projects" aria-label="已有 Codex 项目"></div>
+<footer><p>选中后，点击主页面的“保存设置”完成授权。</p><button id="browseProject">浏览其他文件夹</button></footer>
+</dialog>
+<script src="projects.js"></script><script src="renderer.js"></script></body></html>

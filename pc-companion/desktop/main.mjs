@@ -4,15 +4,17 @@ import { mkdirSync, symlinkSync, existsSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
-import { dataDirectory, installLayout } from '../host/paths.mjs';
+import { dataDirectory } from '../host/paths.mjs';
 import { ensureDaemon, quitDaemon } from '../host/daemon-client.mjs';
 import { DesktopLifecycle } from './lifecycle.mjs';
 import { controlRequest } from '../host/control.mjs';
 import { writePrivate } from '../host/settings.mjs';
 import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from '../host/updates.mjs';
+import { desktopLayout } from './runtime-layout.mjs';
+import { discoverCodexProjects } from '../host/projects.mjs';
 
 const directory = dataDirectory();
-const layout = installLayout(app.isPackaged ? process.resourcesPath : undefined);
+const layout = desktopLayout({ resourcesPath: process.resourcesPath, appPath: app.getAppPath(), isPackaged: app.isPackaged });
 const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui', 'index.html');
 const rendererUrl = pathToFileURL(entry).href;
 let window; let tray; let quitting = false; let pairing;
@@ -46,9 +48,9 @@ async function createWindow() {
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.on('close', event => { if (!quitting) { event.preventDefault(); void lifecycle.requestClose(); } });
-  await window.loadFile(entry);
   updater = new ReleaseUpdater(directory, { kind: 'desktop', fetcher: (url, options) => net.fetch(url, options) });
   updater.on('change', state => { if (window && !window.isDestroyed()) window.webContents.send('companion:update-state', state); });
+  await window.loadFile(entry);
   const check = () => { if (!lifecycle.closing && !installingUpdate && updater.preferences.autoCheck) updater.check().catch(() => {}); };
   const firstCheck = setTimeout(check, 12000); firstCheck.unref();
   const checkTimer = setInterval(check, 6 * 60 * 60000); checkTimer.unref();
@@ -97,6 +99,10 @@ ipcMain.handle('companion:choose', async (event, kind) => {
   const selected = await dialog.showOpenDialog(window, { title: kind === 'project' ? '选择允许手机访问的项目文件夹' : '选择证书文件',
     properties: kind === 'project' ? ['openDirectory'] : ['openFile'] });
   return selected.canceled ? '' : selected.filePaths[0];
+});
+ipcMain.handle('companion:projects', async event => {
+  trusted(event);
+  return discoverCodexProjects({ excludeDirectory: directory });
 });
 ipcMain.handle('companion:export', async event => {
   trusted(event);

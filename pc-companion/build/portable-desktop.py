@@ -46,6 +46,8 @@ def mac_bundle(source, stage, version, destination):
                 name = 'ClawMate-Codex-Licenses/' + name
             else:
                 name = product + name[len('Electron.app/'):]
+            if name == product + 'Contents/MacOS/Electron':
+                name = product + 'Contents/MacOS/clawmate-codex-desktop'
             if name.startswith(product + 'Contents/_CodeSignature/') or name == product + 'Contents/Resources/default_app.asar':
                 continue
             changed = copy.copy(entry)
@@ -53,6 +55,7 @@ def mac_bundle(source, stage, version, destination):
             if name == product + 'Contents/Info.plist':
                 info = plistlib.loads(electron.read(entry))
                 info.update(CFBundleDisplayName='ClawMate Codex', CFBundleName='ClawMate Codex',
+                            CFBundleExecutable='clawmate-codex-desktop',
                             CFBundleIdentifier='com.clawmate.codex.companion', CFBundleShortVersionString=version,
                             CFBundleVersion=version)
                 output.writestr(changed, plistlib.dumps(info))
