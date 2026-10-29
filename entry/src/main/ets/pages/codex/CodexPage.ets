@@ -7,11 +7,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { AppTheme } from '../../utils/AppTheme';
-import { PrivacyConsent, PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
 import { AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { MarkdownView } from '../../components/MarkdownView';
-import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 import { CodexClient } from './CodexClient';
 import { CodexCredentialStore } from './CodexCredentialStore';
 import { CodexApprovalCard } from './CodexApprovalCard';
@@ -37,7 +35,6 @@ export struct CodexPage {
   @Link @Watch('screenChanged') screen: number;
   @Link taskSettingsOpen: boolean;
   @Link historyOpen: boolean;
-  @StorageProp(PRIVACY_STATE_KEY) @Watch('privacyChanged') private privacyState: string = 'unselected';
   @State private originInput: string = '';
   @State private tokenInput: string = '';
   @State private pairingInput: string = '';
@@ -159,9 +156,6 @@ export struct CodexPage {
     if (this.active && this.connected && this.screen === CodexScreen.Workspace) { this.schedulePoll(10); }
     this.startHeartbeat();
   }
-  private privacyChanged(): void {
-    if (this.privacyState !== 'accepted') { this.disconnect(); }
-  }
   private clearTimer(): void {
     if (this.timer >= 0) { clearTimeout(this.timer); this.timer = -1; }
     if (this.statusTimer >= 0) { clearInterval(this.statusTimer); this.statusTimer = -1; }
@@ -199,7 +193,6 @@ export struct CodexPage {
     const candidate = new CodexClient();
     this.pendingClient = candidate;
     try {
-      PrivacyConsent.requireAccepted();
       let connection: CodexConnection;
       if (savedId) {
         const saved = await CodexCredentialStore.load(savedId);
@@ -287,7 +280,6 @@ export struct CodexPage {
     const epoch = ++this.epoch;
     this.busy = true; this.connectionOperation = true; this.errorText = '';
     try {
-      PrivacyConsent.requireAccepted();
       if (!canIUse('SystemCapability.Multimedia.Scan.ScanBarcode')) {
         throw new Error('此设备暂不支持扫码，请导入配对文件或粘贴配对信息');
       }
@@ -317,7 +309,6 @@ export struct CodexPage {
     this.busy = true; this.connectionOperation = true; this.errorText = '';
     let file: fileIo.File | null = null;
     try {
-      PrivacyConsent.requireAccepted();
       const options = new picker.DocumentSelectOptions(); options.maxSelectNumber = 1;
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const uris = await new picker.DocumentViewPicker(context).select(options);
@@ -343,7 +334,6 @@ export struct CodexPage {
     this.busy = true; this.connectionOperation = true; this.errorText = '';
     try {
       const bundle = parseCodexPairingInput(this.pairingInput);
-      PrivacyConsent.requireAccepted();
       const confirmed = await new Promise<boolean>((resolve) => {
         this.getUIContext().showAlertDialog({ title: '连接自己的电脑',
           message: bundle.name + '\n' + bundle.origin + '\n\n请确认这份配对信息来自你自己的 PC 应用。连接后可以向该电脑下发任务。',
@@ -353,7 +343,6 @@ export struct CodexPage {
         });
       });
       if (!confirmed || epoch !== this.epoch || this.screen !== CodexScreen.Setup) { return; }
-      PrivacyConsent.requireAccepted();
       const candidate = new CodexClient(); this.pendingClient = candidate;
       const connection = await candidate.pair(bundle);
       candidate.close();
@@ -655,7 +644,6 @@ export struct CodexPage {
     let file: fileIo.File | null = null;
     let cameraPath: string = '';
     try {
-      PrivacyConsent.requireAccepted();
       let uris: string[] = [];
       if (source === 'camera') {
         const context = this.getUIContext().getHostContext();
@@ -680,7 +668,6 @@ export struct CodexPage {
         uris = await new picker.DocumentViewPicker(context).select(options);
       }
       if (!uris.length || epoch !== this.epoch || this.screen !== CodexScreen.Workspace) { return; }
-      PrivacyConsent.requireAccepted();
       file = await fileIo.open(uris[0], fileIo.OpenMode.READ_ONLY);
       const size = (await fileIo.stat(file.fd)).size;
       if (size <= 0 || size > CODEX_MAX_FILE_BYTES) { throw new Error('单个附件需大于 0 且不超过 8 MiB'); }
@@ -693,7 +680,6 @@ export struct CodexPage {
         new Uint8Array(buffer).set(new Uint8Array(chunk, 0, count), offset); offset += count;
       }
       if (epoch !== this.epoch || this.screen !== CodexScreen.Workspace) { return; }
-      PrivacyConsent.requireAccepted();
       const name = new fileUri.FileUri(uris[0]).name || (image ? 'image' : 'file');
       const result = await this.client.call('/v1/uploads', { workspaceId: workspaceId, name: name,
         base64: new util.Base64Helper().encodeToStringSync(new Uint8Array(buffer)), image: image });
@@ -722,7 +708,7 @@ export struct CodexPage {
     if (!missing.length) { return; }
     const epoch = this.epoch;
     const current = (): boolean => epoch === this.epoch && this.connected && this.active &&
-      this.screen === CodexScreen.Workspace && this.task?.id === task.id && this.privacyState === 'accepted';
+      this.screen === CodexScreen.Workspace && this.task?.id === task.id;
     this.artifactSyncRunning = true;
     try {
       const context = this.getUIContext().getHostContext();
@@ -1089,10 +1075,6 @@ export struct CodexPage {
               Text(codexStatusLabel(this.task.status)).fontSize(11).fontColor(AppTheme.text('#747B87')).width('100%')
             }
             if (this.task?.error) { Text(this.task.error).fontSize(12).fontColor(AppTheme.text('#B94D4D')).width('100%') }
-          }
-          if (this.privacyState !== 'accepted') {
-            Button('阅读并选择隐私声明').fontSize(13).fontColor(AppTheme.text('#5968FF'))
-              .backgroundColor(Color.Transparent).onClick(() => { PrivacyConsentDialog.show(this.getUIContext()); })
           }
           if (this.errorText) {
             Text(this.errorText).fontSize(12).lineHeight(19).fontColor(AppTheme.text('#B94D4D')).width('100%')

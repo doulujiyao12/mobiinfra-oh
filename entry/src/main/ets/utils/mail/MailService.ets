@@ -1,8 +1,7 @@
 import { DataManagerModelConfig, DataManagerProgress, DataManagerProgressCallback } from '../../datamanager/DataManagerTypes';
 import { AppLogger } from '../AppLogger';
-import { PrivacyConsent } from '../PrivacyConsent';
 import { MailAnalysis, MailDecision, mailAnalysisFailure } from './MailAnalysis';
-import { MailCredentialStore } from './MailCredentialStore';
+import { MailCredentialStore, MAIL_CREDENTIAL_MISSING_MESSAGE } from './MailCredentialStore';
 import { MailImapClient } from './MailImapClient';
 import { MailStore } from './MailStore';
 import { MailItem, MailSnapshot, emptyMailSnapshot, mailDay, MAIL_RETENTION_DAYS, validateMailSettings } from './MailTypes';
@@ -27,7 +26,6 @@ export class MailService {
     let store = new MailStore(filesDir);
     let settings = store.settings();
     if (!settings.enabled) { return; }
-    PrivacyConsent.requireAccepted();
     let startedAt = Date.now();
     let accountKey = store.accountKey(settings);
     let old = store.current(startedAt);
@@ -38,8 +36,9 @@ export class MailService {
       if (workProgress) { workProgress(value); }
     };
     try {
-      progress('读取最近三天的收件箱…');
+      report({ stage: '连接邮箱', message: '正在连接邮箱，读取近三天邮件', current: 0, total: 0, percent: 2 });
       let secret = await MailCredentialStore.load(accountKey);
+      if (!secret) { throw new Error(MAIL_CREDENTIAL_MISSING_MESSAGE); }
       let result = await new MailImapClient().readToday(settings, secret, accountKey, old, startedAt, MAIL_RETENTION_DAYS, report);
       AppLogger.info('Mail', 'MAIL_READ_DONE count=' + result.items.length + ' elapsedMs=' + (Date.now() - startedAt));
       saved = { day: mailDay(startedAt), accountKey: accountKey, uidValidity: result.uidValidity,
@@ -88,7 +87,6 @@ export class MailService {
         saved.notice += ' 本次有读取上限、长正文截取或无法解析的邮件，详情中已标明，请结合邮箱核对。';
       }
       // The user may disable/change the mailbox while awaiting a model/network response.
-      PrivacyConsent.requireAccepted();
       if (!store.settings().enabled || JSON.stringify(store.settings()) !== JSON.stringify(settings) ||
         store.accountKey() !== accountKey || mailDay() !== saved.day) {
         throw new Error('邮箱设置或日期已变化，请重新同步');
@@ -101,12 +99,13 @@ export class MailService {
       store.save(saved);
       progress(saved.error || '已读取近三天' + saved.items.length + '封邮件');
       if (saved.error) { throw new Error(saved.error); }
-      let completed: DataManagerProgress = { stage: '邮件已更新', message: '已保存近三天邮件结果',
+      let completed: DataManagerProgress = { stage: settings.aiAllowed ? '邮件读取与分析完成' : '邮件读取完成',
+        message: '已保存近三天邮件结果',
         current: saved.items.length, total: saved.items.length, percent: 100 };
       report(completed);
     } catch (e) {
       let message = (e as Error).message;
-      if (PrivacyConsent.isAccepted() && saved.syncedAt.length === 0 && store.settings().enabled && store.accountKey() === accountKey) {
+      if (saved.syncedAt.length === 0 && store.settings().enabled && store.accountKey() === accountKey) {
         old.day = mailDay(startedAt); old.accountKey = accountKey;
         old.error = message;
         old.stale = true;

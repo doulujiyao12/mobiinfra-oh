@@ -1,7 +1,8 @@
 import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
-import { PrivacyConsent } from '../PrivacyConsent';
+import { AppRequests } from '../AppRequests';
+import { MAIL_CREDENTIAL_MISSING_MESSAGE } from './MailCredentialStore';
 import { DataManagerProgress, DataManagerProgressCallback } from '../../datamanager/DataManagerTypes';
 import { MailSettings, MailItem, MailSnapshot, MailReadResult, mailDay, mailDayBounds, validateMailSettings, MAIL_RETENTION_DAYS } from './MailTypes';
 import { ImapFrames, imapFetch, imapField, imapBody, mailBodyPart, mailQuoted, mailDecode, mailHeader,
@@ -37,7 +38,6 @@ export class MailImapClient {
     return this.queue.shift() || '';
   }
   private async command(command: string, stage: string): Promise<string[]> {
-    PrivacyConsent.requireAccepted();
     if (this.failure || Date.now() >= this.deadline) { throw new Error(this.failure || '邮箱读取超时'); }
     let tag = 'M' + (++this.sequence);
     let sendTimer: number = -1;
@@ -60,7 +60,8 @@ export class MailImapClient {
       if (bytes > 2 * 1024 * 1024) { throw new Error('邮件响应过大，请缩小读取上限'); }
       if (frame.startsWith(tag + ' ')) {
         if (!frame.startsWith(tag + ' OK')) {
-          throw new Error(stage === '认证' ? '邮箱认证失败：请开启IMAP并填写客户端授权码；Outlook等OAuth邮箱暂不支持普通密码登录' :
+          if (stage === '认证') { AppLogger.warn('Mail', 'MAIL_IMAP_AUTH status=rejected'); }
+          throw new Error(stage === '认证' ? 'MAIL_AUTH_REJECTED: 邮箱认证失败，服务器拒绝了当前授权码；请核对授权码是否有效、是否开启IMAP。Outlook等OAuth邮箱暂不支持普通密码登录' :
             stage + '失败：服务器拒绝请求，请确认已开启IMAP服务');
         }
         return result;
@@ -70,7 +71,7 @@ export class MailImapClient {
     }
   }
   private async open(settings: MailSettings): Promise<void> {
-    this.unregister = PrivacyConsent.registerExternalRequest((): void => { this.close(); });
+    this.unregister = AppRequests.registerExternalRequest((): void => { this.close(); });
     let timer = setTimeout((): void => { this.fail('邮箱TLS连接超时'); this.close(); }, 20000);
     try {
       // NetworkKit initializes the native TLS socket on bind. Subscribe only
@@ -116,10 +117,11 @@ export class MailImapClient {
     };
     try {
       validateMailSettings(settings);
-      if (!secret || /[\x00-\x1f\x7f]/.test(secret)) { throw new Error('请先保存邮箱客户端授权码'); }
+      if (!secret || /[\x00-\x1f\x7f]/.test(secret)) { throw new Error(MAIL_CREDENTIAL_MISSING_MESSAGE); }
       report('连接邮箱', '正在建立加密连接，请稍候', 0, 0, 2);
       await this.open(settings);
       await this.command('LOGIN ' + mailQuoted(settings.username) + ' ' + mailQuoted(secret), '认证');
+      AppLogger.info('Mail', 'MAIL_IMAP_AUTH status=accepted');
       report('查询邮件', '连接成功，正在查询近 ' + days + ' 天的收件箱', 0, 0, 10);
       let capabilities = (await this.command('CAPABILITY', '查询能力')).join(' ');
       if (/(?:^|\s)ID(?:\s|$)/i.test(capabilities)) {

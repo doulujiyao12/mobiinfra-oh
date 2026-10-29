@@ -1,5 +1,7 @@
 import { AppTheme } from '../utils/AppTheme';
 import { SyncMetrics } from '../datamanager/SyncMetrics';
+import { ModelStreamActivity } from '../datamanager/ModelStreamActivity';
+import { ModelStreamActivityPanel } from '../components/ModelStreamActivityPanel';
 import { CalendarMemoryService } from '../utils/calendar/CalendarMemoryService';
 import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
 import { MailStore } from '../utils/mail/MailStore';
@@ -134,8 +136,6 @@ import {
   SETTINGS_SECTION_NONE, SettingsSectionId, isSettingsSectionSelected, settingsParentSection
 } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
-import { PrivacyConsent } from '../utils/PrivacyConsent';
-import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
 import { AiLoginGuard } from '../components/AiLoginGuard';
 import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE, HUAWEI_ACCOUNT_SESSION_KEY } from '../utils/AiServiceAccess';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
@@ -293,6 +293,7 @@ const LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS: number = 250;
 const HOME_COMFORT_CHAT_SCENE_ID: number = 3;
 const SYNC_REMINDER_SUPPRESSED_KEY: string = 'syncReminderSuppressed';
 const SYNC_REMINDER_FIRST_OPENED_AT_KEY: string = 'syncReminderFirstOpenedAt';
+type MemoryOperationKind = 'manual' | 'collection' | 'startup' | 'startup-retry' | 'mail' | 'calendar';
 
 interface ServerFile {
   name: string;
@@ -529,6 +530,7 @@ struct Index {
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
   @State @Watch('onChatAppearanceChanged') localChatImagePreparing: boolean = false;
+  private localModelDownloadPromptVisible: boolean = false;
   @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
@@ -660,13 +662,16 @@ struct Index {
   @State pcServerStatusText: string = 'PC Server 未连接';
   @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
+  @State private memoryOperationKind: MemoryOperationKind = 'manual';
+  private memoryOperationEpoch: number = 0;
   @State private startupSourceSyncRunning: boolean = false;
   @State private startupSourceCompleted: number = 0;
   @State private startupSourceTotal: number = 0;
-  @State private startupElapsedSeconds: number = 0;
+  @State private memoryElapsedSeconds: number = 0;
+  @State private memoryModelActivities: ModelStreamActivity[] = [];
   private startupSourceInnerPercent: number = 0;
-  private startupProgressStartedAt: number = 0;
-  private startupProgressTimerId: number = -1;
+  private memoryProgressStartedAt: number = 0;
+  private memoryProgressTimerId: number = -1;
   @StorageProp(STARTUP_SOURCE_SYNC_ENABLED_KEY) private startupSourceSyncEnabled: boolean = true;
   @State dataManagerSyncFailed: boolean = false;
   @State dataManagerProgressStage: string = '准备';
@@ -705,7 +710,7 @@ struct Index {
   private syncReminderShownThisSession: boolean = false;
   private calendarConsentShownForegroundEpoch: number = -1;
   private calendarConsentPending: boolean = false;
-  private privacyConsentReady: boolean = false;
+  private startupServicesReady: boolean = false;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -1315,9 +1320,6 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       return;
     }
-    if (!await this.ensurePrivacyConsent()) {
-      return;
-    }
     await this.voiceOrchestrator().toggleVoiceInput();
   }
 
@@ -1329,17 +1331,11 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       return;
     }
-    if (!await this.ensurePrivacyConsent()) {
-      return;
-    }
     await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
   }
 
   private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
-      return;
-    }
-    if (!await this.ensurePrivacyConsent()) {
       return;
     }
     await this.voiceOrchestrator().replayAssistantMessageVoice(messageId, text);
@@ -1491,6 +1487,7 @@ struct Index {
     if (!this.debugEnabled) {
       this.cloudOutput = '';
       this.output = '';
+      this.refreshModelActivities();
     }
   }
 
@@ -1883,9 +1880,6 @@ struct Index {
     request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
     if (!this.ensureAiServiceLogin()) {
       return mobileGuiTaskRunResultFromFailure('login_required', AI_LOGIN_REQUIRED_MESSAGE, true);
-    }
-    if (!await this.ensurePrivacyConsent()) {
-      return mobileGuiTaskRunResultFromFailure('privacy_consent_required', '未同意隐私声明，任务未执行', true);
     }
     let deviceMode = this.selectedAgentDeviceMode();
     if (deviceMode === 'unavailable') {
@@ -2337,9 +2331,6 @@ struct Index {
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
       throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
-    }
-    if (!await this.ensurePrivacyConsent()) {
-      throw new Error('未同意隐私声明，未生成头像');
     }
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
@@ -2830,6 +2821,38 @@ struct Index {
     this.dataManagerProgressTotal = progress.total;
   }
 
+  // One owner and one lifecycle for every entry point. A new operation never
+  // inherits another operation's title, failure state, counters or retry action.
+  private beginMemoryOperation(kind: MemoryOperationKind, title: string, message: string = ''): boolean {
+    if (this.dataManagerRefreshing) { return false; }
+    this.memoryOperationEpoch++;
+    this.memoryModelActivities = [];
+    this.stopMemoryProgressTimer();
+    this.memoryOperationKind = kind;
+    this.startupSourceSyncRunning = kind === 'startup' || kind === 'startup-retry';
+    this.dataManagerSyncFailed = false;
+    this.dataManagerProgressStage = title; this.dataManagerProgressMessage = message;
+    this.dataManagerProgressPercent = 0; this.dataManagerProgressCurrent = 0; this.dataManagerProgressTotal = 0;
+    this.startupSourceCompleted = 0; this.startupSourceTotal = 0; this.startupSourceInnerPercent = 0;
+    this.dataManagerRefreshing = true;
+    this.startMemoryProgressTimer();
+    return true;
+  }
+
+  private endMemoryOperation(): void {
+    this.refreshModelActivities();
+    this.stopMemoryProgressTimer(); this.startupSourceSyncRunning = false; this.dataManagerRefreshing = false;
+  }
+
+  private async retryMemoryOperation(): Promise<void> {
+    let kind = this.memoryOperationKind;
+    this.dataManagerSyncFailed = false;
+    if (kind === 'mail') { await this.syncMailReminders(); }
+    else if (kind === 'calendar') { await this.syncCalendarMemory(true); }
+    else if (kind === 'startup' || kind === 'startup-retry') { await this.syncDailyStartupSources(true); }
+    else { await this.refreshDataManager(kind !== 'collection', kind === 'collection'); }
+  }
+
   private async syncCollectedWorkflowTasks(): Promise<void> {
     // A sync started before collection may have captured an older daily-log snapshot.
     // Wait for it, then run again so the newly collected files cannot be skipped.
@@ -2837,19 +2860,16 @@ struct Index {
       while (this.dataManagerRefreshing) {
         await new Promise<void>((resolve): void => { setTimeout(resolve, 200); });
       }
-      if (!PrivacyConsent.isAccepted()) { throw new Error('请先同意数据处理说明'); }
       if (await this.refreshDataManager(false, true)) { return; }
-      // Another sync can acquire the lock while consent is being checked.
+      // Another sync can acquire the lock before refreshDataManager starts.
       if (!this.dataManagerRefreshing) {
         throw new Error(this.dataManagerProgressMessage || '采集结果同步未完成，请到汇总页重试');
       }
     }
   }
 
-  private async refreshDataManager(readCalendar: boolean = true, collectionOnly: boolean = false): Promise<boolean> {
-    if (!await this.ensurePrivacyConsent()) {
-      return false;
-    }
+  private async refreshDataManager(readCalendar: boolean = true, collectionOnly: boolean = false,
+    fullCheck: boolean = false): Promise<boolean> {
     dataManagerInfo(`refreshDataManager invoked: hasFacade=${this.dataManagerFacade !== null}, refreshing=${this.dataManagerRefreshing}`);
     if (this.dataManagerFacade === null) {
       dataManagerWarn('refreshDataManager skipped: facade is null');
@@ -2859,29 +2879,27 @@ struct Index {
       dataManagerWarn('refreshDataManager skipped: already refreshing');
       return false;
     }
-    this.dataManagerRefreshing = true;
-    this.dataManagerSyncFailed = false;
-    this.dataManagerProgressStage = '正在整理日志';
-    this.dataManagerProgressMessage = '';
-    this.dataManagerProgressPercent = 0;
-    this.dataManagerProgressCurrent = 0;
-    this.dataManagerProgressTotal = 0;
+    if (!this.beginMemoryOperation(collectionOnly ? 'collection' : 'manual', '同步个人记忆')) { return false; }
     // Post-task sync reuses the memory pipeline without rereading unrelated sources.
     let calendarEnabled = !collectionOnly && new CalendarMemoryStore(this.filesDir).settings().enabled;
     let calendarError = calendarEnabled ?
       new CalendarMemoryStore(this.filesDir).snapshot().error : '';
     let mailEnabled = !collectionOnly && new MailStore(this.filesDir).settings().enabled;
     let mailError = '';
+    let memoryAttempted = false;
+    let scheduler = new StartupSourceSync(this.filesDir);
     let syncMetrics = new SyncMetrics();
     try {
       if (readCalendar && calendarEnabled) {
         this.dataManagerProgressStage = '更新日历';
         syncMetrics.mark('更新日历');
         try {
+          scheduler.markAttempted('calendar');
           await CalendarMemoryService.refresh(getContext(this) as common.Context); calendarError = '';
           new StartupSourceSync(this.filesDir).markSynced('calendar');
         }
         catch (e) {
+          scheduler.markFailed('calendar');
           calendarError = (e as Error).message;
           dataManagerWarn('Calendar unavailable; continuing other memory sources');
           this.appendCloudLog('Calendar refresh failed: ' + calendarError);
@@ -2892,11 +2910,12 @@ struct Index {
         this.dataManagerProgressStage = '更新邮件';
         syncMetrics.mark('更新邮件');
         try {
+          scheduler.markAttempted('mail');
           await MailService.refresh(this.filesDir, this.getDataManagerModelConfig(), (message: string): void => {
             this.dataManagerProgressMessage = message;
           });
           new StartupSourceSync(this.filesDir).markSynced('mail');
-        } catch (e) { mailError = (e as Error).message; }
+        } catch (e) { scheduler.markFailed('mail'); mailError = (e as Error).message; }
         this.reloadDataManagerViewModels();
       }
       if (!readCalendar && calendarEnabled && !calendarError) {
@@ -2912,7 +2931,8 @@ struct Index {
         this.dataManagerSyncFailed = sourceError.length > 0;
         return false;
       }
-      if (!this.dataManagerFacade.hasDataToSync()) {
+      if (!fullCheck && !this.dataManagerFacade.hasDataToSync()) {
+        if (sourceError.length === 0) { this.dataManagerFacade.recordSuccessfulMemoryCheck(); }
         this.dataManagerProgressStage = sourceError ? '部分完成' : '完成';
         this.dataManagerProgressMessage = sourceError || (mailEnabled ? '近三天邮件已更新，暂无其他待同步数据' : '暂无待同步数据');
         this.dataManagerSyncFailed = sourceError.length > 0;
@@ -2922,10 +2942,11 @@ struct Index {
       }
       let modelConfig = this.getDataManagerModelConfig();
       syncMetrics.mark('个人记忆');
+      scheduler.markAttempted('chat'); memoryAttempted = true;
       dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
       let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
         this.updateDataManagerProgress(progress);
-      });
+      }, undefined, fullCheck);
       new StartupSourceSync(this.filesDir).markSynced('chat');
       this.reloadDataManagerViewModels();
       this.appendCloudLog('DataManager refresh: ' + summary.message);
@@ -2934,10 +2955,12 @@ struct Index {
       this.dataManagerSyncFailed = sourceError.length > 0;
       this.dataManagerProgressPercent = 100;
       showToastSafely(sourceError ? '部分来源未更新，请到数据采集中查看并重试' :
-        (summary.skipped ? '已是最新数据' : '同步完成'), sourceError ? 3000 : 1800);
+        (summary.failedEventCount ? '同步完成，本次跳过 ' + summary.failedEventCount + ' 条失败事件' :
+          summary.skipped ? '已是最新数据' : '同步完成'), sourceError || summary.failedEventCount ? 3000 : 1800);
       dataManagerInfo('refreshDataManager ' + (sourceError ? 'partially completed: ' : 'success: ') + summary.message);
       return sourceError.length === 0;
     } catch (e) {
+      if (memoryAttempted) { scheduler.markFailed('chat'); }
       let err = e as Error;
       this.appendCloudLog('DataManager refresh failed: ' + err.message);
       this.dataManagerProgressStage = '同步失败';
@@ -2946,7 +2969,7 @@ struct Index {
       dataManagerError('refreshDataManager failed: ' + err.message);
       return false;
     } finally {
-      this.dataManagerRefreshing = false;
+      this.endMemoryOperation();
       syncMetrics.finish(!this.dataManagerSyncFailed && this.dataManagerProgressPercent === 100);
       dataManagerInfo('refreshDataManager finished');
       this.maybeShowCalendarConsent();
@@ -2955,16 +2978,47 @@ struct Index {
 
   private async syncMailReminders(): Promise<void> {
     if (this.dataManagerRefreshing) { throw new Error('正在同步，请稍候'); }
-    if (!await this.ensurePrivacyConsent()) { throw new Error('请先同意数据处理说明'); }
     if (new MailStore(this.filesDir).settings().aiAllowed && !this.ensureAiServiceLogin()) {
       throw new Error('请登录后使用AI筛选；也可关闭AI筛选，仅在本机读取邮件');
     }
-    this.dataManagerRefreshing = true;
+    if (!this.beginMemoryOperation('mail', '读取邮件', '正在连接邮箱，读取近三天邮件')) { throw new Error('正在处理其他数据，请稍候'); }
+    let scheduler = new StartupSourceSync(this.filesDir);
     try {
-      await MailService.refresh(this.filesDir, this.getDataManagerModelConfig());
+      scheduler.markAttempted('mail');
+      await MailService.refresh(this.filesDir, this.getDataManagerModelConfig(), (_message: string): void => {},
+        (progress: DataManagerProgress): void => { this.updateDataManagerProgress(progress); });
       new StartupSourceSync(this.filesDir).markSynced('mail');
+      this.dataManagerProgressStage = '邮件读取完成'; this.dataManagerProgressPercent = 100;
+    } catch (e) {
+      scheduler.markFailed('mail');
+      this.dataManagerSyncFailed = true; this.dataManagerProgressStage = '邮件读取或分析未完成';
+      this.dataManagerProgressMessage = (e as Error).message;
+      throw new Error(this.dataManagerProgressMessage);
     }
-    finally { this.reloadDataManagerViewModels(); this.dataManagerRefreshing = false; }
+    finally { this.endMemoryOperation(); this.reloadDataManagerViewModels(); }
+  }
+
+  private async syncCalendarMemory(readCalendar: boolean = false): Promise<void> {
+    if (this.dataManagerFacade === null) { return; }
+    if (!this.beginMemoryOperation('calendar', readCalendar ? '读取日历' : '分析日历',
+      readCalendar ? '正在读取已授权的日历安排' : '正在检查日历记忆变化')) { throw new Error('正在处理其他数据，请稍候'); }
+    let scheduler = new StartupSourceSync(this.filesDir);
+    try {
+      if (readCalendar) { scheduler.markAttempted('calendar'); }
+      if (readCalendar) {
+        await CalendarMemoryService.refresh(getContext(this) as common.Context,
+          (progress: DataManagerProgress): void => { this.updateDataManagerProgress(progress); });
+      }
+      await this.dataManagerFacade.refreshSourceMemory(this.getDataManagerModelConfig(), false, true,
+        (progress: DataManagerProgress): void => { this.updateDataManagerProgress(progress); });
+      if (readCalendar) { scheduler.markSynced('calendar'); }
+      this.dataManagerProgressStage = '日历分析完成'; this.dataManagerProgressPercent = 100;
+    } catch (e) {
+      if (readCalendar) { scheduler.markFailed('calendar'); }
+      this.dataManagerSyncFailed = true; this.dataManagerProgressStage = '日历分析未完成';
+      this.dataManagerProgressMessage = (e as Error).message;
+      throw new Error(this.dataManagerProgressMessage);
+    } finally { this.endMemoryOperation(); this.reloadDataManagerViewModels(); }
   }
 
   private maybeShowSyncReminder(): void {
@@ -3004,9 +3058,6 @@ struct Index {
 
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
-      return;
-    }
-    if (!await this.ensurePrivacyConsent()) {
       return;
     }
     if (this.wechatAutoSummaryRunning) {
@@ -3109,7 +3160,6 @@ struct Index {
   }
 
   private saveWechatAutoSummaryResponse(request: WechatAutoSummaryRequest, response: WechatAutoSummaryResponse): void {
-    PrivacyConsent.requireAccepted();
     let runId = response.run_id !== undefined && response.run_id.trim().length > 0 ?
       response.run_id : currentLocalDateKey() + '-wechat';
     let storage = new WechatAutoSummaryStorage(this.filesDir);
@@ -3160,15 +3210,6 @@ struct Index {
 
   aboutToAppear() {
     this.startOnlineCompileNotices();
-    PrivacyConsent.setRevokeHandler(() => {
-      this.cancelCurrentCloudChat();
-      if (this.chatVoiceOrchestrator !== null) {
-        this.chatVoiceOrchestrator.shutdown();
-      }
-      if (AgentExecutionController.isExecutionActive()) {
-        AgentExecutionController.requestCancellation();
-      }
-    });
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     this.migrateWechatAutoSummaryDefaultValues();
@@ -3329,10 +3370,10 @@ struct Index {
 
   onPageShow(): void {
     this.pageVisible = true;
-    if (this.startupSourceSyncRunning) { this.startStartupProgressTimer(false); }
+    if (this.dataManagerRefreshing) { this.startMemoryProgressTimer(false); }
     this.openCollectionReminderTask();
     this.onCurrentTabChanged();
-    this.initializePrivacyConsent();
+    this.initializeStartupServices();
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
@@ -3344,9 +3385,10 @@ struct Index {
       this.calendarConsentShownForegroundEpoch === this.appForegroundEpoch ||
       this.calendarConsentPending || this.shouldDisplayFirstLaunchOnboarding() ||
       this.syncReminderVisible || this.desktopCompanionReminderVisible || this.dataManagerRefreshing ||
+      this.dataManagerSyncFailed ||
       this.collectionReminderRequest.length > 0 ||
       AgentExecutionController.isExecutionActive() || SelfHdcTestRunner.shared().snapshot().running ||
-      !this.privacyConsentReady || !PrivacyConsent.isAccepted() || this.dataManagerFacade === null) { return; }
+      !this.startupServicesReady || this.dataManagerFacade === null) { return; }
     this.calendarConsentShownForegroundEpoch = this.appForegroundEpoch;
     this.calendarConsentPending = true;
     this.runStartupServices().catch((): void => {
@@ -3356,12 +3398,12 @@ struct Index {
       // not interpret that round-trip as a new launch and immediately ask again.
       this.calendarConsentShownForegroundEpoch = this.appForegroundEpoch;
       this.calendarConsentPending = false;
-      if (this.pageVisible && PrivacyConsent.isAccepted()) { this.maybeShowSyncReminder(); }
+      if (this.pageVisible) { this.maybeShowSyncReminder(); }
     });
   }
 
   private async runStartupServices(): Promise<void> {
-    if (!this.pageVisible || !PrivacyConsent.isAccepted()) { return; }
+    if (!this.pageVisible) { return; }
     let calendar = new CalendarMemoryStore(this.filesDir);
     if (calendar.shouldOfferConsent()) {
       // Persist before opening either dialog: denial, dismissal or a process
@@ -3370,7 +3412,7 @@ struct Index {
       try { await this.offerCalendarConsent(); }
       catch (e) { showToastSafely('日历未开启，可在“汇总 → 日历分析”重新授权。', 3000); }
     }
-    if (!this.pageVisible || !PrivacyConsent.isAccepted()) { return; }
+    if (!this.pageVisible) { return; }
     if (CollectionReminderService.shouldOfferStartupConsent()) {
       CollectionReminderService.markStartupConsentPrompted();
       let state = CollectionReminderService.load();
@@ -3381,82 +3423,81 @@ struct Index {
               ' 提醒你收集手机足迹。点击通知并解锁后开始采集，锁屏时不会自动操控手机。\n暂不开启后不再自动询问，可在“任务 → 采集提醒”开启。',
             buttons: [{ text: '暂不开启', color: AppTheme.dialogText('#7C8496') },
               { text: '开启提醒', color: AppTheme.dialogText('#6372D8') }] });
-          if (answer.index === 1 && this.pageVisible && PrivacyConsent.isAccepted()) {
+          if (answer.index === 1 && this.pageVisible) {
             await CollectionReminderService.setEnabled(true);
           }
         } catch (e) { showToastSafely('提醒未开启，可到“任务 → 采集提醒”检查通知授权与签名能力。', 3000); }
       }
     }
-    if (this.pageVisible && PrivacyConsent.isAccepted()) { await this.syncDailyStartupSources(); }
+    if (this.pageVisible) { await this.syncDailyStartupSources(); }
   }
 
-  private async syncDailyStartupSources(): Promise<void> {
+  private async syncDailyStartupSources(retryFailed: boolean = false): Promise<void> {
     const facade = this.dataManagerFacade;
-    if (!PrivacyConsent.isAccepted() || facade === null || this.dataManagerRefreshing || MailService.isBusy()) { return; }
+    if (!retryFailed && this.dataManagerSyncFailed) { return; }
+    if (facade === null || this.dataManagerRefreshing || MailService.isBusy()) { return; }
     let scheduler = new StartupSourceSync(this.filesDir);
-    if (!scheduler.isEnabled()) { return; }
+    if (!retryFailed && !scheduler.isEnabled()) { return; }
     let mail = new MailStore(this.filesDir).settings();
     let aiAllowed = AiServiceAccess.isAllowed();
     let calendarConfigured = new CalendarMemoryStore(this.filesDir).settings().enabled;
     let candidates: StartupSourceSelection = { mail: mail.enabled && (!mail.aiAllowed || aiAllowed),
       calendar: calendarConfigured, chat: aiAllowed };
-    let due = scheduler.pendingSelection(candidates);
+    let due = scheduler.pendingSelection(candidates, Date.now(), retryFailed);
     if (!due.mail && !due.calendar && !due.chat) { return; }
     let readinessStarted = Date.now();
-    const calendarReady = await CalendarMemoryService.canAutoRefresh(getContext(this) as common.Context);
+    let readinessEpoch = this.memoryOperationEpoch;
+    const calendarReady = calendarConfigured && await CalendarMemoryService.canAutoRefresh(getContext(this) as common.Context);
     let mailReady = due.mail && await MailService.canAutoRefresh(this.filesDir);
     dataManagerInfo('STARTUP_SYNC_READY calendar=' + calendarReady + ' mail=' + mailReady + ' elapsedMs=' + (Date.now() - readinessStarted));
-    if (!this.pageVisible || !PrivacyConsent.isAccepted() || this.dataManagerRefreshing || !scheduler.isEnabled()) { return; }
+    // Explicit work takes precedence over an older asynchronous startup check,
+    // even when that work finished while readiness checks were still waiting.
+    if (this.memoryOperationEpoch !== readinessEpoch || !this.pageVisible ||
+      this.dataManagerRefreshing || (!retryFailed && !scheduler.isEnabled())) { return; }
     if (calendarConfigured && !calendarReady) { this.reloadDataManagerViewModels(); }
     let selection: StartupSourceSelection = { mail: mailReady, calendar: due.calendar && calendarReady, chat: due.chat };
-    if (!scheduler.hasDue(selection)) { return; }
-    this.dataManagerRefreshing = true;
-    this.startupSourceSyncRunning = true;
-    this.startupSourceCompleted = 0; this.startupSourceTotal = 0; this.startupSourceInnerPercent = 0;
-    this.dataManagerProgressCurrent = 0; this.dataManagerProgressTotal = 0;
-    this.startStartupProgressTimer();
-    this.dataManagerSyncFailed = false;
-    this.dataManagerProgressStage = '自动更新'; this.dataManagerProgressMessage = '仅更新邮件、日历和新增聊天';
-    this.dataManagerProgressPercent = 0;
+    if (!scheduler.hasDue(selection, Date.now(), retryFailed)) { return; }
+    if (!this.beginMemoryOperation(retryFailed ? 'startup-retry' : 'startup', retryFailed ? '重试未完成的来源' : '每日自动更新',
+      '仅处理已开启的邮件、日历和新增聊天')) { return; }
     let actions: StartupSourceActions = {
       mail: async (): Promise<void> => {
-        PrivacyConsent.requireAccepted();
         this.dataManagerProgressStage = '自动更新邮件';
         await MailService.refresh(this.filesDir, this.getDataManagerModelConfig(), (_message: string): void => {},
           (value: DataManagerProgress): void => { this.updateStartupWorkProgress(value); });
       },
       calendar: async (): Promise<void> => {
-        PrivacyConsent.requireAccepted();
         this.dataManagerProgressStage = '自动更新日历';
         let inlineMemory = AiServiceAccess.isAllowed() && !selection.chat;
         await CalendarMemoryService.refresh(getContext(this) as common.Context,
           (value: DataManagerProgress): void => { this.updateStartupWorkProgress(value, 0, inlineMemory ? 25 : 100); });
         if (inlineMemory && AiServiceAccess.isAllowed()) {
-          await facade.refreshAutomaticSources(this.getDataManagerModelConfig(), false, true,
+          await facade.refreshSourceMemory(this.getDataManagerModelConfig(), false, true,
             (value: DataManagerProgress): void => { this.updateStartupWorkProgress(value, 25, 75); });
         }
       },
       chat: async (): Promise<void> => {
-        PrivacyConsent.requireAccepted();
         this.dataManagerProgressStage = '自动更新聊天';
         if (!AiServiceAccess.isAllowed()) { throw new Error('请登录后同步聊天'); }
-        await facade.refreshAutomaticSources(this.getDataManagerModelConfig(), true,
+        await facade.refreshSourceMemory(this.getDataManagerModelConfig(), true,
           calendarReady, (value: DataManagerProgress): void => { this.updateStartupWorkProgress(value); });
       }
     };
     try {
       let result = await scheduler.run(selection, actions, Date.now(),
-        (value: StartupSyncProgress): void => { this.updateStartupSourceProgress(value); });
-      this.dataManagerProgressPercent = 100;
-      this.dataManagerProgressStage = !scheduler.isEnabled() ? '已关闭每日自动更新' : result.failed.length > 0 ? '部分来源待重试' :
-        result.updated.length > 0 ? '已自动更新' : '已是最新';
+        (value: StartupSyncProgress): void => { this.updateStartupSourceProgress(value); }, retryFailed);
+      this.dataManagerSyncFailed = result.failed.length > 0;
+      this.dataManagerProgressPercent = this.dataManagerSyncFailed ? this.dataManagerProgressPercent : 100;
+      this.dataManagerProgressStage = this.dataManagerSyncFailed ? '部分来源未完成' : !scheduler.isEnabled() ? '本次处理已结束' :
+        result.updated.length > 0 ? (retryFailed ? '重试完成' : '已自动更新') : '已是最新';
       this.dataManagerProgressMessage = result.failed.length > 0 ?
         result.failed.map((source: string): string => source === 'mail' ? '邮件' : source === 'calendar' ? '日历' : '聊天')
-          .join('、') + '暂未更新，已保留原有数据，可到汇总页手动同步重试。' :
+          .join('、') + '未完成，已保存成功步骤。可点击重试；重新打开应用不会反复执行本轮失败任务。' :
         '已检查开启的邮件、日历和聊天来源；其他采集内容仍需手动同步。';
+    } catch (e) {
+      this.dataManagerSyncFailed = true; this.dataManagerProgressStage = '来源处理未完成';
+      this.dataManagerProgressMessage = (e as Error).message;
     } finally {
-      this.stopStartupProgressTimer();
-      this.startupSourceSyncRunning = false; this.dataManagerRefreshing = false; this.reloadDataManagerViewModels();
+      this.endMemoryOperation(); this.reloadDataManagerViewModels();
     }
   }
 
@@ -3472,23 +3513,29 @@ struct Index {
 
   private updateStartupWorkProgress(value: DataManagerProgress, start: number = 0, span: number = 100): void {
     this.dataManagerProgressStage = value.stage;
-    this.dataManagerProgressMessage = this.startupSourceSyncEnabled ? value.message : '已关闭自动更新，当前项完成后停止。' + value.message;
+    this.dataManagerProgressMessage = this.memoryOperationKind !== 'startup' || this.startupSourceSyncEnabled ?
+      value.message : '已关闭自动更新，当前项完成后停止。' + value.message;
     this.dataManagerProgressCurrent = value.current; this.dataManagerProgressTotal = value.total;
     this.startupSourceInnerPercent = Math.max(this.startupSourceInnerPercent, Math.min(100, Math.max(0, start + span * value.percent / 100)));
     this.dataManagerProgressPercent = 100 * (this.startupSourceCompleted + this.startupSourceInnerPercent / 100) /
       Math.max(1, this.startupSourceTotal);
   }
 
-  private startStartupProgressTimer(reset: boolean = true): void {
-    if (reset) { this.startupProgressStartedAt = Date.now(); this.startupElapsedSeconds = 0; }
-    if (this.startupProgressTimerId !== -1) { return; }
-    this.startupProgressTimerId = setInterval((): void => {
-      this.startupElapsedSeconds = Math.floor((Date.now() - this.startupProgressStartedAt) / 1000);
+  private startMemoryProgressTimer(reset: boolean = true): void {
+    if (reset) { this.memoryProgressStartedAt = Date.now(); this.memoryElapsedSeconds = 0; }
+    if (this.memoryProgressTimerId !== -1) { return; }
+    this.memoryProgressTimerId = setInterval((): void => {
+      this.memoryElapsedSeconds = Math.floor((Date.now() - this.memoryProgressStartedAt) / 1000);
+      this.refreshModelActivities();
     }, 1000);
   }
 
-  private stopStartupProgressTimer(): void {
-    if (this.startupProgressTimerId !== -1) { clearInterval(this.startupProgressTimerId); this.startupProgressTimerId = -1; }
+  private refreshModelActivities(): void {
+    this.memoryModelActivities = this.dataManagerFacade === null ? [] : this.dataManagerFacade.modelActivities(this.memoryProgressStartedAt);
+  }
+
+  private stopMemoryProgressTimer(): void {
+    if (this.memoryProgressTimerId !== -1) { clearInterval(this.memoryProgressTimerId); this.memoryProgressTimerId = -1; }
   }
 
   private disableDailyStartupSync(): void {
@@ -3506,7 +3553,7 @@ struct Index {
       choice.skipReminder = skip;
       store.saveConsentChoice(choice);
     });
-    if (!enable || !this.pageVisible || !PrivacyConsent.isAccepted()) { return; }
+    if (!enable || !this.pageVisible) { return; }
     await CalendarMemoryService.requestAccess(getContext(this) as common.UIAbilityContext);
     let settings = store.settings();
     settings.enabled = true;
@@ -3528,7 +3575,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
-    this.stopStartupProgressTimer();
+    this.stopMemoryProgressTimer();
     this.appliedPageBackgroundColor = '';
     this.appliedNavigationBarColor = '';
     applyPageStatusBar(this.getUIContext(), '#FFFFFF', '#FFFFFF');
@@ -3563,7 +3610,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
-    this.stopStartupProgressTimer();
+    this.stopMemoryProgressTimer();
     if (this.filesDir) { CodexChatService.get(this.filesDir).detach(); }
     if (this.onlineCompileNoticeTimerId !== -1) {
       clearInterval(this.onlineCompileNoticeTimerId);
@@ -3572,7 +3619,6 @@ struct Index {
     if (this.desktopCompanionReminderResolver !== null) {
       this.finishDesktopCompanionReminder(false);
     }
-    PrivacyConsent.setRevokeHandler(null);
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
     this.clearLocalChatCompletionProbe();
@@ -3583,25 +3629,18 @@ struct Index {
     this.profileKnockShareService.dispose();
   }
 
-  private initializePrivacyConsent(): void {
-    PrivacyConsent.initialize(getContext(this) as common.UIAbilityContext).then(async (): Promise<void> => {
-      this.privacyConsentReady = true;
+  private initializeStartupServices(): void {
+    Promise.resolve().then(async (): Promise<void> => {
+      this.startupServicesReady = true;
       this.maybeShowCalendarConsent();
-      if (AiServiceAccess.isAllowed() && PrivacyConsent.isAccepted() && !this.homeTaskSuggestionsAutoStarted) {
+      if (AiServiceAccess.isAllowed() && !this.homeTaskSuggestionsAutoStarted) {
         this.homeTaskSuggestionsAutoStarted = true;
         await this.refreshHomeTaskSuggestions(false);
         await this.refreshHomeComfortConcerns(false);
       }
     }).catch(() => {
-      showToastSafely('隐私设置读取失败，任务与云端上传暂不可用，请稍后重试', 2000);
+      dataManagerWarn('Startup services initialization failed');
     });
-  }
-
-  private async ensurePrivacyConsent(): Promise<boolean> {
-    if (PrivacyConsent.isAccepted()) {
-      return true;
-    }
-    return await PrivacyConsentDialog.show(this.getUIContext());
   }
 
   private async ensureDesktopCompanionReminder(): Promise<boolean> {
@@ -3653,7 +3692,7 @@ struct Index {
   private onAiAccountSessionChanged(): void {
     if (AiServiceAccess.isAllowed()) {
       // 登录后补上此前静默跳过的首页生成，不恢复被拦截的消息或任务。
-      this.initializePrivacyConsent();
+      this.initializeStartupServices();
       return;
     }
     this.homeTaskSuggestionsAutoStarted = false;
@@ -3996,9 +4035,6 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
     }
-    if (!await this.ensurePrivacyConsent()) {
-      throw new Error('未同意隐私声明，未上传资料进行分析');
-    }
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
@@ -4337,7 +4373,10 @@ struct Index {
     try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
 
     let hasConfig = false;
-    try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
+    try {
+      const config = fs.statSync(path + '/config.json');
+      hasConfig = config.isFile() && config.size > 0;
+    } catch (e) { hasConfig = false; }
     let hasWeight = this.hasModelWeightFile(path, 0);
     if (!hasConfig && !hasWeight) {
       return '下载未完成';
@@ -4359,6 +4398,12 @@ struct Index {
     if (hasComplete) {
       return '下载完成';
     }
+    // App-managed downloads can leave config/vision weights before the main
+    // model arrives. Only a validated manifest or completion marker proves the
+    // package finished; manually imported legacy model folders remain supported.
+    if (path.replace(/\\/g, '/').startsWith(this.modelScopeRootDir() + '/')) {
+      return '下载未完成';
+    }
     if (hasConfig && hasWeight) {
       return '可加载';
     }
@@ -4367,18 +4412,15 @@ struct Index {
 
   private modelManifestLoadableStatus(path: string): string {
     let manifestPath = path + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
-    let completePath = path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
     let hasManifest = false;
-    let hasComplete = false;
     try { hasManifest = fs.accessSync(manifestPath); } catch (e) { hasManifest = false; }
-    try { hasComplete = fs.accessSync(completePath); } catch (e) { hasComplete = false; }
     if (!hasManifest) {
       return '';
     }
 
     let manifest = this.readModelDownloadManifest(manifestPath);
     if (manifest === null || manifest.files.length === 0) {
-      return hasComplete ? '下载记录损坏' : '';
+      return '下载记录损坏';
     }
 
     let hasConfig = false;
@@ -6014,9 +6056,6 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       return;
     }
-    if (!await this.ensurePrivacyConsent()) {
-      return;
-    }
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
@@ -6112,7 +6151,6 @@ struct Index {
         },
         beforeIteration: async (): Promise<void> => {
           if (this.cloudChatCancelRequested) { throw new Error('已取消本次回复。'); }
-          PrivacyConsent.requireAccepted();
         },
         confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
           return await this.confirmMobileGuiTask(chatSessionId, request);
@@ -6702,17 +6740,22 @@ struct Index {
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
     // 本地 Agent 启动前自动加载模型，减少用户遗漏“加载大模型”按钮导致的失败。
-    if (this.modelLoaded) {
-      this.reportLocalAgentStartupStatus('本地模型已加载，继续准备 Agent。');
-      return true;
+    if (this.downloading || this.modelScopeDownloading) {
+      this.reportLocalAgentStartupStatus('本地模型正在下载，请等待完成后再试。', true, true);
+      return false;
     }
 
     let cfg = this.modelDir + '/config.json';
     let executionMode = this.normalizedLocalNpuExecutionMode();
     let modelStatus = this.modelLoadableStatus(this.modelDir);
     if (modelStatus !== '下载完成' && modelStatus !== '可加载') {
+      this.modelLoaded = false;
       this.reportLocalAgentStartupStatus('模型暂不可加载: ' + modelStatus + '\n路径: ' + this.modelDir, true, true);
       return false;
+    }
+    if (this.modelLoaded) {
+      this.reportLocalAgentStartupStatus('本地模型已加载，继续准备 Agent。');
+      return true;
     }
     if (!this.prepareCustomOpp()) {
       let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
@@ -6843,9 +6886,6 @@ struct Index {
     if (!this.ensureAiServiceLogin(showFailureToast)) {
       return;
     }
-    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
-      return;
-    }
     if (this.homeTaskSuggestionsLoading) {
       return;
     }
@@ -6882,9 +6922,6 @@ struct Index {
 
   private async refreshHomeComfortConcerns(showFailureToast: boolean): Promise<void> {
     if (!this.ensureAiServiceLogin(showFailureToast)) {
-      return;
-    }
-    if (!PrivacyConsent.isAccepted() && (!showFailureToast || !await this.ensurePrivacyConsent())) {
       return;
     }
     if (this.homeComfortConcernsLoading) {
@@ -6927,9 +6964,6 @@ struct Index {
     history: HomeComfortChatMessage[]): Promise<string> {
     if (!this.ensureAiServiceLogin()) {
       throw new Error(AI_LOGIN_REQUIRED_MESSAGE);
-    }
-    if (!await this.ensurePrivacyConsent()) {
-      throw new Error('未同意隐私声明，消息未发送');
     }
     let cloudConfig = this.getConfiguredCloudConfig();
     if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
@@ -7055,9 +7089,6 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       return { success: false, error: AI_LOGIN_REQUIRED_MESSAGE };
     }
-    if (!await this.ensurePrivacyConsent()) {
-      return { success: false, error: '未同意隐私声明，任务未执行' };
-    }
     let task = taskText.trim();
     if (task.length === 0) {
       return { success: false, error: '请先输入云端 Agent 任务。' };
@@ -7137,7 +7168,7 @@ struct Index {
 
   private async runPhoneWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation): Promise<void> {
     cancellation.throwIfCancelled();
-    if (!this.ensureAiServiceLogin() || !await this.ensurePrivacyConsent()) { return; }
+    if (!this.ensureAiServiceLogin()) { return; }
     cancellation.throwIfCancelled();
     let hub = SelfHdcTestRunner.shared();
     let bridge: PhoneHdcWorkflowBridge | null = null;
@@ -7221,9 +7252,6 @@ struct Index {
   private async runWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation): Promise<void> {
     cancellation.throwIfCancelled();
     if (!this.ensureAiServiceLogin()) {
-      return;
-    }
-    if (!await this.ensurePrivacyConsent()) {
       return;
     }
     cancellation.throwIfCancelled();
@@ -7311,6 +7339,8 @@ struct Index {
     if (!await this.ensureLocalChatModelIsAvailable()) {
       return;
     }
+    // The readiness dialog yields to the UI; another send may have started.
+    if (this.isThinking || this.localChatImagePreparing) { return; }
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       return;
@@ -7455,36 +7485,36 @@ struct Index {
   }
 
   private async ensureLocalChatModelIsAvailable(): Promise<boolean> {
-    if (this.modelLoaded) {
-      return true;
+    if (this.downloading || this.modelScopeDownloading) {
+      showToastSafely('本地模型正在下载，请等待完成后再发送', 1800);
+      return false;
     }
+    // An in-memory flag cannot prove the selected model still exists on disk.
     let modelStatus = this.modelLoadableStatus(this.modelDir);
     if (modelStatus === '下载完成' || modelStatus === '可加载') {
       return true;
     }
-    if (this.downloading) {
-      showToastSafely('本地模型正在下载，请等待完成后再发送', 1800);
-      return false;
+    this.modelLoaded = false;
+    if (this.localModelDownloadPromptVisible) { return false; }
+    this.localModelDownloadPromptVisible = true;
+    try {
+      if (await this.confirmModelScopeDownloadForLocalChat(modelStatus)) {
+        this.openSettingsFromTab(SettingsSectionId.ModelAgents, MainTabIndex.Chat);
+      }
+    } finally {
+      this.localModelDownloadPromptVisible = false;
     }
-    let shouldOpenModelSettings = await this.confirmModelScopeDownloadForLocalChat(modelStatus);
-    if (!shouldOpenModelSettings) {
-      return false;
-    }
-    this.settingsSectionId = SettingsSectionId.ModelAgents;
-    this.currentTab = MainTabIndex.Mine;
-    await this.downloadModelScopeModel();
     return false;
   }
 
   private async confirmModelScopeDownloadForLocalChat(modelStatus: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
-        title: '本地 Agent 未下载',
-        message: '未检测到可加载的本地 Agent 模型（' + modelStatus + '）。\n\n是否前往设置页，从 ModelScope 仓库“' +
-          this.modelScopeMnnRepo + '”下载？',
+        title: '请先下载本地模型',
+        message: '当前选择的本地模型尚未下载完成或文件不完整（' + modelStatus + '），暂时不能发送本地聊天或执行本地任务。\n\n请前往“我的 → 模型与智能体 → 本地模型”下载；已有模型也可以在设置中重新选择。输入内容会保留。',
         buttons: [
           { text: '暂不前往', color: AppTheme.dialogText('#666666') },
-          { text: '前往设置', color: AppTheme.dialogText('#4F68FF') }
+          { text: '去下载模型', color: AppTheme.dialogText('#4F68FF') }
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         resolve(data.index === 1);
@@ -7496,15 +7526,9 @@ struct Index {
     if (!this.ensureAiServiceLogin()) {
       return;
     }
-    if (!await this.ensurePrivacyConsent()) {
-      return;
-    }
     let deviceMode = this.selectedAgentDeviceMode();
     if (deviceMode === 'unavailable') { return; }
     let phoneControl = deviceMode === 'phone';
-    if (!phoneControl && !await this.ensureDesktopCompanionReminder()) {
-      return;
-    }
     let task = this.userInput.trim();
     if (task.length === 0) {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
@@ -7524,6 +7548,9 @@ struct Index {
       this.reportLocalAgentCleanupStatus('本地 Agent 正在处理上一轮任务，请稍后再试。');
       return;
     }
+    if (!await this.ensureLocalChatModelIsAvailable()) { return; }
+    if (this.isThinking || this.localChatImagePreparing || this.localAgentCleaningUp) { return; }
+    if (!phoneControl && !await this.ensureDesktopCompanionReminder()) { return; }
     this.ensureActiveChatSession();
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       task, new Date().getTime()));
@@ -7592,9 +7619,6 @@ struct Index {
 
   private async submitCurrentCloudTask(): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
-      return;
-    }
-    if (!await this.ensurePrivacyConsent()) {
       return;
     }
     let deviceMode = this.selectedAgentDeviceMode();
@@ -7709,9 +7733,8 @@ struct Index {
             if (this.startupSourceSyncRunning) {
               LoadingProgress().width(18).height(18).color(AppTheme.text('#4F68FF')).margin({ right: 8 })
             }
-            Text(this.startupSourceSyncRunning ? '阶段进度 ' + Math.round(this.dataManagerProgressPercent) + '%' : this.dataManagerSyncFailed ? '等待重试' :
-              ((this.dataManagerProgressStage === '生成画像' || this.dataManagerProgressStage === '采集分组') &&
-                this.dataManagerProgressTotal > 0 ?
+            Text(this.dataManagerSyncFailed ? '等待重试' : this.startupSourceSyncRunning ? '阶段进度 ' + Math.round(this.dataManagerProgressPercent) + '%' :
+              (this.dataManagerProgressTotal > 0 ?
                 `${this.dataManagerProgressCurrent}/${this.dataManagerProgressTotal}` : '正在处理…'))
               .fontSize(13)
               .fontWeight(FontWeight.Bold)
@@ -7720,12 +7743,15 @@ struct Index {
           .width('100%')
           .margin({ top: 10 })
           if (this.startupSourceSyncRunning) {
-            Text('已处理 ' + this.startupSourceCompleted + '/' + this.startupSourceTotal + ' 项 · 已用时 ' + this.startupElapsedSeconds + ' 秒')
+            Text('已处理 ' + this.startupSourceCompleted + '/' + this.startupSourceTotal + ' 项 · 已用时 ' + this.memoryElapsedSeconds + ' 秒')
               .fontSize(12).fontColor(AppTheme.text('#657086')).width('100%').margin({ top: 8 })
             if (this.dataManagerProgressTotal > 0) {
               Text('当前步骤 ' + this.dataManagerProgressCurrent + '/' + this.dataManagerProgressTotal)
                 .fontSize(12).fontColor(AppTheme.text('#657086')).width('100%').margin({ top: 6 })
             }
+          } else {
+            Text('已用时 ' + this.memoryElapsedSeconds + ' 秒').fontSize(12)
+              .fontColor(AppTheme.text('#657086')).width('100%').margin({ top: 8 })
           }
           if (this.dataManagerProgressMessage.length > 0) {
             Text(this.dataManagerProgressMessage)
@@ -7736,7 +7762,11 @@ struct Index {
               .width('100%')
               .margin({ top: 12 })
           }
-          if (this.startupSourceSyncRunning) {
+          if (this.memoryModelActivities.length > 0) {
+            ModelStreamActivityPanel({ activities: this.memoryModelActivities, debugEnabled: this.debugEnabled })
+              .margin({ top: 12 })
+          }
+          if (this.startupSourceSyncRunning && this.memoryOperationKind === 'startup') {
             Button(this.startupSourceSyncEnabled ? '关闭每日自动更新' : '已关闭，当前项完成后停止')
               .fontSize(14).width('100%').height(42).margin({ top: 18 })
               .backgroundColor(AppTheme.background('#E7EBF5')).fontColor(AppTheme.text('#414D65'))
@@ -7765,7 +7795,7 @@ struct Index {
                 .fontColor(AppTheme.text(Color.White))
                 .onClick(() => {
                   this.dataManagerSyncFailed = false;
-                  this.refreshDataManager().catch((e: Error) => {
+                  this.retryMemoryOperation().catch((e: Error) => {
                     dataManagerError('retry refreshDataManager failed: ' + e.message);
                   });
                 })
@@ -7901,7 +7931,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
             .fontColor(AppTheme.text('#20263A'))
             .width('100%')
-          Text('已有至少 3 天未同步，发现了新保存的记录。现在同步，更新汇总和聊天记忆吗？')
+          Text('发现了尚未整理的新记录。现在同步，更新汇总和聊天记忆吗？')
             .fontSize(14)
             .lineHeight(22)
             .fontColor(AppTheme.text('#555D70'))
@@ -8029,6 +8059,7 @@ struct Index {
         wechatAutoSummaryCanStop: this.wechatAutoSummaryCanStop,
         wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
         onRefresh: () => { this.refreshDataManager(); },
+        onFullCheck: () => { this.refreshDataManager(true, false, true); },
         onOpenDataCollectionSettings: () => {
           this.openSettingsFromTab(SettingsSectionId.DataCollection, MainTabIndex.Summary);
         },
@@ -8146,9 +8177,10 @@ struct Index {
         onMailChanged: (): void => { this.reloadDataManagerViewModels(); },
         onSyncMail: async (): Promise<void> => { await this.syncMailReminders(); },
         calendarMemoryRefreshing: this.dataManagerRefreshing,
+        onReadCalendarMemory: async (): Promise<void> => { await this.syncCalendarMemory(true); },
         onSyncCalendarMemory: async (): Promise<void> => {
           this.reloadDataManagerViewModels();
-          await this.refreshDataManager(false);
+          await this.syncCalendarMemory();
         },
         autoConfirm: $autoConfirm,
         cloudAutoConfirm: $cloudAutoConfirm,

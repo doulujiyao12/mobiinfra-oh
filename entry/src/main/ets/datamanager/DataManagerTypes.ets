@@ -103,6 +103,8 @@ export interface DataManagerRefreshOptions {
 }
 
 export interface RefreshSummary {
+  // Current sync only; historical totals belong to the index completion receipt.
+  failedEventCount?: number;
   dailyEntryCount: number;
   consolidatedRecordCount: number;
   eventCount: number;

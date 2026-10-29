@@ -11,7 +11,6 @@ import {
 } from '../main/ets/agent/PersonalMemoryA2aProtocol';
 import { personalMemoryAnswer, personalMemoryQueryOptions } from '../main/ets/agent/PersonalMemoryQuery';
 import { canExposePersonalMemory, PERSONAL_MEMORY_A2A_SCOPE } from '../main/ets/agent/PersonalMemoryAccess';
-import { PRIVACY_VERSION } from '../main/ets/utils/PrivacyConsent';
 
 function event(summary: string, scenes: number[]): IndexedEvent {
   return {
@@ -39,13 +38,12 @@ function event(summary: string, scenes: number[]): IndexedEvent {
 
 export default function personalMemoryA2aUnitTest() {
   describe('personalMemoryA2aUnitTest', () => {
-    it('requiresCurrentPrivacyConsentUserOptInAndApi24', 0, () => {
-      expect(canExposePersonalMemory('accepted', PRIVACY_VERSION, true, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertTrue();
-      expect(canExposePersonalMemory('accepted', PRIVACY_VERSION, true, 20, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
-      expect(canExposePersonalMemory('accepted', PRIVACY_VERSION, false, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
-      expect(canExposePersonalMemory('rejected', PRIVACY_VERSION, true, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
-      expect(canExposePersonalMemory('accepted', 'old-version', true, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
-      expect(canExposePersonalMemory('accepted', PRIVACY_VERSION, true, 24, '')).assertFalse();
+    it('requiresPlatformConsentUserOptInAndApi24', 0, () => {
+      expect(canExposePersonalMemory(true, true, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertTrue();
+      expect(canExposePersonalMemory(true, true, 20, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
+      expect(canExposePersonalMemory(true, false, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
+      expect(canExposePersonalMemory(false, true, 24, PERSONAL_MEMORY_A2A_SCOPE)).assertFalse();
+      expect(canExposePersonalMemory(true, true, 24, '')).assertFalse();
     });
 
     it('queriesIndexedMemoryAcrossScenesAndExcludesSensitiveResults', 0, () => {

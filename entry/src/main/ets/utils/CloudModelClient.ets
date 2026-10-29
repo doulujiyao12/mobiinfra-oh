@@ -1,4 +1,4 @@
-import { PrivacyConsent } from './PrivacyConsent';
+import { AppRequests } from './AppRequests';
 import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
@@ -139,6 +139,7 @@ export interface CloudChatCompletionOptions {
   maxTokens?: number;
   readTimeout?: number;
   logResponseContent?: boolean;
+  separateReasoning?: boolean;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
   top_p?: number;
   top_k?: number;
@@ -153,6 +154,18 @@ export type CloudChatStreamDeltaHandler = (delta: string) => void;
 
 export interface CloudChatCompletionStreamCallbacks {
   onContentDelta?: CloudChatStreamDeltaHandler;
+  onProgress?: (progress: CloudChatStreamProgress) => void;
+}
+
+export interface CloudChatStreamProgress {
+  phase: string;
+  responseCode: number;
+  receivedBytes: number;
+  contentChars: number;
+  reasoningChars: number;
+  contentDelta: string;
+  reasoningDelta: string;
+  finishReason: string;
 }
 
 export interface CloudChatStreamDiagnostics {
@@ -323,7 +336,7 @@ export class CloudModelClient {
     this.activeRequests = [];
     for (let i = 0; i < pending.length; i++) {
       try {
-        PrivacyConsent.destroyHttp(pending[i]);
+        AppRequests.destroyHttp(pending[i]);
       } catch (e) {
         AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
@@ -713,7 +726,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     let startedAt = new Date().getTime();
@@ -753,7 +766,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 
@@ -774,7 +787,7 @@ export class CloudModelClient {
       readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     AppLogger.info('CloudModel', 'chat stream request start url=' + url +
@@ -810,7 +823,7 @@ export class CloudModelClient {
         httpReq.off('dataEnd');
         self.unregisterActiveRequest(httpReq);
         try {
-          PrivacyConsent.destroyHttp(httpReq);
+          AppRequests.destroyHttp(httpReq);
         } catch (e) {
           AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
         }
@@ -829,8 +842,8 @@ export class CloudModelClient {
         rawResponseTruncated = true;
       };
       let buildDiagnostics = (toolCallCountOverride?: number): CloudChatStreamDiagnostics => {
-        let rawPreview = CloudModelClient.previewTextForLog(rawResponseText, 512);
-        if (rawResponseTruncated) {
+        let rawPreview = options.logResponseContent === false ? '' : CloudModelClient.previewTextForLog(rawResponseText, 512);
+        if (rawResponseTruncated && options.logResponseContent !== false) {
           rawPreview += '...<truncated>';
         }
         return {
@@ -847,7 +860,16 @@ export class CloudModelClient {
       let diagnosticsForLog = (toolCallCountOverride?: number): string => {
         return CloudModelClient.formatStreamDiagnosticsForLog(buildDiagnostics(toolCallCountOverride));
       };
+      let reportProgress = (phase: string, contentDelta: string = '', reasoningDelta: string = ''): void => {
+        if (callbacks.onProgress) {
+          let value: CloudChatStreamProgress = { phase: phase, responseCode: responseCode, receivedBytes: receivedBytes,
+            contentChars: contentDeltaChars, reasoningChars: reasoningDeltaChars, contentDelta: contentDelta,
+            reasoningDelta: reasoningDelta, finishReason: finishReason };
+          callbacks.onProgress(value);
+        }
+      };
       let httpStatusErrorMessage = (code: number): string => {
+        if (options.logResponseContent === false) { return 'Cloud HTTP ' + String(code); }
         let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(rawResponseText.trim());
         if (errorMessage.length > 0) {
           return 'Cloud HTTP ' + String(code) + ': ' + errorMessage;
@@ -886,6 +908,9 @@ export class CloudModelClient {
         if (sseLineCount === 0 && rawResponseText.trim().length > 0) {
           try {
             let fallbackResult = CloudModelClient.parseNonSseStreamFallbackResponse(rawResponseText);
+            contentDeltaChars = fallbackResult.content.length;
+            finishReason = fallbackResult.finishReason;
+            reportProgress('buffered', fallbackResult.content);
             resolved = true;
             cleanup();
             AppLogger.warn('CloudModel', 'chat stream received non-SSE response, fallback parsed: ' +
@@ -899,9 +924,10 @@ export class CloudModelClient {
         }
         closeSeparateReasoning();
         resolved = true;
-        let content = contentParts.join('');
+        let content = options.separateReasoning ? answerParts.join('') : contentParts.join('');
         let finalToolCalls = CloudModelClient.compactStreamToolCalls(toolCalls);
         cleanup();
+        reportProgress('completed');
         if (content.length === 0 && finalToolCalls.length === 0) {
           AppLogger.warn('CloudModel', 'chat stream completed without content or tool calls: ' +
             diagnosticsForLog(finalToolCalls.length));
@@ -926,10 +952,11 @@ export class CloudModelClient {
         }
         resolved = true;
         cleanup();
-        AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
+        reportProgress('failed');
+        AppLogger.warn('CloudModel', 'chat stream failed: ' + (options.logResponseContent === false ? 'response details hidden' : message) + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
-      PrivacyConsent.onHttpCancel(httpReq, () => {
+      AppRequests.onHttpCancel(httpReq, () => {
         finishWithError(AiServiceAccess.isAllowed() ? '隐私授权已撤回' : AI_LOGIN_REQUIRED_MESSAGE);
       });
       let decodeStreamData = (data: ArrayBuffer): string => {
@@ -972,11 +999,12 @@ export class CloudModelClient {
             emitRawDelta(chunk.reasoningDelta);
           }
           if (chunk.contentDelta.length > 0) {
-            if (isDeepSeek) { answerParts.push(chunk.contentDelta); }
+            answerParts.push(chunk.contentDelta);
             contentDeltaChars += chunk.contentDelta.length;
             closeSeparateReasoning();
             emitRawDelta(chunk.contentDelta);
           }
+          reportProgress('receiving', chunk.contentDelta, chunk.reasoningDelta);
         } catch (e) {
           let err = e as Error;
           finishWithError(err.message);
@@ -1009,13 +1037,16 @@ export class CloudModelClient {
         appendRawResponseText(decodedText);
         textBuffer += decodedText;
         processBufferedText(false);
+        if (!resolved) { reportProgress('receiving'); }
       });
       httpReq.on('dataEnd', () => {
         processBufferedText(true);
         finishWithResult();
       });
+      reportProgress('waiting');
       httpReq.requestInStream(this.normalizeChatUrl(options.baseUrl), requestOptions).then((code: number) => {
         responseCode = code;
+        reportProgress('receiving');
         AppLogger.info('CloudModel', 'chat stream response status: ' + diagnosticsForLog());
         if (code < 200 || code >= 300) {
           finishWithError(httpStatusErrorMessage(code));
@@ -1492,7 +1523,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
@@ -1510,7 +1541,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 

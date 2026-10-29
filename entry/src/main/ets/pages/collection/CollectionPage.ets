@@ -12,6 +12,7 @@ import {
 } from '../../datamanager/DataManagerTypes';
 import { collectionViewModelByTabIndex, createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
+import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
 import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
@@ -43,6 +44,7 @@ const COLLECTION_SECTION_GAP: number = 18;
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) private debugEnabled: boolean = false;
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   private pageScroller: Scroller = new Scroller();
   @Link collectionModule: number;
@@ -72,6 +74,7 @@ export struct CollectionPage {
   @StorageLink('wechatAutoSummaryCollectionTargetContactInput') wechatTargetContactInput: string = '';
   @State private wechatFormError: string = '';
   onRefresh: () => void = () => {};
+  onFullCheck: () => void = () => {};
   onOpenDataCollectionSettings: () => void = () => {};
   onOpenCalendarAnalysis: () => void = () => {};
   onOpenMailAnalysis: () => void = () => {};
@@ -637,6 +640,14 @@ export struct CollectionPage {
           CollectionFormGroup({ title: '采集与分析',
             contentBuilder: (): void => { this.CollectionSourceEntries(); } })
         }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: COLLECTION_SECTION_GAP })
+        if (this.debugEnabled) {
+          Text('完整检查记忆数据')
+            .fontSize(13)
+            .fontColor(AppTheme.text('#727A8B'))
+            .padding(16)
+            .enabled(!this.refreshing)
+            .onClick(() => { this.onFullCheck(); })
+        }
         Blank().height(110)
       }
       .width('100%')

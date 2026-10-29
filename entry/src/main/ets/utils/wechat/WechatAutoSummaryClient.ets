@@ -1,4 +1,4 @@
-import { PrivacyConsent } from '../PrivacyConsent';
+import { AppRequests } from '../AppRequests';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { WechatAutoSummaryRequest, WechatAutoSummaryResponse } from './WechatAutoSummaryTypes';
@@ -29,7 +29,7 @@ export class WechatAutoSummaryClient {
       action: 'wechat_collect',
       payload: request
     };
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     try {
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,
@@ -54,7 +54,7 @@ export class WechatAutoSummaryClient {
         message: 'HDC bridge 请求失败：' + err.message
       };
     } finally {
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 }

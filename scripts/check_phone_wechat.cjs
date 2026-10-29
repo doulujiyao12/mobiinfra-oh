@@ -322,12 +322,12 @@ test('background/network failure preserves partial pages without retrying UI act
   assert.equal(env.checkpoints.at(-1).contacts_collected, 1);
   assert.equal(env.calls.filter(x => x.action === 'swipe_with_coords' && x.start_y < x.end_y).length, 1);
 });
-test('privacy revocation aborts without writing new checkpoints', async () => {
+test('an app-wide privacy status change does not interrupt an explicitly started collection', async () => {
   const env = setup([home, chat], { onAction(payload) {
     if (payload.action === 'swipe_with_coords' && payload.start_y < payload.end_y) accepted = false;
   } });
-  await assert.rejects(env.client.collect(request), /PRIVACY_REQUIRED/);
-  assert.equal(env.checkpoints.length, 0);
+  await env.client.collect(request);
+  assert.ok(env.checkpoints.length > 0);assert.equal(env.checkpoints.at(-1).contacts_collected,1);
 });
 test('debug switch controls UI dump persistence; malformed arguments do not open WeChat', async () => {
   let env = setup([home, chat]); debug = true;

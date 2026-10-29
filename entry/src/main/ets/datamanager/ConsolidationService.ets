@@ -55,6 +55,8 @@ interface EntryGroup {
   entries: SourceEntry[];
 }
 
+function groupStateKey(group: EntryGroup): string { return group.month + '/' + group.fileName + '.state.json'; }
+
 interface ConsolidationGroupResult {
   recordCount: number;
   outputFileCount: number;
@@ -70,6 +72,7 @@ interface ConsolidationOutputStateIndex {
   schema: string;
   generated_at: string;
   state_paths: string[];
+  record_counts?: Record<string, number>;
 }
 interface KnownDailySource { path: string; }
 interface KnownDailySources { files: KnownDailySource[]; }
@@ -106,6 +109,8 @@ export class ConsolidationService {
       dataManagerWarn('Consolidation found no daily-log entries. Check fixture import path and file format.');
     }
     let plans = this.planEntryGroups(groups);
+    let counts: Record<string, number> = {};
+    plans.forEach((plan: EntryGroupPlan) => counts[groupStateKey(plan.group)] = plan.existingRecordCount);
     let pendingPlans = plans.filter((plan: EntryGroupPlan) => plan.pendingEntryCount > 0);
     let skippedRecords = 0;
     plans.forEach((plan: EntryGroupPlan) => {
@@ -115,6 +120,7 @@ export class ConsolidationService {
     });
     dataManagerInfo(`Consolidation pending groups: pending=${pendingPlans.length}, skipped=${groups.length - pendingPlans.length}`);
     if (pendingPlans.length === 0) {
+      this.saveOutputCatalog(groups, counts);
       this.emitProgress(progress, '整理日志', 'daily-log 无新增整理项', groups.length, Math.max(1, groups.length), 58);
       return {
         sourceEntries: entries.length,
@@ -148,6 +154,8 @@ export class ConsolidationService {
       totalRecords += result.recordCount;
       outputFiles += result.outputFileCount;
     });
+    results.forEach((result: ConsolidationGroupResult, index: number) => counts[groupStateKey(pendingPlans[index].group)] = result.recordCount);
+    this.saveOutputCatalog(groups, counts);
     this.emitProgress(progress, '整理日志', `整理完成，生成 ${totalRecords} 条记录`, 100, 100, 58);
     return {
       sourceEntries: entries.length,
@@ -185,15 +193,59 @@ export class ConsolidationService {
       !/^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative)));
     let payload: ConsolidationOutputStateIndex = { schema: 'datamanager-consolidation-output-state-index-v1',
       generated_at: nowIsoLocal(), state_paths: stableUnique(retained.concat(relativePaths)).sort() };
+    if (previous && previous.record_counts) {
+      let previousCounts = previous.record_counts;
+      let counts: Record<string, number> = {};
+      retained.forEach((path: string) => counts[path] = previousCounts[path] || 0);
+      groups.forEach((group: EntryGroup) => counts[groupStateKey(group)] =
+        this.readConsolidatedState(this.paths.outputStatePath(group.month, group.fileName)).records.length);
+      payload.record_counts = counts;
+    }
     this.storage.writeJsonAtomic(path, payload);
     return relativePaths.map((relative: string): string => this.storage.join(this.paths.outputsRoot, relative));
   }
 
-  private collectSourceEntries(chatOnly: boolean = false): SourceEntry[] {
+  async consolidateChanged(modelConfig: DataManagerModelConfig, changedPaths: string[], allPaths: string[],
+    progress?: DataManagerProgressCallback): Promise<ConsolidationResult> {
+    let catalogPath = this.storage.join(this.paths.outputsRoot, OUTPUT_STATE_INDEX_FILE_NAME);
+    let previous = this.storage.readJson<ConsolidationOutputStateIndex | null>(catalogPath, null);
+    if (!previous || previous.schema !== 'datamanager-consolidation-output-state-index-v1' || !previous.record_counts) {
+      return await this.consolidateAll(modelConfig, 5, progress);
+    }
+    let previousCounts = previous.record_counts;
+    let affected = stableUnique(changedPaths.map((path: string): string => path.substring(0, 7) + '/' + this.storage.basename(path) + '.state.json'));
+    let selected = allPaths.filter((path: string): boolean =>
+      affected.indexOf(path.substring(0, 7) + '/' + this.storage.basename(path) + '.state.json') >= 0);
+    let entries = this.collectSourceEntries(false, selected);
+    let groups = this.groupEntriesByMonth(entries);
+    let counts: Record<string, number> = {};
+    let retained = previous.state_paths.filter((path: string): boolean => affected.indexOf(path) < 0);
+    retained.forEach((path: string) => counts[path] = previousCounts[path] || 0);
+    let tasks = groups.map((group: EntryGroup): (() => Promise<number>) => async (): Promise<number> => {
+      this.emitProgress(progress, '整理变化日志', '整理 ' + group.fileName, 0, groups.length, 25);
+      return (await this.consolidateGroup(group, modelConfig, 5, progress)).records.length;
+    });
+    let results = await runLimitedTasks<number>(tasks, DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY);
+    groups.forEach((group: EntryGroup, index: number) => { let key = groupStateKey(group); retained.push(key); counts[key] = results[index]; });
+    let document: ConsolidationOutputStateIndex = { schema: 'datamanager-consolidation-output-state-index-v1',
+      generated_at: nowIsoLocal(), state_paths: stableUnique(retained).sort(), record_counts: counts };
+    this.storage.writeJsonAtomic(catalogPath, document);
+    dataManagerInfo('SYNC_CONSOLIDATE mode=journal readFiles=' + selected.length + ' affectedGroups=' + affected.length);
+    return { sourceEntries: entries.length, outputFiles: document.state_paths.length,
+      totalRecords: Object.keys(counts).reduce((total: number, key: string): number => total + counts[key], 0), updatedAt: nowIsoLocal() };
+  }
+
+  private saveOutputCatalog(groups: EntryGroup[], counts: Record<string, number>): void {
+    let document: ConsolidationOutputStateIndex = { schema: 'datamanager-consolidation-output-state-index-v1',
+      generated_at: nowIsoLocal(), state_paths: groups.map((group: EntryGroup): string => groupStateKey(group)).sort(), record_counts: counts };
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.outputsRoot, OUTPUT_STATE_INDEX_FILE_NAME), document);
+  }
+
+  private collectSourceEntries(chatOnly: boolean = false, selectedPaths?: string[]): SourceEntry[] {
     let entries: SourceEntry[] = [];
-    let exportedPaths = ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage);
-    if (!chatOnly) { exportedPaths = exportedPaths.concat(GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot)); }
-    let previous: KnownDailySources = chatOnly ? { files: [] } : this.storage.readJson<KnownDailySources>(
+    let exportedPaths = selectedPaths || ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage);
+    if (!chatOnly && !selectedPaths) { exportedPaths = exportedPaths.concat(GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot)); }
+    let previous: KnownDailySources = chatOnly || selectedPaths !== undefined ? { files: [] } : this.storage.readJson<KnownDailySources>(
       this.storage.join(this.paths.consolidationRoot, 'daily-log-snapshot.json'), { files: [] });
     if (!chatOnly && previous && Array.isArray(previous.files)) {
       previous.files.forEach((source: KnownDailySource) => {
@@ -202,7 +254,7 @@ export class ConsolidationService {
       });
     }
     let daySet: Record<string, boolean> = new Object() as Record<string, boolean>;
-    (chatOnly ? [] : this.storage.listDir(this.paths.dailyLogRoot))
+    (chatOnly || selectedPaths !== undefined ? [] : this.storage.listDir(this.paths.dailyLogRoot))
       .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name))
       .forEach((name: string) => daySet[name] = true);
     exportedPaths.forEach((relativePath: string) => {
@@ -219,7 +271,7 @@ export class ConsolidationService {
     for (let day of dayDirs) {
       let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
       let fileSet: Record<string, boolean> = new Object() as Record<string, boolean>;
-      if (!chatOnly) {
+      if (!chatOnly && !selectedPaths) {
         this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
       }
       exportedPaths.forEach((relativePath: string) => {

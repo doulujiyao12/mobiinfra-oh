@@ -9,6 +9,7 @@ const base = 'entry/src/main/ets/', mail = base + 'utils/mail/';
 let now = new Date('2026-10-24T12:00:00+08:00').getTime(), accepted = true, revoke = null;
 let messages = [], commands = [], options = null, failAuth = false, validity = '91', malformedAi = false;
 let aiCalls = [], onAi = null, server = null, aiReply = null, aiFailure = null, diagnostics = [];
+let assetQueryError = 0, assetAddError = 0, assetDropWrite = false;
 class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
 const clone = v => JSON.parse(JSON.stringify(v));
 class Storage {
@@ -22,8 +23,8 @@ const Tag = { ALIAS: 1, RETURN_TYPE: 2, SECRET: 3, ACCESSIBILITY: 4, AUTH_TYPE: 
 const bytesEqual = (a,b) => a && b && Buffer.from(a).equals(Buffer.from(b));
 const asset = { Tag, ReturnType: { ALL: 1 }, Accessibility: { DEVICE_UNLOCKED: 1 }, AuthType: { NONE: 1 }, SyncType: { NEVER: 1 },
   ConflictResolution: { OVERWRITE: 1 },
-  async query(q) { return assets.filter(a => bytesEqual(a.get(Tag.ALIAS),q.get(Tag.ALIAS))); },
-  async add(q) { const i=assets.findIndex(a=>bytesEqual(a.get(Tag.ALIAS),q.get(Tag.ALIAS))); if(i>=0) assets.splice(i,1); assets.push(new Map(q)); },
+  async query(q) { if(assetQueryError)throw Object.assign(Error('fixture native failure'),{code:assetQueryError});return assets.filter(a => bytesEqual(a.get(Tag.ALIAS),q.get(Tag.ALIAS))); },
+  async add(q) { if(assetAddError)throw Object.assign(Error('fixture native failure'),{code:assetAddError});if(assetDropWrite)return;const i=assets.findIndex(a=>bytesEqual(a.get(Tag.ALIAS),q.get(Tag.ALIAS))); if(i>=0) assets.splice(i,1); assets.push(new Map(q)); },
   async remove(q) { for(let i=assets.length-1;i>=0;i--) if(q.has(Tag.ALIAS)?bytesEqual(assets[i].get(Tag.ALIAS),q.get(Tag.ALIAS)):
     bytesEqual(assets[i].get(Tag.DATA_LABEL_CRITICAL_4),q.get(Tag.DATA_LABEL_CRITICAL_4))) assets.splice(i,1); }
 };
@@ -81,7 +82,7 @@ const mocks={
   'AiServiceAccess.ets':{AI_LOGIN_REQUIRED_MESSAGE:'请先到我的中登录，解锁此功能。'},
   'PrivacyConsent.ets':{PrivacyConsent:privacy},
   'CloudModelClient.ets':{CloudModelClient:class{async chatCompletion(options){
-    privacy.requireAccepted(); aiCalls.push(options); if(onAi){ const fn=onAi;onAi=null;fn(); }
+    aiCalls.push(options); if(onAi){ const fn=onAi;onAi=null;fn(); }
     if(aiFailure)throw aiFailure;
     if(aiReply)return clone(aiReply);
     if(malformedAi) return {content:'{"items":[]}'};
@@ -112,6 +113,7 @@ const store=new MailStore('/sandbox');
 function fixture(uid,extra={}) { return {uid,date:'24-Oct-2026 '+String(8+uid%12).padStart(2,'0')+':00:00 +0800',
   subject:'Research update',body:Buffer.from('会议时间已变更，请确认。').toString('base64'),...extra}; }
 function setup() { disk.clear();assets.length=0;commands=[];aiCalls=[];diagnostics=[];aiReply=null;aiFailure=null;accepted=true;malformedAi=false;failAuth=false;validity='91';
+  assetQueryError=0;assetAddError=0;assetDropWrite=false;server=null;
   const settings=types.defaultMailSettings();settings.enabled=true;settings.username='test@example.test';settings.aiAllowed=true;
   store.saveSettings(settings);return settings; }
 const cases=[];function test(name,fn){cases.push([name,fn]);}
@@ -192,6 +194,35 @@ test('credential aliases bind secrets to account and host; remove clears all mai
   assert.ok(assets.every(x=>x.get(Tag.ACCESSIBILITY)===asset.Accessibility.DEVICE_UNLOCKED&&x.get(Tag.SYNC_TYPE)===asset.SyncType.NEVER));
   assert.ok(!JSON.stringify([...disk.values()]).includes('first-fixture'));
   await MailCredentialStore.remove();assert.equal(assets.length,0);
+});
+test('credential diagnostics distinguish missing, read failure and server rejection without exposing secrets',async()=>{
+  setup();
+  await assert.rejects(MailService.refresh('/sandbox',config),/MAIL_CREDENTIAL_MISSING/);
+  assert.equal(server,null,'Missing credentials must fail before opening a network socket');
+  await MailCredentialStore.save(store.accountKey(),'private-fixture-code');
+  assetQueryError=24000005;
+  await assert.rejects(MailService.refresh('/sandbox',config),/MAIL_CREDENTIAL_READ_FAILED.*24000005/);
+  assert.equal(server,null);assert.equal(MailService.isBusy(),false);
+  assetQueryError=0;failAuth=true;
+  await assert.rejects(MailService.refresh('/sandbox',config),/MAIL_AUTH_REJECTED/);
+  assert.ok(commands.some(c=>c.includes(' LOGIN ')));assert.equal(server.closed,true);
+  assert.ok(diagnostics.some(x=>x.includes('MAIL_IMAP_AUTH status=rejected')));
+  assert.ok(!diagnostics.join('\n').includes('private-fixture-code'));
+  assert.ok(!diagnostics.join('\n').includes('test@example.test'));
+});
+test('credential save verifies readback and existing aliases survive a module reload',async()=>{
+  setup();const key=store.accountKey();
+  await MailCredentialStore.save(key,'stored-fixture-code');
+  assert.ok(diagnostics.some(x=>x.includes('MAIL_CREDENTIAL_SAVE status=verified')));
+  const filename=path.join(root,mail,'MailCredentialStore.ets');cache.delete(filename);
+  const reloaded=load(filename).MailCredentialStore;
+  assert.equal(await reloaded.load(key),'stored-fixture-code');
+  assetDropWrite=true;
+  await assert.rejects(reloaded.save(key,'different-fixture-code'),/MAIL_CREDENTIAL_VERIFY_FAILED/);
+  assetDropWrite=false;assert.equal(await reloaded.load(key),'stored-fixture-code');
+  assetAddError=24000001;await assert.rejects(reloaded.save(key,'other-fixture-code'),/MAIL_CREDENTIAL_WRITE_FAILED/);
+  assetQueryError=24000002;assert.equal(await reloaded.load(key),'');
+  assert.ok(!diagnostics.join('\n').includes('fixture-code'));
 });
 test('analysis prompt treats mail as untrusted data, never requests execution or profile writes',()=>{
   const settings=setup();settings.interested='学术进展';settings.ignored='促销';
@@ -287,11 +318,12 @@ test('completion only updates local mail cache and overview, never the mailbox o
   assert.equal(commands.length,count);assert.equal(store.setCompleted('mail:overview',true),false);
   assert.equal(policy.mailOverview(store.current()).sourceEventIds.length,0);
 });
-test('privacy refusal/revocation blocks network and results; busy flag is always released',async()=>{
+test('configured mail reading does not depend on an app-wide privacy status; busy flag is released',async()=>{
   setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];accepted=false;
-  await assert.rejects(MailService.refresh('/sandbox',config));assert.equal(commands.length,0);
-  accepted=true;onAi=()=>{accepted=false;};await assert.rejects(MailService.refresh('/sandbox',config));
-  assert.equal(store.current().items.length,0);assert.equal(MailService.isBusy(),false);accepted=true;
+  await MailService.refresh('/sandbox',config);assert.ok(commands.length>0);assert.equal(store.current().items.length,1);
+  const changed=store.settings();changed.ignored='fixture refresh analysis';store.saveSettings(changed);
+  accepted=true;onAi=()=>{accepted=false;};await MailService.refresh('/sandbox',config);
+  assert.equal(store.current().items.length,1);assert.equal(MailService.isBusy(),false);assert.equal(accepted,false);accepted=true;
 });
 test('changing preferences during analysis discards old results instead of replacing the new choice',async()=>{
   setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];
@@ -313,7 +345,7 @@ test('home and settings only read cache; mail never enters daily logs or profile
   const facade=fs.readFileSync(path.join(root,base+'datamanager/DataManagerFacade.ets'),'utf8');
   const source=ts.createSourceFile('Index.ts',fs.readFileSync(path.join(root,base+'pages/Index.ets'),'utf8').replace(/\bstruct Index\b/,'class Index'),ts.ScriptTarget.Latest,true);
   const methods=[];function walk(node){if(ts.isMethodDeclaration(node))methods.push(node);ts.forEachChild(node,walk);}walk(source);
-  const lifecycle=methods.filter(x=>/^(aboutToAppear|onPageShow|initializePrivacyConsent|reloadHomeViewModelIfDateChanged)$/.test(x.name?.getText(source)||''));
+  const lifecycle=methods.filter(x=>/^(aboutToAppear|onPageShow|initializeStartupServices|reloadHomeViewModelIfDateChanged)$/.test(x.name?.getText(source)||''));
   assert.ok(lifecycle.length>=3);
   for(const method of lifecycle)
     assert.ok(!/MailService\.refresh|syncMailReminders\(/.test(method.getText(source)),method.name.getText(source));
@@ -361,7 +393,7 @@ test('mail progress reaches the UI through connection, fetch, analysis and saved
   assert.ok(steps.some(value=>value.stage==='连接邮箱'&&value.percent>0));
   assert.ok(steps.some(value=>value.stage==='读取邮件正文'&&value.total>0));
   assert.ok(steps.some(value=>value.stage==='AI筛选邮件'&&value.current===0&&value.total===2));
-  assert.equal(steps.at(-1).percent,100);assert.equal(steps.at(-1).stage,'邮件已更新');
+  assert.equal(steps.at(-1).percent,100);assert.equal(steps.at(-1).stage,'邮件读取与分析完成');
   assert.ok(steps.every((value,index)=>value.percent>=0&&value.percent<=100&&(!index||value.percent>=steps[index-1].percent)));
 });
 test('mail day sections use local midnight across a year boundary and preserve active filters',()=>{
@@ -380,5 +412,5 @@ test('mail day sections use local midnight across a year boundary and preserve a
   assert.equal(policy.mailForDay(filtered,1,at).length,0);assert.equal(policy.mailForDay(filtered,2,at).length,0);
   assert.equal(policy.mailForDay(items,3,at).length,0);assert.equal(policy.mailForDay(items,-1,at).length,0);
 });
-(async()=>{let failures=0;for(const [name,fn]of cases){try{await fn();console.log('PASS '+name);}catch(e){failures++;console.error('FAIL '+name+'\n'+e.stack);}}
- console.log(`${cases.length-failures}/${cases.length} mail checks passed`);process.exitCode=failures?1:0;})();
+(async()=>{const selected=cases.filter(([name])=>!process.env.MAIL_TEST_FILTER||name.includes(process.env.MAIL_TEST_FILTER));let failures=0;for(const [name,fn]of selected){try{await fn();console.log('PASS '+name);}catch(e){failures++;console.error('FAIL '+name+'\n'+e.stack);}}
+ console.log(`${selected.length-failures}/${selected.length} mail checks passed`);process.exitCode=failures?1:0;})();

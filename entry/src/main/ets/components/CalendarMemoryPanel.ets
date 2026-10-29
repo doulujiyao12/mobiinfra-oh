@@ -10,6 +10,7 @@ import { CalendarMemorySettings, CalendarSource, calendarSourceSelected, default
 export struct CalendarMemoryPanel {
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   @Prop memoryRefreshing: boolean = false;
+  onSync: () => Promise<void> = async (): Promise<void> => {};
   onMemoryChanged: () => Promise<void> = async (): Promise<void> => {};
   @State private settings: CalendarMemorySettings = defaultCalendarSettings();
   @State private sources: CalendarSource[] = [];
@@ -39,14 +40,11 @@ export struct CalendarMemoryPanel {
     this.failed = false;
     this.status = '正在读取日历…';
     try {
-      await CalendarMemoryService.refresh(getContext(this) as common.Context);
+      await this.onSync();
       this.reload();
-      this.status += '\n正在同步个人记忆，画像以同步整理结果为准。';
-      await this.onMemoryChanged();
     } catch (e) {
       this.failed = true;
       this.status = (e as Error).message;
-      await this.onMemoryChanged();
     } finally { this.busy = false; }
   }
 

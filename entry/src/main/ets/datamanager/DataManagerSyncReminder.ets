@@ -20,6 +20,18 @@ export function syncSnapshotTimeMs(value: string): number {
   return date.getTime();
 }
 
+export function latestSuccessfulSyncTime(snapshotAt: string, sourceSuccessAt: number): string {
+  const snapshotMs = syncSnapshotTimeMs(snapshotAt);
+  const timestamp = Math.max(Number.isFinite(snapshotMs) ? snapshotMs : 0,
+    Number.isFinite(sourceSuccessAt) && sourceSuccessAt > 0 ? sourceSuccessAt : 0);
+  if (timestamp <= 0) { return ''; }
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) { return ''; }
+  return String(date.getFullYear()) + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getDate()).padStart(2, '0') + 'T' + String(date.getHours()).padStart(2, '0') + ':' +
+    String(date.getMinutes()).padStart(2, '0') + ':' + String(date.getSeconds()).padStart(2, '0');
+}
+
 export function shouldOfferSyncReminder(lastSyncAt: string, hasNewRecords: boolean,
   nowMs: number = Date.now()): boolean {
   if (!hasNewRecords) {

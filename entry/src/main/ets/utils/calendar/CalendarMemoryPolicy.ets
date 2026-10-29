@@ -202,7 +202,9 @@ export function calendarIndexedEvents(snapshot: CalendarMemorySnapshot, settings
       (series.recurrence ? '；属于同一重复日程的实例，不是独立行为证据' : '');
     let event: IndexedEvent = {
       event_id: 'calendar:' + item.key, source_state_file: 'calendar-memory', record_id: series.eventId,
-      event_date: calendarDate(item.start), last_seen_date: snapshot.syncedAt.substring(0, 10),
+      // Reading the same plan tomorrow is not a new occurrence or evidence.
+      // Keep acquisition time in snapshot.syncedAt, outside event identities.
+      event_date: calendarDate(item.start), last_seen_date: calendarDate(item.start),
       summary: fact, normalized_fact: fact, tags: ['日历', '日程安排', series.title],
       source_refs: ['calendar-series:' + series.key], sources: ['系统日历'], workflow_scene_ids: [],
       image_paths: [], todo: { type: '', deadline: '', text: '', agent_task: '' },

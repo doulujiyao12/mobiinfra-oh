@@ -1,6 +1,11 @@
 import { JSON as ArkJSON } from '@kit.ArkTS';
-import { CloudChatMessage, CloudModelClient } from '../utils/CloudModelClient';
+import { CloudChatMessage, CloudModelClient, CloudChatCompletionOptions, CloudChatStreamProgress } from '../utils/CloudModelClient';
+import { DebugSettings } from '../utils/DebugSettings';
+import { ModelStreamActivity, ModelStreamActivityStore } from './ModelStreamActivity';
+import { EventStreamParser } from './EventStreamParser';
 import { ProfileBlockModel, PROFILE_BLOCK_POLICY } from './ProfileBlockCache';
+import { profileEvidence, ProfileEventPromptPayload } from './ProfileEvidence';
+import { ProfileRequestCodec, ProfileResponseError } from './ProfileRequestCodec';
 import {
   DOMAIN_DESCRIPTIONS,
   AggregatedRecord,
@@ -32,6 +37,7 @@ import {
   normalizeDomains,
   normalizeEntityMentions,
   normalizeFreeText,
+  sourceAppDisplayName,
   normalizeProfileShortSummary,
   normalizedSimilarityKey,
   normalizedTransactionSignature,
@@ -104,17 +110,7 @@ export interface FactSplitPromptPreview {
   systemPrompt: string;
   userPrompt: string;
 }
-
-interface ProfileEventPromptPayload {
-  event_id: string;
-  date: string;
-  summary: string;
-  sources: string[];
-  entities: string[];
-  keywords: string[];
-  normalized_fact?: string;
-  domains?: string[];
-}
+interface ProfileRequestBudget { remaining: number; }
 
 interface ProfileChunkPayload {
   index: number;
@@ -139,12 +135,6 @@ interface ProfileMergePromptPayload {
   candidate_claims: RawProfileClaim[];
   previous_claims: ProfileClaim[];
   batch?: ProfileChunkPayload;
-}
-
-interface ProfileMergeResult {
-  short_summary: string;
-  summary: string;
-  claims: RawProfileClaim[];
 }
 
 interface ProfileShortSummaryRepairClaimPayload {
@@ -488,8 +478,7 @@ const PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT: string =
   '风格像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”。无法生成时返回 {"short_summary":""}。不要输出 markdown。';
 
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
-const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
-const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
+const SYNC_MODEL_READ_TIMEOUT_MS: number = 2 * 60 * 1000;
 const SPLIT_BATCH_REQUEST_CONCURRENCY: number = 8;
 const ENRICH_BATCH_REQUEST_CONCURRENCY: number = 8;
 const BATCH_FACT_SPLIT_REQUEST_SIZE: number = 8;
@@ -532,11 +521,22 @@ const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。\n' +
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
+export interface EventAnalysisCallbacks {
+  onEvent: (event: IndexedEvent) => void;
+  onFailure: (event: IndexedEvent, reason: string) => void;
+}
+
 export class DataPipelineModelClient implements ProfileBlockModel {
+  private streamActivities: ModelStreamActivityStore = new ModelStreamActivityStore();
   private syncCalls: number = 0;
   private syncWaitMs: number = 0;
   private syncInputChars: number = 0;
-  resetSyncMetrics(): void { this.syncCalls = 0; this.syncWaitMs = 0; this.syncInputChars = 0; }
+  resetSyncMetrics(): void {
+    this.syncCalls = 0; this.syncWaitMs = 0; this.syncInputChars = 0; this.streamActivities.reset();
+  }
+  modelActivities(since: number = 0): ModelStreamActivity[] {
+    return this.streamActivities.snapshots(since, DebugSettings.isEnabled());
+  }
   reportSyncMetrics(): void {
     dataManagerInfo('SYNC_MODEL requests=' + this.syncCalls + ' waitMs=' + this.syncWaitMs + ' inputChars=' + this.syncInputChars);
   }
@@ -544,41 +544,107 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     return [PROFILE_BLOCK_POLICY, config.baseUrl, config.model || '', String(config.enabled),
       String(PROFILE_SYNC_MAX_TOKENS), PROFILE_SYSTEM_PROMPT, PROFILE_MERGE_SYSTEM_PROMPT, PROFILE_BLOCK_PROMPT].join('|');
   }
-  async summarizeProfileBlock(domain: string, events: IndexedEvent[], config: DataManagerModelConfig): Promise<ProfileModelPayload> {
+  async summarizeProfileBlock(domain: string, events: IndexedEvent[], config: DataManagerModelConfig,
+    onWork?: (message: string) => void, depth: number = 0,
+    budget: ProfileRequestBudget = { remaining: 12 }): Promise<ProfileModelPayload> {
     if (!this.isEnabled(config)) { throw new Error('请先配置同步使用的模型服务'); }
     let input = this.profilePayloadFromEvents(domain, events.length,
       events.map((event: IndexedEvent): ProfileEventPromptPayload => this.profileEventPayload(event, true)), [], 0, 0);
-    let raw = await this.callJson(config, 'profile.block.' + domain, PROFILE_BLOCK_PROMPT, this.profilePromptText(input));
-    return this.normalizeBlockPayload(raw, events);
+    try {
+      let raw = await this.callProfileJson(config, 'profile.block.' + domain, PROFILE_BLOCK_PROMPT,
+        this.profilePromptText(input), events, 8, onWork, budget);
+      return this.normalizeBlockPayload(raw, events);
+    } catch (e) {
+      if (!(e instanceof ProfileResponseError) || depth >= 3 || events.length < 2) { throw new Error((e as Error).message); }
+      if (onWork) { onWork('模型结果未通过校验，正在拆小本批事实'); }
+      let middle = Math.ceil(events.length / 2);
+      let left = await this.summarizeProfileBlock(domain, events.slice(0, middle), config, onWork, depth + 1, budget);
+      let right = await this.summarizeProfileBlock(domain, events.slice(middle), config, onWork, depth + 1, budget);
+      return await this.combineProfileBlocks(domain, [left, right], events, config, false, onWork, budget);
+    }
   }
   async combineProfileBlocks(domain: string, blocks: ProfileModelPayload[], events: IndexedEvent[],
-    config: DataManagerModelConfig, final: boolean): Promise<ProfileModelPayload> {
+    config: DataManagerModelConfig, final: boolean, onWork?: (message: string) => void,
+    budget: ProfileRequestBudget = { remaining: 12 }): Promise<ProfileModelPayload> {
     if (!this.isEnabled(config)) { throw new Error('请先配置同步使用的模型服务'); }
     let candidates: RawProfileClaim[] = [];
     blocks.forEach((block: ProfileModelPayload) => { candidates = candidates.concat(block.claims); });
     if (candidates.length === 0) { return this.emptyProfilePayload('model_empty'); }
-    let batches = this.profileModelMergePayloads(domain, candidates, [], 1);
+    let batches = this.profileBlockMergeBatches(domain, candidates, events);
     for (let round = 0; batches.length > 1; round++) {
       if (round >= 5) { throw new Error('画像摘要合并超出预算，请重试'); }
       let reduced: RawProfileClaim[] = [];
-      for (let batch of batches) {
-        let partial = await this.callJson(config, 'profile.block.reduce.' + domain, PROFILE_BLOCK_PROMPT, this.profilePromptText(batch));
-        reduced = reduced.concat(this.normalizeBlockPayload(partial, events).claims);
+      for (let index = 0; index < batches.length; index++) {
+        if (onWork) { onWork('正在合并变化摘要 ' + (index + 1) + '/' + batches.length + '（第' + (round + 1) + '轮）'); }
+        let partial = await this.reduceProfileClaims(domain, batches[index].candidate_claims, events, config, false, onWork, 0, budget);
+        reduced = reduced.concat(partial.claims);
       }
+      if (reduced.length >= candidates.length) { throw new Error('画像摘要未收敛，已保留成功分块，请重试'); }
       candidates = reduced;
-      batches = this.profileModelMergePayloads(domain, candidates, [], round + 2);
+      batches = this.profileBlockMergeBatches(domain, candidates, events);
     }
-    let input = batches[0];
-    let raw = await this.callJson(config, 'profile.' + (final ? 'merge.' : 'block.merge.') + domain,
-      final ? PROFILE_MERGE_SYSTEM_PROMPT : PROFILE_BLOCK_PROMPT, this.profilePromptText(input));
-    if (!final) { return this.normalizeBlockPayload(raw, events); }
+    return await this.reduceProfileClaims(domain, candidates, events, config, final, onWork, 0, budget);
+  }
+  private profileBlockMergeBatches(domain: string, candidates: RawProfileClaim[], events: IndexedEvent[]): ProfileMergePromptPayload[] {
+    let codec = new ProfileRequestCodec(events);
+    let groups: ProfileMergePromptPayload[] = []; let pending: RawProfileClaim[] = [];
+    for (let claim of candidates) {
+      let next = pending.concat([claim]);
+      if (pending.length > 0 && (next.length > 16 || codec.encode(this.profilePromptText(
+        this.profileMergePayload(domain, next, [], 1, 0, 0))).length > 6500)) {
+        groups.push(this.profileMergePayload(domain, pending, [], 1, 0, 0)); pending = [];
+      }
+      pending.push(claim);
+    }
+    if (pending.length > 0) { groups.push(this.profileMergePayload(domain, pending, [], 1, 0, 0)); }
+    return groups;
+  }
+  private async reduceProfileClaims(domain: string, candidates: RawProfileClaim[], events: IndexedEvent[],
+    config: DataManagerModelConfig, final: boolean, onWork?: (message: string) => void, depth: number = 0,
+    budget: ProfileRequestBudget = { remaining: 12 }): Promise<ProfileModelPayload> {
+    let allowed: Record<string, boolean> = {};
+    candidates.forEach((claim: RawProfileClaim) => claim.event_ids.forEach((id: string) => allowed[id] = true));
+    let evidence = events.filter((event: IndexedEvent): boolean => allowed[event.event_id] === true);
+    let raw: JsonMap;
+    try {
+      raw = await this.callProfileJson(config, 'profile.' + (final ? 'merge.' : 'block.merge.') + domain,
+        final ? PROFILE_MERGE_SYSTEM_PROMPT : PROFILE_BLOCK_PROMPT,
+        this.profilePromptText(this.profileMergePayload(domain, candidates, [], 1, 0, 0)), evidence,
+        final ? 5 : Math.min(6, candidates.length), onWork, budget);
+    } catch (e) {
+      if (!(e instanceof ProfileResponseError) || depth >= 3 || candidates.length < 2) { throw new Error((e as Error).message); }
+      if (onWork) { onWork('摘要输出未通过校验，正在缩小合并范围'); }
+      let middle = Math.ceil(candidates.length / 2);
+      let left = await this.reduceProfileClaims(domain, candidates.slice(0, middle), events, config, false, onWork, depth + 1, budget);
+      let right = await this.reduceProfileClaims(domain, candidates.slice(middle), events, config, false, onWork, depth + 1, budget);
+      let smaller = left.claims.concat(right.claims);
+      if (smaller.length >= candidates.length) { throw new Error('画像合并结果未通过校验，已保留成功分块，请重试'); }
+      return await this.reduceProfileClaims(domain, smaller, events, config, final, onWork, depth + 1, budget);
+    }
+    if (!final) { return this.normalizeBlockPayload(raw, evidence); }
     if (!Array.isArray(raw['claims'])) { throw new Error('画像合并结果缺少 claims，请重试'); }
     let parsed = this.normalizeProfilePayload(raw);
-    let claims = this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8);
+    let claims = this.normalizeGeneratedProfileClaims(parsed.claims, evidence, domain, 8);
     let shortSummary = claims.length > 0 ?
       await this.ensureProfileShortSummary(domain, parsed.short_summary, parsed.summary, claims, config) : '';
     return { short_summary: shortSummary, summary: parsed.summary, claims: claims,
       generation: claims.length > 0 ? 'model' : 'model_empty' };
+  }
+  private async callProfileJson(config: DataManagerModelConfig, kind: string, system: string, prompt: string,
+    events: IndexedEvent[], limit: number, onWork?: (message: string) => void,
+    budget?: ProfileRequestBudget): Promise<JsonMap> {
+    let codec = new ProfileRequestCodec(events);
+    if (onWork) { onWork('正在等待AI整理本批摘要'); }
+    return await this.callJson(config, kind, system + '\n本次最多输出' + limit +
+      '条，每条最多引用4个输入证据编号，statement不超过100字；严格返回单个JSON对象，使用输入中的e编号，不要展开文件路径。',
+      codec.encode(prompt), (payload: JsonMap): void => {
+        codec.decode(payload);
+        let claims = payload['claims'] as JsonMap[];
+        if (claims.length > limit) { payload['claims'] = claims.slice(0, limit); }
+        if (!kind.startsWith('profile.merge.')) { this.normalizeBlockPayload(payload, events); }
+      }, (attempt: number, total: number): void => {
+        if (onWork) { onWork('摘要格式校验重试 ' + attempt + '/' + total); }
+      }, budget);
   }
   private normalizeBlockPayload(raw: JsonMap, events: IndexedEvent[]): ProfileModelPayload {
     if (!Array.isArray(raw['claims'])) { throw new Error('画像分块结果缺少 claims，请重试'); }
@@ -695,22 +761,26 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     }
   }
 
-  async enrichEvents(events: IndexedEvent[], config: DataManagerModelConfig): Promise<IndexedEvent[]> {
+  async enrichEvents(events: IndexedEvent[], config: DataManagerModelConfig, callbacks?: EventAnalysisCallbacks): Promise<IndexedEvent[]> {
     let result: Record<string, IndexedEvent> = {};
+    if (config.enabled && !this.isEnabled(config)) { throw new Error('请先配置同步使用的模型服务'); }
     if (!this.isEnabled(config) || events.length === 0) {
       return events.map((event: IndexedEvent) => this.heuristicEnrichEvent(event, 'heuristic'));
     }
     let chunks = this.chunkEventsByTodoGuide(events, BATCH_ENRICH_REQUEST_SIZE);
     let tasks = chunks.map((chunk: IndexedEvent[], chunkIndex: number): (() => Promise<boolean>) => {
       return async (): Promise<boolean> => {
-        await this.requestBatchEnrichChunk(chunk, result, config, chunkIndex + 1, chunks.length);
+        await this.requestBatchEnrichChunk(chunk, result, config, chunkIndex + 1, chunks.length, callbacks);
         return true;
       };
     });
     await runLimitedTasks<boolean>(tasks, ENRICH_BATCH_REQUEST_CONCURRENCY);
+    if (callbacks) { return events.filter((event: IndexedEvent): boolean => result[event.event_id] !== undefined)
+      .map((event: IndexedEvent): IndexedEvent => result[event.event_id]); }
     return events.map((event: IndexedEvent): IndexedEvent => {
       let enriched = result[event.event_id];
-      return enriched ? enriched : this.heuristicEnrichEvent(event, 'heuristic_batch_fallback');
+      if (!enriched) { throw new Error('事件分析结果遗漏记录，请重试同步'); }
+      return enriched;
     });
   }
 
@@ -743,15 +813,49 @@ export class DataPipelineModelClient implements ProfileBlockModel {
   }
 
   private async requestBatchEnrichChunk(chunk: IndexedEvent[], result: Record<string, IndexedEvent>,
-    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number): Promise<void> {
+    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number, callbacks?: EventAnalysisCallbacks): Promise<void> {
     let eventMap: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
     chunk.forEach((event: IndexedEvent) => {
       eventMap[event.event_id] = event;
     });
     let preview = buildEnrichPromptPreview(chunk);
+    let accept = (item: JsonMap): void => {
+      let id = normalizeFreeText(item['event_id']);
+      if (result[id]) { return; }
+      let event = eventMap[id];
+      if (!event || !Array.isArray(item['keywords']) || !Array.isArray(item['domains']) ||
+        (item['domains'] as string[]).length === 0 || !Array.isArray(item['entities']) ||
+        !item['todo'] || typeof item['todo'] !== 'object' || Array.isArray(item['todo'])) { return; }
+      let enriched = this.enrichEventFromPayload(event, item, 'model_batch');
+      if (callbacks) {
+        try { callbacks.onEvent(enriched); }
+        catch (e) { throw new Error('保存事件检查点失败：' + (e as Error).message); }
+      }
+      result[id] = enriched;
+    };
     try {
       dataManagerInfo(`Batch enrich request: chunk=${chunkIndex}/${chunkCount}, events=${chunk.length}`);
-      let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
+      let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt,
+        (value: JsonMap): void => {
+          if (!Array.isArray(value['events'])) { throw new Error('事件分析结果不完整，请重试'); }
+          let seen: Record<string, boolean> = {};
+          (value['events'] as JsonMap[]).forEach((item: JsonMap) => {
+            if (!item || typeof item !== 'object') { throw new Error('事件分析结果格式无效'); }
+            let id = normalizeFreeText(item['event_id']);
+            if (!eventMap[id]) { throw new Error('事件分析引用了未知记录'); }
+            if (seen[id]) { throw new Error('事件分析返回重复记录'); }
+            if (!Array.isArray(item['keywords']) || !Array.isArray(item['domains']) ||
+              (item['domains'] as string[]).length === 0 || !Array.isArray(item['entities']) ||
+              !item['todo'] || typeof item['todo'] !== 'object' || Array.isArray(item['todo'])) {
+              throw new Error('事件分析字段不完整，请重试');
+            }
+            seen[id] = true;
+          });
+          if (chunk.some((event: IndexedEvent): boolean => !seen[event.event_id])) {
+            throw new Error('事件分析结果遗漏记录，请重试');
+          }
+        }, undefined, undefined, (chunk[0].calendar ? '日历' : sourceAppDisplayName(chunk[0].source_state_file)) +
+          ' · 批次 ' + chunkIndex + '/' + chunkCount + '（' + chunk.length + ' 条）', callbacks ? accept : undefined);
       let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
       rawEvents.forEach((rawEvent: JsonMap) => {
         let eventId = normalizeFreeText(rawEvent['event_id']);
@@ -759,11 +863,20 @@ export class DataPipelineModelClient implements ProfileBlockModel {
         if (!event) {
           return;
         }
-        result[eventId] = this.enrichEventFromPayload(event, rawEvent, 'model_batch');
+        accept(rawEvent);
       });
     } catch (e) {
       let err = e as Error;
-      dataManagerError(`Batch enrich fallback: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
+      dataManagerError(`Batch enrich failed: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
+      if (callbacks && !/保存事件检查点失败|Cloud HTTP (400|401|403|404|405|429)|登录|请先配置|取消|终止|已撤回|cancel|abort/i.test(err.message)) {
+        let reason = err.message.includes('MODEL_REPEATED_OUTPUT') ? 'repeated_output' :
+          /超时|time(?:d)?[\s_-]*out/i.test(err.message) ? 'timeout' : 'invalid_or_failed_response';
+        chunk.filter((event: IndexedEvent): boolean => !result[event.event_id]).forEach((event: IndexedEvent) => callbacks.onFailure(event, reason));
+        return;
+      }
+      // Do not publish a rule-based fallback as a completed model analysis.
+      // The index transaction retains the last successfully published version.
+      throw new Error(err.message || '事件分析失败，请重试同步');
     }
   }
 
@@ -800,7 +913,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     }
   }
 
-  async generateProfile(domain: string, events: IndexedEvent[], previousClaims: ProfileClaim[], config: DataManagerModelConfig): Promise<ProfileModelPayload> {
+  async generateProfile(domain: string, events: IndexedEvent[], _previousClaims: ProfileClaim[], config: DataManagerModelConfig): Promise<ProfileModelPayload> {
     if (events.length === 0) {
       return this.emptyProfilePayload('empty');
     }
@@ -808,39 +921,16 @@ export class DataPipelineModelClient implements ProfileBlockModel {
       return this.emptyProfilePayload('model_unavailable');
     }
     try {
-      let promptPayloads = this.profileModelPromptChunks(domain, events, previousClaims);
-      if (promptPayloads.length === 1) {
-        let payload = await this.callJson(config, 'profile.generate.' + domain, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayloads[0]));
-        let parsed = this.normalizeProfilePayload(payload);
-        let claims = this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8);
-        if (claims.length === 0) {
-          return this.emptyProfilePayload('model_empty');
-        }
-        let shortSummary = await this.ensureProfileShortSummary(domain, parsed.short_summary, parsed.summary, claims, config);
-        return {
-          short_summary: shortSummary,
-          summary: parsed.summary,
-          claims: claims,
-          generation: 'model'
-        };
-      }
-      let candidateClaims: RawProfileClaim[] = [];
+      // Compatibility entry point shares the same bounded evidence pipeline.
+      // Old claims are not inputs: removed facts must not perpetuate themselves.
+      let promptPayloads = this.profileModelPromptChunks(domain, events, []);
+      let blocks: ProfileModelPayload[] = [];
       for (let promptPayload of promptPayloads) {
-        let payload = await this.callJson(config, 'profile.generate.' + domain, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayload));
-        let parsed = this.normalizeProfilePayload(payload);
-        candidateClaims = candidateClaims.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8));
+        let selected = new Set<string>(promptPayload.events.map((event: ProfileEventPromptPayload): string => event.event_id));
+        blocks.push(await this.summarizeProfileBlock(domain,
+          events.filter((event: IndexedEvent): boolean => selected.has(event.event_id)), config));
       }
-      let merged = await this.mergeProfileClaimsWithModel(domain, candidateClaims, previousClaims, events, config);
-      if (merged.claims.length === 0) {
-        return this.emptyProfilePayload('model_empty');
-      }
-      let shortSummary = await this.ensureProfileShortSummary(domain, merged.short_summary, merged.summary, merged.claims, config);
-      return {
-        short_summary: shortSummary,
-        summary: merged.summary,
-        claims: merged.claims,
-        generation: 'model'
-      };
+      return await this.combineProfileBlocks(domain, blocks, events, config, true);
     } catch (e) {
       let err = e as Error;
       dataManagerError(`Profile model failed: domain=${domain}, error=${err.message}`);
@@ -1371,14 +1461,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
   }
 
   private profileEventPayload(event: IndexedEvent, compact: boolean): ProfileEventPromptPayload {
-    let item: ProfileEventPromptPayload = {
-      event_id: event.event_id,
-      date: event.event_date,
-      summary: summarizeText(event.summary, compact ? 110 : 220),
-      sources: event.sources.slice(0, 3),
-      entities: event.entities.slice(0, 8),
-      keywords: event.keywords.slice(0, compact ? 6 : 12)
-    };
+    let item: ProfileEventPromptPayload = profileEvidence(event);
     if (!compact) {
       item.normalized_fact = summarizeText(event.normalized_fact, 260);
       item.domains = event.domains.slice();
@@ -1479,76 +1562,6 @@ export class DataPipelineModelClient implements ProfileBlockModel {
       };
     }
     return payload;
-  }
-
-  private profileModelMergePayloads(domain: string, candidateClaims: RawProfileClaim[], previousClaims: ProfileClaim[],
-    round: number): ProfileMergePromptPayload[] {
-    let fullPayload = this.profileMergePayload(domain, candidateClaims, previousClaims, round, 0, 0);
-    if (this.profilePromptCharCount(fullPayload) <= PROFILE_MODEL_MERGE_CHAR_LIMIT) {
-      return [fullPayload];
-    }
-    let batches: RawProfileClaim[][] = [];
-    let current: RawProfileClaim[] = [];
-    let budget = Math.max(1, Math.floor(PROFILE_MODEL_MERGE_CHAR_LIMIT * 0.95));
-    for (let claim of candidateClaims) {
-      let candidate = current.concat([claim]);
-      let testPayload = this.profileMergePayload(domain, candidate, [], round, 1, 1);
-      if (current.length > 0 && this.profilePromptCharCount(testPayload) > budget) {
-        batches.push(current);
-        current = [claim];
-      } else {
-        current = candidate;
-      }
-    }
-    if (current.length > 0) {
-      batches.push(current);
-    }
-    let result: ProfileMergePromptPayload[] = [];
-    let batchCount = batches.length;
-    for (let index = 0; index < batches.length; index++) {
-      result.push(this.profileMergePayload(domain, batches[index], [], round, index + 1, batchCount));
-    }
-    return result;
-  }
-
-  private async mergeProfileClaimsWithModel(domain: string, candidateClaims: RawProfileClaim[], previousClaims: ProfileClaim[],
-    events: IndexedEvent[], config: DataManagerModelConfig): Promise<ProfileMergeResult> {
-    let pending = this.normalizeGeneratedProfileClaims(candidateClaims, events, domain, 80);
-    if (pending.length === 0) {
-      return { short_summary: '', summary: '', claims: [] };
-    }
-    let currentPrevious = previousClaims;
-    let latestShortSummary = '';
-    let latestSummary = '';
-    for (let round = 1; round <= PROFILE_MODEL_MERGE_ROUND_LIMIT; round++) {
-      let payloads = this.profileModelMergePayloads(domain, pending, currentPrevious, round);
-      let merged: RawProfileClaim[] = [];
-      let shortSummary = '';
-      let summary = '';
-      for (let payload of payloads) {
-        let raw = await this.callJson(config, 'profile.merge.' + domain, PROFILE_MERGE_SYSTEM_PROMPT, this.profilePromptText(payload));
-        let parsed = this.normalizeProfilePayload(raw);
-        if (shortSummary.length === 0) {
-          shortSummary = parsed.short_summary;
-        }
-        if (summary.length === 0) {
-          summary = parsed.summary;
-        }
-        merged = merged.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 16));
-      }
-      merged = this.normalizeGeneratedProfileClaims(merged, events, domain, 80);
-      if (merged.length === 0) {
-        return { short_summary: '', summary: '', claims: [] };
-      }
-      latestShortSummary = shortSummary;
-      latestSummary = summary;
-      if (payloads.length === 1 || merged.length >= pending.length) {
-        return { short_summary: shortSummary, summary: summary, claims: merged.slice(0, 8) };
-      }
-      pending = merged;
-      currentPrevious = [];
-    }
-    return { short_summary: latestShortSummary, summary: latestSummary, claims: pending.slice(0, 8) };
   }
 
   private normalizeGeneratedProfileClaims(rawClaims: RawProfileClaim[], events: IndexedEvent[], domain: string, limit: number): RawProfileClaim[] {
@@ -1722,6 +1735,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
 
   private copyEvent(event: IndexedEvent): IndexedEvent {
     let copied: IndexedEvent = {
+      calendar: event.calendar,
       event_id: event.event_id,
       source_state_file: event.source_state_file,
       record_id: event.record_id,
@@ -1792,7 +1806,8 @@ export class DataPipelineModelClient implements ProfileBlockModel {
 
   private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string,
     validatePayload?: (payload: JsonMap) => void,
-    onRetry?: (attempt: number, total: number) => void): Promise<JsonMap> {
+    onRetry?: (attempt: number, total: number) => void, profileBudget?: ProfileRequestBudget,
+    requestLabel: string = '', onEventItem?: (item: JsonMap) => void): Promise<JsonMap> {
     let messages: CloudChatMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -1800,35 +1815,83 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     let startedAt = Date.now();
     this.requestSequence += 1;
     let requestId = this.requestSequence;
-    dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}`);
-    let temperatures: number[] = [0, 0.5, 1.0];
+    dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}, stream=true, readTimeout=${SYNC_MODEL_READ_TIMEOUT_MS}`);
+    let profileRequest = kind.startsWith('profile.');
+    let temperatures: number[] = onEventItem ? [0] : profileRequest ? [0, 0] : [0, 0.5, 1.0];
     try {
       for (let attempt = 0; attempt < temperatures.length; attempt++) {
+        if (profileRequest && profileBudget) {
+          if (profileBudget.remaining <= 0) { throw new Error('本批画像多次未通过校验，已保留成功摘要，请检查模型服务后重试'); }
+          profileBudget.remaining--;
+        }
         let temperature = temperatures[attempt];
+        let activityId = String(requestId) + '-' + String(attempt + 1);
+        this.streamActivities.begin(activityId, kind, requestLabel || this.modelRequestLabel(kind), attempt + 1);
+        let lastStreamDiagnosticAt = 0;
+        let eventParser = new EventStreamParser();
         this.syncCalls++; this.syncInputChars += systemPrompt.length + userPrompt.length;
         let requestStarted = Date.now();
         let content = '';
-        try { content = await this.cloudClient.chatCompletionText({
+        let truncated = false;
+        let options: CloudChatCompletionOptions = {
           baseUrl: config.baseUrl,
           apiKey: config.apiKey,
           model: config.model,
           messages: messages,
           temperature: temperature,
+          readTimeout: SYNC_MODEL_READ_TIMEOUT_MS,
           maxTokens: kind.startsWith('profile.') ? PROFILE_SYNC_MAX_TOKENS : undefined,
+          logResponseContent: profileRequest ? false : undefined,
+          separateReasoning: true,
           chatTemplateKwargs: {
             enable_thinking: false
           }
-        }); } finally { this.syncWaitMs += Date.now() - requestStarted; }
+        };
+        try {
+          let result = await this.cloudClient.chatCompletionStream(options, {
+            onProgress: (value: CloudChatStreamProgress): void => {
+              let repeated = this.streamActivities.update(activityId, value, DebugSettings.isEnabled());
+              if (onEventItem && value.contentDelta.length > 0) {
+                eventParser.append(value.contentDelta).forEach((item: JsonMap) => { if (onEventItem) { onEventItem(item); } });
+              }
+              if (repeated) {
+                dataManagerInfo('SYNC_MODEL_REPEATED id=' + requestId + ' kind=' + kind +
+                  ' contentChars=' + value.contentChars + ' reasoningChars=' + value.reasoningChars);
+                // The transport catches callback errors and destroys only this
+                // HTTP request. Completed event checkpoints remain available.
+                throw new Error('MODEL_REPEATED_OUTPUT: 检测到重复片段，已中断当前' + this.modelRequestLabel(kind) + '请求');
+              }
+              let now = Date.now();
+              if (now - lastStreamDiagnosticAt >= 2000 || ['completed', 'buffered', 'failed'].includes(value.phase)) {
+                dataManagerInfo('SYNC_MODEL_STREAM id=' + requestId + ' attempt=' + (attempt + 1) + ' kind=' + kind +
+                  ' phase=' + value.phase + ' http=' + value.responseCode + ' bytes=' + value.receivedBytes +
+                  ' contentChars=' + value.contentChars + ' reasoningChars=' + value.reasoningChars + ' elapsedMs=' + (now - requestStarted));
+                lastStreamDiagnosticAt = now;
+              }
+            }
+          });
+          content = result.content;
+          truncated = result.finishReason === 'length' || result.finishReason === 'max_tokens';
+        } catch (e) {
+          this.streamActivities.finish(activityId, (e as Error).message.includes('MODEL_REPEATED_OUTPUT') ? 'repeated' : 'failed');
+          throw new Error((e as Error).message);
+        } finally { this.syncWaitMs += Date.now() - requestStarted; }
         dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
         try {
+          if (truncated) {
+            if (profileRequest) { throw new ProfileResponseError('画像模型输出被截断，需要缩小本批输入'); }
+            throw new Error('模型输出被截断，本批未通过校验，请缩小输入或检查输出上限');
+          }
           let payload = this.parseJsonObject(content);
           if (validatePayload) {
             validatePayload(payload);
           }
+          this.streamActivities.finish(activityId, 'succeeded');
           return payload;
         } catch (e) {
+          this.streamActivities.finish(activityId, 'invalid');
           let err = e as Error;
-          let canRetry = attempt + 1 < temperatures.length;
+          let canRetry = !truncated && attempt + 1 < temperatures.length;
           dataManagerError(`Model request parse failed: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, responseChars=${content.length}, retry=${canRetry}, error=${err.message}`);
           // Chat output can contain personal details; diagnostics only need counts and the validation error.
           if (kind !== 'chat.memory' && !kind.startsWith('profile.')) {
@@ -1838,10 +1901,16 @@ export class DataPipelineModelClient implements ProfileBlockModel {
             if (kind === 'chat.memory') {
               throw new ChatMemoryResponseError(err.message);
             }
+            if (profileRequest) { throw new ProfileResponseError(err.message); }
             throw err;
           }
           if (onRetry) {
             onRetry(attempt + 2, temperatures.length);
+          }
+          if (profileRequest) {
+            let correction: CloudChatMessage = { role: 'user',
+              content: '上次结果未通过JSON或证据校验。请只返回合法JSON对象，检查逗号、引号、数组括号和输入的e编号；不要输出解释或Markdown。' };
+            messages = messages.slice(0, 2).concat([correction]);
           }
           dataManagerInfo(`Model request parse retry: id=${requestId}, kind=${kind}, nextTemperature=${temperatures[attempt + 1]}`);
         }
@@ -1850,8 +1919,25 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     } catch (e) {
       let err = e as Error;
       dataManagerError(`Model request failed: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, ms=${Date.now() - startedAt}, error=${err.message}`);
+      if (/time(?:d)?[\s_-]*out/i.test(err.message)) {
+        let stage = kind.startsWith('profile.') ? '画像生成' : kind.startsWith('enrich.') ? '事件分析' :
+          kind.startsWith('collection.') ? '采集分组' : kind.startsWith('entity.') ? '实体整理' :
+          kind === 'chat.memory' ? '聊天记忆提取' : kind === 'home.recommendation' ? '提醒分析' : '记忆分析';
+        throw new Error(stage + '的模型请求超时，已完成的分析缓存已保留，请稍后重试');
+      }
       throw err;
     }
+  }
+
+  private modelRequestLabel(kind: string): string {
+    if (kind.startsWith('profile.')) { return '个人画像'; }
+    if (kind.startsWith('collection.')) { return '采集分组'; }
+    if (kind.startsWith('entity.')) { return '实体整理'; }
+    if (kind === 'chat.memory') { return '聊天记忆'; }
+    if (kind === 'split.batch') { return '事实提取'; }
+    if (kind === 'enrich.batch') { return '事件分析'; }
+    if (kind === 'home.recommendation') { return '提醒分析'; }
+    return '记忆整理';
   }
 
   private logRawModelOutput(requestId: number, kind: string, content: string): void {
@@ -1870,7 +1956,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
   }
 
   private parseJsonObject(rawText: string): JsonMap {
-    let text = rawText.trim();
+    let text = rawText.trim().replace(/^(?:<think>[\s\S]*?<\/think>\s*)+/i, '');
     let fenced = /```json\s*([\s\S]*?)\s*```/i.exec(text);
     if (fenced) {
       text = fenced[1].trim();

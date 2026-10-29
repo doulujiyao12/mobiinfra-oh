@@ -1,6 +1,5 @@
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
-import { PrivacyConsent } from '../../utils/PrivacyConsent';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
 import { CodexClient } from './CodexClient';
 import { CodexCredentialStore } from './CodexCredentialStore';
@@ -44,7 +43,6 @@ export class CodexChatService {
   load(id: string): CodexChatRun | null { return this.store.load(id); }
   private save(operation: CodexChatOperation): void { this.store.save(operation.run); }
   private requireCurrent(operation: CodexChatOperation): void {
-    PrivacyConsent.requireAccepted();
     if (operation.paused || !ChatSessionStorage.sessionExists(this.filesDir, operation.run.sessionId)) {
       throw new Error('聊天已关闭或删除，远端状态待同步');
     }
@@ -69,7 +67,6 @@ export class CodexChatService {
     this.sessions.add(execution.sessionId);
     let operation: CodexChatOperation | null = null;
     try {
-      PrivacyConsent.requireAccepted();
       const previous = request.continueRunId ? this.store.load(request.continueRunId) : null;
       if (request.continueRunId && (previous === null || previous.sessionId !== execution.sessionId ||
         previous.status !== 'completed' || !previous.submitted || !safeTaskId(previous.taskId))) {
@@ -263,7 +260,7 @@ export class CodexChatService {
       if (operation.stopRequested) { throw new Error('文件接收已停止，可稍后同步结果'); }
       try {
         const saved = await store.receive(run.taskId, artifact, operation.client,
-          (): boolean => !operation.paused && !operation.stopRequested && PrivacyConsent.isAccepted(),
+          (): boolean => !operation.paused && !operation.stopRequested,
           (received: number, total: number): void => {
             run.notice = '接收 ' + artifact.name + ' · ' + Math.floor(received * 100 / total) + '%'; this.save(operation);
           });

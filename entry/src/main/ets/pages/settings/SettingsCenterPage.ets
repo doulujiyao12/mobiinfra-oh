@@ -115,7 +115,7 @@ import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, Collec
 import { HuaweiAccountCard } from './HuaweiAccountCard';
 import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
 import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
-import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { HuaweiPrivacyAccess } from '../../utils/HuaweiPrivacyAccess';
 import { PERSONAL_MEMORY_A2A_STATE_KEY, PersonalMemoryAccess } from '../../agent/PersonalMemoryAccess';
 
 registerGallerySettingsDefaults();
@@ -229,6 +229,7 @@ export struct SettingsCenterPage {
   onRefreshDownloadedModels: () => void = () => {};
   @Prop calendarMemoryRefreshing: boolean = false;
   onSyncCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
+  onReadCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
   onMailChanged: () => void = (): void => {};
   onSyncMail: () => Promise<void> = async (): Promise<void> => {};
   @StorageLink(STARTUP_SOURCE_SYNC_ENABLED_KEY) private startupSyncEnabled: boolean = true;
@@ -1040,12 +1041,11 @@ export struct SettingsCenterPage {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
         Column({ space: 5 }) {
-          Text('隐私声明')
+          Text('隐私政策')
             .fontSize(16)
             .fontWeight(FontWeight.Medium)
             .fontColor(AppTheme.text($r('sys.color.ohos_id_color_text_primary')))
-          Text(this.privacyConsentState === 'accepted' ? '已同意 · 可随时撤回同意' :
-            (this.privacyConsentState === 'rejected' ? '已拒绝 · 任务与云端分析已关闭' : '未选择 · 阅读并管理云端分析授权'))
+          Text('查看应用隐私政策')
             .fontSize(12)
             .fontColor(AppTheme.text($r('sys.color.ohos_id_color_text_secondary')))
             .maxLines(2)
@@ -1062,7 +1062,7 @@ export struct SettingsCenterPage {
     .borderRadius(20)
     .backgroundColor(AppTheme.background($r('sys.color.ohos_id_color_dialog_bg')))
     .margin({ top: 16 })
-    .onClick(() => { PrivacyConsentDialog.show(this.getUIContext(), true); })
+    .onClick(() => { HuaweiPrivacyAccess.openPolicy(this.getUIContext()); })
   }
 
   @Builder AvatarImageServiceGroup() {
@@ -1138,13 +1138,13 @@ export struct SettingsCenterPage {
 
   @Builder StartupSyncSettings() {
     CollectionFormSwitch({ label: '每日自动更新', selected: this.startupSyncEnabled,
-      detail: '跨天打开应用时，更新已授权日历、已配置邮箱和新增聊天',
+      detail: '距离上次成功满24小时后，检查已开启的邮件、日历和新增聊天',
       onChangeValue: (enabled: boolean): void => { this.changeStartupSyncEnabled(enabled); } })
   }
 
   @Builder DataCollectionSection() {
     Column() {
-      CollectionFormGroup({ title: '同步', footer: '未授权的日历、未配置的邮箱会自动跳过。关闭后仍可手动同步；正在更新时，当前项完成后停止。',
+      CollectionFormGroup({ title: '同步', footer: '距上次成功处理满24小时后，打开应用时检查已开启的来源。未授权或未配置的来源会跳过；失败可手动重试。关闭不影响手动操作。',
         contentBuilder: (): void => { this.StartupSyncSettings(); } })
       CollectionFormGroup({ title: '采集来源', contentBuilder: (): void => { this.CollectionSourceEntries(); } })
       CollectionFormGroup({ title: '辅助设置', contentBuilder: (): void => { this.CollectionAuxiliaryEntries(); } })
@@ -1155,6 +1155,7 @@ export struct SettingsCenterPage {
     Column() {
       if (this.selectedSectionId === SettingsSectionId.CalendarAnalysis) {
         CalendarMemoryPanel({ memoryRefreshing: this.calendarMemoryRefreshing,
+          onSync: async (): Promise<void> => { await this.onReadCalendarMemory(); },
           onMemoryChanged: async (): Promise<void> => { await this.onSyncCalendarMemory(); } })
       } else if (this.selectedSectionId === SettingsSectionId.MailAnalysis) {
         MailSettingsPanel({ memoryRefreshing: this.calendarMemoryRefreshing,

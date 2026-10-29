@@ -1,50 +1,45 @@
 import { common } from '@kit.AbilityKit';
-import { preferences } from '@kit.ArkData';
+import { privacyManager } from '@kit.AppGalleryKit';
 import { http } from '@kit.NetworkKit';
 
 export const PRIVACY_STATE_KEY: string = 'privacyConsentState';
-export const PRIVACY_VERSION: string = '2026-10-26-v4';
-export const PRIVACY_REQUIRED_MESSAGE: string = '请先阅读并同意隐私声明，再执行任务或使用云端分析。';
+export const PERSONAL_MEMORY_SHARING_UNAVAILABLE_MESSAGE: string = '暂时无法确认小艺个人记忆共享授权，请稍后重试。';
 
-export function normalizePrivacyChoice(value: string): string {
-  return value === 'accepted' || value === 'rejected' ? value : 'unselected';
+export function platformPrivacyChoice(results: privacyManager.AppPrivacyResult[]): string {
+  let policies = results.filter((item: privacyManager.AppPrivacyResult): boolean =>
+    item.type === privacyManager.AppPrivacyType.PRIVACY_AGREEMENT);
+  if (policies.length === 0) { return 'unselected'; }
+  if (policies.some((item: privacyManager.AppPrivacyResult): boolean =>
+    item.result === privacyManager.AppPrivacyResultType.DISAGREED)) { return 'rejected'; }
+  return policies.every((item: privacyManager.AppPrivacyResult): boolean =>
+    item.result === privacyManager.AppPrivacyResultType.FULL_MODE_AGREED) ? 'accepted' : 'unselected';
 }
 
-export function resolvePrivacyChoice(choice: string, version: string): string {
-  return version === PRIVACY_VERSION ? normalizePrivacyChoice(choice) : 'unselected';
-}
-
-// Fail closed until the local preference has been loaded. Never infer consent from usage.
+// External personal-memory sharing only. Foreground app features do not call
+// this guard; their requests use AppRequests without an app-wide consent gate.
+// The external API still validates actual platform consent and its own opt-in.
 export class PrivacyConsent {
-  private static appContext: common.Context | null = null;
-  private static store: preferences.Preferences | null = null;
-  private static loading: Promise<void> | null = null;
   private static choice: string = 'unselected';
-  private static saving: boolean = false;
   private static requests: http.HttpRequest[] = [];
   private static cancellers: Map<http.HttpRequest, () => void> = new Map();
   private static externalRequests: Map<number, () => void> = new Map();
   private static externalSequence: number = 0;
   private static revokeHandler: (() => void) | null = null;
 
-  static initialize(context: common.Context): Promise<void> {
-    PrivacyConsent.appContext = context;
-    if (PrivacyConsent.loading === null) {
-      PrivacyConsent.loading = PrivacyConsent.load(context).catch(() => {
-        PrivacyConsent.loading = null;
-        throw new Error('无法读取隐私选择，请稍后重试');
-      });
-    }
-    return PrivacyConsent.loading;
+  static async initialize(_context: common.Context): Promise<void> {
+    PrivacyConsent.refreshPlatformState();
   }
 
-  private static async load(context: common.Context): Promise<void> {
-    let store = await preferences.getPreferences(context, { name: 'privacy_consent' });
-    let choice = await store.get('choice', 'unselected');
-    let version = await store.get('version', '');
-    PrivacyConsent.store = store;
-    PrivacyConsent.choice = resolvePrivacyChoice(String(choice), String(version));
-    AppStorage.setOrCreate(PRIVACY_STATE_KEY, PrivacyConsent.choice);
+  private static refreshPlatformState(): void {
+    let next: string;
+    try { next = platformPrivacyChoice(privacyManager.getAppPrivacyResult()); }
+    catch (e) { next = 'unavailable'; }
+    let previous = PrivacyConsent.choice;
+    PrivacyConsent.choice = next;
+    if (AppStorage.get<string>(PRIVACY_STATE_KEY) !== next) {
+      AppStorage.setOrCreate(PRIVACY_STATE_KEY, next);
+    }
+    if (previous === 'accepted' && next !== 'accepted') { PrivacyConsent.cancelForPlatformRevocation(); }
   }
 
   static state(): string {
@@ -52,12 +47,13 @@ export class PrivacyConsent {
   }
 
   static isAccepted(): boolean {
-    return PrivacyConsent.store !== null && !PrivacyConsent.saving && PrivacyConsent.choice === 'accepted';
+    PrivacyConsent.refreshPlatformState();
+    return PrivacyConsent.choice === 'accepted';
   }
 
   static requireAccepted(): void {
     if (!PrivacyConsent.isAccepted()) {
-      throw new Error(PRIVACY_REQUIRED_MESSAGE);
+      throw new Error(PERSONAL_MEMORY_SHARING_UNAVAILABLE_MESSAGE);
     }
   }
 
@@ -65,59 +61,27 @@ export class PrivacyConsent {
     PrivacyConsent.revokeHandler = handler;
   }
 
-  static async choose(accepted: boolean): Promise<void> {
-    let store = PrivacyConsent.store;
-    if (store === null || PrivacyConsent.saving) {
-      throw new Error('隐私设置尚未就绪，请稍后重试');
+  private static cancelForPlatformRevocation(): void {
+    const external = Array.from(PrivacyConsent.externalRequests.values());
+    PrivacyConsent.externalRequests.clear();
+    external.forEach((cancel: () => void): void => { try { cancel(); } catch (e) { } });
+    let pending = PrivacyConsent.requests.slice();
+    pending.forEach((request: http.HttpRequest): void => {
+      try { PrivacyConsent.cancellers.get(request)?.(); }
+      catch (e) { }
+      finally { PrivacyConsent.destroyHttp(request); }
+    });
+    try { PrivacyConsent.revokeHandler?.(); } catch (e) { }
+  }
+
+  static async openStatement(context: common.UIAbilityContext): Promise<void> {
+    let info = privacyManager.getAppPrivacyMgmtInfo();
+    let statement = info.privacyInfo.find((item: privacyManager.AppPrivacyLink): boolean =>
+      item.type === privacyManager.AppPrivacyLinkType.PRIVACY_STATEMENT_LINK);
+    if (statement === undefined || !/^https?:\/\//i.test(statement.url)) {
+      throw new Error('未找到华为托管的隐私政策，请检查应用市场配置');
     }
-    PrivacyConsent.saving = true;
-    // Revocation takes effect before disk I/O, including when the disk write fails.
-    PrivacyConsent.choice = accepted ? 'unselected' : 'rejected';
-    AppStorage.setOrCreate(PRIVACY_STATE_KEY, PrivacyConsent.choice);
-    try {
-      if (!accepted) {
-        const external = Array.from(PrivacyConsent.externalRequests.values());
-        PrivacyConsent.externalRequests.clear();
-        external.forEach((cancel: () => void) => {
-          try { cancel(); } catch (e) { }
-        });
-        let pending = PrivacyConsent.requests.slice();
-        pending.forEach((request: http.HttpRequest) => {
-          try {
-            PrivacyConsent.cancellers.get(request)?.();
-          } catch (e) {
-            // Continue aborting the remaining requests if a stream cleanup callback fails.
-          } finally {
-            PrivacyConsent.destroyHttp(request);
-          }
-        });
-        try {
-          PrivacyConsent.revokeHandler?.();
-        } catch (e) {
-          // A task's cleanup error must not prevent persisting the user's refusal.
-        }
-      }
-      await store.put('choice', accepted ? 'accepted' : 'rejected');
-      await store.put('version', PRIVACY_VERSION);
-      await store.flush();
-      if (!accepted) {
-        let context = PrivacyConsent.appContext;
-        if (context !== null) {
-          try {
-            let externalMemory = await preferences.getPreferences(context, { name: 'personal_memory_a2a' });
-            await externalMemory.put('enabled', false);
-            await externalMemory.flush();
-            AppStorage.setOrCreate('personalMemoryA2aEnabled', false);
-          } catch (e) {
-            // The persisted privacy refusal still blocks all external memory reads.
-          }
-        }
-      }
-      PrivacyConsent.choice = accepted ? 'accepted' : 'rejected';
-      AppStorage.setOrCreate(PRIVACY_STATE_KEY, PrivacyConsent.choice);
-    } finally {
-      PrivacyConsent.saving = false;
-    }
+    await context.openLink(statement.url);
   }
 
   // All user-data HTTP clients register here so revocation aborts requests across instances.

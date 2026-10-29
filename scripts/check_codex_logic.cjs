@@ -64,7 +64,13 @@ const asset = {
   },
   remove: async query => { storedAssets.delete(query.get(1).toString()); }
 };
+let platformAccepted = true;
 const kitMocks = {
+  '@kit.AppGalleryKit': { privacyManager: {
+    AppPrivacyType: { PRIVACY_AGREEMENT: 1, USER_AGREEMENT: 2 },
+    AppPrivacyResultType: { DISAGREED: 0, FULL_MODE_AGREED: 1, REQUIRE_RESIGNING_VERSION_UPDATE: 2 },
+    getAppPrivacyResult: () => [{type: 1, result: platformAccepted ? 1 : 0, id: 'fixture', versionCode: 1}]
+  } },
   '@kit.ArkUI': { router: { pushUrl: async options => { helpNavigation = options; } } },
   '@kit.AbilityKit': {}, '@kit.BasicServicesKit': { zlib: {
     ReturnStatus: { OK: 0, STREAM_END: 1 }, CompressFlushMode: { FINISH: 4 },
@@ -152,7 +158,7 @@ function load(relative) {
   clearTimeout: dummy, setInterval: () => 1, clearInterval: dummy, Scroller,
   Component: dummy, State: decorator, Prop: decorator, Link: decorator, Watch: decorator, StorageProp: decorator,
   canIUse: () => true,
-  AppStorage: { setOrCreate: (k, v) => appStorage.set(k, v) } };
+  AppStorage: { get: k => appStorage.get(k), setOrCreate: (k, v) => appStorage.set(k, v) } };
   vm.runInNewContext(compiled.outputText, context, { filename });
   cache.set(filename, module.exports);
   return module.exports;
@@ -213,8 +219,7 @@ async function main() {
   const tabs = load('entry/src/main/ets/pages/main/MainTabConfig.ets');
   assert.deepEqual(Array.from(tabs.MAIN_TAB_ITEMS, t => t.label), ['首页', '汇总', '聊天', 'Codex', '任务', '我的']);
 
-  const { PrivacyConsent, PRIVACY_VERSION } = load('entry/src/main/ets/utils/PrivacyConsent.ets');
-  preferencesData.set('choice', 'accepted'); preferencesData.set('version', PRIVACY_VERSION);
+  const { PrivacyConsent } = load('entry/src/main/ets/utils/PrivacyConsent.ets');
   await PrivacyConsent.initialize({});
   assert.equal(PrivacyConsent.isAccepted(), true);
   const { CodexClient } = load('entry/src/main/ets/pages/codex/CodexClient.ets');
@@ -269,12 +274,15 @@ async function main() {
   deferred = true;
   const pending = client.call('/v1/info');
   const before = sessionCloses;
-  await PrivacyConsent.choose(false);
-  assert.equal(sessionCloses, before + 1);
+  platformAccepted = false; PrivacyConsent.isAccepted();
+  assert.equal(sessionCloses, before, 'external sharing state does not disconnect an in-app Codex transport');
   resolveFetch(response);
-  await assert.rejects(pending);
-  assert.equal(sessionCloses, before + 1, 'session closed exactly once on privacy revocation');
+  await pending;
+  assert.equal(sessionCloses, before);
+  const cancelled = client.call('/v1/info');
   client.close();
+  resolveFetch(response); await assert.rejects(cancelled);
+  assert.equal(sessionCloses, before + 1, 'explicit disconnect closes the session exactly once');
   await assert.rejects(client.call('/v1/info'));
 
   const { CodexCredentialStore } = load('entry/src/main/ets/pages/codex/CodexCredentialStore.ets');
@@ -317,7 +325,7 @@ async function main() {
   assert.equal(storedAssets.has(legacyAlias.toString()), false);
   assert.equal((await CodexCredentialStore.load(migrated.id)).token, 'l'.repeat(43));
   assert.equal((await CodexCredentialStore.load(second.id)).token, 't'.repeat(43));
-  await PrivacyConsent.choose(true); deferred = false;
+  platformAccepted = true; PrivacyConsent.isAccepted(); deferred = false;
   const bundle = { type: 'clawmate-codex-pairing', version: 1, name: 'My PC', origin: 'https://example.com',
     serverId: 'server', code: 'c'.repeat(43), caCertificate: ca, expiresAt: Date.now() + 5 * 60000 };
   const { parseCodexPairingInput } = load('entry/src/main/ets/pages/codex/CodexPairingInput.ets');
@@ -519,7 +527,7 @@ async function main() {
     assert.deepEqual(Object.keys(helpNavigation.params), ['section']);
     assert.equal(helpNavigation.params.section, section, 'help routes carry no credentials or pairing data');
   }
-  console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, privacy cancellation, Asset Store size/trust policy, one-time pairing, task reconciliation, and help navigation.');
+console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, explicit cancellation without a duplicate privacy gate, Asset Store size/trust policy, one-time pairing, task reconciliation, and help navigation.');
   console.log('ArkUI rendering and HarmonyOS API type checking require the full DevEco SDK.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

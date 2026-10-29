@@ -1,4 +1,3 @@
-import { PrivacyConsent } from './PrivacyConsent';
 import { AiServiceAccess } from './AiServiceAccess';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
@@ -453,7 +452,6 @@ export class WorkflowRunner {
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
     this.cancellation?.throwIfCancelled();
     AiServiceAccess.requireAllowed();
-    PrivacyConsent.requireAccepted();
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
     this.workflow = WorkflowStorage.validateWorkflowJson(this.workflowJsonForRun(task));
     this.runningTask = task;

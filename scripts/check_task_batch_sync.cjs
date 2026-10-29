@@ -17,7 +17,7 @@ function probe(file, name, methods, globals) {
   const output = ts.transpileModule('exports.Probe=class Probe {' + bodies + '}', {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   });
-  const exports = {}; vm.runInNewContext(output.outputText, { exports, setTimeout, ...globals });
+  const exports = {}; vm.runInNewContext(output.outputText, { exports, setTimeout, setInterval, clearInterval, ...globals });
   return new exports.Probe();
 }
 const cancelExports = {};
@@ -40,7 +40,7 @@ function batch(mode = 'phone', count = 3) {
     'isTaskExecutionBusy', 'batchRunButtonText', 'batchRunButtonEnabled', 'stopEnabledTasks'
   ], {
     WorkflowCancellation, WorkflowStorage: storage,
-    AiLoginGuard: { ensure: () => state.login }, PrivacyConsentDialog: { show: async () => state.accepted },
+    AiLoginGuard: { ensure: () => state.login }, HuaweiPrivacyAccess: { ensure: async () => state.accepted },
     SelfHdcSetupGuard: { ensure: async () => state.ready },
     CollectionReminderService: { pendingIntent: () => ({}), claim: () => { state.claimed++; return true; }, clearRequest() {},
       recordSuccessfulCollection: async () => { state.history++; } },
@@ -66,14 +66,16 @@ function batch(mode = 'phone', count = 3) {
   return { page, state, storage, saved: () => clone(saved) };
 }
 function index() {
-  const state = { accepted: true, login: true, memory: 0, calendar: 0, mail: 0, marks: [], failure: false, hasData: true };
-  const page = probe('pages/Index.ets', 'Index', ['syncCollectedWorkflowTasks', 'refreshDataManager', 'updateDataManagerProgress'], {
+  const state = { accepted: true, login: true, memory: 0, calendar: 0, mail: 0, marks: [], failure: false, hasData: true,
+    checked: 0, calendarFailure: false };
+  const page = probe('pages/Index.ets', 'Index', ['syncCollectedWorkflowTasks', 'refreshDataManager', 'updateDataManagerProgress',
+    'beginMemoryOperation','endMemoryOperation','startMemoryProgressTimer','stopMemoryProgressTimer'], {
     PrivacyConsent: { isAccepted: () => state.accepted },
     CalendarMemoryStore: class { settings() { return { enabled: true }; } snapshot() { return { error: '', syncedAt: '' }; } },
     MailStore: class { settings() { return { enabled: true }; } },
-    CalendarMemoryService: { refresh: async () => { state.calendar++; } },
+    CalendarMemoryService: { refresh: async () => { state.calendar++; if (state.calendarFailure) throw Error('fixture calendar failure'); } },
     MailService: { refresh: async () => { state.mail++; } },
-    StartupSourceSync: class { markSynced(key) { state.marks.push(key); } },
+    StartupSourceSync: class { markSynced(key) { state.marks.push(key); } markAttempted() {} markFailed() {} },
     SyncMetrics: class { mark() {} finish() {} }, dataManagerInfo() {}, dataManagerWarn() {}, dataManagerError() {},
     getContext: () => ({}), showToastSafely() {}
   });
@@ -81,7 +83,7 @@ function index() {
     ensurePrivacyConsent: async () => state.accepted, ensureAiServiceLogin: () => state.login,
     appendCloudLog() {}, reloadDataManagerViewModels() {}, maybeShowCalendarConsent() {},
     getDataManagerModelConfig: () => ({ enabled: true, baseUrl: 'https://model.invalid', model: 'fixture' }),
-    dataManagerFacade: { hasDataToSync: () => state.hasData, refresh: async (_config, progress) => {
+    dataManagerFacade: { hasDataToSync: () => state.hasData, recordSuccessfulMemoryCheck: () => { state.checked++; }, refresh: async (_config, progress) => {
       state.memory++; if (state.failure) throw Error('fixture model unavailable');
       progress({ stage: '生成画像', message: 'fixture progress', percent: 80, current: 4, total: 5 });
       return { message: 'fixture completed', skipped: false };
@@ -144,11 +146,15 @@ test('analysis failure preserves successful task status, unlocks the batch and a
   page.onSyncCollectedTasks = async () => { state.syncs++; };
   await page.runEnabledTasks(); assert.equal(state.syncs, 1);
 });
-test('empty queues, missing HDC configuration and refused consent never start sync', async () => {
-  const fixtures = [batch('phone', 0), batch(), batch()]; fixtures[1].state.ready = false; fixtures[2].state.accepted = false;
+test('empty queues, missing HDC configuration and lost login never start sync', async () => {
+  const fixtures = [batch('phone', 0), batch(), batch()]; fixtures[1].state.ready = false; fixtures[2].state.login = false;
   for (const { page, state } of fixtures) {
     await page.runEnabledTasks(); assert.equal(state.syncs, 0); assert.equal(state.events.length, 0); assert.equal(page.batchPreparing, false);
   }
+});
+test('an explicitly started batch does not consult an app-wide privacy status',async()=>{
+  const {page,state}=batch();state.accepted=false;await page.runEnabledTasks();assert.equal(state.syncs,1);
+  assert.ok(state.events.includes('run:task-0'));assert.equal(page.batchRunning,false);
 });
 test('post-task sync reuses the full memory pipeline and progress without rereading mail/calendar', async () => {
   const { page, state } = index(); await page.syncCollectedWorkflowTasks();
@@ -160,23 +166,22 @@ test('a sync already in progress is awaited and followed by a fresh snapshot of 
   const { page, state } = index(); page.dataManagerRefreshing = true;
   const waiting = page.syncCollectedWorkflowTasks(); await Promise.resolve(); assert.equal(state.memory, 0);
   page.dataManagerRefreshing = false; await waiting; assert.equal(state.memory, 1);
-  // Simulate another sync claiming the lock during the asynchronous consent check.
-  let first = true; page.ensurePrivacyConsent = async () => {
-    if (first) { first = false; page.dataManagerRefreshing = true; setTimeout(() => { page.dataManagerRefreshing = false; }, 5); }
-    return true;
-  };
-  await page.syncCollectedWorkflowTasks(); assert.equal(state.memory, 2);
+  // Two callers each need a fresh snapshot; the second waits for the first lock.
+  await Promise.all([page.syncCollectedWorkflowTasks(),page.syncCollectedWorkflowTasks()]);assert.equal(state.memory,3);
 });
-test('failed analysis, revoked consent and lost login cannot be reported as sync success', async () => {
+test('sync keeps model/login failure handling without depending on a duplicate privacy status', async () => {
   const failed = index(); failed.state.failure = true;
   await assert.rejects(failed.page.syncCollectedWorkflowTasks(), /fixture model unavailable/);
   assert.equal(failed.page.dataManagerSyncFailed, true); assert.equal(failed.page.dataManagerRefreshing, false);
   const denied = index(); denied.state.accepted = false;
-  await assert.rejects(denied.page.syncCollectedWorkflowTasks(), /数据处理/); assert.equal(denied.state.memory, 0);
+  await denied.page.syncCollectedWorkflowTasks(); assert.equal(denied.state.memory, 1); assert.equal(denied.state.accepted, false);
   const loggedOut = index(); loggedOut.state.login = false;
   await assert.rejects(loggedOut.page.syncCollectedWorkflowTasks(), /登录/); assert.equal(loggedOut.state.memory, 0);
   const empty = index(); empty.state.hasData = false;
   await empty.page.syncCollectedWorkflowTasks(); assert.equal(empty.state.memory, 0); assert.equal(empty.page.dataManagerProgressPercent, 100);
+  assert.equal(empty.state.checked,1,'a successful no-change sync still records completion');
+  const partial=index();partial.state.hasData=false;partial.state.calendarFailure=true;
+  assert.equal(await partial.page.refreshDataManager(),false);assert.equal(partial.state.checked,0,'an incomplete source check must not count as a complete memory check');
 });
 (async () => {
   for (const [name, run] of tests) { await run(); console.log('PASS ' + name); }

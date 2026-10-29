@@ -208,6 +208,13 @@ export class HomeRecommendationService {
     return this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
   }
 
+  cachedBuildResult(day: string | undefined): HomeRecommendationBuildResult | null {
+    if (day !== this.currentDateKey()) { return null; }
+    let document = this.loadDocument();
+    if (!document.generated_at || !document.input_hash || !Array.isArray(document.recommendations)) { return null; }
+    return { totalEvents: document.total_events, recommendationCount: document.recommendations.length, reused: true, prunedCount: 0 };
+  }
+
   pruneInactiveRecommendationsForToday(): number {
     this.paths.ensureBaseDirs();
     let context = this.planningContext();

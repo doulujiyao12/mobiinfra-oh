@@ -8,7 +8,6 @@ import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
-import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 import { AiLoginGuard } from '../../components/AiLoginGuard';
 import {
   WorkflowCondition,
@@ -825,9 +824,6 @@ export struct TaskPage {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
-    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
-      return;
-    }
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
@@ -902,9 +898,6 @@ export struct TaskPage {
     let queue = this.enabledTasks();
     if (queue.length === 0) {
       showToastSafely('请先开启至少一个任务', 1500);
-      return;
-    }
-    if (!await PrivacyConsentDialog.show(this.getUIContext())) {
       return;
     }
     if (!AiLoginGuard.ensure(this.getUIContext())) {

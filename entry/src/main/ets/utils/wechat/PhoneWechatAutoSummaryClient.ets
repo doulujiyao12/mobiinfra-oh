@@ -1,6 +1,5 @@
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { PhoneHdcWorkflowBridge } from '../selfhdc/PhoneHdcWorkflowBridge';
-import { PrivacyConsent } from '../PrivacyConsent';
 import { DebugSettings } from '../DebugSettings';
 import { WorkflowJsonMap } from '../WorkflowTypes';
 import { WechatAutoSummaryStorage } from './WechatAutoSummaryStorage';
@@ -57,7 +56,7 @@ export class PhoneWechatAutoSummaryClient {
     this.progress = progress; this.checkStopped = checkStopped; this.checkpoint = checkpoint;
   }
 
-  private check(): void { PrivacyConsent.requireAccepted(); this.checkStopped(); }
+  private check(): void { this.checkStopped(); }
   private stage(message: string): void { this.record('WECHAT ' + message); this.progress(message); }
   private async action(payload: WorkflowJsonMap): Promise<void> {
     this.check(); await this.device.action(payload); this.check();
@@ -284,15 +283,13 @@ export class PhoneWechatAutoSummaryClient {
       if (!failure && this.textChars >= 8 * 1024 * 1024) {
         failure = new Error('WECHAT_DATA_LIMIT: 已达到本次采集文本安全上限，已读取结果会保存，请减少天数或联系人数量');
       }
-      // A user stop/background expiry should preserve the already read data. A privacy
-      // revocation must not write any more personal data. Do not perform further HDC here.
-      if (PrivacyConsent.isAccepted()) {
-        this.response.contacts_collected = this.conversations.length;
-        this.response.conversations = this.conversations.slice();
-        this.response.finished_at = new Date().toISOString();
-        try { this.checkpoint(this.response); }
-        catch (e) { if (!failure) { failure = e as Error; } }
-      }
+      // A user stop/background expiry preserves already read data. No further
+      // HDC operation is performed while saving this local checkpoint.
+      this.response.contacts_collected = this.conversations.length;
+      this.response.conversations = this.conversations.slice();
+      this.response.finished_at = new Date().toISOString();
+      try { this.checkpoint(this.response); }
+      catch (e) { if (!failure) { failure = e as Error; } }
       this.record('WECHAT_CONVERSATION index=' + index + ' pages=' + pages.length +
         ' messages=' + messages.length + ' complete=' + complete + ' reason=' + reason);
     }
@@ -359,7 +356,7 @@ export class PhoneWechatAutoSummaryClient {
     } catch (e) {
       this.response.status = 'partial';
       this.response.message = '采集中断，已保留 ' + this.conversations.length + ' 个会话的实际读取结果';
-      if (this.conversations.length > 0 && PrivacyConsent.isAccepted()) { this.checkpoint(this.response); }
+      if (this.conversations.length > 0) { this.checkpoint(this.response); }
       throw e as Error;
     }
   }

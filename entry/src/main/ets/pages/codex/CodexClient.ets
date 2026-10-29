@@ -1,6 +1,6 @@
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { PrivacyConsent } from '../../utils/PrivacyConsent';
+import { AppRequests } from '../../utils/AppRequests';
 import { codexResponseText } from './CodexResponseText';
 import {
   CodexConnection, CodexEnvelope, CodexCreateBody, CodexTurnBody, CodexUploadBody, CodexApprovalBody,
@@ -96,7 +96,6 @@ export class CodexClient {
 
   private async fetchOnce(route: string, body: CodexCreateBody | CodexTurnBody | CodexUploadBody | CodexApprovalBody | CodexPairBody | CodexForkBody | CodexResumeBody | undefined,
     authenticated: boolean): Promise<CodexEnvelope> {
-    PrivacyConsent.requireAccepted();
     if (!this.origin || !this.token) { throw new Error('请先连接 Codex 服务器'); }
     const generation = this.generation;
     const session = this.transport();
@@ -110,7 +109,7 @@ export class CodexClient {
     };
     this.cancellers.push(close);
     if (route.includes('waitMs=')) { this.updateCancellers.push(close); }
-    const unregister = PrivacyConsent.registerExternalRequest(() => { this.close(); });
+    const unregister = AppRequests.registerExternalRequest(() => { this.close(); });
     let timer: number = -1;
     let transportFailed: boolean = false;
     let timedOut: boolean = false;
@@ -126,7 +125,6 @@ export class CodexClient {
       const response = await Promise.race([session.fetch(request), deadline]);
       if (generation !== this.generation) { throw new Error('连接已更换'); }
       if (cancelled) { throw new Error('请求已取消'); }
-      PrivacyConsent.requireAccepted();
       if (response.statusCode !== 401) { this.onReachability(true, ''); }
       if (response.statusCode >= 300 && response.statusCode < 400) { throw new Error('服务器重定向已拒绝，请填写最终 HTTPS 地址'); }
       if (response.statusCode === 401) {
@@ -144,7 +142,6 @@ export class CodexClient {
         throw new Error((e as Error).message);
       }
       if (generation !== this.generation || cancelled) { throw new Error('请求已取消或连接已更换'); }
-      PrivacyConsent.requireAccepted();
       const envelope = JSON.parse(responseText) as CodexEnvelope;
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw new CodexRequestFailure(envelope.error || '服务器请求失败', response.statusCode === 502 || response.statusCode === 504);

@@ -1044,16 +1044,24 @@ export type DataManagerAsyncTask<T> = () => Promise<T>;
 
 interface DataManagerTaskCursor {
   nextIndex: number;
+  failed: boolean;
+  errorMessage: string;
 }
 
 async function runLimitedTaskWorker<T>(tasks: DataManagerAsyncTask<T>[], results: T[], cursor: DataManagerTaskCursor): Promise<void> {
   while (true) {
+    if (cursor.failed) { return; }
     let index = cursor.nextIndex;
     cursor.nextIndex++;
     if (index >= tasks.length) {
       return;
     }
-    results[index] = await tasks[index]();
+    try { results[index] = await tasks[index](); }
+    catch (e) {
+      if (!cursor.failed) { cursor.errorMessage = (e as Error).message || '并发处理失败，请重试'; }
+      cursor.failed = true;
+      return;
+    }
   }
 }
 
@@ -1064,12 +1072,19 @@ export async function runLimitedTasks<T>(tasks: DataManagerAsyncTask<T>[], concu
   }
   let limit = Math.max(1, Math.min(concurrency, tasks.length));
   let cursor: DataManagerTaskCursor = {
-    nextIndex: 0
+    nextIndex: 0, failed: false, errorMessage: ''
   };
   let workers: Promise<void>[] = [];
   for (let index = 0; index < limit; index++) {
     workers.push(runLimitedTaskWorker(tasks, results, cursor));
   }
   await Promise.all(workers);
+  // Keep the operation lock until every started task has stopped writing.
+  // A rejected worker must not leave siblings running behind a new sync.
+  if (cursor.failed) { throw new Error(cursor.errorMessage); }
   return results;
+}
+
+export function isModelEnrichmentMethod(method: string): boolean {
+  return method === 'model' || method === 'model_batch';
 }

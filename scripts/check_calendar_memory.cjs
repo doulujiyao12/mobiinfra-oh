@@ -124,6 +124,17 @@ test('bounded recurring-instance reads include a series that started years ago',
   assert.ok(!JSON.stringify(result).includes('private@example.com'));
   assert.equal(store.reminders(now).length, 1);
 });
+test('rereading identical past plans on another day does not invalidate events or profile evidence', () => {
+  const original=store.snapshot(),settings=store.settings();
+  try {
+    const snapshot=clone(original);snapshot.occurrences=snapshot.occurrences.map(item=>({...item,
+      start:now-86400000*3,end:now-86400000*3+3600000}));
+    snapshot.syncedAt=new Date(now).toISOString();store.save(snapshot);
+    const before=JSON.stringify(store.events()),fingerprint=store.fingerprint();
+    snapshot.syncedAt=new Date(now+86400000).toISOString();store.save(snapshot);
+    assert.equal(JSON.stringify(store.events()),before);assert.equal(store.fingerprint(),fingerprint);
+  } finally {store.save(original);store.saveSettings(settings);}
+});
 test('elapsed time preserves cached profile identity; manual index fingerprint tracks newly elapsed plans', () => {
   const before = store.fingerprint(), indexBefore = store.indexFingerprint(), readCount = reads;
   try {
@@ -203,7 +214,7 @@ test('startup lifecycle delegates to the guarded coordinator instead of directly
   const tree = ts.createSourceFile(file.replace(/\.ets$/, '.ts'), source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const declaration = tree.statements.find(s => ts.isClassDeclaration(s) && s.name?.text === 'Index');
   assert.ok(declaration, 'Root component declaration is available for lifecycle inspection');
-  for (const name of ['onPageShow', 'initializePrivacyConsent']) {
+  for (const name of ['onPageShow', 'initializeStartupServices']) {
     const method = declaration.members.find(m => ts.isMethodDeclaration(m) && m.name.getText(tree) === name);
     assert.ok(method?.body);
     const body = method.body.getText(tree);
@@ -211,8 +222,8 @@ test('startup lifecycle delegates to the guarded coordinator instead of directly
   }
   assert.ok(!source.includes('refreshCalendarOnForeground'));
   const coordinator=declaration.members.find(m=>ts.isMethodDeclaration(m)&&m.name.getText(tree)==='syncDailyStartupSources');
-  assert.ok(coordinator.body.getText(tree).includes('scheduler.hasDue(selection)'));
-  assert.ok(coordinator.body.getText(tree).includes('refreshAutomaticSources'));
+  assert.ok(coordinator.body.getText(tree).includes('scheduler.hasDue(selection, Date.now(), retryFailed)'));
+  assert.ok(coordinator.body.getText(tree).includes('refreshSourceMemory'));
   assert.ok(!coordinator.body.getText(tree).includes('refreshDataManager('));
 });
 

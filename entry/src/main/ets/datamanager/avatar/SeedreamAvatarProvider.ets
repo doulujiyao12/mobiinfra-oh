@@ -1,4 +1,4 @@
-import { PrivacyConsent } from '../../utils/PrivacyConsent';
+import { AppRequests } from '../../utils/AppRequests';
 import { AiServiceAccess } from '../../utils/AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
@@ -105,7 +105,7 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     try {
       let response = await httpReq.request(normalizedUrl, requestOptions);
       AiServiceAccess.requireAllowed();
@@ -119,7 +119,7 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 
@@ -160,7 +160,7 @@ export class SeedreamAvatarProvider {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     try {
       let response = await httpReq.request(imageBaseUrl, requestOptions);
       AiServiceAccess.requireAllowed();
@@ -197,7 +197,7 @@ export class SeedreamAvatarProvider {
       let err = e as Error;
       throw err;
     } finally {
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 }

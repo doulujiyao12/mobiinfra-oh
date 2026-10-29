@@ -198,13 +198,13 @@ async function main() {
   backend(); e = env();
   result = await e.service.execute(request, { ...e.execution, imagePaths: ['/sandbox/other-chat/private.png'] });
   assert.equal(result.status, 'failed'); assert.equal(calls.filter(c => c.route === '/v1/attachments' || c.route.endsWith('/turns')).length, 0);
-  // Old connector / revoked privacy fail closed before execution.
+  // Unsupported connectors fail before dispatch; in-app delegation has no second privacy gate.
   b = backend(); e = env(); b.info.permissionSettingsSupported = false;
   result = await e.service.execute(request, e.execution); assert.equal(result.status, 'failed');
   assert.equal(calls.filter(c => c.body).length, 0);
   backend(); e = env(); accepted = false;
   result = await e.service.execute(request, e.execution); accepted = true;
-  assert.equal(result.status, 'failed'); assert.equal(calls.length, 0);
+  assert.equal(result.status, 'completed'); assert.ok(calls.length > 0);
   // JSON stays valid under the registry's limit, even with escaped control chars.
   for (const text of ['x'.repeat(50000), '\u0000'.repeat(50000), '中文"\\'.repeat(10000)]) {
     const payload = toolModule.codexTaskToolPayload({ ...first, summary: text, error: text, computer: text });

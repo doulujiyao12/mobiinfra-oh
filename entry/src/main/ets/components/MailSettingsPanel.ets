@@ -3,7 +3,7 @@ import { promptAction } from '@kit.ArkUI';
 import { AppTheme, APP_DARK_MODE_KEY } from '../utils/AppTheme';
 import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormSwitch,
   CollectionFormAction } from './CollectionFormControls';
-import { MailCredentialStore } from '../utils/mail/MailCredentialStore';
+import { MailCredentialStore, MAIL_CREDENTIAL_MISSING_MESSAGE } from '../utils/mail/MailCredentialStore';
 import { MailStore } from '../utils/mail/MailStore';
 import { MailService } from '../utils/mail/MailService';
 import { MailSettings, MailProvider, MAIL_PROVIDERS, defaultMailSettings, validateMailSettings } from '../utils/mail/MailTypes';
@@ -55,9 +55,9 @@ export struct MailSettingsPanel {
     let oldKey = store.accountKey();
     let key = store.accountKey(settings);
     let changed = store.accountKey(settings) !== store.accountKey();
-    if (settings.enabled && changed && !this.secret) { throw new Error('更换邮箱或服务器时，请重新填写客户端授权码'); }
+    if (settings.enabled && changed && !this.secret) { throw new Error('更换邮箱、服务器或端口时，请重新填写客户端授权码'); }
     if (this.secret) { await MailCredentialStore.save(key, this.secret); }
-    else if (settings.enabled && !await MailCredentialStore.load(key)) { throw new Error('请填写客户端授权码'); }
+    else if (settings.enabled && !await MailCredentialStore.load(key)) { throw new Error(MAIL_CREDENTIAL_MISSING_MESSAGE); }
     if (changed) { store.clear(); }
     store.saveSettings(settings);
     this.secret = '';
@@ -74,7 +74,7 @@ export struct MailSettingsPanel {
         this.status = '正在读取并筛选近三天邮件…';
         await this.onSync();
         this.reloadStatus();
-      } else { this.status = '设置已保存，下次同步生效'; }
+      } else { this.status = '邮箱设置已保存'; }
     } catch (e) { this.failed = true; this.status = (e as Error).message; }
     finally { this.busy = false; }
   }

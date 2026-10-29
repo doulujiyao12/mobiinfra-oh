@@ -2,6 +2,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from '../utils/JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from '../utils/TextEncodingCompat';
+import { MemoryChangeJournal } from './MemoryChangeJournal';
 
 const EMPTY_SHA256: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
@@ -125,6 +126,7 @@ export class DataManagerStorage {
   }
 
   writeText(path: string, content: string): void {
+    MemoryChangeJournal.beforeMutation(path, this);
     this.invalidateRead(path);
     try {
       let parent = this.dirname(path);
@@ -186,6 +188,7 @@ export class DataManagerStorage {
   }
 
   writeTextAtomic(path: string, content: string): void {
+    MemoryChangeJournal.beforeMutation(path, this);
     this.invalidateRead(path);
     let temporary = path + '.tmp';
     this.writeText(temporary, content);
@@ -223,6 +226,7 @@ export class DataManagerStorage {
   }
 
   removeFile(path: string): void {
+    MemoryChangeJournal.beforeMutation(path, this);
     this.invalidateRead(path);
     try {
       if (this.exists(path)) {
@@ -233,6 +237,7 @@ export class DataManagerStorage {
   }
 
   removeTree(path: string): void {
+    MemoryChangeJournal.beforeMutation(path, this);
     if (!this.exists(path)) {
       return;
     }

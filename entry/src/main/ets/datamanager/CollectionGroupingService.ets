@@ -206,7 +206,7 @@ export class CollectionGroupingService {
     let completedTabs = 0;
     let tasks = specs.map((spec: CollectionTabSpec): (() => Promise<CollectionTabBuildResult>) => {
       return async (): Promise<CollectionTabBuildResult> => {
-        this.emitProgress(progress, '采集分组', `生成${spec.title}分组`, completedTabs, specs.length,
+        this.emitProgress(progress, '检查分组', `检查${spec.title}分组`, completedTabs, specs.length,
           96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
         let result = this.indexService.query(spec.query);
         let events = result.events;
@@ -214,7 +214,7 @@ export class CollectionGroupingService {
         let previous = this.loadGroupsDocumentBySpec(spec);
         if (!force && previous.input_hash === inputHash && (previous.groups.length > 0 || events.length === 0)) {
           completedTabs++;
-          this.emitProgress(progress, '采集分组', `已生成 ${completedTabs}/${specs.length} 个场景分组`, completedTabs, specs.length,
+          this.emitProgress(progress, '检查分组', `已检查 ${completedTabs}/${specs.length} 个场景，复用${spec.title}分组`, completedTabs, specs.length,
             96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
           dataManagerInfo(`Collection groups reused: tab=${spec.tabId}, events=${events.length}, groups=${previous.groups.length}`);
           return {
@@ -224,6 +224,8 @@ export class CollectionGroupingService {
             updatedGroupDocs: 0
           };
         }
+        this.emitProgress(progress, '采集分组', `更新${spec.title}分组`, completedTabs, specs.length,
+          96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
         let groups = await this.buildGroupsForTab(spec, events, modelConfig, previous);
         let document: CollectionGroupsDocument = {
           generated_at: nowIsoLocal(),
@@ -236,7 +238,7 @@ export class CollectionGroupingService {
         };
         this.storage.writeJsonAtomic(this.paths.collectionGroupsPath(spec.tabId), document as Object);
         completedTabs++;
-        this.emitProgress(progress, '采集分组', `已生成 ${completedTabs}/${specs.length} 个场景分组`, completedTabs, specs.length,
+        this.emitProgress(progress, '采集分组', `已检查 ${completedTabs}/${specs.length} 个场景，更新${spec.title}分组`, completedTabs, specs.length,
           96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
         dataManagerInfo(`Collection groups built: tab=${spec.tabId}, events=${events.length}, groups=${groups.length}`);
         return {
@@ -272,6 +274,14 @@ export class CollectionGroupingService {
     this.storage.removeTree(this.paths.collectionGroupsRoot);
     this.paths.ensureBaseDirs();
     dataManagerInfo('Collection groups cleared: ' + this.paths.collectionGroupsRoot);
+  }
+
+  cachedBuildResult(groupCount: number | undefined, eventCount: number | undefined): CollectionGroupingBuildResult | null {
+    let specs = collectionTabSpecs();
+    if (groupCount === undefined || eventCount === undefined ||
+      specs.some((spec: CollectionTabSpec): boolean => !this.storage.exists(this.paths.collectionGroupsPath(spec.tabId)))) { return null; }
+    return { tabCount: specs.length, groupCount: groupCount, eventCount: eventCount,
+      reusedGroupDocs: specs.length, updatedGroupDocs: 0 };
   }
 
   private async buildGroupsForTab(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig,

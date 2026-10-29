@@ -1,5 +1,7 @@
 import fs from '@ohos.file.fs';
 import { DataManagerStorage } from '../../datamanager/DataManagerStorage';
+import { MemoryChangeJournal, MemorySourceChange } from '../../datamanager/MemoryChangeJournal';
+import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { CollectionGalleryDetailViewModel, JsonMap, createJsonMap } from '../../datamanager/DataManagerTypes';
 import { parseJsonCompat, stringifyJsonCompat } from '../JsonCompat';
 import { GalleryExifUtils } from './GalleryExifUtils';
@@ -93,6 +95,7 @@ export function galleryMemorySceneIdForCategory(category: string): number {
 }
 
 export class GalleryMemorySync {
+  private static markerCache: Map<string, Record<string, string>> = new Map<string, Record<string, string>>();
   static hasNewValidResultsSince(filesDir: string, lastSyncMs: number): boolean {
     let storage = new DataManagerStorage();
     return GalleryMemorySync.loadValidResults(filesDir, storage).valid.some((item: GalleryAnalysisResult): boolean =>
@@ -100,17 +103,37 @@ export class GalleryMemorySync {
   }
 
   // 将图库分析结果转换为 workflows/daily-log 输入，是图库进入 DataManager 记忆管线的唯一写入入口。
-  // 每次同步会先读取旧导出中的 entry index，再删除旧导出并重建，确保图库清空、重分类或分析失败时不会残留过期 mem 输入。
-  static sync(filesDir: string): GalleryMemorySyncResult {
+  // Publish changed dates before removing obsolete groups. Old exports remain
+  // intact on read/model errors; an unchanged gallery needs no history reads.
+  static sync(filesDir: string, fullCheck: boolean = false): GalleryMemorySyncResult {
     let storage = new DataManagerStorage();
+    let journal = new MemoryChangeJournal(filesDir, storage);
+    let changes = journal.pending('gallery', fullCheck);
+    let full = fullCheck || !journal.ready('gallery') || changes.some((change: MemorySourceChange): boolean => change.path === '*');
+    let dates = full ? undefined : GalleryMemorySync.stableUnique(changes.map((change: MemorySourceChange): string => change.path));
+    if (dates && dates.length === 0) {
+      dataManagerInfo('SYNC_GALLERY checkedDates=0 readItems=0 writtenFiles=0');
+      return { scannedItemCount: 0, validItemCount: 0, skippedItemCount: 0,
+        exportedFileCount: 0, exportedEntryCount: 0, deletedFileCount: 0 };
+    }
+    GalleryMemorySync.markerCache.clear();
     let dailyLogRoot = GalleryMemorySync.dailyLogRoot(filesDir, storage);
-    let previousIndexes = GalleryMemorySync.readExistingEntryIndexes(dailyLogRoot, storage);
-    let deleted = GalleryMemorySync.deleteOldGalleryDailyLogs(dailyLogRoot, storage);
-    GalleryMemorySync.exportedFilesForCurrentSync = [];
-    let loaded = GalleryMemorySync.loadValidResults(filesDir, storage);
+    let previousIndexes = GalleryMemorySync.readExistingEntryIndexes(dailyLogRoot, storage, dates);
+    let previousFiles = GalleryMemorySync.readExportIndex(dailyLogRoot, storage);
+    if (full) {
+      storage.findFiles(dailyLogRoot, GALLERY_DAILY_SUFFIX).forEach((path: string) => {
+        if (storage.basename(path).startsWith(GALLERY_DAILY_PREFIX)) { previousFiles.push(storage.relativePath(dailyLogRoot, path)); }
+      });
+    }
+    let affected = GalleryMemorySync.stableUnique(previousFiles).filter((path: string): boolean =>
+      full || (dates !== undefined && dates.indexOf(path.substring(0, 10)) >= 0));
+    GalleryMemorySync.exportedFilesForCurrentSync = GalleryMemorySync.stableUnique(previousFiles)
+      .filter((path: string): boolean => affected.indexOf(path) < 0);
+    let loaded = GalleryMemorySync.loadValidResults(filesDir, storage, dates);
     let groups = GalleryMemorySync.groupResults(loaded.valid);
     let exportedFiles = 0;
     let exportedEntries = 0;
+    let written = 0;
 
     groups.forEach((group: GalleryExportGroup) => {
       let bindings = GalleryMemorySync.bindEntryIndexes(group, previousIndexes);
@@ -118,12 +141,27 @@ export class GalleryMemorySync {
         return;
       }
       let path = storage.join(dailyLogRoot, group.date, GalleryMemorySync.fileNameForCategory(group.category));
-      storage.writeTextAtomic(path, GalleryMemorySync.renderDailyLog(group, bindings));
+      let content = GalleryMemorySync.renderDailyLog(group, bindings);
+      if (storage.readText(path, '') !== content) { storage.writeTextAtomic(path, content); written++; }
       GalleryMemorySync.appendExportedFile(group.date + '/' + GalleryMemorySync.fileNameForCategory(group.category));
       exportedFiles += 1;
       exportedEntries += bindings.length;
     });
+    let deleted = 0;
+    affected.forEach((relative: string) => {
+      if (GalleryMemorySync.exportedFilesForCurrentSync.indexOf(relative) < 0) {
+        let path = storage.join(dailyLogRoot, relative);
+        if (storage.exists(path)) {
+          storage.removeFile(path);
+          if (storage.exists(path)) { throw new Error('无法移除过期图库日志，请重试'); }
+          deleted++;
+        }
+      }
+    });
     GalleryMemorySync.writeExportIndex(dailyLogRoot, storage);
+    journal.setReady('gallery'); journal.acknowledge(changes);
+    dataManagerInfo('SYNC_GALLERY full=' + full + ' changedDates=' + (dates ? dates.length : -1) +
+      ' readItems=' + loaded.scanned + ' writtenFiles=' + written + ' removedFiles=' + deleted);
 
     return {
       scannedItemCount: loaded.scanned,
@@ -166,17 +204,6 @@ export class GalleryMemorySync {
       return [];
     }
     let storage = new DataManagerStorage();
-    let results = GalleryMemorySync.loadValidResults(filesDir, storage).valid;
-    let groups = GalleryMemorySync.groupResults(results);
-    let previousIndexes = GalleryMemorySync.readExistingEntryIndexes(dailyLogRoot, storage);
-    let bindingMap: Record<string, GalleryEntryBinding> = new Object() as Record<string, GalleryEntryBinding>;
-    groups.forEach((group: GalleryExportGroup) => {
-      GalleryMemorySync.bindEntryIndexes(group, previousIndexes).forEach((binding: GalleryEntryBinding) => {
-        let sourceRef = group.date + '/' + GalleryMemorySync.fileNameForCategory(group.category) + '#' + String(binding.entryIndex);
-        bindingMap[sourceRef] = binding;
-      });
-    });
-
     let bindings: GalleryEntryBinding[] = [];
     let seen: Record<string, boolean> = new Object() as Record<string, boolean>;
     sourceRefs.forEach((sourceRef: string) => {
@@ -184,15 +211,25 @@ export class GalleryMemorySync {
       if (parts === null) {
         return;
       }
-      let normalizedRef = parts.date + '/' + parts.fileName + '#' + String(parts.entryIndex);
-      let binding = bindingMap[normalizedRef];
-      if (!binding) {
-        return;
+      let exportPath = storage.join(dailyLogRoot, parts.date, parts.fileName);
+      let markers = GalleryMemorySync.markerCache.get(exportPath);
+      if (!markers) {
+        markers = {};
+        let target = markers;
+        GalleryMemorySync.readEntryMarkers(storage.readText(exportPath, '')).forEach((binding: GalleryEntryBinding) =>
+          target[String(binding.entryIndex)] = binding.item.id);
+        if (GalleryMemorySync.markerCache.size >= 32) { GalleryMemorySync.markerCache.clear(); }
+        GalleryMemorySync.markerCache.set(exportPath, markers);
       }
-      let key = binding.item.date + '/' + binding.item.id;
+      let id = markers[String(parts.entryIndex)];
+      if (!id || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) { return; }
+      let raw = storage.readJson<GalleryAnalysisResult | null>(storage.join(filesDir, GALLERY_LOG_DIR, GALLERY_ITEMS_DIR, parts.date, id + '.json'), null);
+      if (!raw || !GalleryMemorySync.isValidResult(raw)) { return; }
+      let item = GalleryMemorySync.normalizeResult(raw);
+      let key = item.date + '/' + item.id;
       if (!seen[key]) {
         seen[key] = true;
-        bindings.push(binding);
+        bindings.push({ item: item, entryIndex: parts.entryIndex });
       }
     });
     return bindings;
@@ -207,8 +244,8 @@ export class GalleryMemorySync {
     return false;
   }
 
-  private static loadValidResults(filesDir: string, storage: DataManagerStorage): GalleryLoadedResults {
-    let results = GalleryMemorySync.loadGalleryItems(filesDir, storage);
+  private static loadValidResults(filesDir: string, storage: DataManagerStorage, dates?: string[]): GalleryLoadedResults {
+    let results = GalleryMemorySync.loadGalleryItems(filesDir, storage, dates);
     let valid: GalleryAnalysisResult[] = [];
     results.forEach((item: GalleryAnalysisResult) => {
       if (GalleryMemorySync.isValidResult(item)) {
@@ -227,31 +264,32 @@ export class GalleryMemorySync {
     return loaded;
   }
 
-  private static loadGalleryItems(filesDir: string, storage: DataManagerStorage): GalleryAnalysisResult[] {
+  private static loadGalleryItems(filesDir: string, storage: DataManagerStorage, dates?: string[]): GalleryAnalysisResult[] {
     let root = storage.join(filesDir, GALLERY_LOG_DIR, GALLERY_ITEMS_DIR);
     let results: GalleryAnalysisResult[] = [];
-    GalleryMemorySync.listNames(root, storage).forEach((dateName: string) => {
+    (dates || GalleryMemorySync.listNames(root, storage)).forEach((dateName: string) => {
       let dateDir = storage.join(root, dateName);
       GalleryMemorySync.listNames(dateDir, storage)
         .filter((fileName: string) => fileName.endsWith('.json'))
         .forEach((fileName: string) => {
           let content = storage.readText(storage.join(dateDir, fileName), '');
           if (content.length === 0) {
-            return;
+            throw new Error('图库分析记录无法读取，请重试同步');
           }
           try {
             results.push(parseJsonCompat<GalleryAnalysisResult>(content));
           } catch (e) {
+            throw new Error('图库分析记录损坏，请保留数据并重试');
           }
         });
     });
     if (results.length === 0) {
-      results = GalleryMemorySync.loadGalleryItemsFromIndex(filesDir, storage);
+      results = GalleryMemorySync.loadGalleryItemsFromIndex(filesDir, storage, dates);
     }
     return results;
   }
 
-  private static loadGalleryItemsFromIndex(filesDir: string, storage: DataManagerStorage): GalleryAnalysisResult[] {
+  private static loadGalleryItemsFromIndex(filesDir: string, storage: DataManagerStorage, dates?: string[]): GalleryAnalysisResult[] {
     let path = storage.join(filesDir, GALLERY_LOG_DIR, GALLERY_ITEMS_INDEX_FILE);
     let content = storage.readText(path, '');
     if (content.length === 0) {
@@ -260,27 +298,28 @@ export class GalleryMemorySync {
     try {
       let document = parseJsonCompat<GalleryItemsIndexDocument>(content);
       if (!document || !Array.isArray(document.items)) {
-        return [];
+        throw new Error('图库分析清单格式无效，请进行完整检查');
       }
       let results: GalleryAnalysisResult[] = [];
       document.items.forEach((relativePath: string) => {
         let normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/g, '');
+        if (dates && !dates.some((date: string): boolean => normalized.indexOf('/items/' + date + '/') >= 0)) { return; }
         if (!normalized.startsWith(GALLERY_LOG_DIR + '/' + GALLERY_ITEMS_DIR + '/') || !normalized.endsWith('.json')) {
           return;
         }
         let itemContent = storage.readText(storage.join(filesDir, normalized), '');
         if (itemContent.length === 0) {
+          if (storage.exists(storage.join(filesDir, normalized))) { throw new Error('图库分析记录无法读取，请重试同步'); }
           return;
         }
         try {
           results.push(parseJsonCompat<GalleryAnalysisResult>(itemContent));
         } catch (e) {
+          throw new Error('图库分析记录损坏，请保留数据并重试');
         }
       });
       return results;
-    } catch (e) {
-      return [];
-    }
+    } catch (e) { throw new Error((e as Error).message || '图库分析清单无法读取'); }
   }
 
   private static listNames(path: string, storage: DataManagerStorage): string[] {
@@ -293,6 +332,7 @@ export class GalleryMemorySync {
         .filter((name: string): boolean => name.length > 0)
         .sort();
     } catch (e) {
+      if (storage.exists(path)) { throw new Error('无法列出图库记录，请重试同步'); }
       return [];
     }
   }
@@ -752,11 +792,12 @@ export class GalleryMemorySync {
     return output;
   }
 
-  private static readExistingEntryIndexes(dailyLogRoot: string, storage: DataManagerStorage): Record<string, number> {
+  private static readExistingEntryIndexes(dailyLogRoot: string, storage: DataManagerStorage, dates?: string[]): Record<string, number> {
     let map: Record<string, number> = new Object() as Record<string, number>;
     let paths: string[] = [];
-    storage.findFiles(dailyLogRoot, GALLERY_DAILY_SUFFIX).forEach((path: string) => paths.push(path));
+    if (!dates) { storage.findFiles(dailyLogRoot, GALLERY_DAILY_SUFFIX).forEach((path: string) => paths.push(path)); }
     GalleryMemorySync.readExportIndex(dailyLogRoot, storage).forEach((relativePath: string) => {
+      if (dates && dates.indexOf(relativePath.substring(0, 10)) < 0) { return; }
       paths.push(storage.join(dailyLogRoot, relativePath));
     });
     GalleryMemorySync.stableUnique(paths).forEach((path: string) => {
@@ -814,26 +855,6 @@ export class GalleryMemorySync {
       error: '',
       createdAt: 0
     };
-  }
-
-  private static deleteOldGalleryDailyLogs(dailyLogRoot: string, storage: DataManagerStorage): number {
-    let deleted = 0;
-    let paths: string[] = [];
-    storage.findFiles(dailyLogRoot, GALLERY_DAILY_SUFFIX).forEach((path: string) => paths.push(path));
-    GalleryMemorySync.readExportIndex(dailyLogRoot, storage).forEach((relativePath: string) => {
-      paths.push(storage.join(dailyLogRoot, relativePath));
-    });
-    GalleryMemorySync.stableUnique(paths).forEach((path: string) => {
-      if (!storage.basename(path).startsWith(GALLERY_DAILY_PREFIX)) {
-        return;
-      }
-      let existed = storage.exists(path);
-      storage.removeFile(path);
-      if (existed) {
-        deleted += 1;
-      }
-    });
-    return deleted;
   }
 
   private static exportedFilesForCurrentSync: string[] = [];

@@ -1,5 +1,7 @@
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
+import { DataManagerStorage } from '../datamanager/DataManagerStorage';
+import { MemoryChangeJournal } from '../datamanager/MemoryChangeJournal';
 import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
@@ -225,6 +227,7 @@ export class WorkflowStorage {
   }
 
   static writeText(path: string, content: string): void {
+    MemoryChangeJournal.beforeMutation(path, new DataManagerStorage());
     try {
       let byteStr = encodeUtf8Compat(content);
       let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
@@ -1637,6 +1640,7 @@ export class WorkflowStorage {
   }
 
   static deletePathRecursively(path: string): number {
+    MemoryChangeJournal.beforeMutation(path, new DataManagerStorage());
     try {
       let children = fs.listFileSync(path);
       let deleted = 0;
@@ -1777,6 +1781,7 @@ export class WorkflowStorage {
   }
 
   static deleteDailyLogs(filesDir: string): number {
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('daily', '*');
     let deleted = WorkflowStorage.deletePathRecursively(WorkflowStorage.dailyLogDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
     return deleted;
