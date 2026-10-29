@@ -1,6 +1,6 @@
 # Tailscale 组网教程
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.13
+[返回下载与指南](README.md) · ClawMate Codex 1.1.15
 
 把手机和电脑、云服务器加入同一个虚拟局域网，即使不在同一个 Wi-Fi 下，也能互相连接。
 

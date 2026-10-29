@@ -18,7 +18,7 @@ const data = moduleData.exports;
 const downloads = data.codexDownloads();
 const guides = ['windows', 'macos', 'linux'].map(value => data.codexConnectionGuide(value));
 guides.push(data.codexTailscaleGuide());
-assert.equal(new Set(downloads.map(d => d.filename)).size, 5);
+assert.equal(new Set(downloads.map(d => d.filename)).size, 6);
 for (const d of downloads) {
   const url = new URL(d.url);
   assert.equal(url.protocol, 'https:');
@@ -38,6 +38,38 @@ assert.equal(data.codexHelpSection('tailscale'), 'tailscale');
 assert.equal(data.codexHelpSection('invalid'), 'connect');
 assert.equal(data.codexHelpSection(''), 'connect');
 assert.ok(guides.find(g => g.id === 'macos').notice.includes('Apple Silicon'));
+assert.ok(guides.find(g => g.id === 'macos').notice.includes('Intel'));
+assert.ok(downloads.some(d => d.id === 'macos-intel' && d.filename.endsWith('-darwin-x64-unsigned.zip')));
+const mac = guides.find(g => g.id === 'macos');
+const macText = data.codexGuideText(mac);
+for (const text of ['已损坏', '应用程序', 'Agent 帮忙安装']) {
+  assert.ok(macText.includes(text), 'Mac installation help: ' + text);
+}
+assert.ok(mac.links.some(link => link.url === 'https://support.apple.com/zh-cn/102445'));
+const quarantineSteps = mac.steps.filter(step => step.command.includes('xattr -dr'));
+assert.equal(quarantineSteps.length, 1);
+assert.equal(mac.steps.filter(step => step.command).length, 1, 'Mac installation uses only one two-line command block');
+for (const step of quarantineSteps) {
+  assert.ok(step.command.includes('com.apple.quarantine "/Applications/ClawMate Codex.app"'));
+  assert.ok(step.command.includes('open "/Applications/ClawMate Codex.app"'));
+  assert.ok(!step.command.includes('xattr -cr'), 'Only remove the quarantine attribute');
+  assert.equal(step.command.split('\n').length, 2);
+}
+assert.ok(!/方法一|方法二|sudo |codesign --verify|spctl --assess|仅在从本项目/.test(macText));
+assert.ok(!mac.steps.some(step => /--master-disable|--global-disable|csrutil disable|chmod -R/.test(step.command)));
+for (const guide of guides) {
+  const text = data.codexGuideText(guide);
+  assert.ok(text.startsWith(guide.title + '\n\n' + guide.intro));
+  assert.ok(text.includes(guide.notice));
+  for (const [index, step] of guide.steps.entries()) {
+    assert.ok(text.includes(`${index + 1}. ${step.title}\n${step.body}`));
+    if (step.command) assert.ok(text.includes(step.command), 'copy retains complete multiline commands');
+  }
+  for (const note of guide.notes) assert.ok(text.includes(note));
+  for (const link of guide.links) assert.ok(text.includes(link.title + '：' + link.url));
+  assert.ok(!text.includes('undefined'), 'copied guide has no missing fields');
+}
+assert.ok(!data.codexGuideText(guides.find(g => g.id === 'windows')).includes('Touch ID'), 'platform-specific copy stays isolated');
 assert.ok(guides.find(g => g.id === 'tailscale').notice.includes('卓易通'));
 const linux = guides.find(g => g.id === 'linux');
 const commands = linux.steps.map(step => step.command).join('\n');
@@ -54,6 +86,16 @@ const page = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/codex/Cod
 assert.ok(page.includes('router.back()'));
 assert.ok(page.includes('context.openLink(url)'));
 assert.ok(page.includes('pasteboard.MIMETYPE_TEXT_PLAIN, value'));
+for (const expression of ['item.title', 'item.body', 'this.guide().intro', 'this.guide().notice', 'note', 'link.url']) {
+  const start = page.indexOf(`Text(${expression})`, page.indexOf('@Builder private Step'));
+  assert.ok(start >= 0, 'visible guide text: ' + expression);
+  const nextText = page.indexOf('Text(', start + 5);
+  const block = page.slice(start, nextText < 0 ? page.length : nextText);
+  assert.ok(block.includes('.copyOption(CopyOptions.LocalDevice)'), 'long-press copying: ' + expression);
+}
+assert.ok(page.includes("Button('复制全文')"));
+assert.ok(page.includes('this.copyText(codexGuideText(this.guide())'));
+assert.ok(page.includes("this.copyText(link.url, '链接已复制"));
 assert.ok(!page.includes('CodexClient'), 'help must not reconnect or change device credentials');
 
 // Native help and published Markdown are generated from the same content.
@@ -75,8 +117,8 @@ const version = data.CODEX_BRIDGE_VERSION;
 files.set('README.md', `# ClawMate Codex 连接器\n\n在手机中继续自己电脑或服务器上的 Codex 工作。电脑运行连接器，手机扫码或粘贴一次性配对信息。\n\n` +
   `## 下载 ${data.CODEX_BRIDGE_VERSION}\n\n| 平台 | 适用设备 | 安装包 |\n| --- | --- | --- |\n${rows}\n\n` +
   `[Release 与 SHA256 校验清单](${data.CODEX_RELEASE_URL})\n\n${data.CODEX_DOWNLOAD_NOTICE}\n\n` +
-  `Windows 是安装向导；macOS ZIP 内为应用，解压后移入「应用程序」；Linux 为解压使用的便携包，服务器优先选 CLI。当前没有 Intel Mac、Linux ARM64、DMG、DEB 或 RPM 安装包。\n\n` +
-  `## 连接指南\n\n- [Windows](windows.md)\n- [macOS · Apple Silicon](macos.md)\n- [Linux · CLI](linux.md)\n- [Tailscale：异地手机与服务器组网](tailscale.md)\n\n` +
+  `Windows 是安装向导；macOS 按芯片选择 M 系列或 Intel ZIP，解压后移入「应用程序」；Linux 为解压使用的便携包，服务器优先选 CLI。当前没有 Linux ARM64、DMG、DEB 或 RPM 安装包。\n\n` +
+  `## 连接指南\n\n- [Windows](windows.md)\n- [macOS · M 系列 / Intel](macos.md)\n- [Linux · CLI](linux.md)\n- [Tailscale：异地手机与服务器组网](tailscale.md)\n\n` +
   `手机入口：**Codex → 我的连接 → 下载 PC 端的 Codex 连接器 / 连接指南 / Tailscale 组网教程**。内置指南无需加载网页；下载文件和打开外部资料需要网络。\n\n` +
   `## 校验与升级\n\n从同一 Release 下载 SHA256SUMS.txt，核对对应文件的哈希，再安装或解压。\n\n` +
   `- Windows PowerShell：\`Get-FileHash .\\ClawMate-Codex-${version}-win-x64.exe -Algorithm SHA256\`\n` +
@@ -88,7 +130,8 @@ files.set('README.md', `# ClawMate Codex 连接器\n\n在手机中继续自己�
 if (process.argv.includes('--write-docs')) fs.mkdirSync(folder, { recursive: true });
 for (const [filename, content] of files) {
   const target = path.join(folder, filename);
-  if (process.argv.includes('--write-docs')) fs.writeFileSync(target, content);
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8').replaceAll('\r\n', '\n') : null;
+  if (process.argv.includes('--write-docs') && existing !== content) fs.writeFileSync(target, content);
   assert.equal(fs.readFileSync(target, 'utf8').replaceAll('\r\n', '\n'), content, filename + ' is out of sync');
 }
-console.log('Codex help checks passed: 5 release packages, 4 native guides, CLI flags, route, and Markdown sync.');
+console.log('Codex help checks passed: 6 release packages, 4 native guides, CLI flags, route, and Markdown sync.');

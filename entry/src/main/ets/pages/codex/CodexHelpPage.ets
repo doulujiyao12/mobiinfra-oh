@@ -9,7 +9,7 @@ import { showToastSafely } from '../../utils/PromptSafe';
 import {
   CODEX_BRIDGE_VERSION, CODEX_DOWNLOAD_NOTICE, CODEX_RELEASE_URL, CodexDownload, CodexGuide,
   CodexGuideStep, CodexHelpLink, CodexHelpParams, CodexHelpSection, CodexPlatform,
-  codexConnectionGuide, codexDownloads, codexHelpSection, codexTailscaleGuide
+  codexConnectionGuide, codexDownloads, codexGuideText, codexHelpSection, codexTailscaleGuide
 } from './CodexHelpContent';
 
 @Entry
@@ -83,7 +83,9 @@ struct CodexHelpPage {
     Row({ space: 10 }) {
       Column({ space: 5 }) {
         Text(item.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+          .copyOption(CopyOptions.LocalDevice)
         Text(item.detail).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#747B87')).maxLines(2)
+          .copyOption(CopyOptions.LocalDevice)
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         .onClick(() => { this.openLink(item.url); })
       Button('下载').fontSize(13).height(36).padding({ left: 14, right: 14 })
@@ -99,8 +101,10 @@ struct CodexHelpPage {
   @Builder private DownloadContent() {
     Column({ space: 8 }) {
       Text('把 Codex 带到手机').fontSize(25).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
+        .copyOption(CopyOptions.LocalDevice)
       Text('在电脑安装连接器，再用手机配对。也可以复制下载链接，发送到电脑打开。')
         .fontSize(14).lineHeight(22).fontColor(AppTheme.text('#747B87'))
+        .copyOption(CopyOptions.LocalDevice)
     }.width('100%').alignItems(HorizontalAlign.Start)
     Column() {
       ForEach(this.downloads, (item: CodexDownload, index: number) => {
@@ -109,7 +113,7 @@ struct CodexHelpPage {
       }, (item: CodexDownload) => item.id)
     }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).clip(true)
     Text('版本 ' + CODEX_BRIDGE_VERSION + ' · ' + CODEX_DOWNLOAD_NOTICE).fontSize(12).lineHeight(20)
-      .fontColor(AppTheme.text('#747B87')).width('100%')
+      .fontColor(AppTheme.text('#747B87')).width('100%').copyOption(CopyOptions.LocalDevice)
     Button('查看 Release 与校验清单').height(42).fontSize(14).backgroundColor(Color.Transparent)
       .fontColor(AppTheme.text('#5968FF')).onClick(() => { this.openLink(CODEX_RELEASE_URL); })
     Button('如何连接？').height(42).fontSize(14).backgroundColor(Color.Transparent)
@@ -125,14 +129,16 @@ struct CodexHelpPage {
         .backgroundColor(AppTheme.background('#EEF0FF')).borderRadius(14)
       Column({ space: 9 }) {
         Text(item.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+          .copyOption(CopyOptions.LocalDevice)
         Text(item.body).fontSize(14).lineHeight(23).fontColor(AppTheme.text('#626B7C')).width('100%')
+          .copyOption(CopyOptions.LocalDevice)
         if (item.command) {
           Column({ space: 8 }) {
             Text(item.command).fontSize(12).fontFamily('monospace').lineHeight(20)
               .fontColor(AppTheme.text('#34405A')).width('100%').copyOption(CopyOptions.LocalDevice)
             Button('复制命令').fontSize(12).height(32).padding({ left: 10, right: 10 })
               .backgroundColor(Color.Transparent).fontColor(AppTheme.text('#5968FF'))
-              .onClick(() => { this.copyText(item.command, '命令已复制，请先替换示例路径和 IP'); })
+              .onClick(() => { this.copyText(item.command, '命令已复制，请核对路径和示例参数'); })
           }.width('100%').alignItems(HorizontalAlign.Start).padding(12)
             .backgroundColor(AppTheme.background('#F4F6FA')).borderRadius(12)
         }
@@ -143,9 +149,18 @@ struct CodexHelpPage {
   @Builder private GuideContent() {
     if (this.section === CodexHelpSection.Connect) { this.PlatformPicker() }
     Column({ space: 10 }) {
-      Text(this.guide().title).fontSize(24).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
+      Row({ space: 10 }) {
+        Text(this.guide().title).fontSize(24).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
+          .layoutWeight(1).copyOption(CopyOptions.LocalDevice)
+        Button('复制全文').height(36).fontSize(13).padding({ left: 12, right: 12 })
+          .fontColor(AppTheme.text('#5968FF')).backgroundColor(AppTheme.background('#EEF0FF'))
+          .accessibilityText('复制当前教程全文，包含步骤、命令和链接')
+          .onClick(() => { this.copyText(codexGuideText(this.guide()), '教程已复制，可发送到电脑'); })
+      }.width('100%').alignItems(VerticalAlign.Center)
       Text(this.guide().intro).fontSize(14).lineHeight(23).fontColor(AppTheme.text('#747B87'))
+        .copyOption(CopyOptions.LocalDevice)
       Text(this.guide().notice).fontSize(12).lineHeight(20).fontColor(AppTheme.text('#747B87'))
+        .copyOption(CopyOptions.LocalDevice)
     }.width('100%').alignItems(HorizontalAlign.Start)
     Column() {
       ForEach(this.guide().steps, (item: CodexGuideStep, index: number) => {
@@ -156,18 +171,31 @@ struct CodexHelpPage {
     if (this.guide().notes.length > 0) {
       Column({ space: 14 }) {
         Text('你可能还想知道').fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+          .copyOption(CopyOptions.LocalDevice)
         ForEach(this.guide().notes, (note: string) => {
           Text(note).fontSize(13).lineHeight(22).fontColor(AppTheme.text('#747B87')).width('100%')
+            .copyOption(CopyOptions.LocalDevice)
         }, (note: string) => note)
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 4, right: 4 })
     }
     Column() {
       ForEach(this.guide().links, (link: CodexHelpLink, index: number) => {
         if (index > 0) { Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 18, right: 18 }) }
-        Row() {
-          Text(link.title).fontSize(14).fontColor(AppTheme.text('#5968FF')).layoutWeight(1)
-          Text('↗').fontSize(16).fontColor(AppTheme.text('#9198A5'))
-        }.width('100%').padding(18).onClick(() => { this.openLink(link.url); })
+        Row({ space: 8 }) {
+          Column({ space: 4 }) {
+            Text(link.title).fontSize(14).fontColor(AppTheme.text('#5968FF'))
+              .copyOption(CopyOptions.LocalDevice)
+            Text(link.url).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#747B87'))
+              .width('100%').copyOption(CopyOptions.LocalDevice)
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Button('打开').height(34).fontSize(12).padding({ left: 8, right: 8 })
+            .fontColor(AppTheme.text('#5968FF')).backgroundColor(Color.Transparent)
+            .accessibilityText('打开 ' + link.title).onClick(() => { this.openLink(link.url); })
+          Button('复制').height(34).fontSize(12).padding({ left: 8, right: 8 })
+            .fontColor(AppTheme.text('#747B87')).backgroundColor(Color.Transparent)
+            .accessibilityText('复制 ' + link.title + ' 链接')
+            .onClick(() => { this.copyText(link.url, '链接已复制，可发送到电脑'); })
+        }.width('100%').padding(18)
       }, (link: CodexHelpLink) => link.url)
     }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(18)
   }

@@ -1,5 +1,5 @@
 // Keep downloads pinned to a verified release; never guess the latest asset name.
-export const CODEX_BRIDGE_VERSION: string = '1.1.13';
+export const CODEX_BRIDGE_VERSION: string = '1.1.15';
 export const CODEX_BRIDGE_TAG: string = 'codex-bridge-v' + CODEX_BRIDGE_VERSION;
 export const CODEX_REPOSITORY_URL: string = 'https://github.com/doulujiyao12/mobiinfra-oh';
 export const CODEX_RELEASE_URL: string = CODEX_REPOSITORY_URL + '/releases/tag/' + CODEX_BRIDGE_TAG;
@@ -29,6 +29,23 @@ export interface CodexGuide {
   links: CodexHelpLink[];
 }
 
+export function codexGuideText(guide: CodexGuide): string {
+  const lines: string[] = [guide.title, '', guide.intro, '', guide.notice];
+  guide.steps.forEach((step: CodexGuideStep, index: number) => {
+    lines.push('', (index + 1).toString() + '. ' + step.title, step.body);
+    if (step.command) { lines.push('', step.command); }
+  });
+  if (guide.notes.length > 0) {
+    lines.push('', '常见问题与注意事项');
+    guide.notes.forEach((note: string) => { lines.push('- ' + note); });
+  }
+  if (guide.links.length > 0) {
+    lines.push('', '相关链接');
+    guide.links.forEach((link: CodexHelpLink) => { lines.push(link.title + '：' + link.url); });
+  }
+  return lines.join('\n');
+}
+
 function download(id: string, title: string, detail: string, filename: string): CodexDownload {
   return { id: id, title: title, detail: detail, filename: filename, url: DOWNLOAD_ROOT + filename };
 }
@@ -36,8 +53,10 @@ function download(id: string, title: string, detail: string, filename: string): 
 export function codexDownloads(): CodexDownload[] {
   return [
     download('windows', 'Windows', 'x64 · 安装向导', 'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-win-x64.exe'),
-    download('macos', 'macOS', 'Apple Silicon（M 系列）· 解压后移入应用程序',
+    download('macos', 'macOS · M 系列', 'Apple Silicon · 解压后移入应用程序',
       'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-darwin-arm64-unsigned.zip'),
+    download('macos-intel', 'macOS · Intel', 'Intel 芯片 · 解压后移入应用程序',
+      'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-darwin-x64-unsigned.zip'),
     download('linux', 'Linux · CLI', 'x64 · 适合云服务器和无桌面环境',
       'ClawMate-Codex-Terminal-' + CODEX_BRIDGE_VERSION + '-linux-x64.tar.gz'),
     download('linux-desktop', 'Linux · 桌面', 'x64 · 解压后启动，需要图形环境',
@@ -47,7 +66,7 @@ export function codexDownloads(): CodexDownload[] {
   ];
 }
 
-export const CODEX_DOWNLOAD_NOTICE: string = '安装包未签名，Mac 未公证；Mac 仅提供 M 系列版本。';
+export const CODEX_DOWNLOAD_NOTICE: string = '安装包未签名，Mac 未公证；请选择与你电脑芯片匹配的版本。';
 export const CODEX_PAIRING_NOTE: string = '配对码 5 分钟内有效，只能使用一次。请粘贴完整配对信息或导入配对文件；证书指纹不是 token。不要公开配对码和文件。';
 
 const DESKTOP_NOTES: string[] = [
@@ -61,25 +80,37 @@ const DESKTOP_NOTES: string[] = [
 function desktopGuide(platform: CodexPlatform): CodexGuide {
   const mac: boolean = platform === CodexPlatform.Mac;
   const platformName: string = mac ? 'macOS' : 'Windows';
+  const steps: CodexGuideStep[] = [
+    { title: '安装连接器', body: mac ?
+      '在苹果菜单 → 关于本机查看芯片：M 系列选择 Apple Silicon（arm64），Intel 处理器选择 Intel（x64）。从本项目的 GitHub Release 下载对应 ZIP，解压后将 ClawMate Codex.app 移入「应用程序」。' :
+      '下载 Windows EXE，按安装向导完成安装，打开 ClawMate Codex。若系统提示未知发布者，请核对来源和校验值后再决定是否继续。', command: '' }
+  ];
+  if (mac) {
+    steps.push({ title: '打开应用（提示「已损坏」时）',
+      body: '将 ClawMate Codex.app 放入「应用程序」，打开「终端」执行下面两行命令。如果遇到问题，可以让 Agent 帮忙安装该应用。',
+      command: 'xattr -dr com.apple.quarantine "/Applications/ClawMate Codex.app"\nopen "/Applications/ClawMate Codex.app"' });
+  }
+  steps.push(
+    { title: '登录 Codex 账号', body: '在电脑「连接设置」点击「使用浏览器登录」，在官方登录页面完成授权。账号需具备 Codex 使用资格。OpenAI 登录凭据留在电脑，手机使用独立的设备凭据。', command: '' },
+    { title: '选择允许操作的目录', body: '点击「选择项目」，添加实际项目文件夹。保留「局域网 · 自动安全配对」，监听范围选择「允许局域网 / 远程设备访问」，保存设置。只添加你希望手机操作的项目。', command: '' },
+    { title: '启动手机连接', body: '点击「启动手机连接」，确认服务已启动。手机和电脑先连接同一个可互访的 Wi-Fi；异地连接请先按 Tailscale 教程组网。默认端口为 8787，以电脑实际显示为准。', command: '' },
+    { title: '生成配对二维码', body: '在电脑「手机配对」选择手机能访问的本机地址：同一 Wi-Fi 选局域网 IP，Tailscale 选 100 开头的 IP。点击「生成配对信息」，保持二维码页面打开。', command: '' },
+    { title: '手机扫码或粘贴配对', body: '手机打开 Codex → 创建连接 → 扫描二维码，核对电脑名称和地址后连接。也可导入电脑导出的配对文件，或粘贴完整配对信息；不要填写「连接保护」里的指纹。', command: '' },
+    { title: '开始第一条任务', body: '连接后选择项目，发送「概括这个项目的结构」。之后可在「我的连接」轻点电脑重连，右侧菜单可断开或删除连接。电脑端连接器需保持运行。', command: '' }
+  );
+  const links: CodexHelpLink[] = [{ title: '下载连接器', url: CODEX_RELEASE_URL },
+    { title: '网页版指南', url: GUIDE_ROOT + platform + '.md' }];
+  if (mac) {
+    links.push({ title: 'Apple 官方：打开未公证的 App', url: 'https://support.apple.com/zh-cn/102445' });
+  }
   return {
     id: platform, title: platformName + ' 连接指南',
     intro: '在自己的电脑安装 ClawMate Codex 连接器，登录、选择项目，再用手机扫码。运行组件已经内置，无需另装 Node.js 或 npm。',
-    notice: mac ? '适用于 Apple Silicon（M 系列）。当前应用未签名、未公证，请先核对 Release 中的 SHA256。' :
+    notice: mac ? '支持 Apple Silicon（M 系列）和 Intel 芯片。当前应用未签名、未公证。' :
       '适用于 Windows x64。当前安装包未签名，请先核对 Release 中的 SHA256。',
-    steps: [
-      { title: '安装连接器', body: mac ?
-        '下载 macOS ZIP 并解压，将 ClawMate Codex.app 移入「应用程序」。若系统阻止打开，确认来源和校验值后，在系统设置 → 隐私与安全性中查看允许打开的选项。无需关闭系统安全保护。' :
-        '下载 Windows EXE，按安装向导完成安装，打开 ClawMate Codex。若系统提示未知发布者，请核对来源和校验值后再决定是否继续。', command: '' },
-      { title: '登录 Codex 账号', body: '在电脑「连接设置」点击「使用浏览器登录」，在官方登录页面完成授权。账号需具备 Codex 使用资格。OpenAI 登录凭据留在电脑，手机使用独立的设备凭据。', command: '' },
-      { title: '选择允许操作的目录', body: '点击「选择项目」，添加实际项目文件夹。保留「局域网 · 自动安全配对」，监听范围选择「允许局域网 / 远程设备访问」，保存设置。只添加你希望手机操作的项目。', command: '' },
-      { title: '启动手机连接', body: '点击「启动手机连接」，确认服务已启动。手机和电脑先连接同一个可互访的 Wi-Fi；异地连接请先按 Tailscale 教程组网。默认端口为 8787，以电脑实际显示为准。', command: '' },
-      { title: '生成配对二维码', body: '在电脑「手机配对」选择手机能访问的本机地址：同一 Wi-Fi 选局域网 IP，Tailscale 选 100 开头的 IP。点击「生成配对信息」，保持二维码页面打开。', command: '' },
-      { title: '手机扫码或粘贴配对', body: '手机打开 Codex → 创建连接 → 扫描二维码，核对电脑名称和地址后连接。也可导入电脑导出的配对文件，或粘贴完整配对信息；不要填写「连接保护」里的指纹。', command: '' },
-      { title: '开始第一条任务', body: '连接后选择项目，发送「概括这个项目的结构」。之后可在「我的连接」轻点电脑重连，右侧菜单可断开或删除连接。电脑端连接器需保持运行。', command: '' }
-    ],
+    steps: steps,
     notes: DESKTOP_NOTES,
-    links: [{ title: '下载连接器', url: CODEX_RELEASE_URL },
-      { title: '网页版指南', url: GUIDE_ROOT + platform + '.md' }]
+    links: links
   };
 }
 
