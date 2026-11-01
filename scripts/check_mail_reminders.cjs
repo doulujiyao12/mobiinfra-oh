@@ -9,13 +9,20 @@ const base = 'entry/src/main/ets/', mail = base + 'utils/mail/';
 let now = new Date('2026-10-24T12:00:00+08:00').getTime(), accepted = true, revoke = null;
 let messages = [], commands = [], options = null, failAuth = false, validity = '91', malformedAi = false;
 let aiCalls = [], onAi = null, server = null, aiReply = null, aiFailure = null, diagnostics = [];
+let aiResponder = null, checkpoints = [], failCheckpoint = 0;
 let assetQueryError = 0, assetAddError = 0, assetDropWrite = false;
 class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
 const clone = v => JSON.parse(JSON.stringify(v));
 class Storage {
   join(...p) { return p.join('/'); }
   readJson(p, fallback) { return clone(disk.has(p) ? disk.get(p) : fallback); }
-  writeJsonAtomic(p, value) { disk.set(p, clone(value)); }
+  writeJsonAtomic(p, value) {
+    if(p.endsWith('/snapshot.json')) {
+      if(failCheckpoint && checkpoints.length + 1 === failCheckpoint) throw Error('fixture checkpoint write failed');
+      checkpoints.push(clone(value));
+    }
+    disk.set(p, clone(value));
+  }
   sha256Text(text) { return crypto.createHash('sha256').update(text).digest('hex'); }
 }
 const Tag = { ALIAS: 1, RETURN_TYPE: 2, SECRET: 3, ACCESSIBILITY: 4, AUTH_TYPE: 5, SYNC_TYPE: 6,
@@ -84,6 +91,7 @@ const mocks={
   'CloudModelClient.ets':{CloudModelClient:class{async chatCompletion(options){
     aiCalls.push(options); if(onAi){ const fn=onAi;onAi=null;fn(); }
     if(aiFailure)throw aiFailure;
+    if(aiResponder)return await aiResponder(options,aiCalls.length);
     if(aiReply)return clone(aiReply);
     if(malformedAi) return {content:'{"items":[]}'};
     const data=JSON.parse(options.messages[1].content);
@@ -113,6 +121,7 @@ const store=new MailStore('/sandbox');
 function fixture(uid,extra={}) { return {uid,date:'24-Oct-2026 '+String(8+uid%12).padStart(2,'0')+':00:00 +0800',
   subject:'Research update',body:Buffer.from('会议时间已变更，请确认。').toString('base64'),...extra}; }
 function setup() { disk.clear();assets.length=0;commands=[];aiCalls=[];diagnostics=[];aiReply=null;aiFailure=null;accepted=true;malformedAi=false;failAuth=false;validity='91';
+  aiResponder=null;onAi=null;checkpoints=[];failCheckpoint=0;
   assetQueryError=0;assetAddError=0;assetDropWrite=false;server=null;
   const settings=types.defaultMailSettings();settings.enabled=true;settings.username='test@example.test';settings.aiAllowed=true;
   store.saveSettings(settings);return settings; }
@@ -328,7 +337,106 @@ test('configured mail reading does not depend on an app-wide privacy status; bus
 test('changing preferences during analysis discards old results instead of replacing the new choice',async()=>{
   setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];
   onAi=()=>{const changed=store.settings();changed.ignored='新偏好';store.saveSettings(changed);};
-  await assert.rejects(MailService.refresh('/sandbox',config));assert.equal(store.current().items.length,0);assert.equal(store.settings().ignored,'新偏好');
+  await assert.rejects(MailService.refresh('/sandbox',config));assert.equal(store.current().items.length,1);
+  assert.equal(store.current().items[0].analysisKey,'','raw read checkpoint must not publish an obsolete AI decision');
+  assert.equal(store.settings().ignored,'新偏好');
+});
+
+function aiDecisions(options, selected) {
+  const items=JSON.parse(options.messages[1].content).messages;
+  return {content:JSON.stringify({items:(selected===undefined?items:selected).map(x=>({
+    id:x.id,relevant:true,summary:'逐封测试摘要',reason:'逐封测试理由'}))})};
+}
+
+test('mail recovery: partial output retains valid IDs and rejects ambiguous duplicates, invalid fields and foreign IDs',()=>{
+  setup();const items=['a','b','c','d'].map(id=>({id}));
+  const good=id=>({id,relevant:true,summary:'safe summary',reason:'safe reason'});
+  const parsed=analysis.parseMailDecisions(JSON.stringify({items:[good('b'),good('a'),
+    {...good('c'),relevant:'true'},good('d'),good('d'),good('foreign'),null]}),items);
+  assert.deepEqual(clone(parsed.map(x=>x.id)),['b','a']);
+  assert.ok(diagnostics.some(x=>x.includes('expected=4 returned=7 accepted=2 rejected=5')));
+  assert.ok(!diagnostics.some(x=>x.includes('safe summary')||x.includes('safe reason')));
+});
+
+test('mail recovery: 107 mails continue past the first short reply and retry only its missing IDs after the first pass',async()=>{
+  const settings=setup();settings.maxMessages=100;store.saveSettings(settings);
+  await MailCredentialStore.save(store.accountKey(),'fixture-code');
+  messages=Array.from({length:107},(_,i)=>fixture(i+1,i<37?{date:'23-Oct-2026 10:00:00 +0800'}:{}));
+  let missing=[];
+  aiResponder=async(options,call)=>{
+    const items=JSON.parse(options.messages[1].content).messages;
+    if(call===1){missing=items.slice(2).map(x=>x.id);return aiDecisions(options,items.slice(0,2));}
+    if(call===2)assert.equal(store.current().items.filter(x=>x.analysisKey).length,2,'valid partial reply is already on disk');
+    return aiDecisions(options);
+  };
+  await MailService.refresh('/sandbox',config);
+  assert.equal(store.current().items.length,107);assert.equal(store.current().items.filter(x=>x.analysisKey).length,107);
+  assert.equal(store.current().error,'');assert.equal(aiCalls.length,25);
+  assert.deepEqual(aiCalls.slice(0,22).map(o=>JSON.parse(o.messages[1].content).messages.length),[...Array(21).fill(5),2]);
+  assert.deepEqual(aiCalls.slice(22).map(o=>JSON.parse(o.messages[1].content).messages[0].id),missing);
+  assert.ok(checkpoints.some(s=>s.items.filter(x=>x.analysisKey).length===2));
+  await MailService.refresh('/sandbox',config);assert.equal(aiCalls.length,25,'successful mail is cached on the next sync');
+});
+
+test('mail recovery: malformed batch and one persistently bad mail do not block later mails or reanalyze successes',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=Array.from({length:7},(_,i)=>fixture(i+1));
+  let failedId='';
+  aiResponder=async(options,call)=>{
+    const items=JSON.parse(options.messages[1].content).messages;
+    if(call===1){failedId=items[0].id;return {content:'not-json'};}
+    if(items.length===1&&items[0].id===failedId)return {content:'{"items":[]}'};
+    return aiDecisions(options);
+  };
+  await assert.rejects(MailService.refresh('/sandbox',config),/已完成6\/7封/);
+  const saved=store.current();assert.equal(saved.items.filter(x=>x.analysisKey).length,6);
+  assert.ok(saved.items.find(x=>x.id===failedId).analysisError);assert.equal(aiCalls.length,7);
+  assert.equal(JSON.parse(aiCalls[1].messages[1].content).messages.length,2,'later primary batch precedes retries');
+  aiResponder=null;await MailService.refresh('/sandbox',config);
+  assert.equal(aiCalls.length,8);assert.equal(JSON.parse(aiCalls[7].messages[1].content).messages[0].id,failedId);
+  assert.equal(store.current().items.find(x=>x.id===failedId).analysisError,'');assert.equal(store.current().error,'');
+});
+
+test('mail recovery: complete validated entries survive a provider length flag',async()=>{
+  setup();const items=['a','b'].map(id=>({id,from:'sender',subject:'fixture',body:'fixture body',truncated:false,bodyError:''}));
+  aiReply={content:JSON.stringify({items:[{id:'b',relevant:false,summary:'valid',reason:'valid'}]}),finishReason:'length'};
+  const result=await analysis.MailAnalysis.analyze(items,types.defaultMailSettings(),config);
+  assert.deepEqual(clone(result.map(x=>x.id)),['b']);
+});
+
+test('mail recovery: provider authorization failure stops requests without retry storms and retains readable mail',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=Array.from({length:8},(_,i)=>fixture(i+1));
+  aiFailure=new Error('Cloud HTTP 401');
+  await assert.rejects(MailService.refresh('/sandbox',config),/HTTP 401/);
+  assert.equal(aiCalls.length,1);assert.equal(store.current().items.length,8);
+  assert.ok(store.current().items.every(x=>!x.analysisKey&&x.analysisError));
+});
+
+test('mail recovery: changing mailbox settings during a later batch preserves earlier checkpoints and stops queued retries',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=Array.from({length:7},(_,i)=>fixture(i+1));
+  aiResponder=async(options,call)=>{
+    const items=JSON.parse(options.messages[1].content).messages;
+    if(call===1)return aiDecisions(options,items.slice(0,2));
+    const changed=store.settings();changed.enabled=false;store.saveSettings(changed);return aiDecisions(options);
+  };
+  await assert.rejects(MailService.refresh('/sandbox',config),/邮箱设置或日期已变化/);
+  assert.equal(aiCalls.length,2);assert.equal(store.current().items.filter(x=>x.analysisKey).length,2);
+});
+
+test('mail recovery: checkpoint I/O failures are not retried as model errors',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=Array.from({length:7},(_,i)=>fixture(i+1));
+  failCheckpoint=2;
+  await assert.rejects(MailService.refresh('/sandbox',config),/fixture checkpoint write failed/);
+  assert.equal(aiCalls.length,1);assert.equal(store.current().items.length,7);assert.equal(MailService.isBusy(),false);
+});
+
+test('mail recovery: total deadline bounds request timeouts and preserves completed batches',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=Array.from({length:11},(_,i)=>fixture(i+1));
+  aiResponder=async(options,call)=>{now+=call===1?290000:10001;return aiDecisions(options);};
+  try {
+    await assert.rejects(MailService.refresh('/sandbox',config),/筛选超时/);
+    assert.equal(aiCalls.length,2);assert.equal(aiCalls[0].readTimeout,90000);assert.equal(aiCalls[1].readTimeout,10000);
+    assert.equal(store.current().items.filter(x=>x.analysisKey).length,10);
+  } finally {now=new Date('2026-10-24T12:00:00+08:00').getTime();}
 });
 test('completion made during analysis is preserved when the refreshed snapshot is saved',async()=>{
   const settings=setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];await MailService.refresh('/sandbox',config);

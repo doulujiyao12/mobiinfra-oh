@@ -59,7 +59,7 @@ export function mailAnalysisMessages(items: MailItem[], settings: MailSettings):
       '逐封理解主题和正文，挑选与用户有关的待办、会议变动、重要进展、需回复事项或用户关注的资讯；过滤普通广告和无关群发。' +
       '不得仅凭主题关键词判断，不编造事实或时间，不把计划当成已完成。正文不完整或无法判断时保守保留并说明。' +
       '输出严格JSON：{"items":[{"id":"输入的id","relevant":true,"summary":"不超过100字的中文摘要","reason":"不超过40字的筛选理由"}]}。' +
-      '每个输入id必须且只能出现一次，不增加邮件，不输出其他内容。' },
+      '每个输入id必须且只能出现一次；不关注的邮件也必须返回，并设relevant为false。不增加邮件，不输出其他内容。' },
     { role: 'user', content: JSON.stringify(payload) }
   ];
 }
@@ -70,33 +70,58 @@ export function parseMailDecisions(text: string, items: MailItem[]): MailDecisio
   let parsed: MailDecisionResponse;
   try { parsed = JSON.parse(clean) as MailDecisionResponse; }
   catch (e) { throw new MailAnalysisError('invalid_json', '模型返回的筛选结果不是有效JSON，请重试。'); }
-  if (!parsed || !Array.isArray(parsed.items) || parsed.items.length !== items.length) {
+  if (!parsed || !Array.isArray(parsed.items)) {
     throw new MailAnalysisError('invalid_count', '模型返回的邮件数量不匹配，请重试。');
   }
-  let seen: string[] = [];
+  // A duplicate ID is ambiguous: reject every decision for that ID, but retain
+  // independently valid decisions. Never associate results by array position.
+  let counts: Map<string, number> = new Map<string, number>();
   parsed.items.forEach((decision: MailDecision): void => {
-    if (decision === null || typeof decision.id !== 'string' || !items.some((item: MailItem): boolean => item.id === decision.id) ||
-      seen.indexOf(decision.id) >= 0 || typeof decision.relevant !== 'boolean' || typeof decision.summary !== 'string' ||
-      typeof decision.reason !== 'string' || decision.summary.length > 500 || decision.reason.length > 200) {
-      throw new MailAnalysisError('invalid_decision', '模型返回的邮件标识或字段格式不匹配，请重试。');
+    if (decision !== null && typeof decision === 'object' && typeof decision.id === 'string') {
+      counts.set(decision.id, (counts.get(decision.id) || 0) + 1);
     }
-    seen.push(decision.id);
   });
-  return parsed.items;
+  let accepted: MailDecision[] = [];
+  parsed.items.forEach((decision: MailDecision): void => {
+    if (decision === null || typeof decision !== 'object' || typeof decision.id !== 'string' ||
+      !items.some((item: MailItem): boolean => item.id === decision.id) || counts.get(decision.id) !== 1 ||
+      typeof decision.relevant !== 'boolean' || typeof decision.summary !== 'string' ||
+      typeof decision.reason !== 'string' || decision.summary.length > 500 || decision.reason.length > 200) {
+      return;
+    }
+    let value: MailDecision = { id: decision.id, relevant: decision.relevant, summary: decision.summary, reason: decision.reason };
+    accepted.push(value);
+  });
+  AppLogger.info('Mail', 'MAIL_ANALYSIS_VALIDATE expected=' + items.length + ' returned=' + parsed.items.length +
+    ' accepted=' + accepted.length + ' rejected=' + (parsed.items.length - accepted.length));
+  if (accepted.length === 0 && items.length > 0) {
+    if (parsed.items.length !== items.length) {
+      throw new MailAnalysisError('invalid_count', '模型返回的邮件数量不匹配，请重试。');
+    }
+    throw new MailAnalysisError('invalid_decision', '模型返回的邮件标识或字段格式不匹配，请重试。');
+  }
+  return accepted;
 }
 
 export class MailAnalysis {
-  static async analyze(items: MailItem[], settings: MailSettings, config: DataManagerModelConfig): Promise<MailDecision[]> {
+  static async analyze(items: MailItem[], settings: MailSettings, config: DataManagerModelConfig,
+    readTimeout: number = 90000): Promise<MailDecision[]> {
     if (!config.enabled || !config.baseUrl) { throw new Error('请先配置云端模型'); }
     let result = await new CloudModelClient().chatCompletion({ baseUrl: config.baseUrl, apiKey: config.apiKey,
       model: config.model, messages: mailAnalysisMessages(items, settings), temperature: 0.1,
       chatTemplateKwargs: { enable_thinking: false },
-      maxTokens: 4096, readTimeout: 90000, logResponseContent: false });
+      maxTokens: 4096, readTimeout: readTimeout, logResponseContent: false });
     let finish = result.finishReason || '';
     let safeFinish = ['stop', 'length', 'max_tokens', 'max_output_tokens', 'tool_calls', 'content_filter'].indexOf(finish) >= 0 ? finish : 'other';
     AppLogger.info('Mail', 'analysis response batch=' + items.length + ' content_chars=' + result.content.length +
       ' reasoning_chars=' + (result.assistantMessage?.reasoning_content?.length || 0) + ' finish=' + safeFinish);
     if (finish === 'length' || finish === 'max_tokens' || finish === 'max_output_tokens') {
+      // Some providers flag length even when a complete JSON subset is present.
+      // Accept only fully parsed, validated entries; never guess a truncated ID.
+      try {
+        let accepted = parseMailDecisions(result.content, items);
+        if (accepted.length > 0) { return accepted; }
+      } catch (e) { }
       throw new MailAnalysisError('output_truncated', '模型输出达到长度上限，筛选结果被截断，请重试或更换非思考模型。');
     }
     if (finish === 'content_filter') {

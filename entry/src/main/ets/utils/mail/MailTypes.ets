@@ -22,6 +22,7 @@ export interface MailItem {
   reason: string;
   summary: string;
   analysisKey: string;
+  analysisError?: string;
   completed: boolean;
 }
 

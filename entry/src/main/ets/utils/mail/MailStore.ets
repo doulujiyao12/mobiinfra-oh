@@ -25,7 +25,8 @@ export class MailStore {
         !item.id.startsWith('mail:') || !Number.isFinite(item.receivedAt) || typeof item.subject !== 'string' ||
         typeof item.from !== 'string' || typeof item.body !== 'string' || item.body.length > 32000 ||
         typeof item.bodyError !== 'string' || typeof item.summary !== 'string' || typeof item.reason !== 'string' ||
-        typeof item.analysisKey !== 'string' || typeof item.relevant !== 'boolean' || typeof item.completed !== 'boolean')) {
+        typeof item.analysisKey !== 'string' || typeof item.relevant !== 'boolean' || typeof item.completed !== 'boolean' ||
+        (item.analysisError !== undefined && (typeof item.analysisError !== 'string' || item.analysisError.length > 300)))) {
       let fallback = emptyMailSnapshot();
       fallback.day = mailDay(); fallback.accountKey = this.accountKey(); fallback.error = '邮件缓存无法读取，请重新同步';
       return fallback;

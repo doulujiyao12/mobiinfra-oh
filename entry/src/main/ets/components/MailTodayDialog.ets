@@ -50,7 +50,7 @@ struct MailTodayContent {
     Column({ space: 12 }) {
       Column({ space: 9 }) {
         Row() {
-          Text(item.analysisKey && item.summary ? 'AI 总结' : '邮件原文 · 待总结')
+          Text(item.analysisKey && item.summary ? 'AI 总结' : (item.analysisError ? 'AI 总结未完成' : '邮件原文 · 待总结'))
             .fontSize(12).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#007AFF')).layoutWeight(1)
           Text(this.receivedTime(item)).fontSize(12).fontColor(AppTheme.text('#7C8496'))
         }.width('100%')
@@ -75,6 +75,10 @@ struct MailTodayContent {
           this.original = item.analysisKey && item.summary ? '' : this.expanded;
         })
       if (this.expanded === item.id) {
+        if (!item.analysisKey && item.analysisError) {
+          Text(item.analysisError + ' 可重新读取邮件以重试。').fontSize(13).lineHeight(21)
+            .fontColor(AppTheme.text('#B45309')).width('100%')
+        }
         if (item.analysisKey && item.reason) {
           Text('关注理由 · ' + item.reason).fontSize(13).lineHeight(21).fontColor(AppTheme.text('#60697C')).width('100%')
         }
