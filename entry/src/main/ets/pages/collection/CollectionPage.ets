@@ -50,6 +50,9 @@ export struct CollectionPage {
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
+  @Prop calendarSourceSyncReady: boolean = false;
+  @Prop mailSourceSyncReady: boolean = false;
+  @Prop sourceSyncPending: string = '';
   @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
   @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string =
     DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
@@ -78,6 +81,8 @@ export struct CollectionPage {
   onOpenDataCollectionSettings: () => void = () => {};
   onOpenCalendarAnalysis: () => void = () => {};
   onOpenMailAnalysis: () => void = () => {};
+  onQuickSyncCalendar: () => void = (): void => {};
+  onQuickSyncMail: () => void = (): void => {};
   onRunWechatAutoSummary: (request: WechatAutoSummaryRequest) => Promise<void> =
     async (request: WechatAutoSummaryRequest) => {};
   onStopWechatAutoSummary: () => void = (): void => {};
@@ -590,9 +595,13 @@ export struct CollectionPage {
       tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
     CollectionFormDivider()
     CollectionSourceRow({ title: '日历分析', detail: '日程同步与一周安排', icon: $r('app.media.source_calendar'),
+      showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
       tint: '#FF9500', onOpen: (): void => { this.onOpenCalendarAnalysis(); } })
     CollectionFormDivider()
     CollectionSourceRow({ title: '邮箱分析', detail: '邮箱设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
+      showSync: true, syncEnabled: this.mailSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'mail', onSync: this.onQuickSyncMail,
       onOpen: (): void => { this.onOpenMailAnalysis(); } })
   }
 

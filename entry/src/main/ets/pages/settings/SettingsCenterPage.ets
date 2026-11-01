@@ -228,6 +228,11 @@ export struct SettingsCenterPage {
   onDeleteDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onRefreshDownloadedModels: () => void = () => {};
   @Prop calendarMemoryRefreshing: boolean = false;
+  @Prop calendarSourceSyncReady: boolean = false;
+  @Prop mailSourceSyncReady: boolean = false;
+  @Prop sourceSyncPending: string = '';
+  onQuickSyncCalendar: () => void = (): void => {};
+  onQuickSyncMail: () => void = (): void => {};
   onSyncCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
   onReadCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
   onMailChanged: () => void = (): void => {};
@@ -1109,9 +1114,13 @@ export struct SettingsCenterPage {
 
   @Builder CollectionSourceEntries() {
     CollectionSourceRow({ title: '日历分析', detail: '同步日程与个人记忆', icon: $r('app.media.source_calendar'),
+      showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.calendarMemoryRefreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
       tint: '#FF9500', onOpen: (): void => { this.openSection(SettingsSectionId.CalendarAnalysis); } })
     CollectionFormDivider()
     CollectionSourceRow({ title: '邮箱分析', detail: '账号设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
+      showSync: true, syncEnabled: this.mailSourceSyncReady && !this.calendarMemoryRefreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'mail', onSync: this.onQuickSyncMail,
       onOpen: (): void => { this.openSection(SettingsSectionId.MailAnalysis); } })
     CollectionFormDivider()
     CollectionSourceRow({ title: '微信采集', detail: '默认范围与高级参数', icon: $r('app.media.source_wechat'),

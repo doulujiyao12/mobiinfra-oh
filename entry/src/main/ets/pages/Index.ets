@@ -662,6 +662,10 @@ struct Index {
   @State pcServerStatusText: string = 'PC Server 未连接';
   @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
+  @State private calendarSourceSyncReady: boolean = false;
+  @State private mailSourceSyncReady: boolean = false;
+  @State private sourceSyncPending: string = '';
+  private sourceReadinessEpoch: number = 0;
   @State private memoryOperationKind: MemoryOperationKind = 'manual';
   private memoryOperationEpoch: number = 0;
   @State private startupSourceSyncRunning: boolean = false;
@@ -2399,6 +2403,7 @@ struct Index {
   }
 
   private reloadDataManagerViewModels(): void {
+    this.reloadCollectionSourceSyncReadiness();
     if (this.dataManagerFacade === null) {
       dataManagerWarn('reloadDataManagerViewModels skipped: facade is null');
       return;
@@ -2976,6 +2981,40 @@ struct Index {
     }
   }
 
+  private async reloadCollectionSourceSyncReadiness(): Promise<void> {
+    const epoch = ++this.sourceReadinessEpoch;
+    if (this.filesDir.length === 0) {
+      this.calendarSourceSyncReady = false; this.mailSourceSyncReady = false;
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    let ready: boolean[] = await Promise.all([
+      CalendarMemoryService.canAutoRefresh(context).catch((): boolean => false),
+      MailService.canAutoRefresh(this.filesDir).catch((): boolean => false)
+    ]);
+    if (epoch !== this.sourceReadinessEpoch) { return; }
+    this.calendarSourceSyncReady = ready[0]; this.mailSourceSyncReady = ready[1];
+  }
+
+  private async syncCollectionSource(source: 'calendar' | 'mail'): Promise<void> {
+    if (this.dataManagerRefreshing || this.sourceSyncPending.length > 0) { return; }
+    this.sourceSyncPending = source;
+    try {
+      // Recheck at click time: permissions or saved configuration may have changed.
+      await this.reloadCollectionSourceSyncReadiness();
+      const ready = source === 'calendar' ? this.calendarSourceSyncReady : this.mailSourceSyncReady;
+      if (!ready) {
+        showToastSafely(source === 'calendar' ? '请先在日历分析中开启并授权日历' : '请先在邮箱分析中配置并开启邮箱', 3000);
+        return;
+      }
+      if (source === 'calendar') { await this.syncCalendarMemory(true); }
+      else { await this.syncMailReminders(); }
+    } catch (e) {
+      // The existing progress overlay owns sync failures and its retry action.
+      if (!this.dataManagerSyncFailed) { showToastSafely((e as Error).message, 3000); }
+    } finally { this.sourceSyncPending = ''; }
+  }
+
   private async syncMailReminders(): Promise<void> {
     if (this.dataManagerRefreshing) { throw new Error('正在同步，请稍候'); }
     if (new MailStore(this.filesDir).settings().aiAllowed && !this.ensureAiServiceLogin()) {
@@ -2996,10 +3035,11 @@ struct Index {
       throw new Error(this.dataManagerProgressMessage);
     }
     finally { this.endMemoryOperation(); this.reloadDataManagerViewModels(); }
+    showToastSafely('同步完成，可在 首页 → 为你提醒 查看', 3500);
   }
 
   private async syncCalendarMemory(readCalendar: boolean = false): Promise<void> {
-    if (this.dataManagerFacade === null) { return; }
+    if (this.dataManagerFacade === null) { throw new Error('日历服务正在初始化，请稍后重试'); }
     if (!this.beginMemoryOperation('calendar', readCalendar ? '读取日历' : '分析日历',
       readCalendar ? '正在读取已授权的日历安排' : '正在检查日历记忆变化')) { throw new Error('正在处理其他数据，请稍候'); }
     let scheduler = new StartupSourceSync(this.filesDir);
@@ -3019,6 +3059,7 @@ struct Index {
       this.dataManagerProgressMessage = (e as Error).message;
       throw new Error(this.dataManagerProgressMessage);
     } finally { this.endMemoryOperation(); this.reloadDataManagerViewModels(); }
+    if (readCalendar) { showToastSafely('同步完成，可在 首页 → 为你提醒 查看', 3500); }
   }
 
   private maybeShowSyncReminder(): void {
@@ -3583,6 +3624,9 @@ struct Index {
   }
 
   private onCurrentTabChanged(): void {
+    if (this.currentTab === MainTabIndex.Summary || this.currentTab === MainTabIndex.Mine) {
+      this.reloadCollectionSourceSyncReadiness();
+    }
     // An explicit tab switch ends the return path of an earlier settings visit.
     if (this.currentTab !== MainTabIndex.Mine) { this.clearSettingsOrigin(); }
     if (this.pageVisible) {
@@ -8055,6 +8099,11 @@ struct Index {
         collectionModule: $collectionModule,
         viewModels: this.collectionViews,
         refreshing: this.dataManagerRefreshing,
+        calendarSourceSyncReady: this.calendarSourceSyncReady,
+        mailSourceSyncReady: this.mailSourceSyncReady,
+        sourceSyncPending: this.sourceSyncPending,
+        onQuickSyncCalendar: (): void => { this.syncCollectionSource('calendar'); },
+        onQuickSyncMail: (): void => { this.syncCollectionSource('mail'); },
         wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
         wechatAutoSummaryCanStop: this.wechatAutoSummaryCanStop,
         wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
@@ -8173,6 +8222,11 @@ struct Index {
     .tabBar(this.tabBarStyle(MainTabIndex.Task))
     TabContent() {
       SettingsCenterPage({
+        calendarSourceSyncReady: this.calendarSourceSyncReady,
+        mailSourceSyncReady: this.mailSourceSyncReady,
+        sourceSyncPending: this.sourceSyncPending,
+        onQuickSyncCalendar: (): void => { this.syncCollectionSource('calendar'); },
+        onQuickSyncMail: (): void => { this.syncCollectionSource('mail'); },
         onBackRequest: (): boolean => { return this.navigateSettingsBack(); },
         onMailChanged: (): void => { this.reloadDataManagerViewModels(); },
         onSyncMail: async (): Promise<void> => { await this.syncMailReminders(); },

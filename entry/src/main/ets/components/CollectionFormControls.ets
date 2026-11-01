@@ -103,19 +103,33 @@ export struct CollectionSourceRow {
   @Prop detail: string = '';
   @Prop icon: Resource = $r('app.media.source_calendar');
   @Prop tint: string = '#007AFF';
+  @Prop showSync: boolean = false;
+  @Prop syncEnabled: boolean = false;
+  @Prop syncing: boolean = false;
   onOpen: () => void = (): void => {};
+  onSync: () => void = (): void => {};
   build() {
-    Row({ space: 13 }) {
-      Image(this.icon).width(34).height(34).padding(7)
-        .backgroundColor(AppTheme.filledBackground(this.tint)).borderRadius(10)
-      Column({ space: 4 }) {
-        Text(this.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033')).width('100%')
-        if (this.detail) {
-          Text(this.detail).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#747C8A')).width('100%')
-        }
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Text('›').fontSize(23).fontColor(AppTheme.text('#A0A6B2')).width(16).textAlign(TextAlign.Center)
+    Row({ space: 12 }) {
+      Row({ space: 13 }) {
+        Image(this.icon).width(34).height(34).padding(7)
+          .backgroundColor(AppTheme.filledBackground(this.tint)).borderRadius(10)
+        Column({ space: 4 }) {
+          Text(this.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033')).width('100%')
+          if (this.detail) {
+            Text(this.detail).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#747C8A')).width('100%')
+          }
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      }.layoutWeight(1).constraintSize({ minHeight: 46 }).onClick(this.onOpen).accessibilityText(this.title)
+      if (this.showSync) {
+        Button(this.syncing ? '同步中' : '同步').fontSize(14).height(34)
+          .padding({ left: 13, right: 13 })
+          .fontColor(AppTheme.text(this.syncEnabled && !this.syncing ? '#007AFF' : '#A0A6B2'))
+          .backgroundColor(AppTheme.background(this.syncEnabled && !this.syncing ? '#EEF4FF' : '#F2F2F7'))
+          .enabled(this.syncEnabled && !this.syncing).onClick(this.onSync)
+          .accessibilityText(this.title + (this.syncing ? '同步中' : '同步'))
+      }
+      Text('›').fontSize(23).fontColor(AppTheme.text('#A0A6B2')).width(16).height(46).textAlign(TextAlign.Center)
+        .onClick(this.onOpen).accessibilityText('打开' + this.title)
     }.width('100%').constraintSize({ minHeight: 70 }).padding({ left: 16, right: 16, top: 12, bottom: 12 })
-      .onClick(this.onOpen).accessibilityText(this.title)
   }
 }
