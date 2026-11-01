@@ -455,7 +455,7 @@ export class DataManagerFacade {
     let chatMessage = chatSummary.processedParts > 0 ?
       `已检查近 7 天未处理聊天，提取 ${chatSummary.factCount} 条相关信息` : '';
     let currentSnapshot = this.buildDailyLogSnapshot(fullCheck);
-    currentSnapshot.pipeline_hash = this.storage.sha256Text('sync-v2:' + this.modelClient.profileCacheIdentity(modelConfig) +
+    currentSnapshot.pipeline_hash = this.storage.sha256Text('sync-v3-chat-context:' + this.modelClient.profileCacheIdentity(modelConfig) +
       ':' + groupingConfig.baseUrl + ':' + (groupingConfig.model || '') + ':' + String(groupingConfig.enabled));
     let previousSnapshot = this.loadDailyLogSnapshot();
     // Automatic calendar updates publish a new index generation without moving

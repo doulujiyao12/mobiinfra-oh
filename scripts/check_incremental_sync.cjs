@@ -1564,5 +1564,186 @@ test('stream: real SSE transport decodes UTF-8, separates reasoning and preserve
   assert.equal(deltas,1);assert.equal(destroyed,before+1,'Callback failure destroys the individual native HTTP request');
 });
 
+const chatContext = load(base+'ChatCollectionContext');
+const comfort = load('entry/src/main/ets/pages/home/HomeEmotionalSupport');
+function chatFixture(id='wx',extra={}) {return event(id,'2026-10-31',{source_state_file:'2026-10/com.tencent.mm__basic-gui-task.md.state.json',
+  workflow_scene_ids:[3],summary:'小王请我明天发送PPT',normalized_fact:'小王｜2026-10-31 09:00：请明天发PPT；我｜09:10：已经发了',
+  source_refs:['2026-10-31/wechat.md#1'],...extra});}
+function contextFixture() {const index=new chatContext.ChatCollectionContextIndex();
+  index.add('workflow:run-a','2026-10-31/wechat.md#1','聊天对象：小王\n小王｜09:00：请明天发PPT',['runs/a/1.jpg'],1);
+  index.add('workflow:run-a','2026-10-31/wechat.md#2','聊天对象：小王\n我｜09:10：已经发了\n小王｜09:11：收到',['runs/a/2.jpg'],2);
+  index.add('workflow:run-b','2026-10-31/wechat.md#3','小王｜10:00：请再发一份',[],1);return index;}
+test('chat context: same collection includes the answer and retains page evidence without another collection',()=>{
+  const index=contextFixture(),e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  const batches=chatContext.chatBatchesForEvents([e],index.all());assert.equal(batches.length,1);
+  assert.ok(batches[0].entries[1].text.includes('已经发了'));assert.ok(!JSON.stringify(batches).includes('再发一份'));
+  assert.equal(batches[0].entries[1].image_paths[0],'runs/a/2.jpg');assert.equal(e.chat_context.complete,true);
+});
+test('chat context: source identity survives two collections with the same contact on the same date',()=>{
+  const index=contextFixture(),a=index.forRefs(['2026-10-31/wechat.md#1'],x=>storage.sha256Text(x));
+  const b=index.forRefs(['2026-10-31/wechat.md#3'],x=>storage.sha256Text(x));assert.notDeepEqual(clone(a.batch_ids),clone(b.batch_ids));
+  assert.equal(index.forRefs(['2026-10-31/wechat.md#1','2026-10-31/wechat.md#3'],x=>storage.sha256Text(x)).complete,false);
+  assert.equal(index.forRefs(['unknown'],x=>storage.sha256Text(x)).complete,false);
+});
+test('chat context: a changed answer invalidates only its batch fingerprint and fingerprints are cached',()=>{
+  const index=contextFixture();let chars=0;const hash=x=>{chars+=x.length;return storage.sha256Text(x);};
+  const a=index.forRefs(['2026-10-31/wechat.md#1'],hash),b=index.forRefs(['2026-10-31/wechat.md#3'],hash);
+  const before=chars;for(let i=0;i<30;i++)index.forRefs(['2026-10-31/wechat.md#1'],hash);
+  assert.ok((chars-before)/30<250,'Historical page text is not rehashed for each event');
+  index.add('workflow:run-a','2026-10-31/wechat.md#4','我：收到',[],3);
+  assert.notEqual(index.forRefs(['2026-10-31/wechat.md#1'],hash).input_hash,a.input_hash);
+  assert.equal(index.forRefs(['2026-10-31/wechat.md#3'],hash).input_hash,b.input_hash);
+});
+test('chat context: oversized context is bounded and cannot certify an unresolved task',()=>{
+  const index=new chatContext.ChatCollectionContextIndex();index.add('large','p','起始'+ '字'.repeat(60000)+'已完成',[],1);
+  const batch=index.all()[0];assert.equal(batch.complete,false);assert.ok(batch.entries[0].text.length<=48000);
+  assert.ok(batch.entries[0].text.endsWith('已完成'));assert.equal(index.forRefs(['p'],x=>storage.sha256Text(x)).complete,false);
+});
+test('chat context: resolved, unknown actor, fabricated name and foreign evidence are not pending ownership',()=>{
+  const index=contextFixture(),e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  const raw={subject:'other',subject_name:'小王',action_owner:'self',action_owner_name:'',status:'resolved',evidence_source_refs:['2026-10-31/wechat.md#2']};
+  const a=chatContext.normalizeChatAttribution(raw,e,index.all());assert.equal(a.status,'resolved');assert.equal(a.subject_name,'小王');
+  assert.equal(chatContext.normalizeChatAttribution({...raw,status:'pending',action_owner:'other',action_owner_name:'小赵'},e,index.all()).action_owner,'unknown');
+  assert.equal(chatContext.normalizeChatAttribution({...raw,evidence_source_refs:['2026-10-31/wechat.md#3']},e,index.all()).status,'unknown');
+});
+test('chat context: generic pronouns cannot become third-party titles',()=>{
+  for(const name of ['对方','我','你','未知发送人','群友','未出现的人'])assert.equal(chatContext.verifiedChatPersonName(name,'小王说对方很累'),'');
+  assert.equal(chatContext.chatPersonTitle('最近有点累',['小王','小王']),'小王：最近有点累');
+  assert.equal(chatContext.chatPersonTitle('小王：最近有点累',['小王']),'小王：最近有点累');
+});
+test('chat context: persisted workflow pages recover one collection even when no image was saved',()=>{
+  reset();const daily=paths.dailyLogRoot+'/2026-10-31/com.tencent.mm__basic.md';
+  storage.writeTextAtomic(daily,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3},latest_entry_index:2})+'\n-->\n\n1. 小王说请发PPT\n\n2. 我说已发送，小王说收到\n');
+  storage.writeJsonAtomic(paths.workflowRunsRoot+'/run-a/run_summary.json',{steps:{'3.1':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'小王说请发PPT'}},
+    '3.2':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'我说已发送，小王说收到'}}}});
+  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  const context=service.chatContexts.forRefs(['2026-10-31/com.tencent.mm__basic.md#1'],x=>storage.sha256Text(x));
+  assert.equal(context.complete,true);const batches=service.loadChatContextBatches([chatFixture('wx',{chat_context:context})]);
+  assert.equal(batches[0].entries.length,2);assert.ok(batches[0].entries[1].text.includes('已发送'));
+});
+test('chat context: fast WeChat collection uses run ID and workflow metadata keeps collection boundaries',()=>{
+  reset();const dir=paths.dailyLogRoot+'/2026-10-31/';
+  storage.writeTextAtomic(dir+'com.tencent.mm__wechat_auto_summary__r.md','<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3,run_id:'quick-r'}})+'\n-->\n\n1. 小王：我很累\n');
+  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  const ctx=service.chatContexts.forRefs(['2026-10-31/com.tencent.mm__wechat_auto_summary__r.md#1'],x=>storage.sha256Text(x));
+  assert.equal(ctx.batch_ids[0],'wechat:quick-r');assert.equal(ctx.complete,true);
+  const parsed=load(base+'DataManagerUtils').parseDailyLogDocument('<!-- DAILY_LOG_METADATA\n'+JSON.stringify({entry_batch_ids:{'1':'workflow:old','2':'workflow:new'}})+'\n-->\n');
+  assert.equal(parsed.entry_batch_ids['1'],'workflow:old');assert.equal(parsed.entry_batch_ids['2'],'workflow:new');
+});
+function concernResponse(extra={}) {return JSON.stringify({concerns:[{subject:'other',subject_name:'小王',title:'最近压力大',summary:'聊聊如何关心小王',opening:'想聊聊怎样关心小王吗？',category:'relationship',evidence_refs:['record-1'],...extra}]});}
+test('chat context: real sync requests see later-page answers across the eight-event chunk boundary',async()=>{
+  reset();const index=contextFixture(),events=Array.from({length:10},(_,i)=>chatFixture('wx'+i));
+  for(const e of events)e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  let calls=0;cloudHandler=async options=>{calls++;assert.equal(options.baseUrl,config.baseUrl);
+    const input=JSON.parse(options.messages[1].content);assert.equal(input.chat_batches.length,1);
+    assert.ok(input.chat_batches[0].entries[1].text.includes('已经发了'));
+    assert.ok(!JSON.stringify(input).includes('再发一份'));assert.ok(options.messages[0].content.includes('不同联系人/群'));
+    return JSON.stringify({events:input.events.map(e=>({event_id:e.event_id,keywords:['PPT'],domains:['work'],entities:[],
+      todo:{type:'plan',deadline:'2026-11-01',text:'发PPT',agent_task:''},
+      chat:{subject:'self',subject_name:'',action_owner:'self',action_owner_name:'',user_involved:true,status:'resolved',
+        evidence_source_refs:['2026-10-31/wechat.md#2']}}))});};
+  const result=await new DataPipelineModelClient().enrichEvents(events,config,undefined,index.all());
+  assert.equal(calls,2);assert.equal(result.length,10);assert.ok(result.every(e=>e.todo.text===''&&e.chat_attribution.status==='resolved'));
+});
+test('chat context: a third-party task keeps its owner and never inherits a GUI action',async()=>{
+  reset();const index=contextFixture(),e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  cloudHandler=async()=>JSON.stringify({events:[{event_id:e.event_id,keywords:['商品'],domains:['other'],entities:[],
+    todo:{type:'buy',deadline:'',text:'小王要购买商品',agent_task:'打开淘宝下单'},
+    chat:{subject:'other',subject_name:'小王',action_owner:'other',action_owner_name:'小王',user_involved:true,status:'pending',
+      evidence_source_refs:e.source_refs}}]});
+  const [result]=await new DataPipelineModelClient().enrichEvents([e],config,undefined,index.all());
+  assert.equal(result.chat_attribution.action_owner_name,'小王');assert.equal(result.todo.type,'buy');assert.equal(result.todo.agent_task,'');
+});
+test('chat context: unresolved but unrelated, incomplete, or un-attributed output cannot become a user reminder',async()=>{
+  reset();const index=contextFixture();let raw={subject:'other',subject_name:'小王',action_owner:'other',action_owner_name:'小王',user_involved:false,status:'pending',evidence_source_refs:['2026-10-31/wechat.md#1']};
+  cloudHandler=async options=>JSON.stringify({events:JSON.parse(options.messages[1].content).events.map(e=>({event_id:e.event_id,keywords:[],domains:['other'],entities:[],todo:{type:'buy',deadline:'',text:'购买',agent_task:''},chat:raw}))});
+  const e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  assert.equal((await new DataPipelineModelClient().enrichEvents([e],config,undefined,index.all()))[0].todo.type,'');
+  raw={...raw,user_involved:true};e.chat_context.complete=false;
+  assert.equal((await new DataPipelineModelClient().enrichEvents([e],config,undefined,index.all()))[0].todo.type,'');
+  raw={};e.chat_context.complete=true;
+  assert.equal((await new DataPipelineModelClient().enrichEvents([e],config,undefined,index.all()))[0].todo.type,'');
+});
+test('chat context: local cache changes when same-batch evidence changes, not on another batch',()=>{
+  const index=contextFixture(),e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  const before=load(base+'IndexService').eventEnrichInputFingerprint(e);
+  index.add('workflow:run-b','other','小王：换了安排',[],2);
+  e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));assert.equal(load(base+'IndexService').eventEnrichInputFingerprint(e),before);
+  index.add('workflow:run-a','same','小王：任务已取消',[],3);
+  e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));assert.notEqual(load(base+'IndexService').eventEnrichInputFingerprint(e),before);
+});
+test('chat context: comfort names the actual person and chat keeps that identity',()=>{
+  const e=chatFixture('wx',{summary:'小王很疲惫',normalized_fact:'小王：我最近压力很大；我：想帮帮你'});
+  const result=comfort.parseHomeComfortConcerns(concernResponse(),'x',[e]);assert.equal(result[0].title,'小王：最近压力大');
+  assert.equal(result[0].subjectName,'小王');const messages=comfort.buildHomeComfortChatMessages(result[0],[],[e],'2026-10-31');
+  assert.ok(messages[0].content.includes('情绪、经历或任务'));assert.ok(messages[0].content.includes('"subject_name": "小王"'));
+});
+test('chat context: comfort drops unknown or invented subjects and another person cannot become self',()=>{
+  const e=chatFixture('wx',{chat_attribution:{subject:'other',subject_name:'小王'}});
+  assert.equal(comfort.parseHomeComfortConcerns(concernResponse({subject:'self'}),'x',[e]).length,0);
+  assert.equal(comfort.parseHomeComfortConcerns(concernResponse({subject_name:'小赵'}),'x',[e]).length,0);
+  assert.equal(comfort.parseHomeComfortConcerns(concernResponse({subject:'unknown'}),'x',[e]).length,0);
+});
+test('chat context: reminder titles name the third-party action owner',()=>{
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const service=new HomeRecommendationService(paths,storage,new Model(),new IndexService(paths,storage,new Model()));
+  const e=chatFixture('wx',{chat_attribution:{action_owner:'other',action_owner_name:'小王'}});
+  assert.equal(service.recommendationTitle({title:'发送PPT'},['wx'],{wx:e}),'小王：发送PPT');
+});
+test('chat migration: historical chat is upgraded once while unchanged shopping and subsequent sync stay cached',async()=>{
+  reset();const model=new Model(),service=new IndexService(paths,storage,model);
+  const raw='com.tencent.mm__wechat_auto_summary__old.md',ref='2026-10-31/'+raw+'#1';
+  const chatState=paths.outputStatePath('2026-10','wechat.md'),shoppingState=paths.outputStatePath('2026-10','shopping.md');
+  storage.writeTextAtomic(paths.dailyLogRoot+'/2026-10-31/'+raw,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3,run_id:'old'}})+'\n-->\n\n1. 小王：请明天发PPT\n');
+  storage.writeJsonAtomic(chatState,{metadata:{},records:[{...reviewRecord(1),source_refs:[ref],workflow_scene_ids:[3]}]});
+  storage.writeJsonAtomic(shoppingState,{metadata:{},records:[reviewRecord(2)]});
+  await service.build(config);const all=service.loadEvents(),chatId=Object.keys(all).find(id=>all[id].workflow_scene_ids.includes(3));
+  assert.ok(all[chatId].chat_context?.complete);const partition=storage.readJson(paths.indexesRoot+'/events/2026-10.json',null);
+  const legacy=partition.events.find(e=>e.event_id===chatId);delete legacy.chat_context;storage.writeJsonAtomic(paths.indexesRoot+'/events/2026-10.json',partition);
+  const manifest=storage.readJson(paths.indexesRoot+'/manifest.json',null);
+  manifest.sources['2026-10/wechat.md.state.json'].event_input_hashes[chatId]='legacy-without-batch';
+  storage.writeJsonAtomic(paths.indexesRoot+'/manifest.json',manifest);
+  storage.removeFile(paths.consolidationRoot+'/sync-cache/events/'+storage.sha256Text(chatId)+'.json');
+  const receipt=storage.readJson(paths.indexesRoot+'/completion.json',null);delete receipt.chat_context_policy;storage.writeJsonAtomic(paths.indexesRoot+'/completion.json',receipt);
+  const selection=service.changedSourceSelection(config,[]);assert.deepEqual(clone(selection.sources),['2026-10/wechat.md.state.json']);
+  model.enriched.length=0;await service.build(config,undefined,selection);assert.deepEqual(model.enriched,[chatId]);
+  const count=model.enriched.length;await service.build(config);assert.equal(model.enriched.length,count);
+  assert.equal(service.completion().chat_context_policy,chatContext.CHAT_CONTEXT_POLICY);
+  assert.ok(Object.values(service.loadEvents()).some(e=>e.source_state_file.includes('shopping.md')));
+});
+test('chat migration: a user action concerning someone else also names the recipient',()=>{
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const service=new HomeRecommendationService(paths,storage,new Model(),new IndexService(paths,storage,new Model()));
+  const e=chatFixture('wx',{chat_attribution:{action_owner:'self',subject:'other',subject_name:'小王'}});
+  assert.equal(service.recommendationTitle({title:'帮忙确认材料'},['wx'],{wx:e}),'关于小王：帮忙确认材料');
+});
+test('chat evidence: one forged cross-batch citation cannot be hidden beside a valid citation',()=>{
+  const index=contextFixture(),e=chatFixture();e.chat_context=index.forRefs(e.source_refs,x=>storage.sha256Text(x));
+  const raw={subject:'self',action_owner:'self',user_involved:true,status:'pending',
+    evidence_source_refs:['2026-10-31/wechat.md#1','2026-10-31/wechat.md#3']};
+  assert.equal(chatContext.normalizeChatAttribution(raw,e,index.all()).status,'unknown');
+});
+test('chat evidence: duplicate legacy summaries in two runs never guess a collection identity',()=>{
+  reset();const file='com.tencent.mm__basic.md',daily=paths.dailyLogRoot+'/2026-10-31/'+file;
+  storage.writeTextAtomic(daily,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3}})+'\n-->\n\n1. 小王说请发PPT\n');
+  for(const run of ['a','b'])storage.writeJsonAtomic(paths.workflowRunsRoot+'/'+run+'/run_summary.json',
+    {steps:{'1':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'小王说请发PPT'}}}});
+  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  assert.equal(service.chatContexts.forRefs(['2026-10-31/'+file+'#1'],x=>storage.sha256Text(x)).complete,false);
+});
+test('chat evidence: consolidation merges overlapping pages only within the same collection',async()=>{
+  reset();const filename='wechat.md';
+  const entry=(id,batch)=>({source_date:'2026-10-31',file_name:filename,entry_index:id,entry_text:'小王明天交材料',workflow_metadata:{task_scene_id:3},
+    workflow_scene_id:3,source_ref:'2026-10-31/'+filename+'#'+id,collection_batch_id:batch});
+  const entries=[entry(1,'workflow:a'),entry(2,'workflow:a'),entry(3,'workflow:b')];
+  const model={async splitEntriesIntoFacts(values){return Object.fromEntries(values.map(e=>[e.source_ref,[{
+    summary:e.entry_text,normalized_fact:e.entry_text,event_date:e.source_date,tags:[],model_notes:'',raw_excerpt:e.entry_text,
+    source_ref:e.source_ref,source_date:e.source_date,workflow_scene_id:3,dedup_text:e.entry_text}]]));},
+    async decideDedup(fact,records){assert.equal(records.length,0,'A new collection cannot receive old collection candidates');
+      return {decision:'new',matched_record_ids:[],reason:'no_candidates',merged_summary:'',merged_fact:'',merged_tags:[]};}};
+  const service=new ConsolidationService(paths,storage,model);
+  const state=await service.consolidateGroup({month:'2026-10',fileName:filename,entries},config,5);
+  assert.equal(state.records.length,2);assert.equal(state.records[0].source_refs.length,2);assert.equal(state.records[1].source_refs.length,1);
+});
 (async()=>{const selected=cases.filter(([name])=>!process.env.SYNC_TEST_FILTER||name.includes(process.env.SYNC_TEST_FILTER));for(const[name,run]of selected){await run();console.log('PASS '+name);}console.log(selected.length+' incremental sync checks passed');})()
   .catch(error=>{console.error(error.stack);process.exitCode=1;});

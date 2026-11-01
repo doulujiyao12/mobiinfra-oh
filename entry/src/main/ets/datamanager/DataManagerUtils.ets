@@ -11,6 +11,7 @@ import {
   JsonMap,
   NumberedEntry,
   StringArrayMap,
+  StringMap,
   SourceEntry,
   createStringArrayMap
 } from './DataManagerTypes';
@@ -244,6 +245,10 @@ export function parseDailyLogDocument(content: string): DailyLogParseResult {
         result.workflow_metadata = parsed['workflow_metadata'] as JsonMap;
       }
       let latest = Number(parsed['latest_entry_index']);
+      let batches = parsed['entry_batch_ids'];
+      if (batches && typeof batches === 'object' && !Array.isArray(batches)) {
+        result.entry_batch_ids = batches as StringMap;
+      }
       result.latest_entry_index = isNaN(latest) ? 0 : latest;
     }
   } catch (e) {

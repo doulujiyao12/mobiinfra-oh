@@ -40,7 +40,7 @@ import {
 } from './DataManagerUtils';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import { ChatMemorySync } from './ChatMemorySync';
-import { normalizeMemorySceneIds } from '../utils/WorkflowSceneConfig';
+import { normalizeMemorySceneIds, memorySceneLabel } from '../utils/WorkflowSceneConfig';
 
 export interface ConsolidationResult {
   sourceEntries: number;
@@ -304,6 +304,8 @@ export class ConsolidationService {
           }
           let metadata: JsonMap = document.workflow_metadata || createJsonMap();
           entries.push({
+            collection_batch_id: document.entry_batch_ids ? normalizeFreeText(document.entry_batch_ids[String(index)]) :
+              normalizeFreeText(metadata['run_id']) ? 'wechat:' + normalizeFreeText(metadata['run_id']) : '',
             source_date: day,
             file_name: fileName,
             entry_index: index,
@@ -393,6 +395,8 @@ export class ConsolidationService {
       totalFacts += (factsBySource[entry.source_ref] || []).length;
     });
     let processedFacts = 0;
+    let entryBatches: StringMap = {};
+    group.entries.forEach((item: SourceEntry) => { entryBatches[item.source_ref] = item.collection_batch_id || ''; });
     for (let entry of pendingEntries) {
       let facts = factsBySource[entry.source_ref] || [];
       for (let fact of facts) {
@@ -400,6 +404,11 @@ export class ConsolidationService {
         let percent = startPercent + Math.round((endPercent - startPercent) * processedFacts / Math.max(1, totalFacts));
         this.emitProgress(progress, '语义去重', `整理 ${group.fileName} (${processedFacts}/${Math.max(1, totalFacts)})`, processedFacts, Math.max(1, totalFacts), percent);
         let scopedRecords = selectRecentScopeRecords(records, fact);
+        if (memorySceneLabel(entry.workflow_scene_id) === '聊天' && !/^app-chat__(local|cloud)__/.test(entry.file_name)) {
+          let batchId = entry.collection_batch_id || '';
+          scopedRecords = scopedRecords.filter((record: AggregatedRecord): boolean => record.source_refs.some((ref: string): boolean =>
+            ref === entry.source_ref || (batchId.length > 0 && entryBatches[ref] === batchId)));
+        }
         let exactMatch = findExactExistingMatch(scopedRecords, fact);
         if (exactMatch !== null) {
           let exactDecision: DedupDecision = {

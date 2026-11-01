@@ -38,6 +38,7 @@ export function createJsonMap(): JsonMap {
 }
 
 export interface DailyLogParseResult {
+  entry_batch_ids?: StringMap;
   workflow_metadata: JsonMap;
   latest_entry_index: number;
   body: string;
@@ -141,6 +142,7 @@ export interface DailyLogMetadata {
 }
 
 export interface SourceEntry {
+  collection_batch_id?: string;
   source_date: string;
   file_name: string;
   entry_index: number;
@@ -210,7 +212,39 @@ export interface IndexedEventTodo {
   agent_task: string;
 }
 
+export interface ChatCollectionEntry {
+  source_ref: string;
+  text: string;
+  image_paths: string[];
+  order: number;
+}
+
+export interface ChatCollectionBatch {
+  batch_id: string;
+  entries: ChatCollectionEntry[];
+  complete: boolean;
+}
+
+export interface ChatEventContext {
+  policy: string;
+  batch_ids: string[];
+  input_hash: string;
+  complete: boolean;
+}
+
+export interface ChatEventAttribution {
+  user_involved: boolean;
+  subject: string;
+  subject_name: string;
+  action_owner: string;
+  action_owner_name: string;
+  status: string;
+  evidence_source_refs: string[];
+}
+
 export interface IndexedEvent {
+  chat_context?: ChatEventContext;
+  chat_attribution?: ChatEventAttribution;
   calendar?: CalendarEventMetadata;
   event_id: string;
   source_state_file: string;
