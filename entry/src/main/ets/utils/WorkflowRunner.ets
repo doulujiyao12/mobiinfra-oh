@@ -1,4 +1,3 @@
-import { PrivacyConsent } from './PrivacyConsent';
 import { AiServiceAccess } from './AiServiceAccess';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
@@ -200,6 +199,7 @@ interface StepResultMap {
 }
 
 interface DailyLogMetadata {
+  entry_batch_ids?: Record<string, string>;
   workflow_metadata: WorkflowJsonMap;
   latest_entry_index: number;
 }
@@ -453,7 +453,6 @@ export class WorkflowRunner {
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
     this.cancellation?.throwIfCancelled();
     AiServiceAccess.requireAllowed();
-    PrivacyConsent.requireAccepted();
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
     this.workflow = WorkflowStorage.validateWorkflowJson(this.workflowJsonForRun(task));
     this.runningTask = task;
@@ -1681,11 +1680,19 @@ export class WorkflowRunner {
     let path = dailyDir + '/' + fileName;
     let latest = 0;
     let body = '';
+    let entryBatches: Record<string, string> = {};
     try {
       if (WorkflowStorage.countFiles(path) > 0) {
         let existing = WorkflowStorage.readText(path);
         let metadataEnd = existing.indexOf('-->');
         if (metadataEnd >= 0) {
+          let start = existing.indexOf('{');
+          if (start >= 0 && start < metadataEnd) {
+            try {
+              let previous = ArkJSON.parse(existing.substring(start, metadataEnd).trim()) as DailyLogMetadata;
+              entryBatches = previous.entry_batch_ids || {};
+            } catch (e) { /* Preserve the existing body even if old metadata is malformed. */ }
+          }
           body = existing.substring(metadataEnd + 3).trim();
         } else {
           body = existing.trim();
@@ -1695,6 +1702,8 @@ export class WorkflowRunner {
     } catch (e) {
     }
     let next = latest + 1;
+    let runParts = this.runDir.replace(/\\/g, '/').split('/');
+    entryBatches[String(next)] = 'workflow:' + runParts[runParts.length - 1];
     let newBody = body.length > 0 ? body + '\n\n' + next + '. ' + text + '\n' : next + '. ' + text + '\n';
     let workflowMetadata: WorkflowJsonMap = {};
     if (this.workflow && this.workflow.metadata) {
@@ -1709,6 +1718,7 @@ export class WorkflowRunner {
       workflowMetadata['task_scene_id'] = this.runningTask.sceneId;
     }
     let metadata: DailyLogMetadata = {
+      entry_batch_ids: entryBatches,
       workflow_metadata: workflowMetadata,
       latest_entry_index: next
     };

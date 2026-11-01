@@ -1,16 +1,20 @@
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
+import { MemoryChangeJournal, MemorySourceChange } from './MemoryChangeJournal';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
+import { ModelStreamActivity } from './ModelStreamActivity';
 import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
-import { IndexService } from './IndexService';
+import { IndexService, IndexSourceSelection } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
+import { SyncMetrics } from './SyncMetrics';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import { ChatMemorySync } from './ChatMemorySync';
-import { shouldOfferSyncReminder, syncSnapshotTimeMs } from './DataManagerSyncReminder';
+import { latestSuccessfulSyncTime, shouldOfferSyncReminder, syncSnapshotTimeMs } from './DataManagerSyncReminder';
+import { StartupSourceSync } from '../utils/StartupSourceSync';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -42,6 +46,7 @@ import {
   QueryResult,
   RefreshSummary,
   DataManagerProgressCallback,
+  DataManagerProgress,
   NumberMap,
   StringMap,
   createDataManagerProgress,
@@ -63,13 +68,30 @@ import {
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
+import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
+import { MailStore } from '../utils/mail/MailStore';
+import { mailOverview, visibleMail, todayMail } from '../utils/mail/MailReminderPolicy';
+
 interface DailyLogSnapshotFile {
   path: string;
   sha256: string;
   entry_count: number;
 }
 
+export interface DataManagerPresentation {
+  home: HomeProfileViewModel;
+  collections: CollectionViewModel[];
+}
+
 interface DailyLogSnapshot {
+  catalog_schema?: string;
+  calendar_hash?: string;
+  index_revision?: string;
+  consolidated_record_count?: number;
+  group_count?: number;
+  group_event_count?: number;
+  recommendations_day?: string;
+  pipeline_hash?: string;
   generated_at: string;
   root: string;
   file_count: number;
@@ -266,6 +288,12 @@ export class DataManagerFacade {
   private homeRecommendationService: HomeRecommendationService;
   private imageResolver: DataManagerImageResolver;
   private avatarService: AvatarService;
+  private syncRunning: boolean = false;
+  private capturedDailyChanges: MemorySourceChange[] = [];
+  private changedDailyPaths: string[] = [];
+  private fullSourceCheck: boolean = true;
+
+  modelActivities(since: number = 0): ModelStreamActivity[] { return this.modelClient.modelActivities(since); }
 
   constructor(filesDir: string) {
     this.storage = new DataManagerStorage();
@@ -302,6 +330,10 @@ export class DataManagerFacade {
 
   hasDailyLogData(): boolean {
     this.ensureReady();
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    if (journal.ready('daily')) {
+      return this.loadDailyLogSnapshot().entry_count > 0 || journal.pending('daily').length > 0;
+    }
     let files = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
     for (let path of files) {
       let content = this.storage.readText(path, '');
@@ -314,6 +346,12 @@ export class DataManagerFacade {
   }
 
   hasDataToSync(): boolean {
+    if (new MemoryChangeJournal(this.paths.filesDir, this.storage).ready('daily')) { return true; }
+    if (this.hasBuiltIndexes() && this.loadDailyLogSnapshot().tree_hash !== this.buildDailyLogSnapshot().tree_hash) {
+      return true;
+    }
+    let calendar = new CalendarMemoryStore(this.paths.filesDir);
+    if (calendar.settings().enabled || calendar.snapshot().syncedAt.length > 0) { return true; }
     if (this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync()) {
       return true;
     }
@@ -324,33 +362,125 @@ export class DataManagerFacade {
 
   shouldRemindToSync(nowMs: number = Date.now(), firstOpenAt: string = ''): boolean {
     let previous = this.loadDailyLogSnapshot();
-    let referenceTime = Number.isFinite(syncSnapshotTimeMs(previous.generated_at)) ?
-      previous.generated_at : firstOpenAt;
+    const successfulAt = this.successfulSyncTime(previous.generated_at);
+    let referenceTime = successfulAt.length > 0 ? successfulAt : firstOpenAt;
     if (!shouldOfferSyncReminder(referenceTime, true, nowMs)) {
       return false;
     }
     let chatSync = new ChatMemorySync(this.paths, this.storage, this.modelClient);
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    if (journal.ready('daily') && journal.ready('gallery')) {
+      let dirty = journal.pending('daily').some((change: MemorySourceChange): boolean =>
+        !/^app-chat__/.test(this.storage.basename(change.path))) || journal.pending('gallery').length > 0;
+      return shouldOfferSyncReminder(referenceTime, dirty || chatSync.hasPendingMessages(nowMs), nowMs);
+    }
     let hasNewRecords = chatSync.hasPendingMessages(nowMs) ||
       this.hasNewDailyLogEntries(previous, this.buildDailyLogSnapshot()) ||
-      GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir, syncSnapshotTimeMs(referenceTime));
+      GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir,
+        Number.isFinite(syncSnapshotTimeMs(previous.generated_at)) ? syncSnapshotTimeMs(previous.generated_at) : 0);
     return shouldOfferSyncReminder(referenceTime, hasNewRecords, nowMs);
   }
 
-  async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
+  async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig,
+    fullCheck: boolean = false): Promise<RefreshSummary> {
+    if (this.syncRunning) { throw new Error('个人记忆正在同步，请稍候'); }
+    this.syncRunning = true;
+    let metrics = new SyncMetrics(); let success = false;
+    this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead();
+    this.modelClient.resetSyncMetrics();
+    try {
+      let result = await this.refreshInternal(modelConfig, (value: DataManagerProgress): void => {
+        metrics.mark(value.stage);
+        if (progress) { progress(value); }
+      }, groupingModelConfig, fullCheck);
+      this.recordSuccessfulMemoryCheck();
+      success = true; return result;
+    } finally {
+      this.indexService.endSyncRead();
+      let hits = this.storage.endReadSession();
+      dataManagerInfo('SYNC_READ_CACHE hits=' + hits);
+      this.modelClient.reportSyncMetrics(); metrics.finish(success); this.syncRunning = false;
+    }
+  }
+
+  async refreshSourceMemory(modelConfig: DataManagerModelConfig, chat: boolean, calendar: boolean,
+    progress?: DataManagerProgressCallback): Promise<void> {
+    if (this.syncRunning) { throw new Error('个人记忆正在同步，请稍候'); }
+    this.syncRunning = true;
+    this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead();
+    this.modelClient.resetSyncMetrics();
+    let metrics = new SyncMetrics(); let success = false;
+    let report: DataManagerProgressCallback = (value: DataManagerProgress): void => {
+      metrics.mark(value.stage);
+      if (progress) { progress(value); }
+    };
+    try {
+      this.ensureReady();
+      let statePaths: string[] = [];
+      let processChat = chat;
+      if (chat) {
+        let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+        let needsChatFiles = !journal.ready('daily') || !journal.ready('chat') || journal.pending('chat').length > 0 ||
+          journal.pending('daily').some((item: MemorySourceChange): boolean =>
+            /^app-chat__(local|cloud)__\d+\.md$/.test(this.storage.basename(item.path)) || item.path === '*');
+        this.emitProgress(report, '检查新增聊天', '正在检查尚未处理的聊天内容', 0, 0, 2);
+        await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, report);
+        if (needsChatFiles) { statePaths = await this.consolidationService.consolidateChat(modelConfig, report); }
+        else { processChat = false; }
+      }
+      this.emitProgress(report, '检查记忆变化', '正在检查聊天和日历是否需要更新索引', 0, 0, 60);
+      let selection: IndexSourceSelection = { chat: processChat, calendar: calendar, statePaths: statePaths };
+      if (this.indexService.selectedSourcesNeedRefresh(selection, modelConfig)) {
+        await this.indexService.build(modelConfig, report, selection);
+      }
+      if (chat || calendar) { this.recordSuccessfulMemoryCheck(); }
+      this.emitProgress(report, '个人记忆已更新', '已完成本次聊天和日历检查', 1, 1, 100);
+      success = true;
+      // No gallery export, full daily-log scan, collection grouping, suggestion
+      // generation or full-sync snapshot: these remain full-sync actions.
+    } finally {
+      this.indexService.endSyncRead(); this.storage.endReadSession();
+      this.modelClient.reportSyncMetrics(); metrics.finish(success); this.syncRunning = false;
+    }
+  }
+
+  private async refreshInternal(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    groupingModelConfig?: DataManagerModelConfig, fullCheck: boolean = false): Promise<RefreshSummary> {
     this.ensureReady();
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
     dataManagerInfo(`DataManagerFacade refresh start: modelEnabled=${modelConfig.enabled}, groupingModelEnabled=${groupingConfig.enabled}, dailyRoot=${this.paths.dailyLogRoot}`);
-    GalleryMemorySync.sync(this.paths.filesDir);
-    let chatSummary = await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, progress);
+    GalleryMemorySync.sync(this.paths.filesDir, fullCheck);
+    let chatSummary = await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, progress, Date.now(), fullCheck);
     let chatMessage = chatSummary.processedParts > 0 ?
       `已检查近 7 天未处理聊天，提取 ${chatSummary.factCount} 条相关信息` : '';
-    let currentSnapshot = this.buildDailyLogSnapshot();
+    let currentSnapshot = this.buildDailyLogSnapshot(fullCheck);
+    currentSnapshot.pipeline_hash = this.storage.sha256Text('sync-v3-chat-context:' + this.modelClient.profileCacheIdentity(modelConfig) +
+      ':' + groupingConfig.baseUrl + ':' + (groupingConfig.model || '') + ':' + String(groupingConfig.enabled));
     let previousSnapshot = this.loadDailyLogSnapshot();
-    if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
-      this.emitProgress(progress, '索引', '正在更新采集分组', 96, 100, 96);
-      let groups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
-      let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
+    // Automatic calendar updates publish a new index generation without moving
+    // the manual raw-source snapshot. Reuse that committed generation when the
+    // task/chat/gallery catalog is unchanged instead of publishing it again.
+    let published = this.indexService.completion();
+    let adoptPublishedMemory = !this.fullSourceCheck && this.changedDailyPaths.length === 0 &&
+      previousSnapshot.pipeline_hash === currentSnapshot.pipeline_hash && published !== null &&
+      this.indexService.isCompleteGeneration(published.revision, modelConfig);
+    dataManagerInfo('SYNC_REFRESH_PLAN changedFiles=' + this.changedDailyPaths.length + ' fullCheck=' + this.fullSourceCheck +
+      ' calendarChanged=' + (previousSnapshot.calendar_hash !== currentSnapshot.calendar_hash) +
+      ' reusePublished=' + adoptPublishedMemory);
+    if (adoptPublishedMemory || this.canSkipRefresh(previousSnapshot, currentSnapshot, modelConfig)) {
+      this.emitProgress(progress, '检查分组', '正在检查采集分组是否有变化', 96, 100, 96);
+      let receipt = this.indexService.completion();
+      let cachedGroups = !this.fullSourceCheck && receipt &&
+        (adoptPublishedMemory || receipt.revision === previousSnapshot.index_revision) ?
+        this.collectionGroupingService.cachedBuildResult(previousSnapshot.group_count, previousSnapshot.group_event_count) : null;
+      let groups = cachedGroups || await this.collectionGroupingService.buildAll(groupingConfig, progress);
+      currentSnapshot.group_count = groups.groupCount; currentSnapshot.group_event_count = groups.eventCount;
+      let cachedRecommendations = !this.fullSourceCheck && receipt &&
+        (adoptPublishedMemory || receipt.revision === previousSnapshot.index_revision) ?
+        this.homeRecommendationService.cachedBuildResult(previousSnapshot.recommendations_day) : null;
+      currentSnapshot.recommendations_day = nowIsoLocal().substring(0, 10);
+      let recommendations = cachedRecommendations || await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
       if (chatMessage.length > 0) {
@@ -375,48 +505,70 @@ export class DataManagerFacade {
       this.emitProgress(progress, '完成', skipped.message, 100, 100, 100);
       return skipped;
     }
-    if (this.canRecoverIndexesFromConsolidatedOutputs(previousSnapshot, currentSnapshot)) {
-      this.emitProgress(progress, '索引', '已整理日志存在，正在重建索引', 0, 100, 60);
+    if ((!this.changedDailyPaths || this.changedDailyPaths.length === 0 || this.fullSourceCheck) &&
+      this.canRecoverIndexesFromConsolidatedOutputs(previousSnapshot, currentSnapshot)) {
       dataManagerInfo(`DataManagerFacade index recovery start: dailyEntries=${currentSnapshot.entry_count}, outputsRoot=${this.paths.outputsRoot}`);
-      let index = await this.indexService.build(modelConfig, progress);
+      let selection = !this.fullSourceCheck && this.changedDailyPaths.length === 0 ?
+        this.indexService.changedSourceSelection(modelConfig, []) : undefined;
+      this.emitProgress(progress, '索引', selection ? '正在更新日历与画像，保留历史任务索引' :
+        '已整理日志存在，正在检查索引完整性', 0, 100, 60);
+      let index = await this.indexService.build(modelConfig, progress, selection);
       dataManagerInfo(`DataManagerFacade index recovery done: sourceFiles=${index.sourceFiles}, eventCount=${index.eventCount}, profileClaimCount=${index.profileClaimCount}`);
       this.emitProgress(progress, '索引', '正在生成采集分组', 96, 100, 96);
       let collectionGroups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
+      currentSnapshot.group_count = collectionGroups.groupCount; currentSnapshot.group_event_count = collectionGroups.eventCount;
       dataManagerInfo(`DataManagerFacade recovery collection groups done: tabs=${collectionGroups.tabCount}, groups=${collectionGroups.groupCount}, events=${collectionGroups.eventCount}, reused=${collectionGroups.reusedGroupDocs}, updated=${collectionGroups.updatedGroupDocs}`);
+      currentSnapshot.recommendations_day = nowIsoLocal().substring(0, 10);
       let recommendations: HomeRecommendationBuildResult = await this.homeRecommendationService.build(groupingConfig, progress);
       dataManagerInfo(`DataManagerFacade recovery home recommendations done: events=${recommendations.totalEvents}, recommendations=${recommendations.recommendationCount}, reused=${recommendations.reused}`);
       this.writeDailyLogSnapshot(currentSnapshot);
       this.emitProgress(progress, '完成', `重建 ${index.eventCount} 条索引事件`, 100, 100, 100);
       return {
+        failedEventCount: index.failedEventCount || 0,
         dailyEntryCount: currentSnapshot.entry_count,
-        consolidatedRecordCount: this.countConsolidatedRecords(),
+        consolidatedRecordCount: currentSnapshot.consolidated_record_count !== undefined ?
+          currentSnapshot.consolidated_record_count : this.countConsolidatedRecords(),
         eventCount: index.eventCount,
         profileClaimCount: index.profileClaimCount,
         updatedAt: index.updatedAt,
-        message: (chatMessage.length > 0 ? chatMessage + '；' : '') + `基于已整理日志重建 ${index.eventCount} 条索引事件`,
+        message: (chatMessage.length > 0 ? chatMessage + '；' : '') + `基于已整理日志重建 ${index.eventCount} 条索引事件` +
+          (index.failedEventCount ? '；本次跳过 ' + index.failedEventCount + ' 条失败事件' : ''),
         skipped: false
       };
     }
-    let consolidation = await this.consolidationService.consolidateAll(modelConfig, 5, progress);
+    let consolidation = !this.fullSourceCheck && this.changedDailyPaths.length > 0 ?
+      await this.consolidationService.consolidateChanged(modelConfig, this.changedDailyPaths,
+        currentSnapshot.files.map((file: DailyLogSnapshotFile): string => file.path), progress) :
+      await this.consolidationService.consolidateAll(modelConfig, 5, progress);
+    currentSnapshot.consolidated_record_count = consolidation.totalRecords;
     this.emitProgress(progress, '索引', '开始构建索引', 0, 100, 60);
     dataManagerInfo(`DataManagerFacade consolidation done: sourceEntries=${consolidation.sourceEntries}, outputFiles=${consolidation.outputFiles}, totalRecords=${consolidation.totalRecords}`);
-    let index = await this.indexService.build(modelConfig, progress);
+    // An empty change set is still a scoped update. Losing that empty scope
+    // after a legacy consolidation check would reopen every historical source.
+    let selection = !this.fullSourceCheck ?
+      this.indexService.changedSourceSelection(modelConfig, stableUnique(this.changedDailyPaths.map((path: string): string =>
+        path.substring(0, 7) + '/' + this.storage.basename(path) + '.state.json'))) : undefined;
+    let index = await this.indexService.build(modelConfig, progress, selection);
     dataManagerInfo(`DataManagerFacade index done: sourceFiles=${index.sourceFiles}, eventCount=${index.eventCount}, profileClaimCount=${index.profileClaimCount}`);
     this.emitProgress(progress, '索引', '正在生成采集分组', 96, 100, 96);
     let collectionGroups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
+    currentSnapshot.group_count = collectionGroups.groupCount; currentSnapshot.group_event_count = collectionGroups.eventCount;
     dataManagerInfo(`DataManagerFacade collection groups done: tabs=${collectionGroups.tabCount}, groups=${collectionGroups.groupCount}, events=${collectionGroups.eventCount}, reused=${collectionGroups.reusedGroupDocs}, updated=${collectionGroups.updatedGroupDocs}`);
+    currentSnapshot.recommendations_day = nowIsoLocal().substring(0, 10);
     let recommendations: HomeRecommendationBuildResult = await this.homeRecommendationService.build(groupingConfig, progress);
     dataManagerInfo(`DataManagerFacade home recommendations done: events=${recommendations.totalEvents}, recommendations=${recommendations.recommendationCount}, reused=${recommendations.reused}`);
     this.writeDailyLogSnapshot(currentSnapshot);
     this.emitProgress(progress, '完成', `生成 ${index.eventCount} 条索引事件`, 100, 100, 100);
     return {
+      failedEventCount: index.failedEventCount || 0,
       dailyEntryCount: consolidation.sourceEntries,
       consolidatedRecordCount: consolidation.totalRecords,
       eventCount: index.eventCount,
       profileClaimCount: index.profileClaimCount,
       updatedAt: index.updatedAt,
       message: (chatMessage.length > 0 ? chatMessage + '；' : '') +
-        `整理 ${consolidation.sourceEntries} 条日志，生成 ${index.eventCount} 条索引事件`,
+        `整理 ${consolidation.sourceEntries} 条日志，生成 ${index.eventCount} 条索引事件` +
+        (index.failedEventCount ? '；本次跳过 ' + index.failedEventCount + ' 条失败事件' : ''),
       skipped: false
     };
   }
@@ -442,6 +594,14 @@ export class DataManagerFacade {
     return this.storage.join(this.paths.consolidationRoot, DAILY_LOG_SNAPSHOT_FILE_NAME);
   }
 
+  recordSuccessfulMemoryCheck(): void {
+    new StartupSourceSync(this.paths.filesDir).markMemoryChecked();
+  }
+
+  private successfulSyncTime(snapshotAt: string): string {
+    return latestSuccessfulSyncTime(snapshotAt, new StartupSourceSync(this.paths.filesDir).latestSuccessfulSyncAt());
+  }
+
   private legacyDailyLogSnapshotPath(): string {
     return this.storage.join(this.paths.indexesRoot, DAILY_LOG_SNAPSHOT_FILE_NAME);
   }
@@ -457,9 +617,65 @@ export class DataManagerFacade {
     };
   }
 
-  private buildDailyLogSnapshot(): DailyLogSnapshot {
+  private buildDailyLogSnapshot(forceFull: boolean = false): DailyLogSnapshot {
+    let previous = this.loadDailyLogSnapshot();
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    this.capturedDailyChanges = journal.pending('daily', forceFull);
+    this.changedDailyPaths = [];
+    // Discovering files after an upgrade/deletion is a local catalog operation.
+    // Only the explicit full-verification action may recheck unrelated indexes.
+    this.fullSourceCheck = forceFull;
+    let discoverSources = forceFull || !journal.ready('daily') || previous.catalog_schema !== 'source-catalog-v1' ||
+      this.capturedDailyChanges.some((change: MemorySourceChange): boolean => change.path === '*');
+    let calendarHash = new CalendarMemoryStore(this.paths.filesDir).indexFingerprint();
+    if (!discoverSources) {
+      if (this.capturedDailyChanges.length === 0 && previous.calendar_hash === calendarHash) {
+        dataManagerInfo('SYNC_SOURCE_CHECK mode=journal readFiles=0 changedFiles=0');
+        return previous;
+      }
+      let byPath = new Map<string, DailyLogSnapshotFile>();
+      previous.files.forEach((file: DailyLogSnapshotFile) => byPath.set(file.path, file));
+      let entries = previous.entry_count;
+      let readFiles = 0;
+      let readChars = 0;
+      let fingerprints: string[] = [];
+      for (let change of this.capturedDailyChanges) {
+        if (!/^\d{4}-\d{2}-\d{2}\/[^/]+\.md$/.test(change.path)) { throw new Error('采集日志变更路径无效'); }
+        let old = byPath.get(change.path);
+        let absolute = this.storage.join(this.paths.dailyLogRoot, change.path);
+        if (!this.storage.exists(absolute)) {
+          if (old) { byPath.delete(change.path); entries -= old.entry_count; fingerprints.push(change.path + ':deleted'); this.changedDailyPaths.push(change.path); }
+          continue;
+        }
+        let content = this.storage.readText(absolute, '\u0000SYNC_UNREADABLE\u0000');
+        if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
+        readFiles++; readChars += content.length;
+        let hash = this.storage.sha256Text(content);
+        if (old && old.sha256 === hash) { continue; }
+        let count = parseNumberedEntries(parseDailyLogDocument(content).body).length;
+        let file: DailyLogSnapshotFile = { path: change.path, sha256: hash, entry_count: count };
+        byPath.set(change.path, file); entries += count - (old ? old.entry_count : 0);
+        this.changedDailyPaths.push(change.path); fingerprints.push(change.path + ':' + hash);
+      }
+      let changed = fingerprints.length > 0 || previous.calendar_hash !== calendarHash;
+      let current: DailyLogSnapshot = { catalog_schema: 'source-catalog-v1', calendar_hash: calendarHash,
+        generated_at: nowIsoLocal(), root: previous.root, file_count: byPath.size, entry_count: entries,
+        tree_hash: changed ? this.storage.sha256Text(previous.tree_hash + fingerprints.sort().join('|') + calendarHash) : previous.tree_hash,
+        files: fingerprints.length > 0 ? Array.from(byPath.values()).sort((a: DailyLogSnapshotFile, b: DailyLogSnapshotFile): number => a.path.localeCompare(b.path)) : previous.files,
+        index_revision: previous.index_revision, consolidated_record_count: previous.consolidated_record_count,
+        group_count: previous.group_count, group_event_count: previous.group_event_count, recommendations_day: previous.recommendations_day };
+      dataManagerInfo('SYNC_SOURCE_CHECK mode=journal readFiles=' + readFiles + ' readChars=' + readChars + ' changedFiles=' + this.changedDailyPaths.length);
+      return current;
+    }
     let files: DailyLogSnapshotFile[] = [];
     let paths = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
+    // Registered sources survive transient directory-enumeration failures.
+    this.loadDailyLogSnapshot().files.forEach((file: DailyLogSnapshotFile) => {
+      if (/^\d{4}-\d{2}-\d{2}\/[^/\\]+\.md$/.test(file.path)) {
+        let known = this.storage.join(this.paths.dailyLogRoot, file.path);
+        if (this.storage.exists(known)) { paths.push(known); }
+      }
+    });
     GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
       paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
     });
@@ -467,8 +683,10 @@ export class DataManagerFacade {
       paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
     });
     stableUnique(paths).forEach((path: string) => {
+      if (!this.storage.exists(path)) { return; }
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
-      let content = this.storage.readText(path, '');
+      let content = this.storage.readText(path, '\u0000SYNC_UNREADABLE\u0000');
+      if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
       let document = parseDailyLogDocument(content);
       let entryCount = parseNumberedEntries(document.body).length;
       files.push({
@@ -478,68 +696,102 @@ export class DataManagerFacade {
       });
     });
     files.sort((left: DailyLogSnapshotFile, right: DailyLogSnapshotFile) => left.path.localeCompare(right.path));
+    let previousByPath = new Map<string, DailyLogSnapshotFile>();
+    previous.files.forEach((file: DailyLogSnapshotFile) => previousByPath.set(file.path, file));
+    files.forEach((file: DailyLogSnapshotFile) => {
+      let old = previousByPath.get(file.path);
+      if (!old || old.sha256 !== file.sha256 || old.entry_count !== file.entry_count) { this.changedDailyPaths.push(file.path); }
+      previousByPath.delete(file.path);
+    });
+    previousByPath.forEach((file: DailyLogSnapshotFile) => this.changedDailyPaths.push(file.path));
     let fingerprint = files.map((file: DailyLogSnapshotFile) => {
       return [file.path, file.sha256, String(file.entry_count)].join('\u001f');
-    }).join('\u001e');
+    }).join('\u001e') + '\u001fcalendar:' + calendarHash;
     let snapshot: DailyLogSnapshot = {
+      catalog_schema: 'source-catalog-v1', calendar_hash: calendarHash,
       generated_at: nowIsoLocal(),
       root: 'workflows/daily-log',
       file_count: files.length,
       entry_count: files.reduce((total: number, file: DailyLogSnapshotFile) => total + file.entry_count, 0),
-      tree_hash: this.storage.sha256Text(fingerprint),
-      files: files
+      tree_hash: this.changedDailyPaths.length === 0 && previous.calendar_hash === calendarHash && previous.tree_hash ?
+        previous.tree_hash : this.storage.sha256Text(fingerprint),
+      files: files,
+      index_revision: previous.index_revision, consolidated_record_count: previous.consolidated_record_count,
+      group_count: previous.group_count, group_event_count: previous.group_event_count,
+      recommendations_day: previous.recommendations_day
     };
+    dataManagerInfo('SYNC_SOURCE_CHECK mode=' + (forceFull ? 'full' : 'discovery') + ' readFiles=' + files.length +
+      ' changedFiles=' + this.changedDailyPaths.length);
     return snapshot;
   }
 
   private loadDailyLogSnapshot(): DailyLogSnapshot {
     let snapshot = this.storage.readJson<DailyLogSnapshot>(this.dailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
+    if (!snapshot || typeof snapshot.tree_hash !== 'string' || !Array.isArray(snapshot.files)) { return this.emptyDailyLogSnapshot(); }
     if (snapshot.tree_hash.length === 0 && !this.storage.exists(this.dailyLogSnapshotPath())) {
       snapshot = this.storage.readJson<DailyLogSnapshot>(this.legacyDailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
     }
-    if (!snapshot || !Array.isArray(snapshot.files)) {
+    if (!snapshot || typeof snapshot.tree_hash !== 'string' || !Array.isArray(snapshot.files)) {
       return this.emptyDailyLogSnapshot();
     }
     return snapshot;
   }
 
   private writeDailyLogSnapshot(snapshot: DailyLogSnapshot): void {
-    this.storage.writeJsonAtomic(this.dailyLogSnapshotPath(), snapshot as Object);
+    let receipt = this.indexService.completion();
+    snapshot.index_revision = receipt ? receipt.revision : undefined;
+    let previous = this.loadDailyLogSnapshot();
+    if (snapshot.consolidated_record_count === undefined) { snapshot.consolidated_record_count = this.countConsolidatedRecords(); }
+    if (previous.catalog_schema !== snapshot.catalog_schema || previous.tree_hash !== snapshot.tree_hash ||
+      previous.pipeline_hash !== snapshot.pipeline_hash || previous.index_revision !== snapshot.index_revision ||
+      previous.consolidated_record_count !== snapshot.consolidated_record_count || previous.group_count !== snapshot.group_count ||
+      previous.recommendations_day !== snapshot.recommendations_day) {
+      this.storage.writeJsonAtomic(this.dailyLogSnapshotPath(), snapshot as Object);
+    }
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    journal.setReady('daily'); journal.acknowledge(this.capturedDailyChanges);
   }
 
   private hasNewDailyLogEntries(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
     let previousCounts: Record<string, number> = new Object() as Record<string, number>;
     previous.files.forEach((file: DailyLogSnapshotFile) => previousCounts[file.path] = file.entry_count);
     return current.files.some((file: DailyLogSnapshotFile): boolean =>
+      !/^app-chat__(local|cloud)__\d+\.md$/.test(this.storage.basename(file.path)) &&
       file.entry_count > (previousCounts[file.path] || 0));
   }
 
-  private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+  private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot, modelConfig?: DataManagerModelConfig): boolean {
+    if (!current.pipeline_hash || previous.pipeline_hash !== current.pipeline_hash) { return false; }
     if (previous.tree_hash.length === 0 || previous.tree_hash !== current.tree_hash) {
       return false;
     }
     if (previous.file_count !== current.file_count || previous.entry_count !== current.entry_count) {
       return false;
     }
-    return this.hasGeneratedDataForSnapshot(current);
-  }
-
-  private hasGeneratedDataForSnapshot(snapshot: DailyLogSnapshot): boolean {
-    if (snapshot.entry_count === 0) {
-      return false;
-    }
-    let profile = this.indexService.loadProfileState();
-    let eventCount = Object.keys(this.indexService.loadEvents()).length;
-    return eventCount > 0 && profile.event_count > 0;
+    if (!this.fullSourceCheck && previous.index_revision && modelConfig &&
+      this.indexService.isCompleteGeneration(previous.index_revision, modelConfig)) { return true; }
+    return this.indexService.hasCompletePublishedIndex(modelConfig);
   }
 
   private canRecoverIndexesFromConsolidatedOutputs(previous: DailyLogSnapshot, snapshot: DailyLogSnapshot): boolean {
     if (snapshot.entry_count === 0) {
       return false;
     }
+    if (!this.fullSourceCheck && this.changedDailyPaths.length === 0 && this.indexService.completion()) { return true; }
+    // A legacy snapshot already acknowledges these exact raw files. Calendar
+    // hashes and catalog format changes must not invalidate that acknowledgement
+    // or force re-reading/reclassifying old derived task states.
     if (this.sameDailyLogSnapshot(previous, snapshot) && this.hasConsolidatedOutputFilesForSnapshot(snapshot)) {
-      dataManagerInfo(`DataManagerFacade index recovery available from persisted snapshot: entries=${snapshot.entry_count}`);
+      dataManagerInfo(`DataManagerFacade index recovery available from persisted sources: entries=${snapshot.entry_count}`);
       return true;
+    }
+    // Edited/deleted sources need consolidation to retract merged evidence,
+    // even when every remaining source reference is already covered.
+    let currentHashes = new Map<string, string>();
+    snapshot.files.forEach((file: DailyLogSnapshotFile) => currentHashes.set(file.path, file.sha256));
+    if (previous.files.some((old: DailyLogSnapshotFile): boolean =>
+      currentHashes.get(old.path) !== old.sha256)) {
+      return false;
     }
     let coveredEntries = 0;
     let stateCache: Record<string, ConsolidatedState> = new Object() as Record<string, ConsolidatedState>;
@@ -610,11 +862,18 @@ export class DataManagerFacade {
   }
 
   private sameDailyLogSnapshot(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
-    return previous.tree_hash.length > 0 && previous.tree_hash === current.tree_hash &&
-      previous.file_count === current.file_count && previous.entry_count === current.entry_count;
+    if (!previous.tree_hash || previous.file_count !== current.file_count || previous.entry_count !== current.entry_count ||
+      previous.files.length !== current.files.length) { return false; }
+    let currentFiles = new Map<string, DailyLogSnapshotFile>();
+    current.files.forEach((file: DailyLogSnapshotFile) => currentFiles.set(file.path, file));
+    return previous.files.every((file: DailyLogSnapshotFile): boolean => {
+      let other = currentFiles.get(file.path);
+      return other !== undefined && other.sha256 === file.sha256 && other.entry_count === file.entry_count;
+    });
   }
 
   private hasConsolidatedOutputFilesForSnapshot(snapshot: DailyLogSnapshot): boolean {
+    let checked = new Set<string>();
     for (let file of snapshot.files || []) {
       let parts = file.path.split('/');
       if (parts.length < 2) {
@@ -627,6 +886,8 @@ export class DataManagerFacade {
         return false;
       }
       let statePath = this.paths.outputStatePath(month, fileName);
+      if (checked.has(statePath)) { continue; }
+      checked.add(statePath);
       if (!this.storage.exists(statePath)) {
         dataManagerInfo(`DataManagerFacade index recovery unavailable: snapshot state missing=${statePath}`);
         return false;
@@ -654,13 +915,13 @@ export class DataManagerFacade {
   }
 
   private skippedRefreshSummary(snapshot: DailyLogSnapshot): RefreshSummary {
-    let profile = this.indexService.loadProfileState();
-    let events = this.indexService.loadEvents();
+    let receipt = this.indexService.completion();
     return {
+      failedEventCount: 0,
       dailyEntryCount: snapshot.entry_count,
-      consolidatedRecordCount: this.countConsolidatedRecords(),
-      eventCount: Object.keys(events).length,
-      profileClaimCount: profile.claim_count,
+      consolidatedRecordCount: snapshot.consolidated_record_count !== undefined ? snapshot.consolidated_record_count : this.countConsolidatedRecords(),
+      eventCount: receipt ? receipt.event_count : Object.keys(this.indexService.loadEvents()).length,
+      profileClaimCount: receipt ? receipt.claim_count : this.indexService.loadProfileState().claim_count,
       updatedAt: snapshot.generated_at,
       message: '无新增日志，跳过同步',
       skipped: true
@@ -692,12 +953,22 @@ export class DataManagerFacade {
 
   loadHomeViewModel(): HomeProfileViewModel {
     this.homeRecommendationService.pruneInactiveRecommendationsForToday();
+    // Mail belongs only to the presentation cache, never the event index/profile pipeline.
+    let mailStore = new MailStore(this.paths.filesDir);
+    let mailSnapshot = mailStore.current();
+    let mailReminder = mailStore.settings().enabled ? mailOverview(mailSnapshot) : undefined;
+    let mailPreview = visibleMail(todayMail(mailSnapshot.items), false, false).slice(0, 8).map((item): string => item.summary || item.subject);
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
       let empty = createEmptyHomeProfileViewModel();
       let avatar = this.avatarService.currentHomeView();
       empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
       empty.avatarMessageForegroundUri = avatar.avatarMessageForegroundUri;
+      empty.recommendations = new CalendarMemoryStore(this.paths.filesDir).reminders();
+      empty.calendarEnabled = new CalendarMemoryStore(this.paths.filesDir).settings().enabled;
+      empty.calendarError = new CalendarMemoryStore(this.paths.filesDir).snapshot().error;
+      empty.mailReminder = mailReminder;
+      empty.mailPreview = mailPreview;
       return empty;
     }
     let domains = this.homeProfileDomains(profile);
@@ -716,6 +987,10 @@ export class DataManagerFacade {
       updatedLabel: this.lastSyncLabel([]),
       completeness: completeness,
       totalEvents: profile.event_count,
+      calendarEnabled: new CalendarMemoryStore(this.paths.filesDir).settings().enabled,
+      calendarError: new CalendarMemoryStore(this.paths.filesDir).snapshot().error,
+      mailReminder: mailReminder,
+      mailPreview: mailPreview,
       domains: domains,
       recommendations: recommendations,
       empty: false
@@ -723,6 +998,9 @@ export class DataManagerFacade {
   }
 
   setHomeRecommendationCompleted(id: string, completed: boolean): boolean {
+    if (id.startsWith('calendar:')) {
+      return new CalendarMemoryStore(this.paths.filesDir).setCompleted(id, completed);
+    }
     let targetId = normalizeFreeText(id);
     if (targetId.length === 0) {
       return false;
@@ -771,6 +1049,18 @@ export class DataManagerFacade {
 
   listAvatarVersions(): AvatarVersionViewModel[] {
     return this.avatarService.listVersionViewModels();
+  }
+
+  loadPresentationSnapshot(): DataManagerPresentation {
+    let ownScope = !this.syncRunning; let started = Date.now();
+    if (ownScope) { this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead(); }
+    try { return { home: this.loadHomeViewModel(), collections: this.loadCollectionViewModels() }; }
+    finally {
+      if (ownScope) {
+        this.indexService.endSyncRead();
+        dataManagerInfo('PRESENTATION_READ elapsedMs=' + (Date.now() - started) + ' readCacheHits=' + this.storage.endReadSession());
+      }
+    }
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {
@@ -952,8 +1242,9 @@ export class DataManagerFacade {
 
   private lastSyncLabel(events: IndexedEvent[]): string {
     let snapshot = this.loadDailyLogSnapshot();
-    if (normalizeFreeText(snapshot.generated_at).length > 0) {
-      return this.formatHomeUpdatedLabel(snapshot.generated_at);
+    const successfulAt = this.successfulSyncTime(snapshot.generated_at);
+    if (successfulAt.length > 0) {
+      return this.formatHomeUpdatedLabel(successfulAt);
     }
     let profile = this.indexService.loadProfileState();
     if (normalizeFreeText(profile.generated_at).length > 0) {
@@ -1107,7 +1398,9 @@ export class DataManagerFacade {
         result.push(recommendation);
       }
     });
-    return result;
+    // Deterministic calendar reminders precede AI-generated reminders. They are
+    // filtered at read time, even if the user has not rebuilt their profile yet.
+    return new CalendarMemoryStore(this.paths.filesDir).reminders().concat(result);
   }
 
   private recommendationTag(value: string, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {

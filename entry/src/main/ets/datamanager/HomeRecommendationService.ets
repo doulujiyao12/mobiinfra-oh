@@ -3,6 +3,7 @@ import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { IndexService } from './IndexService';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
+import { chatPersonTitle, isChatCollectionEvent } from './ChatCollectionContext';
 import {
   DataManagerModelConfig,
   DataManagerProgressCallback,
@@ -208,6 +209,13 @@ export class HomeRecommendationService {
     return this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
   }
 
+  cachedBuildResult(day: string | undefined): HomeRecommendationBuildResult | null {
+    if (day !== this.currentDateKey()) { return null; }
+    let document = this.loadDocument();
+    if (!document.generated_at || !document.input_hash || !Array.isArray(document.recommendations)) { return null; }
+    return { totalEvents: document.total_events, recommendationCount: document.recommendations.length, reused: true, prunedCount: 0 };
+  }
+
   pruneInactiveRecommendationsForToday(): number {
     this.paths.ensureBaseDirs();
     let context = this.planningContext();
@@ -226,6 +234,8 @@ export class HomeRecommendationService {
     let candidates: IndexedEvent[] = [];
     Object.keys(todoEvents).forEach((eventId: string) => {
       let event = todoEvents[eventId];
+      if (isChatCollectionEvent(event) && event.chat_attribution &&
+        (event.chat_attribution.status !== 'pending' || event.chat_attribution.action_owner === 'unknown')) { return; }
       let todoType = normalizeFreeText(event.todo.type);
       let deadline = normalizeFreeText(event.todo.deadline);
       let hasCurrentOrFutureDeadline = isCurrentOrFutureTodoDeadline(deadline, today);
@@ -289,6 +299,8 @@ export class HomeRecommendationService {
       modelConfig.enabled ? modelConfig.baseUrl : ''
     ];
     context.plannerEvents.forEach((event: HomeRecommendationPlannerEvent) => {
+      let actor = context.events[event.event_id]?.chat_attribution;
+      if (actor) { parts.push([actor.subject, actor.subject_name, actor.action_owner, actor.action_owner_name, actor.status].join(':')); }
       parts.push([
         event.event_id,
         event.date,
@@ -348,7 +360,7 @@ export class HomeRecommendationService {
       let recommendation: HomeRecommendationState = {
         id: id,
         tag: normalizeFreeText(item.tag),
-        title: title,
+        title: this.recommendationTitle(item, eventIds, context.events),
         desc: normalizeFreeText(item.desc),
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
@@ -420,7 +432,12 @@ export class HomeRecommendationService {
       }
       events.push(event);
     }
-    return this.storage.sha256Text(homeRecommendationSourceInputFingerprint(events));
+    let fingerprint = homeRecommendationSourceInputFingerprint(events);
+    eventIds.forEach((id: string) => {
+      let actor = context.events[id]?.chat_attribution;
+      if (actor) { fingerprint += '\u001f' + [actor.subject, actor.subject_name, actor.action_owner, actor.action_owner_name, actor.status].join(':'); }
+    });
+    return this.storage.sha256Text(fingerprint);
   }
 
   private nextRecommendationId(usedIds: Record<string, boolean>): string {
@@ -434,7 +451,15 @@ export class HomeRecommendationService {
   }
 
   private recommendationTitle(item: HomeRecommendationState, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
-    return normalizeFreeText(item.title) || this.firstTodoText(eventIds, eventMap) || this.firstEventText(eventIds, eventMap);
+    let title = normalizeFreeText(item.title) || this.firstTodoText(eventIds, eventMap) || this.firstEventText(eventIds, eventMap);
+    let names: string[] = [];
+    let relatedNames: string[] = [];
+    eventIds.forEach((id: string) => {
+      let attribution = eventMap[id]?.chat_attribution;
+      if (attribution?.action_owner === 'other') { names.push(attribution.action_owner_name); }
+      else if (attribution?.subject === 'other') { relatedNames.push('关于' + attribution.subject_name); }
+    });
+    return chatPersonTitle(title, names.length > 0 ? names : relatedNames);
   }
 
   private recommendationDesc(item: HomeRecommendationState, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {

@@ -1,4 +1,6 @@
 import fs from '@ohos.file.fs';
+import { DataManagerStorage } from '../datamanager/DataManagerStorage';
+import { MemoryChangeJournal } from '../datamanager/MemoryChangeJournal';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
@@ -219,6 +221,7 @@ export class ChatSessionStorage {
   }
 
   static saveSession(filesDir: string, session: ChatSessionRecord): void {
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('chat', session.id);
     ChatSessionStorage.ensureWorkspace(filesDir);
     let normalized: ChatSessionRecord = {
       id: session.id,
@@ -315,6 +318,7 @@ export class ChatSessionStorage {
   }
 
   static deleteSession(filesDir: string, sessionId: string): boolean {
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('chat', sessionId);
     ChatSessionStorage.ensureWorkspace(filesDir);
     let path = ChatSessionStorage.sessionPath(filesDir, sessionId);
     if (ChatSessionStorage.pathExists(path)) {
@@ -358,6 +362,9 @@ export class ChatSessionStorage {
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
       };
+      if (typeof message.codexRunId === 'string' && /^[a-zA-Z0-9-]{32,36}$/.test(message.codexRunId)) {
+        normalizedMessage.codexRunId = message.codexRunId;
+      }
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
         normalizedMessage.voice = voiceMetadata;

@@ -1,4 +1,4 @@
-import { PrivacyConsent } from './PrivacyConsent';
+import { AppRequests } from './AppRequests';
 import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
@@ -11,6 +11,7 @@ import { AppLogger } from './AppLogger';
 import { decodeUtf8Compat } from './TextEncodingCompat';
 import { parseJsonCompat } from './JsonCompat';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
+import { cloudApiProvider, normalizeCloudChatUrl } from './CloudApiCompatibility';
 import { GalleryModelJson } from './gallery/GalleryTypes';
 import {
   PHONE_AGENT_ACTION_OUTPUT_RULES, PHONE_AGENT_MAX_ACTION_TOKENS,
@@ -23,7 +24,7 @@ export interface PhoneAgentCloudOptions {
 }
 
 // OpenAI-compatible 云端模型客户端。Planner 和 Decider 可以指向不同 base URL，
-// 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
+// 请求按服务商规范化到 chat/completions，并支持在任务取消时销毁未完成请求。
 export interface CloudModelConfig {
   plannerBaseUrl: string;
   plannerModel: string;
@@ -37,7 +38,7 @@ export interface CloudModelConfig {
 
 export function cloudPlannerApiKey(config: CloudModelConfig): string {
   let plannerApiKey = config.plannerApiKey;
-  if (plannerApiKey !== undefined && plannerApiKey.trim().length > 0) {
+  if (plannerApiKey !== undefined) {
     return plannerApiKey.trim();
   }
   return config.apiKey.trim();
@@ -45,7 +46,7 @@ export function cloudPlannerApiKey(config: CloudModelConfig): string {
 
 export function cloudDeciderApiKey(config: CloudModelConfig): string {
   let deciderApiKey = config.deciderApiKey;
-  if (deciderApiKey !== undefined && deciderApiKey.trim().length > 0) {
+  if (deciderApiKey !== undefined) {
     return deciderApiKey.trim();
   }
   return config.apiKey.trim();
@@ -110,6 +111,7 @@ export interface CloudChatMessage {
   tool_call_id?: string;
   tool_calls?: CloudToolCall[];
   name?: string;
+  reasoning_content?: string;
 }
 
 export interface CloudChatTemplateKwargs {
@@ -137,6 +139,7 @@ export interface CloudChatCompletionOptions {
   maxTokens?: number;
   readTimeout?: number;
   logResponseContent?: boolean;
+  separateReasoning?: boolean;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
   top_p?: number;
   top_k?: number;
@@ -151,6 +154,18 @@ export type CloudChatStreamDeltaHandler = (delta: string) => void;
 
 export interface CloudChatCompletionStreamCallbacks {
   onContentDelta?: CloudChatStreamDeltaHandler;
+  onProgress?: (progress: CloudChatStreamProgress) => void;
+}
+
+export interface CloudChatStreamProgress {
+  phase: string;
+  responseCode: number;
+  receivedBytes: number;
+  contentChars: number;
+  reasoningChars: number;
+  contentDelta: string;
+  reasoningDelta: string;
+  finishReason: string;
 }
 
 export interface CloudChatStreamDiagnostics {
@@ -163,11 +178,12 @@ export interface CloudChatStreamDiagnostics {
   rawPreview: string;
 }
 
-interface CloudChatRequest {
+export interface CloudChatRequest {
   messages: CloudChatMessage[];
   stream: boolean;
   temperature?: number;
   max_tokens?: number;
+  max_completion_tokens?: number;
   model?: string;
   top_p?: number;
   top_k?: number;
@@ -177,6 +193,11 @@ interface CloudChatRequest {
   chat_template_kwargs?: CloudChatTemplateKwargs;
   tools?: CloudChatToolDefinition[];
   tool_choice?: string;
+  thinking?: CloudThinkingOptions;
+}
+
+interface CloudThinkingOptions {
+  type: string;
 }
 
 interface CloudChatOptions {
@@ -193,6 +214,7 @@ interface CloudChatMessageResult {
   role?: string;
   content?: string | null;
   tool_calls?: CloudToolCall[];
+  reasoning_content?: string | null;
 }
 
 interface CloudChatChoice {
@@ -314,7 +336,7 @@ export class CloudModelClient {
     this.activeRequests = [];
     for (let i = 0; i < pending.length; i++) {
       try {
-        PrivacyConsent.destroyHttp(pending[i]);
+        AppRequests.destroyHttp(pending[i]);
       } catch (e) {
         AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
@@ -356,18 +378,7 @@ export class CloudModelClient {
   }
 
   private normalizeChatUrl(baseUrl: string): string {
-    // 兼容三种用户输入：host、host/v1、host/v1/chat/completions。
-    let url = baseUrl.trim();
-    while (url.endsWith('/')) {
-      url = url.substring(0, url.length - 1);
-    }
-    if (url.endsWith('/chat/completions')) {
-      return url;
-    }
-    if (url.endsWith('/v1')) {
-      return url + '/chat/completions';
-    }
-    return url + '/v1/chat/completions';
+    return normalizeCloudChatUrl(baseUrl);
   }
 
   private normalizeEmbeddingUrl(baseUrl: string): string {
@@ -384,37 +395,55 @@ export class CloudModelClient {
     return url + '/v1/embeddings';
   }
 
-  private buildChatRequestBody(options: CloudChatCompletionOptions, stream: boolean = false): CloudChatRequest {
+  static buildChatRequestBody(options: CloudChatCompletionOptions, stream: boolean = false): CloudChatRequest {
+    let provider = cloudApiProvider(options.baseUrl);
+    if (provider !== 'compatible' && (!options.model || options.model.trim().length === 0)) {
+      throw new Error('请在“模型与智能体”中填写自定义云端服务的模型 ID');
+    }
+    if (provider !== 'compatible' && options.apiKey.trim().length === 0) {
+      throw new Error('请在“模型与智能体”中填写自定义云端服务的 API Key');
+    }
+    let nativeParameters = provider === 'compatible';
+    let standardSampling = provider !== 'openai';
     let requestBody: CloudChatRequest = {
-      messages: options.messages,
+      messages: provider === 'deepseek' ? options.messages : options.messages.map((message: CloudChatMessage): CloudChatMessage => {
+        if (message.reasoning_content === undefined) { return message; }
+        return { role: message.role, content: message.content, name: message.name,
+          tool_calls: message.tool_calls, tool_call_id: message.tool_call_id };
+      }),
       stream: stream
     };
-    if (options.temperature !== undefined) {
+    // OpenAI reasoning models vary in sampling support; leave optional sampling settings to that service.
+    if (options.temperature !== undefined && standardSampling) {
       requestBody.temperature = options.temperature;
     }
     if (options.maxTokens !== undefined) {
-      requestBody.max_tokens = options.maxTokens;
+      if (provider === 'openai') { requestBody.max_completion_tokens = options.maxTokens; }
+      else { requestBody.max_tokens = options.maxTokens; }
     }
     if (options.model !== undefined && options.model.trim().length > 0) {
       requestBody.model = options.model.trim();
     }
-    if (options.top_p !== undefined) {
+    if (options.top_p !== undefined && standardSampling) {
       requestBody.top_p = options.top_p;
     }
-    if (options.top_k !== undefined) {
+    if (options.top_k !== undefined && nativeParameters) {
       requestBody.top_k = options.top_k;
     }
-    if (options.min_p !== undefined) {
+    if (options.min_p !== undefined && nativeParameters) {
       requestBody.min_p = options.min_p;
     }
-    if (options.presence_penalty !== undefined) {
+    if (options.presence_penalty !== undefined && (nativeParameters || provider === 'openrouter')) {
       requestBody.presence_penalty = options.presence_penalty;
     }
-    if (options.repetition_penalty !== undefined) {
+    if (options.repetition_penalty !== undefined && nativeParameters) {
       requestBody.repetition_penalty = options.repetition_penalty;
     }
-    if (options.chatTemplateKwargs !== undefined) {
+    if (options.chatTemplateKwargs !== undefined && nativeParameters) {
       requestBody.chat_template_kwargs = options.chatTemplateKwargs;
+    }
+    if (provider === 'deepseek') {
+      requestBody.thinking = { type: options.chatTemplateKwargs?.enable_thinking === true ? 'enabled' : 'disabled' };
     }
     if (options.tools !== undefined && options.tools.length > 0) {
       requestBody.tools = options.tools;
@@ -502,6 +531,7 @@ export class CloudModelClient {
       content: content,
       tool_calls: toolCalls
     };
+    if (typeof message.reasoning_content === 'string') { assistantMessage.reasoning_content = message.reasoning_content; }
     return {
       content: content,
       toolCalls: toolCalls,
@@ -681,7 +711,7 @@ export class CloudModelClient {
 
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
     AiServiceAccess.requireAllowed();
-    let requestBody = this.buildChatRequestBody(options);
+    let requestBody = CloudModelClient.buildChatRequestBody(options);
 
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -696,7 +726,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     let startedAt = new Date().getTime();
@@ -736,14 +766,15 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 
   async chatCompletionStream(options: CloudChatCompletionOptions,
     callbacks: CloudChatCompletionStreamCallbacks = {}): Promise<CloudChatCompletionResult> {
     AiServiceAccess.requireAllowed();
-    let requestBody = this.buildChatRequestBody(options, true);
+    let requestBody = CloudModelClient.buildChatRequestBody(options, true);
+    let isDeepSeek = cloudApiProvider(options.baseUrl) === 'deepseek';
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer ' + (options.apiKey.length > 0 ? options.apiKey : 'EMPTY')
@@ -756,7 +787,7 @@ export class CloudModelClient {
       readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     let url = this.normalizeChatUrl(options.baseUrl);
     AppLogger.info('CloudModel', 'chat stream request start url=' + url +
@@ -773,6 +804,8 @@ export class CloudModelClient {
       let rawResponseText = '';
       let rawResponseTruncated = false;
       let contentParts: string[] = [];
+      let reasoningParts: string[] = [];
+      let answerParts: string[] = [];
       let toolCalls: CloudToolCall[] = [];
       let finishReason = '';
       let separateReasoningOpen = false;
@@ -790,7 +823,7 @@ export class CloudModelClient {
         httpReq.off('dataEnd');
         self.unregisterActiveRequest(httpReq);
         try {
-          PrivacyConsent.destroyHttp(httpReq);
+          AppRequests.destroyHttp(httpReq);
         } catch (e) {
           AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
         }
@@ -809,8 +842,8 @@ export class CloudModelClient {
         rawResponseTruncated = true;
       };
       let buildDiagnostics = (toolCallCountOverride?: number): CloudChatStreamDiagnostics => {
-        let rawPreview = CloudModelClient.previewTextForLog(rawResponseText, 512);
-        if (rawResponseTruncated) {
+        let rawPreview = options.logResponseContent === false ? '' : CloudModelClient.previewTextForLog(rawResponseText, 512);
+        if (rawResponseTruncated && options.logResponseContent !== false) {
           rawPreview += '...<truncated>';
         }
         return {
@@ -827,7 +860,16 @@ export class CloudModelClient {
       let diagnosticsForLog = (toolCallCountOverride?: number): string => {
         return CloudModelClient.formatStreamDiagnosticsForLog(buildDiagnostics(toolCallCountOverride));
       };
+      let reportProgress = (phase: string, contentDelta: string = '', reasoningDelta: string = ''): void => {
+        if (callbacks.onProgress) {
+          let value: CloudChatStreamProgress = { phase: phase, responseCode: responseCode, receivedBytes: receivedBytes,
+            contentChars: contentDeltaChars, reasoningChars: reasoningDeltaChars, contentDelta: contentDelta,
+            reasoningDelta: reasoningDelta, finishReason: finishReason };
+          callbacks.onProgress(value);
+        }
+      };
       let httpStatusErrorMessage = (code: number): string => {
+        if (options.logResponseContent === false) { return 'Cloud HTTP ' + String(code); }
         let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(rawResponseText.trim());
         if (errorMessage.length > 0) {
           return 'Cloud HTTP ' + String(code) + ': ' + errorMessage;
@@ -866,6 +908,9 @@ export class CloudModelClient {
         if (sseLineCount === 0 && rawResponseText.trim().length > 0) {
           try {
             let fallbackResult = CloudModelClient.parseNonSseStreamFallbackResponse(rawResponseText);
+            contentDeltaChars = fallbackResult.content.length;
+            finishReason = fallbackResult.finishReason;
+            reportProgress('buffered', fallbackResult.content);
             resolved = true;
             cleanup();
             AppLogger.warn('CloudModel', 'chat stream received non-SSE response, fallback parsed: ' +
@@ -879,9 +924,10 @@ export class CloudModelClient {
         }
         closeSeparateReasoning();
         resolved = true;
-        let content = contentParts.join('');
+        let content = options.separateReasoning ? answerParts.join('') : contentParts.join('');
         let finalToolCalls = CloudModelClient.compactStreamToolCalls(toolCalls);
         cleanup();
+        reportProgress('completed');
         if (content.length === 0 && finalToolCalls.length === 0) {
           AppLogger.warn('CloudModel', 'chat stream completed without content or tool calls: ' +
             diagnosticsForLog(finalToolCalls.length));
@@ -894,8 +940,9 @@ export class CloudModelClient {
           finishReason: finishReason,
           assistantMessage: {
             role: 'assistant',
-            content: content,
-            tool_calls: finalToolCalls
+            content: isDeepSeek ? answerParts.join('') : content,
+            tool_calls: finalToolCalls,
+            reasoning_content: isDeepSeek ? reasoningParts.join('') : undefined
           }
         });
       };
@@ -905,10 +952,11 @@ export class CloudModelClient {
         }
         resolved = true;
         cleanup();
-        AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
+        reportProgress('failed');
+        AppLogger.warn('CloudModel', 'chat stream failed: ' + (options.logResponseContent === false ? 'response details hidden' : message) + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
-      PrivacyConsent.onHttpCancel(httpReq, () => {
+      AppRequests.onHttpCancel(httpReq, () => {
         finishWithError(AiServiceAccess.isAllowed() ? '隐私授权已撤回' : AI_LOGIN_REQUIRED_MESSAGE);
       });
       let decodeStreamData = (data: ArrayBuffer): string => {
@@ -942,6 +990,7 @@ export class CloudModelClient {
             CloudModelClient.applyStreamToolCallDeltas(toolCalls, chunk.toolCallDeltas);
           }
           if (chunk.reasoningDelta.length > 0) {
+            if (isDeepSeek) { reasoningParts.push(chunk.reasoningDelta); }
             reasoningDeltaChars += chunk.reasoningDelta.length;
             if (!separateReasoningOpen) {
               separateReasoningOpen = true;
@@ -950,10 +999,12 @@ export class CloudModelClient {
             emitRawDelta(chunk.reasoningDelta);
           }
           if (chunk.contentDelta.length > 0) {
+            answerParts.push(chunk.contentDelta);
             contentDeltaChars += chunk.contentDelta.length;
             closeSeparateReasoning();
             emitRawDelta(chunk.contentDelta);
           }
+          reportProgress('receiving', chunk.contentDelta, chunk.reasoningDelta);
         } catch (e) {
           let err = e as Error;
           finishWithError(err.message);
@@ -986,13 +1037,16 @@ export class CloudModelClient {
         appendRawResponseText(decodedText);
         textBuffer += decodedText;
         processBufferedText(false);
+        if (!resolved) { reportProgress('receiving'); }
       });
       httpReq.on('dataEnd', () => {
         processBufferedText(true);
         finishWithResult();
       });
+      reportProgress('waiting');
       httpReq.requestInStream(this.normalizeChatUrl(options.baseUrl), requestOptions).then((code: number) => {
         responseCode = code;
+        reportProgress('receiving');
         AppLogger.info('CloudModel', 'chat stream response status: ' + diagnosticsForLog());
         if (code < 200 || code >= 300) {
           finishWithError(httpStatusErrorMessage(code));
@@ -1469,7 +1523,7 @@ export class CloudModelClient {
       expectDataType: http.HttpDataType.STRING
     };
 
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
@@ -1487,7 +1541,7 @@ export class CloudModelClient {
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 

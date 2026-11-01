@@ -1,9 +1,15 @@
-import {
-  DEFAULT_ENDPOINT_CONFIG,
-  configuredEndpointSecretOrDefault,
-  configuredEndpointValueOrDefault
-} from '../config/DefaultEndpointConfig';
+import { DEFAULT_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 import { CloudModelConfig } from './CloudModelClient';
+import { resolveCloudSettings } from './CloudSettingsConfig';
+
+export function defaultChatCloudConfig(): CloudModelConfig {
+  return {
+    plannerBaseUrl: DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, plannerModel: DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel,
+    plannerApiKey: DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, deciderBaseUrl: DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
+    deciderModel: DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel, deciderApiKey: DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey,
+    apiKey: DEFAULT_ENDPOINT_CONFIG.cloudApiKey
+  };
+}
 
 let storageInitialized: boolean = false;
 
@@ -24,21 +30,14 @@ export function initializeChatCloudConfigStorage(): void {
 
 export function readChatCloudConfig(): CloudModelConfig {
   initializeChatCloudConfigStorage();
-  let legacyApiKey = configuredEndpointSecretOrDefault(AppStorage.get<string>('cloudApiKey') || '',
-    DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
-  let plannerApiKey = configuredEndpointSecretOrDefault(AppStorage.get<string>('cloudPlannerApiKey') || '', legacyApiKey);
-  let deciderApiKey = configuredEndpointSecretOrDefault(AppStorage.get<string>('cloudDeciderApiKey') || '', legacyApiKey);
-  return {
-    plannerBaseUrl: configuredEndpointValueOrDefault(AppStorage.get<string>('cloudPlannerBaseUrl') || '',
-      DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
-    plannerModel: configuredEndpointValueOrDefault(AppStorage.get<string>('cloudPlannerModel') || '',
-      DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
-    plannerApiKey: plannerApiKey,
-    deciderBaseUrl: configuredEndpointValueOrDefault(AppStorage.get<string>('cloudDeciderBaseUrl') || '',
-      DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
-    deciderApiKey: deciderApiKey,
-    apiKey: plannerApiKey,
-    deciderModel: configuredEndpointValueOrDefault(AppStorage.get<string>('cloudDeciderModel') || '',
-      DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
+  let stored: CloudModelConfig = {
+    plannerBaseUrl: AppStorage.get<string>('cloudPlannerBaseUrl') || '',
+    plannerModel: AppStorage.get<string>('cloudPlannerModel') || '',
+    plannerApiKey: AppStorage.get<string>('cloudPlannerApiKey') || '',
+    deciderBaseUrl: AppStorage.get<string>('cloudDeciderBaseUrl') || '',
+    deciderModel: AppStorage.get<string>('cloudDeciderModel') || '',
+    deciderApiKey: AppStorage.get<string>('cloudDeciderApiKey') || '',
+    apiKey: AppStorage.get<string>('cloudApiKey') || ''
   };
+  return resolveCloudSettings(stored, defaultChatCloudConfig());
 }

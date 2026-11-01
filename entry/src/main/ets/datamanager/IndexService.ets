@@ -1,13 +1,19 @@
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
-import { DataPipelineModelClient } from './DataPipelineModelClient';
+import { DataPipelineModelClient, buildEnrichPromptPreview } from './DataPipelineModelClient';
+import { ProfileBlockCache, PROFILE_BLOCK_POLICY } from './ProfileBlockCache';
+import { profileEvidenceText } from './ProfileEvidence';
+import { IndexWriteBatch } from './IndexWriteBatch';
 import { dataManagerInfo, dataManagerWarn } from './DataManagerLog';
+import { CalendarMemoryStore } from '../utils/calendar/CalendarMemoryStore';
+import { calendarProfileEvents } from '../utils/calendar/CalendarMemoryPolicy';
 import {
   AggregatedRecord,
   BooleanMap,
   ConsolidatedState,
   DataManagerModelConfig,
+  DataManagerProgress,
   DataManagerProgressCallback,
   DOMAIN_DISPLAY_NAMES,
   DOMAIN_KEYS,
@@ -42,6 +48,7 @@ import {
   eventSourceNames,
   indexTerms,
   isIsoDate,
+  isModelEnrichmentMethod,
   monthKeyFromDate,
   normalizeEntityName,
   normalizeDomains,
@@ -51,7 +58,11 @@ import {
   normalizeProfileShortSummary,
   nowIsoLocal,
   parseNumberedEntries,
+  parseDailyLogDocument,
+  workflowSceneIdFromMetadata,
   publicEvent,
+  runLimitedTasks,
+  sourceAppDisplayName,
   sourceSearchText,
   stableUnique,
   stableUniqueNumbers,
@@ -59,6 +70,7 @@ import {
 } from './DataManagerUtils';
 import {
   memorySceneConfigs,
+  memorySceneLabel,
   PERSONAL_INFO_MEMORY_SCENE_ID,
   normalizeMemorySceneId,
   normalizeMemorySceneIds,
@@ -66,21 +78,35 @@ import {
   WorkflowSceneConfig
 } from '../utils/WorkflowSceneConfig';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { ChatCollectionBatch } from './DataManagerTypes';
+import { CHAT_CONTEXT_POLICY, ChatCollectionContextIndex, isChatCollectionEvent } from './ChatCollectionContext';
 
 export interface IndexBuildResult {
+  // Events encountered and omitted in this build, excluding untouched history.
+  failedEventCount?: number;
   sourceFiles: number;
   eventCount: number;
   profileClaimCount: number;
   updatedAt: string;
 }
 
+export interface IndexCompletion {
+  chat_context_policy?: string;
+  failed_event_count?: number;
+  schema: string; revision: string; generated_at: string; event_count: number; claim_count: number;
+  profile_identity: string; calendar_hash: string;
+  complete: boolean;
+}
+
 type EventMap = Record<string, IndexedEvent>;
 type ObjectMap = Record<string, Object>;
 
 interface SourceManifestEntry {
+  failed_event_ids?: string[];
   sha256: string;
   event_ids: string[];
   event_input_hashes: StringMap;
+  enrichment?: EnrichmentManifest;
 }
 
 type SourceManifestMap = Record<string, SourceManifestEntry>;
@@ -89,7 +115,10 @@ interface EnrichmentManifest {
   schema: string;
   mode: string;
   base_url: string;
+  model_name?: string;
 }
+interface EventCheckpoint { hash: string; eventHash: string; event: IndexedEvent; }
+interface EventFailureCheckpoint { hash: string; reason: string; failed_at: string; }
 
 interface IndexManifest {
   generated_at: string;
@@ -97,6 +126,8 @@ interface IndexManifest {
   index_dir: string;
   run_root: string;
   enrichment: EnrichmentManifest;
+  calendar_enrichment?: EnrichmentManifest;
+  profile_identity?: string;
   entity_types: string[];
   sources: SourceManifestMap;
 }
@@ -107,10 +138,6 @@ interface IndexSourceBuildResult {
   events: EventMap;
   reusedEvents: number;
   enrichedEvents: number;
-}
-
-interface IndexSourceCursor {
-  nextIndex: number;
 }
 
 interface IndexBuildCounters {
@@ -200,6 +227,8 @@ interface EntityCandidateScore {
 }
 
 interface ImageReferenceCandidate {
+  batch_id: string;
+  order: number;
   summary: string;
   image_path: string;
   used: boolean;
@@ -209,9 +238,6 @@ type ImageReferenceCandidateMap = Record<string, ImageReferenceCandidate[]>;
 
 const ENTITY_TYPE_KEYS: string[] = ['person', 'place', 'merchant'];
 
-const PROFILE_MODEL_MAX_TOKENS: number = 3000;
-const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
-const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 
 interface TemporalDayNode {
   date: string;
@@ -298,7 +324,8 @@ export function eventEnrichInputFingerprint(event: IndexedEvent): string {
     stableUnique(event.tags || []).sort().join('\u001d'),
     stableUnique(event.source_refs || []).sort().join('\u001d'),
     stableUniqueNumbers(event.workflow_scene_ids || []).map((sceneId: number): string => String(sceneId)).join('\u001d'),
-    stableUnique(event.image_paths || []).sort().join('\u001d')
+    stableUnique(event.image_paths || []).sort().join('\u001d'),
+    event.chat_context ? ArkJSON.stringify(event.chat_context) : ''
   ];
   return fields.join('\u001f');
 }
@@ -351,20 +378,56 @@ export function buildProfileDomainStateFromPayload(domain: string, inputHash: st
   return domainState;
 }
 
+export interface IndexSourceSelection {
+  chat: boolean;
+  calendar: boolean;
+  statePaths: string[];
+  sources?: string[];
+}
+
 export class IndexService {
+  private chatContexts: ChatCollectionContextIndex = new ChatCollectionContextIndex();
+  private failedEventIds: Set<string> = new Set<string>();
   private paths: DataManagerPaths;
   private storage: DataManagerStorage;
   private modelClient: DataPipelineModelClient;
+  private readScope: boolean = false;
+  private syncEvents: EventMap | null = null;
+  private dirtyMonths: BooleanMap = {};
+  beginSyncRead(): void { this.readScope = true; this.syncEvents = null; }
+  endSyncRead(): void { this.readScope = false; this.syncEvents = null; }
+  private ensureCommitted(): void {
+    if (this.storage.exists(this.paths.indexesRoot + '.pending-sync/prepared.json')) {
+      IndexWriteBatch.recover(this.paths.indexesRoot, this.storage); this.syncEvents = null;
+    }
+  }
 
   constructor(paths: DataManagerPaths, storage: DataManagerStorage, modelClient: DataPipelineModelClient) {
     this.paths = paths;
     this.storage = storage;
     this.modelClient = modelClient;
+    this.ensureCommitted();
   }
 
-  async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<IndexBuildResult> {
+  async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    selection?: IndexSourceSelection): Promise<IndexBuildResult> {
+    this.ensureCommitted();
+    let batch = new IndexWriteBatch(this.paths.indexesRoot, this.storage);
+    let worker = new IndexService(this.paths, batch, this.modelClient);
+    try {
+      let result = await worker.buildPrepared(modelConfig, progress, selection);
+      batch.commit();
+      this.syncEvents = this.readScope ? worker.syncEvents : null;
+      return result;
+    } catch (e) { this.syncEvents = null; throw new Error((e as Error).message || '索引构建失败，请重试'); }
+  }
+
+  private async buildPrepared(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback,
+    selection?: IndexSourceSelection): Promise<IndexBuildResult> {
     this.paths.ensureBaseDirs();
-    let statePaths = this.loadOutputStatePaths();
+    // Source-scoped refresh reads only selected chat outputs, not pending
+    // task/gallery output files or acknowledge them as manually synchronized.
+    let statePaths = selection ? selection.statePaths : this.loadOutputStatePaths();
     this.emitProgress(progress, '索引', `发现 ${statePaths.length} 个整理文件`, 0, Math.max(1, statePaths.length), 62);
     dataManagerInfo(`Index build start: stateFiles=${statePaths.length}, outputsRoot=${this.paths.outputsRoot}, modelEnabled=${modelConfig.enabled}`);
     if (statePaths.length === 0) {
@@ -372,34 +435,86 @@ export class IndexService {
     }
     let enrichment = this.currentEnrichment(modelConfig);
     let previousManifest = this.loadManifest();
-    let previousEvents = this.loadEvents();
+    let previousEvents = this.loadStoredEvents();
     let reuseAllowed = this.canReuseIndex(previousManifest, enrichment);
-    let imageReferences = this.buildImageReferenceMap();
+    let imageReferences: StringArrayMap = selection && (!selection.sources || selection.statePaths.length === 0) ? {} : this.buildImageReferenceMap();
     let events: EventMap = {};
     let sources: SourceManifestMap = {};
+    if (selection) {
+      Object.keys(previousManifest.sources).forEach((relative: string) => {
+        if ((selection.sources && selection.sources.indexOf(relative) >= 0) ||
+          (selection.chat && /^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative)))) { return; }
+        let source = previousManifest.sources[relative];
+        sources[relative] = { sha256: source.sha256, event_ids: source.event_ids,
+          event_input_hashes: source.event_input_hashes, failed_event_ids: source.failed_event_ids || [],
+          enrichment: source.enrichment || previousManifest.enrichment };
+        source.event_ids.forEach((id: string) => {
+          if (!previousEvents[id]) { throw new Error('历史索引不完整，请先手动同步修复'); }
+          events[id] = previousEvents[id];
+        });
+      });
+      statePaths.forEach((path: string) => {
+        if (selection.sources && path.startsWith(this.paths.outputsRoot + '/') &&
+          selection.sources.indexOf(this.storage.relativePath(this.paths.outputsRoot, path)) >= 0) { return; }
+        if (!selection.chat || !path.startsWith(this.paths.outputsRoot + '/') ||
+          !/^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(path))) {
+          throw new Error('自动同步来源无效');
+        }
+      });
+      if (!selection.calendar) {
+        Object.keys(previousEvents).forEach((id: string) => {
+          if (previousEvents[id].calendar) { events[id] = previousEvents[id]; }
+        });
+      }
+    }
     let counters: IndexBuildCounters = {
       completedSources: 0,
       reusedEvents: 0,
       enrichedEvents: 0
     };
-    await this.buildSourcesConcurrently(statePaths, previousManifest, previousEvents, reuseAllowed, imageReferences,
+    await this.buildSourcesConcurrently(statePaths, previousManifest, previousEvents, imageReferences,
       modelConfig, events, sources, counters, progress);
+
+    if (!selection || selection.calendar) {
+      await this.buildCalendarEvents(events, previousEvents, modelConfig,
+        this.sameEnrichment(previousManifest.calendar_enrichment || previousManifest.enrichment, enrichment));
+    }
+
+    let changed: BooleanMap = {};
+    let oldChanged: EventMap = {};
+    let newChanged: EventMap = {};
+    stableUnique(Object.keys(previousEvents).concat(Object.keys(events))).forEach((id: string) => {
+      if (ArkJSON.stringify(previousEvents[id] || null) !== ArkJSON.stringify(events[id] || null)) {
+        changed[id] = true;
+        if (previousEvents[id]) { oldChanged[id] = previousEvents[id]; this.dirtyMonths[monthKeyFromDate(previousEvents[id].event_date)] = true; }
+        if (events[id]) { newChanged[id] = events[id]; this.dirtyMonths[monthKeyFromDate(events[id].event_date)] = true; }
+      }
+    });
+    dataManagerInfo('SYNC_EVENT_DELTA total=' + Object.keys(events).length + ' changed=' + Object.keys(changed).length +
+      ' enriched=' + counters.enrichedEvents + ' reused=' + counters.reusedEvents);
 
     this.emitProgress(progress, '写入索引', '正在写入事件索引', 85, 100, 85);
     this.writeEventPartitions(events);
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'inverted', 'index.json'), this.buildInvertedDocument(events));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.buildSourceDocument(events));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'domain', 'index.json'), this.buildDomainDocument(events));
+    this.writePostingIndex('inverted', this.buildInvertedDocument(oldChanged).postings, this.buildInvertedDocument(newChanged).postings,
+      events, changed, reuseAllowed);
+    this.writePostingIndex('source', this.buildSourceDocument(oldChanged).postings, this.buildSourceDocument(newChanged).postings,
+      events, changed, reuseAllowed);
+    this.writePostingIndex('domain', this.buildDomainDocument(oldChanged).postings, this.buildDomainDocument(newChanged).postings,
+      events, changed, reuseAllowed);
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'workflow-scene'));
-    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.buildWorkflowSceneDocument(events));
+    this.writePostingIndex('workflow-scene', this.buildWorkflowSceneDocument(oldChanged).postings,
+      this.buildWorkflowSceneDocument(newChanged).postings, events, changed, reuseAllowed);
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'home-todo'));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.buildHomeTodoDocument(events));
+    // A skipped/revoked calendar may still have old published records. Retain
+    // those files, but never send unavailable calendar facts to model analysis.
+    let analysisEvents = selection && !selection.calendar ? this.filterCurrentCalendarEvents(events) : events;
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
-    let entityDocument = await this.buildEntityDocument(events, modelConfig, previousEntity, reuseAllowed && this.hasEntityIndexData(previousEntity));
+    let entityDocument = await this.buildEntityDocument(analysisEvents, modelConfig, previousEntity, reuseAllowed && this.hasEntityIndexData(previousEntity));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
     this.writeTemporalDocuments(events);
-    this.emitProgress(progress, '生成画像', '正在生成用户画像', 90, 100, 90);
-    let profile = await this.buildProfileDocument(events, modelConfig, reuseAllowed, progress);
+    this.emitProgress(progress, '生成画像', '正在检查画像分块', 0, this.profileDomainKeys().length, 85);
+    let profile = await this.buildProfileDocument(analysisEvents, modelConfig, reuseAllowed, progress);
     dataManagerInfo(`Index profile built: eventCount=${profile.event_count}, claimCount=${profile.claim_count}`);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), profile as Object);
     this.storage.writeTextAtomic(this.storage.join(this.paths.indexesRoot, 'profile', 'profile.md'), this.renderProfileMarkdown(profile));
@@ -409,15 +524,37 @@ export class IndexService {
       input_root: 'workflows/profile-consolidation/outputs',
       index_dir: 'workflows/profile-consolidation/indexes',
       run_root: 'workflows/runs',
-      enrichment: enrichment,
+      // Unselected historical sources retain their previous model identity;
+      // a partial startup update cannot mark the whole corpus as reclassified.
+      enrichment: selection && !selection.sources ? previousManifest.enrichment : enrichment,
+      calendar_enrichment: selection && !selection.calendar ?
+        previousManifest.calendar_enrichment || previousManifest.enrichment : enrichment,
+      profile_identity: this.storage.sha256Text(this.modelClient.profileCacheIdentity(modelConfig)),
       entity_types: ENTITY_TYPE_KEYS,
-      sources: this.orderedSourcesByStatePaths(sources, statePaths)
+      sources: this.orderedSourcesByStatePaths(sources, selection ?
+        Object.keys(sources).map((relative: string): string => this.storage.join(this.paths.outputsRoot, relative)) : statePaths)
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
+    let skippedFailedEventCount = this.failedEventIds.size;
+    Object.keys(sources).forEach((key: string) => (sources[key].failed_event_ids || []).forEach((id: string) => this.failedEventIds.add(id)));
+    let completion: IndexCompletion = { schema: 'memory-index-completion-v1', failed_event_count: this.failedEventIds.size,
+      chat_context_policy: Object.keys(events).every((id: string): boolean => !isChatCollectionEvent(events[id]) ||
+        events[id].chat_context?.policy === CHAT_CONTEXT_POLICY) ? CHAT_CONTEXT_POLICY : '',
+      revision: String(Date.now()) + '-' + String(Math.random()), generated_at: profile.generated_at,
+      event_count: profile.event_count, claim_count: profile.claim_count,
+      profile_identity: manifest.profile_identity || '',
+      calendar_hash: new CalendarMemoryStore(this.paths.filesDir).indexFingerprint(),
+      // This receipt certifies a successfully published generation. Untouched
+      // sources retain their own model policies; a scoped refresh must not
+      // demand reclassification of all history with today's selected model.
+      complete: profile.event_count === Object.keys(events).length };
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'completion.json'), completion);
+    this.syncEvents = events;
     dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${counters.reusedEvents}, enriched=${counters.enrichedEvents}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
     // Keep the index handoff aligned with DataManagerFacade's collection grouping range.
     this.emitProgress(progress, '写入索引', '索引写入完成', 96, 100, 96);
     return {
+      failedEventCount: skippedFailedEventCount,
       sourceFiles: statePaths.length,
       eventCount: Object.keys(events).length,
       profileClaimCount: profile.claim_count,
@@ -425,7 +562,168 @@ export class IndexService {
     };
   }
 
+  selectedSourcesNeedRefresh(selection: IndexSourceSelection, modelConfig?: DataManagerModelConfig): boolean {
+    this.ensureCommitted();
+    let previous = this.loadManifest();
+    if (modelConfig && previous.profile_identity !== this.storage.sha256Text(this.modelClient.profileCacheIdentity(modelConfig))) {
+      return true;
+    }
+    if (selection.chat) {
+      let selected = selection.statePaths.map((path: string): string => this.storage.relativePath(this.paths.outputsRoot, path));
+      if (Object.keys(previous.sources).some((relative: string): boolean =>
+        /^app-chat__(local|cloud)__\d+\.md\.state\.json$/.test(this.storage.basename(relative)) && selected.indexOf(relative) < 0)) { return true; }
+      for (let path of selection.statePaths) {
+        let relative = this.storage.relativePath(this.paths.outputsRoot, path);
+        if (!previous.sources[relative] || previous.sources[relative].sha256 !== this.storage.sha256Text(this.storage.readText(path))) { return true; }
+      }
+    }
+    if (selection.calendar) {
+      let profile = this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+      if (profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) { return true; }
+    }
+    return false;
+  }
+
+  hasCompletePublishedIndex(modelConfig?: DataManagerModelConfig): boolean {
+    this.ensureCommitted();
+    let manifest = this.loadManifest();
+    let profile = this.storage.readJson<ProfileState | null>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), null);
+    if (!this.hasReusableIndexLayout(manifest) || !manifest.generated_at || !profile || !profile.generated_at || !profile.domains) { return false; }
+    let required = ['events/partition-index.json', 'inverted/index.json', 'source/index.json', 'domain/index.json',
+      'entity/index.json', 'workflow-scene/index.json', 'home-todo/index.json', 'profile/profile.md'];
+    if (required.some((relative: string): boolean => !this.storage.exists(this.storage.join(this.paths.indexesRoot, relative)))) { return false; }
+    if (modelConfig && (!this.sameEnrichment(manifest.enrichment, this.currentEnrichment(modelConfig)) ||
+      (manifest.profile_identity && manifest.profile_identity !== this.storage.sha256Text(this.modelClient.profileCacheIdentity(modelConfig))))) { return false; }
+    let events = this.readScope && this.syncEvents !== null ? this.syncEvents : this.loadStoredEvents();
+    if (this.readScope) { this.syncEvents = events; }
+    if (Object.keys(events).some((id: string): boolean => isChatCollectionEvent(events[id]) &&
+      events[id].chat_context?.policy !== CHAT_CONTEXT_POLICY)) { return false; }
+    if (profile.event_count !== Object.keys(events).length ||
+      profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) { return false; }
+    let expected = modelConfig ? this.currentEnrichment(modelConfig) : manifest.enrichment;
+    let calendarIds = Object.keys(events).filter((id: string): boolean => events[id].calendar !== undefined);
+    if (calendarIds.length > 0 && (!this.sameEnrichment(manifest.calendar_enrichment || manifest.enrichment, expected) ||
+      (expected.mode === 'model' && calendarIds.some((id: string): boolean => !isModelEnrichmentMethod(events[id].enrichment_method))))) { return false; }
+    for (let relative of Object.keys(manifest.sources)) {
+      let source = manifest.sources[relative];
+      if (!source || !source.sha256 || !Array.isArray(source.event_ids) || !source.event_input_hashes ||
+        !this.sameEnrichment(source.enrichment || manifest.enrichment, expected)) { return false; }
+      if (source.event_ids.some((id: string): boolean => !events[id] || !source.event_input_hashes[id] ||
+        (expected.mode === 'model' && !isModelEnrichmentMethod(events[id].enrichment_method)))) { return false; }
+    }
+    // Empty model results are successful outcomes too. Missing or unfinished
+    // profiles must never be confused with a successfully published empty one.
+    let domains = profile.domains;
+    return this.profileDomainKeys().every((key: string): boolean => {
+      let domain = domains[key];
+      return domain !== undefined && Array.isArray(domain.event_ids) &&
+        domain.event_count === domain.event_ids.length && domain.event_ids.every((id: string): boolean => events[id] !== undefined) &&
+        Array.isArray(domain.claims) && domain.claims.every((claim: ProfileClaim): boolean => Array.isArray(claim.event_ids) &&
+          claim.event_ids.every((id: string): boolean => domain.event_ids.indexOf(id) >= 0)) &&
+        (isProfileDomainStateReusable(domain, domain.event_ids.length) ||
+          (expected.mode !== 'model' && domain.generation === 'model_unavailable'));
+    });
+  }
+
+  completion(): IndexCompletion | null {
+    this.ensureCommitted();
+    let receipt = this.storage.readJson<IndexCompletion | null>(this.storage.join(this.paths.indexesRoot, 'completion.json'), null);
+    return receipt && receipt.schema === 'memory-index-completion-v1' && receipt.revision ? receipt : null;
+  }
+
+  isCompleteGeneration(revision: string, modelConfig: DataManagerModelConfig): boolean {
+    let receipt = this.completion();
+    return receipt !== null && receipt.complete === true && receipt.revision === revision &&
+      receipt.chat_context_policy === CHAT_CONTEXT_POLICY &&
+      receipt.profile_identity === this.storage.sha256Text(this.modelClient.profileCacheIdentity(modelConfig)) &&
+      receipt.calendar_hash === new CalendarMemoryStore(this.paths.filesDir).indexFingerprint() &&
+      ['manifest.json', 'profile/state.json', 'profile/profile.md', 'events/partition-index.json',
+        'inverted/index.json', 'source/index.json', 'domain/index.json', 'entity/index.json', 'workflow-scene/index.json',
+        'home-todo/index.json'].every((path: string): boolean => this.storage.exists(this.storage.join(this.paths.indexesRoot, path)));
+  }
+
+  changedSourceSelection(modelConfig: DataManagerModelConfig, sources: string[]): IndexSourceSelection | undefined {
+    let manifest = this.loadManifest();
+    // Scope follows changed content, not the model policy of unrelated sources.
+    // buildSourceIndex still validates/reclassifies every selected source and
+    // buildPrepared preserves the individual identities of retained sources.
+    if (!this.hasReusableIndexLayout(manifest) || !manifest.generated_at) {
+      dataManagerInfo('SYNC_INDEX_PLAN scope=full reason=missing-published-layout');
+      return undefined;
+    }
+    sources = sources.slice();
+    // Upgrade only external chat sources once; unrelated task/gallery history stays reusable.
+    if (this.completion()?.chat_context_policy !== CHAT_CONTEXT_POLICY) {
+      let events = this.readScope && this.syncEvents !== null ? this.syncEvents : this.loadStoredEvents();
+      Object.keys(manifest.sources).forEach((relative: string) => {
+        if (manifest.sources[relative].event_ids.some((id: string): boolean => events[id] && isChatCollectionEvent(events[id]) &&
+          events[id].chat_context?.policy !== CHAT_CONTEXT_POLICY) && sources.indexOf(relative) < 0) { sources.push(relative); }
+      });
+    }
+    let paths = this.outputStatePathsFromIndex().filter((path: string): boolean =>
+      sources.indexOf(this.storage.relativePath(this.paths.outputsRoot, path)) >= 0);
+    sources.forEach((relative: string) => {
+      let path = this.storage.join(this.paths.outputsRoot, relative);
+      if (manifest.sources[relative] && this.storage.exists(path) && paths.indexOf(path) < 0) { paths.push(path); }
+    });
+    dataManagerInfo('SYNC_INDEX_PLAN scope=changed sources=' + sources.length + ' stateFiles=' + paths.length +
+      ' retainedSources=' + Object.keys(manifest.sources).filter((key: string): boolean => sources.indexOf(key) < 0).length +
+      ' policyChanged=' + !this.sameEnrichment(manifest.enrichment, this.currentEnrichment(modelConfig)));
+    return { chat: false, calendar: true, statePaths: paths, sources: sources };
+  }
+
+  private async buildCalendarEvents(events: EventMap, previous: EventMap, config: DataManagerModelConfig,
+    reuseAllowed: boolean = true): Promise<void> {
+    let store = new CalendarMemoryStore(this.paths.filesDir);
+    let current = store.events();
+    let pending: IndexedEvent[] = [];
+    let enrichedMap: EventMap = {};
+    let representatives: EventMap = {};
+    current.forEach((event: IndexedEvent) => {
+      let old = previous[event.event_id];
+      let seriesKey = event.calendar ? event.calendar.seriesKey : event.event_id;
+      if (reuseAllowed && old && old.normalized_fact === event.normalized_fact &&
+        (isModelEnrichmentMethod(old.enrichment_method) || !config.enabled)) {
+        enrichedMap[seriesKey] = old;
+      }
+      if (!representatives[seriesKey]) { representatives[seriesKey] = event; }
+    });
+    // Classify each series once; expanding a weekly series must not multiply
+    // identical model requests by the number of its occurrences.
+    Object.keys(representatives).forEach((key: string) => {
+      if (!enrichedMap[key]) { pending.push(representatives[key]); }
+    });
+    let enriched = await this.enrichWithCheckpoint(pending, config);
+    let keyById: StringMap = {};
+    Object.keys(representatives).forEach((key: string) => keyById[representatives[key].event_id] = key);
+    enriched.forEach((event: IndexedEvent) => enrichedMap[keyById[event.event_id]] = event);
+    current.forEach((base: IndexedEvent) => {
+      let enrichment = enrichedMap[base.calendar ? base.calendar.seriesKey : base.event_id];
+      if (!enrichment && config.enabled) { return; }
+      if (enrichment) {
+        base.domains = enrichment.domains;
+        base.entity_mentions = enrichment.entity_mentions;
+        base.entities = enrichment.entities;
+        base.keywords = stableUnique(base.keywords.concat(enrichment.keywords));
+        base.enrichment_method = enrichment.enrichment_method;
+      }
+      // Model enrichment may classify topics, but cannot change dates, fabricate
+      // attendance, create GUI tasks, or turn a calendar plan into a past action.
+      base.profile_domains = deriveProfileDomains(base);
+      events[base.event_id] = base;
+    });
+  }
+
   private loadOutputStatePaths(): string[] {
+    let index = this.storage.readJson<JsonMap>(this.storage.join(this.paths.outputsRoot, 'state-index.json'), createJsonMap());
+    if (index['schema'] === 'datamanager-consolidation-output-state-index-v1') {
+      if (!Array.isArray(index['state_paths'])) { throw new Error('日志整理清单损坏，请重试同步'); }
+      // An authoritative empty list means sources were removed. Directory scans
+      // must not resurrect orphaned output states from previous synchronizations.
+      let indexed = this.outputStatePathsFromIndex();
+      if (indexed.some((file: string): boolean => !this.storage.exists(file))) { throw new Error('日志整理尚未完成，请重试同步'); }
+      return indexed.sort();
+    }
     let paths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
     paths = paths.concat(this.outputStatePathsFromIndex());
     return stableUnique(paths)
@@ -443,6 +741,10 @@ export class IndexService {
     (value as string[]).forEach((item: string) => {
       let relativePath = normalizeFreeText(item);
       if (relativePath.length > 0) {
+        if (relativePath.startsWith('/') || relativePath.indexOf('\\') >= 0 ||
+          relativePath.split('/').some((part: string): boolean => part === '..' || part === '.')) {
+          throw new Error('日志整理清单路径无效');
+        }
         paths.push(this.storage.join(this.paths.outputsRoot, relativePath));
       }
     });
@@ -451,47 +753,51 @@ export class IndexService {
   }
 
   private async buildSourcesConcurrently(statePaths: string[], previousManifest: IndexManifest,
-    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
+    previousEvents: EventMap, imageReferences: StringArrayMap,
     modelConfig: DataManagerModelConfig, events: EventMap, sources: SourceManifestMap, counters: IndexBuildCounters,
     progress?: DataManagerProgressCallback): Promise<void> {
     if (statePaths.length === 0) {
       return;
     }
-    let cursor: IndexSourceCursor = {
-      nextIndex: 0
-    };
-    let workerCount = Math.max(1, Math.min(DEFAULT_INDEX_SOURCE_CONCURRENCY, statePaths.length));
-    let workers: Promise<void>[] = [];
-    for (let index = 0; index < workerCount; index++) {
-      workers.push(this.runSourceIndexWorker(cursor, statePaths, previousManifest, previousEvents, reuseAllowed,
-        imageReferences, modelConfig, events, sources, counters, progress));
-    }
-    await Promise.all(workers);
-  }
-
-  private async runSourceIndexWorker(cursor: IndexSourceCursor, statePaths: string[], previousManifest: IndexManifest,
-    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
-    modelConfig: DataManagerModelConfig, events: EventMap, sources: SourceManifestMap, counters: IndexBuildCounters,
-    progress?: DataManagerProgressCallback): Promise<void> {
-    while (true) {
-      let sourceIndex = cursor.nextIndex;
-      cursor.nextIndex++;
-      if (sourceIndex >= statePaths.length) {
-        return;
+    let waitingSources = new Map<string, number>();
+    let reportSources: (message: string) => void = (message: string): void => {
+      let waiting = Array.from(waitingSources.keys());
+      let stage = waiting.length > 0 ? '索引分析' : '检查索引';
+      let detail = message;
+      if (waiting.length > 0) {
+        let names = stableUnique(waiting.map((source: string): string => sourceAppDisplayName(source)));
+        let count = waiting.reduce((sum: number, source: string): number => sum + (waitingSources.get(source) || 0), 0);
+        detail = '正在等待' + names.join('、') + '的模型分析（' + count + ' 条事件）；已检查 ' +
+          counters.completedSources + '/' + statePaths.length + ' 个来源';
       }
-      let statePath = statePaths[sourceIndex];
-      let relativePath = this.storage.relativePath(this.paths.outputsRoot, statePath);
-      let indexPercent = 62 + Math.round(counters.completedSources * 22 / Math.max(1, statePaths.length));
-      this.emitProgress(progress, '索引增强', `批量增强 ${relativePath}`, counters.completedSources, statePaths.length,
-        indexPercent);
-      let result = await this.buildSourceIndex(statePath, relativePath, previousManifest, previousEvents, reuseAllowed,
-        imageReferences, modelConfig);
-      this.mergeSourceIndexResult(result, events, sources, counters);
-      counters.completedSources++;
-      this.emitProgress(progress, '索引增强', `已增强 ${counters.completedSources}/${statePaths.length} 个整理文件`,
-        counters.completedSources, statePaths.length,
+      this.emitProgress(progress, stage, detail, counters.completedSources, statePaths.length,
         62 + Math.round(counters.completedSources * 22 / Math.max(1, statePaths.length)));
-    }
+    };
+    let tasks = statePaths.map((statePath: string): (() => Promise<IndexSourceBuildResult>) => {
+      return async (): Promise<IndexSourceBuildResult> => {
+        let relativePath = this.storage.relativePath(this.paths.outputsRoot, statePath);
+        reportSources('检查 ' + relativePath);
+        let sourceProgress: DataManagerProgressCallback = (value: DataManagerProgress): void => {
+          if (value.stage === '索引分析') {
+            waitingSources.set(relativePath, value.total); reportSources(value.message);
+          } else if (progress) { progress(value); }
+        };
+        let result: IndexSourceBuildResult;
+        try {
+          result = await this.buildSourceIndex(statePath, relativePath, previousManifest, previousEvents,
+            imageReferences, modelConfig, sourceProgress);
+        } catch (e) {
+          let err = e as Error;
+          dataManagerWarn('SYNC_SOURCE_FAILED source=' + relativePath + ' error=' + err.message);
+          throw new Error(sourceAppDisplayName(relativePath) + '：' + err.message);
+        } finally { waitingSources.delete(relativePath); }
+        counters.completedSources++;
+        reportSources(`已检查 ${counters.completedSources}/${statePaths.length} 个整理文件，复用 ${result.reusedEvents} 条事件`);
+        return result;
+      };
+    });
+    let results = await runLimitedTasks<IndexSourceBuildResult>(tasks, DEFAULT_INDEX_SOURCE_CONCURRENCY);
+    results.forEach((result: IndexSourceBuildResult) => this.mergeSourceIndexResult(result, events, sources, counters));
   }
 
   private mergeSourceIndexResult(result: IndexSourceBuildResult, events: EventMap, sources: SourceManifestMap,
@@ -514,18 +820,42 @@ export class IndexService {
   }
 
   private async buildSourceIndex(statePath: string, relativePath: string, previousManifest: IndexManifest,
-    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
-    modelConfig: DataManagerModelConfig): Promise<IndexSourceBuildResult> {
+    previousEvents: EventMap, imageReferences: StringArrayMap,
+    modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<IndexSourceBuildResult> {
     let content = this.storage.readText(statePath, '');
+    try {
+      let state = ArkJSON.parse(content) as ConsolidatedState;
+      if (!state || !Array.isArray(state.records)) { throw new Error('Invalid source state'); }
+    } catch (e) { throw new Error('日志整理结果无法读取，请重试同步'); }
     let digest = this.storage.sha256Text(content);
     let eventIds: string[] = [];
     let eventInputHashes: StringMap = createStringMap();
     let sourceEvents: EventMap = {};
     let reusedEvents = 0;
     let enrichedEventsCount = 0;
+    let failedIds: string[] = [];
     let previousSource = previousManifest.sources ? previousManifest.sources[relativePath] : undefined;
+    // A partial source update can use a different model from retained sources.
+    // Its identity must travel with the source rather than the global manifest.
+    let reuseAllowed = this.hasReusableIndexLayout(previousManifest) &&
+      this.sameEnrichment(previousSource && previousSource.enrichment ? previousSource.enrichment : previousManifest.enrichment,
+        this.currentEnrichment(modelConfig));
     let canReuseSource = this.canReuseSource(previousSource, digest, previousEvents);
+    if (previousSource && previousSource.event_ids.some((id: string): boolean => {
+      let event = previousEvents[id];
+      if (!event || !isChatCollectionEvent(event)) { return false; }
+      let context = this.chatContexts.forRefs(event.source_refs, (text: string): string => this.storage.sha256Text(text));
+      return !event.chat_context || event.chat_context.policy !== CHAT_CONTEXT_POLICY ||
+        event.chat_context.input_hash !== context.input_hash;
+    })) { canReuseSource = false; }
+    if (modelConfig.enabled && previousSource && previousSource.event_ids.some((id: string): boolean =>
+      !previousEvents[id] || !isModelEnrichmentMethod(previousEvents[id].enrichment_method))) { canReuseSource = false; }
     if (reuseAllowed && canReuseSource && previousSource) {
+      failedIds = previousSource.failed_event_ids || [];
+      let previousInputHashes: StringMap = previousSource.event_input_hashes;
+      Object.keys(previousInputHashes).forEach((eventId: string): void => {
+        eventInputHashes[eventId] = previousInputHashes[eventId];
+      });
       for (let eventId of previousSource.event_ids) {
         let reused = this.copyReusableEvent(previousEvents[eventId], relativePath, imageReferences);
         sourceEvents[reused.event_id] = reused;
@@ -542,14 +872,15 @@ export class IndexService {
       baseEvents.forEach((event: IndexedEvent) => {
         let inputHash = this.eventEnrichInputHash(event);
         eventInputHashes[event.event_id] = inputHash;
-        if (reuseAllowed && this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents)) {
+        if (reuseAllowed && this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents) &&
+          (!modelConfig.enabled || isModelEnrichmentMethod(previousEvents[event.event_id].enrichment_method))) {
           eventsById[event.event_id] = this.copyReusableEvent(previousEvents[event.event_id], relativePath, imageReferences);
           reusedEvents++;
         } else {
           eventsToEnrich.push(event);
         }
       });
-      let enrichedEvents = await this.modelClient.enrichEvents(eventsToEnrich, modelConfig);
+      let enrichedEvents = await this.enrichWithCheckpoint(eventsToEnrich, modelConfig, progress, relativePath);
       for (let enriched of enrichedEvents) {
         enriched.profile_domains = deriveProfileDomains(enriched);
         eventsById[enriched.event_id] = enriched;
@@ -557,6 +888,7 @@ export class IndexService {
       baseEvents.forEach((event: IndexedEvent) => {
         let current = eventsById[event.event_id];
         if (!current) {
+          failedIds.push(event.event_id);
           return;
         }
         sourceEvents[current.event_id] = current;
@@ -570,7 +902,9 @@ export class IndexService {
     let sourceEntry: SourceManifestEntry = {
       sha256: digest,
       event_ids: eventIds,
-      event_input_hashes: eventInputHashes
+      event_input_hashes: eventInputHashes,
+      failed_event_ids: failedIds,
+      enrichment: this.currentEnrichment(modelConfig)
     };
     return {
       relativePath: relativePath,
@@ -582,6 +916,7 @@ export class IndexService {
   }
 
   query(options: QueryOptions): QueryResult {
+    this.ensureCommitted();
     let candidateIds = this.queryCandidateIds(options);
     let events = this.loadEventsByIds(candidateIds);
     return this.queryWithEvents(options, events);
@@ -675,29 +1010,67 @@ export class IndexService {
   }
 
   loadProfileState(): ProfileState {
-    return this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+    this.ensureCommitted();
+    let profile = this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
+    if (profile.calendar_input_hash !== new CalendarMemoryStore(this.paths.filesDir).fingerprint()) {
+      Object.keys(profile.domains).forEach((key: string) => {
+        let domain = profile.domains[key];
+        let current = domain.claims.filter((claim: ProfileClaim): boolean =>
+          !claim.event_ids.some((id: string): boolean => id.startsWith('calendar:')));
+        if (current.length !== domain.claims.length) {
+          domain.claims = current;
+          domain.summary = ''; domain.short_summary = ''; domain.input_hash = ''; domain.generation = 'stale';
+        }
+      });
+      profile.claim_count = this.profileClaimCount(profile);
+    }
+    return profile;
   }
 
   loadProfileMarkdown(): string {
-    return this.storage.readText(this.storage.join(this.paths.indexesRoot, 'profile', 'profile.md'), '').trim();
+    let profile = this.loadProfileState();
+    return profile.event_count > 0 ? this.renderProfileMarkdown(profile) : '';
   }
 
   loadEvents(): EventMap {
+    this.ensureCommitted();
+    if (this.readScope && this.syncEvents !== null) { return this.filterCurrentCalendarEvents(this.syncEvents); }
+    let result = this.loadStoredEvents();
+    if (this.readScope) { this.syncEvents = result; }
+    return this.filterCurrentCalendarEvents(result);
+  }
+
+  private loadStoredEvents(): EventMap {
     let result: EventMap = {};
     let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
-    this.eventPartitionNames()
-      .forEach((name: string) => {
-        let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
-        if (partition && Array.isArray(partition.events)) {
-          partition.events.forEach((event: IndexedEvent) => {
-            result[event.event_id] = this.copyEvent(event);
-          });
-        }
-      });
+    this.eventPartitionNames().forEach((name: string) => {
+      let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
+      if (partition && Array.isArray(partition.events)) {
+        partition.events.forEach((event: IndexedEvent) => result[event.event_id] = this.copyEvent(event));
+      }
+    });
+    return result;
+  }
+
+  private filterCurrentCalendarEvents(events: EventMap): EventMap {
+    let current: EventMap = {};
+    let result: EventMap = {};
+    new CalendarMemoryStore(this.paths.filesDir).events().forEach((event: IndexedEvent) => current[event.event_id] = event);
+    Object.keys(events).forEach((id: string) => {
+      if (!id.startsWith('calendar:') || (current[id] && current[id].normalized_fact === events[id].normalized_fact)) {
+        result[id] = events[id];
+      }
+    });
     return result;
   }
 
   loadEventsByIds(eventIds: string[]): EventMap {
+    this.ensureCommitted();
+    if (this.readScope) {
+      let all = this.loadEvents(); let selected: EventMap = {};
+      stableUnique(eventIds).forEach((id: string) => { if (all[id]) { selected[id] = this.copyEvent(all[id]); } });
+      return selected;
+    }
     let result: EventMap = {};
     let uniqueIds = stableUnique(eventIds);
     if (uniqueIds.length === 0) {
@@ -719,7 +1092,7 @@ export class IndexService {
         .filter((name: string) => loadedPartitions[name] !== true)
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
-    return result;
+    return this.filterCurrentCalendarEvents(result);
   }
 
   private eventPartitionNames(): string[] {
@@ -738,6 +1111,7 @@ export class IndexService {
   }
 
   loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
+    this.ensureCommitted();
     let document = this.storage.readJson<HomeTodoDocument>(
       this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
     let deadlineEventIds: string[] = [];
@@ -1076,7 +1450,8 @@ export class IndexService {
     let enrichment: EnrichmentManifest = {
       schema: 'todo_signal_agent_task',
       mode: modelConfig.enabled ? 'model' : 'heuristic',
-      base_url: modelConfig.baseUrl
+      base_url: modelConfig.baseUrl,
+      model_name: modelConfig.model || ''
     };
     return enrichment;
   }
@@ -1086,19 +1461,26 @@ export class IndexService {
   }
 
   private canReuseIndex(previousManifest: IndexManifest, enrichment: EnrichmentManifest): boolean {
+    return this.hasReusableIndexLayout(previousManifest) && this.sameEnrichment(previousManifest.enrichment, enrichment);
+  }
+
+  private hasReusableIndexLayout(previousManifest: IndexManifest): boolean {
     if (!previousManifest || !previousManifest.enrichment || !previousManifest.sources) {
       return false;
     }
     return previousManifest.input_root === 'workflows/profile-consolidation/outputs' &&
       previousManifest.index_dir === 'workflows/profile-consolidation/indexes' &&
-      previousManifest.enrichment.schema === enrichment.schema &&
-      previousManifest.enrichment.mode === enrichment.mode &&
-      previousManifest.enrichment.base_url === enrichment.base_url &&
       this.sameStringArrays(previousManifest.entity_types || [], ENTITY_TYPE_KEYS);
   }
 
+  private sameEnrichment(previous: EnrichmentManifest | undefined, current: EnrichmentManifest): boolean {
+    return previous !== undefined && previous.schema === current.schema && previous.mode === current.mode &&
+      previous.base_url === current.base_url && (previous.model_name || '') === (current.model_name || '');
+  }
+
   private canReuseSource(previousSource: SourceManifestEntry | undefined, digest: string, previousEvents: EventMap): boolean {
-    if (!previousSource || previousSource.sha256 !== digest || !Array.isArray(previousSource.event_ids) || previousSource.event_ids.length === 0 ||
+    if (!previousSource || previousSource.sha256 !== digest || !Array.isArray(previousSource.event_ids) ||
+      (previousSource.event_ids.length === 0 && !(previousSource.failed_event_ids && previousSource.failed_event_ids.length > 0)) ||
       !previousSource.event_input_hashes) {
       return false;
     }
@@ -1131,6 +1513,9 @@ export class IndexService {
 
   private copyEvent(event: IndexedEvent): IndexedEvent {
     let copied: IndexedEvent = {
+      calendar: event.calendar,
+      chat_context: event.chat_context,
+      chat_attribution: event.chat_attribution,
       event_id: event.event_id,
       source_state_file: event.source_state_file,
       record_id: event.record_id,
@@ -1230,10 +1615,16 @@ export class IndexService {
         profile_domains: []
       });
     }
+    events.forEach((event: IndexedEvent) => {
+      if (isChatCollectionEvent(event)) {
+        event.chat_context = this.chatContexts.forRefs(event.source_refs, (text: string): string => this.storage.sha256Text(text));
+      }
+    });
     return events;
   }
 
   private buildImageReferenceMap(): StringArrayMap {
+    this.chatContexts = new ChatCollectionContextIndex();
     let candidates: ImageReferenceCandidateMap = new Object() as ImageReferenceCandidateMap;
     this.storage.listDir(this.paths.workflowRunsRoot).forEach((runName: string) => {
       let summaryPath = this.storage.join(this.paths.workflowRunsRoot, runName, 'run_summary.json');
@@ -1260,13 +1651,15 @@ export class IndexService {
         let logRelative = this.pathAfterDirectory(output['daily_log_path'], 'daily-log');
         let imagePath = this.workflowImageReferenceForToolOutput(output, runName, stepKey, steps, stepKeys);
         let summary = this.summaryOutputText(output);
-        if (logRelative.length === 0 || imagePath.length === 0 || summary.length === 0) {
+        if (logRelative.length === 0 || summary.length === 0) {
           return;
         }
         if (!candidates[logRelative]) {
           candidates[logRelative] = [];
         }
         candidates[logRelative].push({
+          batch_id: 'workflow:' + runName,
+          order: this.stepOrder(stepKey, stepKeys),
           summary: summary,
           image_path: imagePath,
           used: false
@@ -1284,24 +1677,49 @@ export class IndexService {
           .forEach((fileName: string) => {
             let relative = day + '/' + fileName;
             let available = candidates[relative] || [];
-            if (available.length === 0) {
-              return;
-            }
+            if (available.length === 0 && !fileName.startsWith('com.tencent.mm__wechat_auto_summary__')) { return; }
             let text = this.storage.readText(this.storage.join(dayDir, fileName), '');
+            let document = parseDailyLogDocument(text);
+            let chat = memorySceneLabel(workflowSceneIdFromMetadata(document.workflow_metadata)) === '聊天';
+            let entryBatches = document.entry_batch_ids;
+            let runId = normalizeFreeText(document.workflow_metadata['run_id']);
             let body = text.indexOf('-->') >= 0 ? text.substring(text.indexOf('-->') + 3) : text;
             parseNumberedEntries(body).forEach((entry: NumberedEntry) => {
               let entryText = normalizeFreeText(entry.text);
-              for (let candidate of available) {
-                if (!candidate.used && this.summaryTextsMatch(candidate.summary, entryText)) {
-                  candidate.used = true;
-                  imageReferences[relative + '#' + entry.index] = [candidate.image_path];
-                  break;
-                }
+              let ref = relative + '#' + entry.index;
+              let batchId = chat && entryBatches ? normalizeFreeText(entryBatches[String(entry.index)]) : '';
+              if (chat && runId) { batchId = 'wechat:' + runId; }
+              let order = entry.index;
+              let matches = available.filter((candidate: ImageReferenceCandidate): boolean =>
+                !candidate.used && this.summaryTextsMatch(candidate.summary, entryText) && (!batchId || candidate.batch_id === batchId));
+              let possibleBatches = stableUnique(matches.map((candidate: ImageReferenceCandidate): string => candidate.batch_id));
+              // Identical legacy text in separate runs cannot establish a batch identity.
+              if (matches.length > 0 && (!chat || batchId.length > 0 || possibleBatches.length === 1)) {
+                let candidate = matches[0];
+                candidate.used = true;
+                if (candidate.image_path) { imageReferences[ref] = [candidate.image_path]; }
+                if (chat && !batchId) { batchId = candidate.batch_id; order = candidate.order; }
               }
+              if (chat && batchId) { this.chatContexts.add(batchId, ref, entry.text, imageReferences[ref] || [], order); }
             });
           });
       });
+    this.chatContexts.all().forEach((batch: ChatCollectionBatch) => {
+      this.storage.writeJsonAtomic(this.chatBatchPath(batch.batch_id), batch);
+    });
     return imageReferences;
+  }
+
+  private chatBatchPath(batchId: string): string {
+    return this.storage.join(this.paths.indexesRoot, 'chat-context', this.storage.sha256Text(batchId) + '.json');
+  }
+
+  loadChatContextBatches(events: IndexedEvent[]): ChatCollectionBatch[] {
+    this.ensureCommitted();
+    let ids: string[] = [];
+    events.forEach((event: IndexedEvent) => { if (event.chat_context) { ids = ids.concat(event.chat_context.batch_ids); } });
+    return stableUnique(ids).map((id: string): ChatCollectionBatch =>
+      this.storage.readJson<ChatCollectionBatch>(this.chatBatchPath(id), { batch_id: id, entries: [], complete: false }));
   }
 
   private workflowImageReferenceForToolOutput(output: JsonMap, runName: string, stepKey: string,
@@ -1525,6 +1943,93 @@ export class IndexService {
       normalizeFreeText(record.normalized_fact).length > 0;
   }
 
+  private async enrichWithCheckpoint(events: IndexedEvent[], config: DataManagerModelConfig,
+    progress?: DataManagerProgressCallback, source: string = ''): Promise<IndexedEvent[]> {
+    if (!config.enabled || events.length === 0) { return await this.modelClient.enrichEvents(events, config); }
+    let directory = this.storage.join(this.paths.consolidationRoot, 'sync-cache', 'events');
+    let hashes: StringMap = {}; let failureHashes: StringMap = {}; let ready: EventMap = {}; let pending: IndexedEvent[] = [];
+    let policy = 'event-checkpoint-v1:' + ArkJSON.stringify(this.currentEnrichment(config));
+    let chatBatches = this.chatContexts.all();
+    events.forEach((event: IndexedEvent) => {
+      let hash = this.storage.sha256Text(policy + ':' + ArkJSON.stringify(event)); hashes[event.event_id] = hash;
+      let failureHash = this.storage.sha256Text('event-failure-v1:' + policy + ':' + this.storage.sha256Text(config.apiKey) + ':' +
+        ArkJSON.stringify(buildEnrichPromptPreview([event], chatBatches)));
+      failureHashes[event.event_id] = failureHash;
+      let failed = this.storage.readJson<EventFailureCheckpoint | null>(
+        this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.failed.json'), null);
+      if (failed && failed.hash === failureHash) { this.failedEventIds.add(event.event_id); return; }
+      let receipt = this.storage.readJson<EventCheckpoint | null>(
+        this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.json'), null);
+      if (receipt && receipt.hash === hash && receipt.event && receipt.event.event_id === event.event_id &&
+        isModelEnrichmentMethod(receipt.event.enrichment_method) && receipt.eventHash === this.storage.sha256Text(ArkJSON.stringify(receipt.event))) {
+        ready[event.event_id] = receipt.event;
+      } else { pending.push(event); }
+    });
+    dataManagerInfo('SYNC_ENRICH_PLAN pending=' + pending.length + ' checkpointHits=' + (events.length - pending.length));
+    if (pending.length > 0) {
+      this.emitProgress(progress, '索引分析', source + '：分析 ' + pending.length + ' 条变化事件，复用 ' +
+        (events.length - pending.length) + ' 条检查点', 0, pending.length, 70);
+    }
+    let saveEvent = (event: IndexedEvent): void => {
+      ready[event.event_id] = event;
+      if (isModelEnrichmentMethod(event.enrichment_method) && hashes[event.event_id]) {
+        let receipt: EventCheckpoint = { hash: hashes[event.event_id], eventHash: this.storage.sha256Text(ArkJSON.stringify(event)), event: event };
+        this.storage.writeJsonAtomic(this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.json'), receipt);
+      }
+    };
+    let analyzed = await this.modelClient.enrichEvents(pending, config, {
+      onEvent: (event: IndexedEvent): void => { saveEvent(event); },
+      onFailure: (event: IndexedEvent, reason: string): void => {
+        let failure: EventFailureCheckpoint = { hash: failureHashes[event.event_id], reason: reason, failed_at: nowIsoLocal() };
+        this.storage.writeJsonAtomic(this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.failed.json'), failure);
+        this.failedEventIds.add(event.event_id);
+        dataManagerWarn('SYNC_EVENT_FAILED event=' + event.event_id + ' reason=' + reason + ' automaticRetry=false');
+      }
+    }, chatBatches);
+    analyzed.forEach((event: IndexedEvent) => { if (!ready[event.event_id]) { saveEvent(event); } });
+    dataManagerInfo('SYNC_ENRICH pending=' + pending.length + ' checkpointHits=' + (events.length - pending.length));
+    return events.filter((event: IndexedEvent): boolean => ready[event.event_id] !== undefined)
+      .map((event: IndexedEvent): IndexedEvent => ready[event.event_id]);
+  }
+
+  private writePostingIndex(kind: string, oldTerms: StringArrayMap, newTerms: StringArrayMap,
+    events: EventMap, changed: BooleanMap, incremental: boolean): void {
+    let filename = this.storage.join(this.paths.indexesRoot, kind, 'index.json');
+    let previous = this.storage.readJson<InvertedDocument | null>(filename, null);
+    let postings: StringArrayMap;
+    if (incremental && previous && previous.postings) {
+      postings = previous.postings;
+      let removedTerms = new Set<string>();
+      stableUnique(Object.keys(oldTerms).concat(Object.keys(newTerms))).forEach((term: string) => {
+        let ids = stableUnique((postings[term] || []).filter((id: string): boolean => !changed[id]).concat(newTerms[term] || [])).sort();
+        if (ids.length > 0 || kind === 'workflow-scene' || kind === 'domain') { postings[term] = ids; }
+        else { removedTerms.add(term); }
+      });
+      if (removedTerms.size > 0) {
+        let retained: StringArrayMap = {};
+        Object.keys(postings).forEach((term: string) => {
+          if (!removedTerms.has(term)) { retained[term] = postings[term]; }
+        });
+        postings = retained;
+      }
+    } else {
+      postings = kind === 'inverted' ? this.buildInvertedDocument(events).postings : kind === 'source' ?
+        this.buildSourceDocument(events).postings : kind === 'domain' ? this.buildDomainDocument(events).postings :
+          this.buildWorkflowSceneDocument(events).postings;
+    }
+    let document: InvertedDocument = { postings: postings };
+    this.storage.writeJsonAtomic(filename, document);
+  }
+
+  private writeMonthDocuments(directory: string, desired: ObjectMap, months: string[]): void {
+    Object.keys(desired).forEach((name: string) => this.storage.writeJsonAtomic(this.storage.join(directory, name), desired[name]));
+    this.storage.listDir(directory).forEach((name: string) => {
+      if (/^\d{4}-\d{2}\.json$/.test(name) && months.indexOf(name.substring(0, 7)) < 0) {
+        this.storage.removeFile(this.storage.join(directory, name));
+      }
+    });
+  }
+
   private writeEventPartitions(events: EventMap): void {
     let partitions: EventGroupMap = {};
     Object.keys(events).forEach((eventId: string) => {
@@ -1540,6 +2045,7 @@ export class IndexService {
     });
     let desired: ObjectMap = {};
     Object.keys(partitions).sort().forEach((month: string) => {
+      if (!this.dirtyMonths[month] && this.storage.exists(this.paths.eventPartitionPath(month))) { return; }
       let monthEvents = partitions[month].sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
           return left.event_date.localeCompare(right.event_date);
@@ -1559,7 +2065,7 @@ export class IndexService {
     };
     // 记录事件分区清单，避免查询阶段因目录枚举失败而读不到刚写入的图库事件。
     desired[EVENT_PARTITION_INDEX_FILE_NAME] = partitionIndex as Object;
-    this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'events'), desired);
+    this.writeMonthDocuments(this.storage.join(this.paths.indexesRoot, 'events'), desired, Object.keys(partitions));
   }
 
   private buildInvertedDocument(events: EventMap): InvertedDocument {
@@ -2279,6 +2785,7 @@ export class IndexService {
     });
     let desired: ObjectMap = {};
     for (let month of Object.keys(monthGroups).sort()) {
+      if (!this.dirtyMonths[month] && this.storage.exists(this.paths.temporalPath(month))) { continue; }
       let monthEvents = monthGroups[month].sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
           return left.event_date.localeCompare(right.event_date);
@@ -2333,7 +2840,7 @@ export class IndexService {
       };
       desired[month + '.json'] = temporalDocument as Object;
     }
-    this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'temporal'), desired);
+    this.writeMonthDocuments(this.storage.join(this.paths.indexesRoot, 'temporal'), desired, Object.keys(monthGroups));
   }
 
   private loadTemporalDocuments(): TemporalDocumentMap {
@@ -2354,8 +2861,7 @@ export class IndexService {
     let byDomain: EventGroupMap = {};
     let profileDomains = this.profileDomainKeys();
     profileDomains.forEach((domain: string) => byDomain[domain] = []);
-    Object.keys(events).forEach((eventId: string) => {
-      let event = events[eventId];
+    calendarProfileEvents(Object.keys(events).map((id: string) => events[id]), Date.now()).forEach((event: IndexedEvent) => {
       // 个人信息只供按需查询，避免自动进入每轮云端聊天携带的画像摘要及碰一碰分享。
       if ((event.workflow_scene_ids || []).indexOf(PERSONAL_INFO_MEMORY_SCENE_ID) >= 0) {
         return;
@@ -2373,7 +2879,8 @@ export class IndexService {
     let domainsState: ProfileDomainMap = {};
     let domainIndex = 0;
     for (let domain of profileDomains) {
-      this.emitProgress(progress, '生成画像', `生成${displayDomainName(domain)}画像`, domainIndex, profileDomains.length, 90 + Math.round(domainIndex * 7 / Math.max(1, profileDomains.length)));
+      this.emitProgress(progress, '生成画像', `检查${displayDomainName(domain)}画像`, domainIndex, profileDomains.length,
+        85 + Math.round(domainIndex * 10 / Math.max(1, profileDomains.length)));
       let domainEvents = byDomain[domain] || [];
       domainEvents.sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
@@ -2398,16 +2905,29 @@ export class IndexService {
           generation: 'empty'
         };
       } else {
-        let previousClaims = previous.domains && previous.domains[domain] ? previous.domains[domain].claims : [];
         let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
-        if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
+        // An unchanged published v1 domain is already a validated result. Lazy
+        // migration must not regenerate months of history just to warm v2.
+        let legacyHash = this.storage.sha256Text(PROFILE_BLOCK_POLICY + ':' + domain + ':' +
+          this.modelClient.profileCacheIdentity(modelConfig) + ':' + ArkJSON.stringify(domainEvents));
+        if (reuseAllowed && previousDomain && (previousDomain.input_hash === inputHash || previousDomain.input_hash === legacyHash) &&
+          isProfileDomainStateReusable(previousDomain, eventIds.length)) {
           domainState = this.copyProfileDomain(previousDomain);
+          domainState.input_hash = inputHash;
           domainState.event_ids = eventIds;
           domainState.event_count = eventIds.length;
           domainState.date_range = this.eventDateRange(domainEvents);
           dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
         } else {
-          let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
+          let cache = new ProfileBlockCache(this.paths, this.storage, this.modelClient);
+          let payload: ProfileModelPayload = await cache.build(domain, domainEvents, modelConfig,
+            (value: DataManagerProgress): void => {
+              if (progress) {
+                progress(createDataManagerProgress('生成画像', displayDomainName(domain) + '：' + value.message,
+                  value.current, value.total, 85 + Math.round((domainIndex + value.current / Math.max(1, value.total)) *
+                    10 / Math.max(1, profileDomains.length))));
+              }
+            });
           let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
           domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
         }
@@ -2416,6 +2936,7 @@ export class IndexService {
       domainIndex++;
     }
     let profile: ProfileState = {
+      calendar_input_hash: new CalendarMemoryStore(this.paths.filesDir).fingerprint(),
       generated_at: nowIsoLocal(),
       event_count: Object.keys(events).length,
       event_date_range: this.eventDateRange(Object.keys(events).map((eventId: string) => events[eventId])),
@@ -2438,27 +2959,8 @@ export class IndexService {
   }
 
   private profileDomainInputHash(domain: string, domainEvents: IndexedEvent[], modelConfig: DataManagerModelConfig): string {
-    let parts: string[] = [
-      domain,
-      'short_summary_v1',
-      modelConfig.enabled ? 'model' : 'model_unavailable',
-      modelConfig.enabled ? String(PROFILE_MODEL_MAX_TOKENS) : '0',
-      modelConfig.enabled ? String(PROFILE_MODEL_PROMPT_CHAR_LIMIT) : '0',
-      modelConfig.enabled ? String(PROFILE_MODEL_MERGE_CHAR_LIMIT) : '0'
-    ];
-    domainEvents.forEach((event: IndexedEvent) => {
-      parts.push([
-        event.event_id,
-        event.event_date,
-        summarizeText(event.summary, 220),
-        summarizeText(event.normalized_fact, 260),
-        (event.domains || []).join(','),
-        (event.sources || []).slice(0, 3).join(','),
-        (event.entities || []).slice(0, 8).join(','),
-        (event.keywords || []).slice(0, 12).join(',')
-      ].join('\u001f'));
-    });
-    return this.storage.sha256Text(parts.join('\u001e'));
+    return this.storage.sha256Text('profile-evidence-v2:' + domain + ':' +
+      this.modelClient.profileCacheIdentity(modelConfig) + ':' + profileEvidenceText(domainEvents));
   }
 
   private copyProfileDomain(domain: ProfileDomainState): ProfileDomainState {
@@ -2507,11 +3009,14 @@ export class IndexService {
         continue;
       }
       let evidenceEvents = ids.map((id: string) => eventMap[id]).filter((event: IndexedEvent) => event !== undefined);
+      let calendarOnly = evidenceEvents.every((event: IndexedEvent): boolean => event.calendar !== undefined);
+      let kind = this.normalizeProfileKind(raw.kind);
+      if (calendarOnly && kind !== 'topic' && kind !== 'observation') { continue; }
       let dateRange = this.eventDateRange(evidenceEvents);
       let claim: ProfileClaim = {
         statement: statement,
-        kind: this.normalizeProfileKind(raw.kind),
-        confidence: this.normalizeConfidence(raw.confidence),
+        kind: kind,
+        confidence: calendarOnly && this.normalizeConfidence(raw.confidence) === 'high' ? 'medium' : this.normalizeConfidence(raw.confidence),
         event_ids: ids,
         evidence_count: ids.length,
         start_date: dateRange.start_date,

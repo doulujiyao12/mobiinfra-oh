@@ -31,6 +31,7 @@ export interface ChatMessage {
   streamingActive?: boolean;
   streamingVersion?: number;
   voice?: ChatVoiceMetadata;
+  codexRunId?: string;
 }
 
 export interface ChatAssistantThinkingParts {
@@ -434,7 +435,8 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         collapsed: !message.collapsed,
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
-        imagePaths: chatMessageImagePaths(message)
+        imagePaths: chatMessageImagePaths(message),
+        codexRunId: message.codexRunId
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
@@ -464,7 +466,8 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
         collapsed: message.collapsed,
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
-        imagePaths: chatMessageImagePaths(message)
+        imagePaths: chatMessageImagePaths(message),
+        codexRunId: message.codexRunId
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {

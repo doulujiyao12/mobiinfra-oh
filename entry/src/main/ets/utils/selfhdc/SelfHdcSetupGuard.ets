@@ -10,29 +10,19 @@ export class SelfHdcSetupGuard {
 
   // Do not queue task starts behind a dialog or automatically replay them after settings navigation.
   static async ensure(uiContext: UIContext, filesDir: string, reason: string,
-    phoneModeOnly: boolean = true, startupReminderOnly: boolean = false): Promise<boolean> {
+    phoneModeOnly: boolean = true): Promise<boolean> {
     if (SelfHdcSetupGuard.checking) { return false; }
     SelfHdcSetupGuard.checking = true;
     try {
       let settings = SelfHdcTaskSettings.load(filesDir);
       if (phoneModeOnly && settings.mode !== 'phone') { return true; }
-      let problem = '';
-      if (!startupReminderOnly) {
-        settings = await SelfHdcTaskSettings.refreshLocalIp(filesDir, reason);
-        // A user may have changed the mode while address detection was pending.
-        if (phoneModeOnly && settings.mode !== 'phone') { return true; }
-        problem = selfHdcSetupProblem(settings, AppStorage.get<string>('selfHdcDetectedWifiIp') || '');
-        if (problem.length === 0) { return true; }
-        AppLogger.info('SelfHdc', 'SETUP_REQUIRED source=' + reason + ' ' + problem.replace(/\n/g, ' '));
-        // The startup reminder preference never suppresses a required task setup dialog.
-      } else {
-        // Reminder eligibility uses saved settings only; no device state inspection.
-        if (settings.port.trim().length > 0 || settings.skipSetupReminder) { return true; }
-        AppLogger.info('SelfHdc', 'SETUP_GUIDE source=' + reason);
-      }
-      let openSettings = await showSelfHdcSetupDialog(uiContext, (skipReminder: boolean): void => {
-        SelfHdcTaskSettings.saveSetupReminderChoice(filesDir, skipReminder);
-      }, problem, settings.skipSetupReminder);
+      settings = await SelfHdcTaskSettings.refreshLocalIp(filesDir, reason);
+      // A user may have changed the mode while address detection was pending.
+      if (phoneModeOnly && settings.mode !== 'phone') { return true; }
+      let problem = selfHdcSetupProblem(settings);
+      if (problem.length === 0) { return true; }
+      AppLogger.info('SelfHdc', 'SETUP_REQUIRED source=' + reason + ' ' + problem.replace(/\n/g, ' '));
+      let openSettings = await showSelfHdcSetupDialog(uiContext, problem);
       if (openSettings) { await router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }, router.RouterMode.Single); }
       return false;
     } catch (e) {

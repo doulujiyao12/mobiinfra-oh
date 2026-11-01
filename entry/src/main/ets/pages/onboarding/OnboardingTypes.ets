@@ -58,7 +58,7 @@ export const FIRST_LAUNCH_USAGE_GUIDE_ITEMS: FirstLaunchUsageGuideItem[] = [
     id: 'usage_avatar',
     title: '数字分身',
     entryLabel: '使用入口：首页',
-    configLabel: '配置入口：设置 > 个人与隐私',
+    configLabel: '配置入口：模型与智能体 > 云端模型 > 更多设置',
     description: '基于个人画像和头像生成数字分身，用于问答、任务执行和长期陪伴。',
     iconText: 'A',
     accentColor: '#8066FF',

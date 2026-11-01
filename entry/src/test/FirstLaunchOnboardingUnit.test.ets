@@ -60,7 +60,8 @@ export default function firstLaunchOnboardingUnitTest(): void {
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].id).assertEqual('usage_avatar');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].title).assertEqual('数字分身');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].entryLabel).assertEqual('使用入口：首页');
-      expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].configLabel).assertEqual('配置入口：设置 > 个人与隐私');
+      expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].configLabel)
+        .assertEqual('配置入口：模型与智能体 > 云端模型 > 更多设置');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].description)
         .assertEqual('基于个人画像和头像生成数字分身，用于问答、任务执行和长期陪伴。');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[1].iconText).assertEqual('A');

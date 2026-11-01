@@ -4,6 +4,7 @@
 /build-profile.json5
 /.idea
 **/build
+!/pc-companion/build/
 /.hvigor
 /.hvigor-user-home
 /.hdc-auto-cache/
@@ -38,3 +39,5 @@ build-profile.json5*
 /**/.DS_Store
 /screenshot-Harmony.jpg
 mobiinfer
+/ppt/
+/video/

@@ -1,5 +1,4 @@
 import { socket } from '@kit.NetworkKit';
-import { PrivacyConsent } from './PrivacyConsent';
 import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
@@ -150,7 +149,6 @@ export class AgentRouterServer {
 
   public submitLocalTask(task: string): void {
     AiServiceAccess.requireAllowed();
-    PrivacyConsent.requireAccepted();
     this.routeMode = 'local';
     this.currentTask = task;
     this.cloudTask = '';
@@ -161,7 +159,6 @@ export class AgentRouterServer {
 
   public submitCloudTask(task: string): void {
     AiServiceAccess.requireAllowed();
-    PrivacyConsent.requireAccepted();
     this.routeMode = 'cloud';
     this.currentTask = task;
     this.cloudTask = '';
@@ -339,14 +336,6 @@ export class AgentRouterServer {
       return;
     }
 
-    // Keep cleanup messages available, but do not hand out tasks or model actions without consent.
-    if (!PrivacyConsent.isAccepted() && reqType !== 'clear' && reqType !== 'error' &&
-      reqType !== 'capture_overlay_restore') {
-      this.currentTask = '';
-      this.sendTerminate(client, 'Privacy consent required');
-      return;
-    }
-
     if (reqType === 'poll') {
       if (this.routeMode === 'cloud' && this.currentTask.length > 0) {
         this.log('cloud', '>> [Cloud Poll] PC fetched task: ' + this.currentTask);
@@ -394,10 +383,6 @@ export class AgentRouterServer {
     await AgentExecutionController.waitIfPaused();
     if (!AiServiceAccess.isAllowed()) {
       this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
-      return;
-    }
-    if (!PrivacyConsent.isAccepted()) {
-      this.sendTerminate(client, 'Privacy consent revoked');
       return;
     }
     if (this.isCancellationRequested()) {
@@ -784,7 +769,7 @@ export class AgentRouterServer {
   }
 
   private isCancellationRequested(): boolean {
-    return !AiServiceAccess.isAllowed() || !PrivacyConsent.isAccepted() || this.cancellationRequested ||
+    return !AiServiceAccess.isAllowed() || this.cancellationRequested ||
       AgentExecutionController.isCancelRequested();
   }
 

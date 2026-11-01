@@ -4,6 +4,7 @@ import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { memorySceneLabel } from '../utils/WorkflowSceneConfig';
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
+import { MemoryChangeJournal, MemorySourceChange } from './MemoryChangeJournal';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { dataManagerWarn } from './DataManagerLog';
 import {
@@ -66,6 +67,15 @@ export class ChatMemorySync {
   }
 
   private loadSessions(now: number): ChatSessionRecord[] {
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    if (journal.ready('chat') && !journal.pending('chat').some((change: MemorySourceChange): boolean => change.path === '*')) {
+      let changed: ChatSessionRecord[] = [];
+      for (let change of journal.pending('chat')) {
+        let session = this.storage.readJson<ChatSessionRecord | null>(ChatSessionStorage.sessionPath(this.paths.filesDir, change.path), null);
+        if (session && Array.isArray(session.messages)) { changed.push(session); }
+      }
+      return changed;
+    }
     let emptyIndex: ChatSessionIndex = { sessions: [] };
     let index = this.storage.readJson<ChatSessionIndex>(ChatSessionStorage.indexPath(this.paths.filesDir), emptyIndex);
     let ids = new Set<string>();
@@ -102,6 +112,8 @@ export class ChatMemorySync {
   }
 
   hasPendingMessages(now: number = Date.now()): boolean {
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    if (journal.ready('chat') && journal.pending('chat').length === 0) { return false; }
     let state = ChatMemorySync.readState(this.paths.dailyLogRoot, this.storage);
     return this.pendingInputs(state, now).length > 0;
   }
@@ -112,10 +124,26 @@ export class ChatMemorySync {
   }
 
   async sync(config: DataManagerModelConfig, progress?: DataManagerProgressCallback,
-    now: number = Date.now()): Promise<ChatMemorySyncSummary> {
+    now: number = Date.now(), fullCheck: boolean = false): Promise<ChatMemorySyncSummary> {
+    let journal = new MemoryChangeJournal(this.paths.filesDir, this.storage);
+    journal.pending('chat', fullCheck);
+    if (fullCheck) { journal.mark('chat', '*'); }
+    let changes = journal.pending('chat');
+    if (journal.ready('chat') && changes.length === 0) { return { processedParts: 0, factCount: 0 }; }
     let state = ChatMemorySync.readState(this.paths.dailyLogRoot, this.storage);
+    let exportPaths = journal.ready('chat') && !changes.some((item: MemorySourceChange): boolean => item.path === '*') ? new Set<string>() : undefined;
+    if (exportPaths) {
+      let paths = exportPaths;
+      state.receipts.forEach((receipt: ChatMemoryReceipt) => {
+        let sessionId = '';
+        try { let key = ArkJSON.parse(receipt.source_ref) as string[]; sessionId = key[0] || ''; } catch (e) { return; }
+        if (changes.some((item: MemorySourceChange): boolean => item.path === sessionId)) {
+          ChatMemorySync.exports({ version: 1, receipts: [receipt] }).forEach((item: ChatMemoryExport) => paths.add(item.relativePath));
+        }
+      });
+    }
     // Export committed results first, including when a previous run failed after checkpointing or has aged out.
-    this.exportLogs(state);
+    this.exportLogs(state, exportPaths);
     let pending = this.pendingInputs(state, now);
     let processedParts = 0;
     let factCount = 0;
@@ -168,6 +196,10 @@ export class ChatMemorySync {
       let nextState: ChatMemoryState = { version: state.version, receipts: state.receipts.concat(receipts) };
       this.storage.writeJsonAtomic(ChatMemorySync.statePath(this.paths.dailyLogRoot, this.storage), nextState as Object);
       state = nextState;
+      if (exportPaths) {
+        let paths = exportPaths;
+        ChatMemorySync.exports({ version: 1, receipts: receipts }).forEach((item: ChatMemoryExport) => paths.add(item.relativePath));
+      }
       factCount += batchFactCount;
       processedParts += batch.length;
       batches.shift();
@@ -176,7 +208,9 @@ export class ChatMemorySync {
           processedParts, pending.length, 3 + 2 * processedParts / pending.length));
       }
     }
-    this.exportLogs(state);
+    this.exportLogs(state, exportPaths);
+    journal.setReady('chat');
+    journal.acknowledge(changes);
     return { processedParts: processedParts, factCount: factCount };
   }
 
@@ -185,12 +219,13 @@ export class ChatMemorySync {
       .map((item: ChatMemoryExport): string => item.relativePath);
   }
 
-  private static exports(state: ChatMemoryState): ChatMemoryExport[] {
+  private static exports(state: ChatMemoryState, selectedPaths?: Set<string>): ChatMemoryExport[] {
     let groups = new Map<string, ChatMemoryExport>();
     for (let receipt of state.receipts) {
       let mode = receipt.mode === CHAT_MODE_LOCAL_INFERENCE ? 'local' : 'cloud';
       for (let fact of receipt.facts) {
         let path = receipt.source_date + '/app-chat__' + mode + '__' + String(fact.scene_id) + '.md';
+        if (selectedPaths && !selectedPaths.has(path)) { continue; }
         let group = groups.get(path);
         if (!group) {
           group = { relativePath: path, sceneId: fact.scene_id, entries: [] };
@@ -205,8 +240,8 @@ export class ChatMemorySync {
     return exports;
   }
 
-  private exportLogs(state: ChatMemoryState): void {
-    for (let group of ChatMemorySync.exports(state)) {
+  private exportLogs(state: ChatMemoryState, selectedPaths?: Set<string>): void {
+    for (let group of ChatMemorySync.exports(state, selectedPaths)) {
       let workflowMetadata: JsonMap = createJsonMap();
       workflowMetadata['task_scene_id'] = group.sceneId;
       workflowMetadata['source_kind'] = 'app_chat';

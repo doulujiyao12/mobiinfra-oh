@@ -1,0 +1,22 @@
+[Unit]
+Description=ClawMate Codex bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace these four paths and the user. Log in to Codex as this same user first.
+User=codexbridge
+WorkingDirectory=/opt/clawmate/bridge/codex
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/codexbridge/.local/bin
+ExecStart=/usr/bin/node /opt/clawmate/bridge/codex/server.mjs serve /home/codexbridge/.config/clawmate-codex/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+# Codex itself supplies the task sandbox; no privileged service account is needed.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

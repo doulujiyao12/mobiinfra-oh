@@ -38,6 +38,7 @@ export function createJsonMap(): JsonMap {
 }
 
 export interface DailyLogParseResult {
+  entry_batch_ids?: StringMap;
   workflow_metadata: JsonMap;
   latest_entry_index: number;
   body: string;
@@ -93,6 +94,7 @@ DOMAIN_DESCRIPTIONS['other'] = '无法归入以上分类的事件';
 export interface DataManagerModelConfig {
   baseUrl: string;
   apiKey: string;
+  model?: string;
   enabled: boolean;
 }
 
@@ -102,6 +104,8 @@ export interface DataManagerRefreshOptions {
 }
 
 export interface RefreshSummary {
+  // Current sync only; historical totals belong to the index completion receipt.
+  failedEventCount?: number;
   dailyEntryCount: number;
   consolidatedRecordCount: number;
   eventCount: number;
@@ -138,6 +142,7 @@ export interface DailyLogMetadata {
 }
 
 export interface SourceEntry {
+  collection_batch_id?: string;
   source_date: string;
   file_name: string;
   entry_index: number;
@@ -207,7 +212,40 @@ export interface IndexedEventTodo {
   agent_task: string;
 }
 
+export interface ChatCollectionEntry {
+  source_ref: string;
+  text: string;
+  image_paths: string[];
+  order: number;
+}
+
+export interface ChatCollectionBatch {
+  batch_id: string;
+  entries: ChatCollectionEntry[];
+  complete: boolean;
+}
+
+export interface ChatEventContext {
+  policy: string;
+  batch_ids: string[];
+  input_hash: string;
+  complete: boolean;
+}
+
+export interface ChatEventAttribution {
+  user_involved: boolean;
+  subject: string;
+  subject_name: string;
+  action_owner: string;
+  action_owner_name: string;
+  status: string;
+  evidence_source_refs: string[];
+}
+
 export interface IndexedEvent {
+  chat_context?: ChatEventContext;
+  chat_attribution?: ChatEventAttribution;
+  calendar?: CalendarEventMetadata;
   event_id: string;
   source_state_file: string;
   record_id: number;
@@ -227,6 +265,13 @@ export interface IndexedEvent {
   enrichment_method: string;
   entities: string[];
   profile_domains: string[];
+}
+
+export interface CalendarEventMetadata {
+  seriesKey: string;
+  start: number;
+  end: number;
+  profileEnabled: boolean;
 }
 
 export interface EventPartition {
@@ -259,6 +304,7 @@ export interface ProfileDomainState {
 }
 
 export interface ProfileState {
+  calendar_input_hash?: string;
   generated_at: string;
   event_count: number;
   event_date_range: StringMap;
@@ -329,6 +375,10 @@ export interface HomeDomainViewModel {
 }
 
 export interface HomeRecommendationViewModel {
+  calendarStart?: number;
+  calendarEnd?: number;
+  calendarAllDay?: boolean;
+  calendarLocation?: string;
   id: string;
   domain: string;
   tag: string;
@@ -378,6 +428,10 @@ export interface HomeRecommendationPlannerEvent {
 }
 
 export interface HomeProfileViewModel extends AvatarHomeViewModel {
+  calendarEnabled?: boolean;
+  calendarError?: string;
+  mailReminder?: HomeRecommendationViewModel;
+  mailPreview?: string[];
   updatedLabel: string;
   completeness: number;
   totalEvents: number;

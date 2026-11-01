@@ -5,11 +5,8 @@ export interface SelfHdcSetupConnection { ip: string; port: string; autoIp: bool
 // Only an explicit saved PC selection enables desktop control.
 export function selfHdcControlMode(mode: string | undefined): string { return mode === 'pc' ? 'pc' : 'phone'; }
 
-export function selfHdcSetupProblem(settings: SelfHdcSetupConnection, detectedWifiIp: string): string {
+export function selfHdcSetupProblem(settings: SelfHdcSetupConnection): string {
   let problems: string[] = [];
-  if (settings.autoIp && detectedWifiIp.trim().length === 0) {
-    problems.push('未检测到可用的手机 Wi-Fi IP，请连接 Wi-Fi，或手动填写无线调试页面的 IP。');
-  }
   if (settings.ip.trim().length === 0) {
     problems.push('尚未填写手机 IP 地址。');
   } else {

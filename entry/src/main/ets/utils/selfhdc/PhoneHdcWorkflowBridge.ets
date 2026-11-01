@@ -2,7 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
-import { util } from '@kit.ArkTS';
+import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { decodeUtf8Compat } from '../TextEncodingCompat';
 import { HdcWorkflowBridge } from '../HdcWorkflowBridge';
 import { HdcBridgeResponse, WorkflowJsonMap } from '../WorkflowTypes';
 import { AgentExecutionController } from '../AgentExecutionController';
@@ -15,6 +16,11 @@ import { selfHdcWrite } from './SelfHdcFiles';
 import { PhoneHdcActions, phoneHdcString } from './PhoneHdcActions';
 import { phoneHdcBundle, phoneHdcMainAbility } from './PhoneHdcApp';
 import { parsePhoneHdcUiInputHelp } from './PhoneHdcCapabilities';
+
+interface PhoneUiDumpRoot {
+  attributes?: PhoneUiDumpAttributes;
+}
+interface PhoneUiDumpAttributes { origBounds?: string; bounds?: string; }
 
 // Independent device backend. No method falls through to the inherited HTTP transport.
 export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
@@ -30,6 +36,8 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
   private deadline: number = 0;
   private shotSequence: number = 0;
   private actionSequence: number = 0;
+  private dumpSequence: number = 0;
+  private uiDumpReady: boolean = false;
   private dataPackets: number = 0;
   private dataBytes: number = 0;
   private quotaExpired: () => void;
@@ -193,6 +201,54 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
 
   async screenshot(): Promise<HdcBridgeResponse> {
     return await this.screenshotWithFactor(0.5);
+  }
+
+  // Read only the dump created by this call, in bounded chunks. Chat text must never enter shell logs.
+  // A dump also supplies physical coordinates without taking/caching a screenshot for every UI action.
+  async dumpUiLayout(): Promise<string> {
+    await this.waitForAction();
+    let token = await AgentExecutionController.hideCaptureOverlay();
+    let remote = '/data/local/tmp/self_hdc_ui_' + Date.now() + '_' + (++this.dumpSequence) + '.json';
+    let path = selfHdcShellQuote(remote);
+    try {
+      if (token) { await this.pause(120); }
+      if (!this.uiDumpReady) {
+        await this.execute('command -v wc && command -v dd', 'ui-dump-tool-preflight');
+        this.uiDumpReady = true;
+      }
+      await this.execute('uitest dumpLayout -p ' + path, 'ui-dump');
+      let size = Number((await this.execute('wc -c < ' + path, 'ui-dump-size')).trim());
+      if (!Number.isInteger(size) || size < 2 || size > 4 * 1024 * 1024) {
+        throw new Error('PHONE_HDC_UI_DUMP: invalid size or exceeds 4 MiB');
+      }
+      let bytes = new Uint8Array(size);
+      let block = 49152;
+      for (let offset = 0; offset < size; offset += block) {
+        let encoded = (await this.execute('dd if=' + path + ' bs=' + block + ' skip=' + (offset / block) +
+          ' count=1 2>/dev/null | base64', 'ui-dump-transfer', true, false)).replace(/\s/g, '');
+        if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+          throw new Error('PHONE_HDC_UI_DUMP: invalid Base64 (contents omitted)');
+        }
+        let chunk = new util.Base64Helper().decodeSync(encoded);
+        if (chunk.length !== Math.min(block, size - offset)) {
+          throw new Error('PHONE_HDC_UI_DUMP: incomplete chunk (contents omitted)');
+        }
+        bytes.set(chunk, offset);
+      }
+      let text = decodeUtf8Compat(bytes);
+      let root = ArkJSON.parse(text) as PhoneUiDumpRoot;
+      let bounds = root.attributes?.origBounds || root.attributes?.bounds || '';
+      let match = /^\[0,0\]\[(\d+),(\d+)\]$/.exec(bounds);
+      if (!match) { throw new Error('PHONE_HDC_UI_DUMP: no physical window bounds'); }
+      this.actions.setScreen(Number(match[1]), Number(match[2]));
+      this.geometryReady = true;
+      this.phoneLog('UI_DUMP seq=' + this.dumpSequence + ' bytes=' + size + ' contents omitted');
+      return text;
+    } finally {
+      try { await this.execute('rm -f ' + path, 'ui-dump-cleanup'); }
+      catch (e) { this.phoneLog('UI_DUMP_CLEANUP remaining=' + remote + ' error=' + (e as Error).message); }
+      await AgentExecutionController.restoreCaptureOverlay(token);
+    }
   }
 
   async screenshotWithFactor(factor: number): Promise<HdcBridgeResponse> {

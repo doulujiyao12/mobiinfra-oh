@@ -4,8 +4,9 @@ export enum MainTabIndex {
   Home = 0,
   Summary = 1,
   Chat = 2,
-  Task = 3,
-  Mine = 4
+  Codex = 3,
+  Task = 4,
+  Mine = 5
 }
 
 export interface MainTabItem {
@@ -19,6 +20,7 @@ export const MAIN_TAB_ITEMS: MainTabItem[] = [
   { index: MainTabIndex.Home, icon: 'tab_home', label: '首页' },
   { index: MainTabIndex.Summary, icon: 'tab_summary', label: '汇总' },
   { index: MainTabIndex.Chat, icon: 'tab_chat', label: '聊天' },
+  { index: MainTabIndex.Codex, icon: 'tab_codex', label: 'Codex' },
   { index: MainTabIndex.Task, icon: 'tab_task', label: '任务' },
   { index: MainTabIndex.Mine, icon: 'tab_mine', label: '我的' }
 ];
@@ -28,6 +30,9 @@ export function centerTabIndex(): MainTabIndex {
 }
 
 export function mainTabBackgroundColor(index: number, chatHasConversationContent: boolean = true): string {
+  if (index === MainTabIndex.Codex) {
+    return '#F4F7FB';
+  }
   if (index === MainTabIndex.Chat) {
     return chatPageBackgroundColor(chatHasConversationContent);
   }

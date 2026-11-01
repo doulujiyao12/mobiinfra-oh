@@ -1,5 +1,4 @@
 import { AppLogger } from './AppLogger';
-import { PrivacyConsent } from './PrivacyConsent';
 import { AiServiceAccess } from './AiServiceAccess';
 import { CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY } from './CaptureOverlayPolicy';
 
@@ -74,7 +73,6 @@ export class AgentExecutionController {
 
   static beginExecution(text: string = 'AI Agent running...'): void {
     AiServiceAccess.requireAllowed();
-    PrivacyConsent.requireAccepted();
     AgentExecutionController.executionActive = true;
     AgentExecutionController.cancelRequested = false;
     AgentExecutionController.pauseRequested = false;

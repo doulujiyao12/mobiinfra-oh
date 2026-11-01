@@ -2,7 +2,6 @@ import { AppTheme } from '../utils/AppTheme';
 import { common } from '@kit.AbilityKit';
 import { showToastSafely } from '../utils/PromptSafe';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
-import { SelfHdcSetupGuard } from '../utils/selfhdc/SelfHdcSetupGuard';
 
 @Component
 export struct TaskDeviceControlPanel {
@@ -22,10 +21,9 @@ export struct TaskDeviceControlPanel {
     } catch (e) { showToastSafely('连接配置保存失败：' + (e as Error).message, 2200); return false; }
   }
 
-  private async select(mode: string): Promise<void> {
+  private select(mode: string): void {
     if (this.busy || !this.save(mode)) { return; }
     this.onModeChanged(mode);
-    if (mode === 'phone') { await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'select-phone-control'); }
   }
 
   build() {

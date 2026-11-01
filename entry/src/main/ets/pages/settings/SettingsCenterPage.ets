@@ -1,9 +1,17 @@
 import { AppTheme } from '../../utils/AppTheme';
+import { StartupSourceSync, STARTUP_SOURCE_SYNC_ENABLED_KEY } from '../../utils/StartupSourceSync';
+import { CalendarMemoryPanel } from '../../components/CalendarMemoryPanel';
+import { MailSettingsPanel } from '../../components/MailSettingsPanel';
 import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
+import { CloudModelConfig } from '../../utils/CloudModelClient';
+import { defaultChatCloudConfig } from '../../utils/ChatCloudConfig';
+import {
+  cloudSettingValuesDiffer, cloudSettingsUseSeparateValues, sharedCloudSettingEditorValue, updateUnifiedCloudSetting
+} from '../../utils/CloudSettingsConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -79,7 +87,8 @@ import {
   SettingsSectionItem,
   SettingsSectionId,
   settingsSectionSubtitle,
-  settingsSectionTitle
+  settingsSectionTitle,
+  settingsParentSection
 } from './SettingsCenterTypes';
 import {
   SETTINGS_BUTTON_HEIGHT,
@@ -101,10 +110,12 @@ import {
   SettingsOutputPanel,
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
+import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormSwitch,
+  CollectionFormAction, CollectionSourceRow } from '../../components/CollectionFormControls';
 import { HuaweiAccountCard } from './HuaweiAccountCard';
 import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
 import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
-import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { HuaweiPrivacyAccess } from '../../utils/HuaweiPrivacyAccess';
 import { PERSONAL_MEMORY_A2A_STATE_KEY, PersonalMemoryAccess } from '../../agent/PersonalMemoryAccess';
 
 registerGallerySettingsDefaults();
@@ -120,7 +131,8 @@ export struct SettingsCenterPage {
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
   @Prop localNpuExecutionMode: string = 'cpu';
-  @Link selectedSectionId: number;
+  @Link @Watch('onSelectedSectionChanged') selectedSectionId: number;
+  onBackRequest: () => boolean = (): boolean => false;
   @Link output: string;
   @Link chunkOmCacheOutput: string;
   @Link cloudOutput: string;
@@ -215,6 +227,17 @@ export struct SettingsCenterPage {
   onSwitchDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onDeleteDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onRefreshDownloadedModels: () => void = () => {};
+  @Prop calendarMemoryRefreshing: boolean = false;
+  @Prop calendarSourceSyncReady: boolean = false;
+  @Prop mailSourceSyncReady: boolean = false;
+  @Prop sourceSyncPending: string = '';
+  onQuickSyncCalendar: () => void = (): void => {};
+  onQuickSyncMail: () => void = (): void => {};
+  onSyncCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
+  onReadCalendarMemory: () => Promise<void> = async (): Promise<void> => {};
+  onMailChanged: () => void = (): void => {};
+  onSyncMail: () => Promise<void> = async (): Promise<void> => {};
+  @StorageLink(STARTUP_SOURCE_SYNC_ENABLED_KEY) private startupSyncEnabled: boolean = true;
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
@@ -223,6 +246,7 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    this.startupSyncEnabled = new StartupSourceSync((getContext(this) as common.Context).filesDir).isEnabled();
     try { DebugSettings.initialize(getContext(this) as common.Context); } catch (e) {
       showToastSafely('读取 Debug 设置失败：' + (e as Error).message, 2500);
     }
@@ -331,8 +355,11 @@ export struct SettingsCenterPage {
   }
 
   private openSection(id: SettingsSectionId): void {
-    this.closeSensitiveInputs();
     this.selectedSectionId = normalizeSettingsSectionId(id);
+  }
+
+  private onSelectedSectionChanged(): void {
+    this.closeSensitiveInputs();
     this.resetDetailScroll();
     setTimeout(() => {
       this.resetDetailScroll();
@@ -341,7 +368,8 @@ export struct SettingsCenterPage {
 
   private closeSection(): void {
     this.closeSensitiveInputs();
-    this.selectedSectionId = SETTINGS_SECTION_NONE;
+    if (this.onBackRequest()) { return; }
+    this.selectedSectionId = settingsParentSection(this.selectedSectionId);
   }
 
   private sectionInitial(id: SettingsSectionId): string {
@@ -361,22 +389,12 @@ export struct SettingsCenterPage {
   }
 
   private activeSectionTitle(): string {
-    if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
-      return settingsSectionTitle(SettingsSectionId.PersonalPrivacy);
-    }
-    if (this.selectedSectionId === SettingsSectionId.DataCollection) {
-      return settingsSectionTitle(SettingsSectionId.DataCollection);
-    }
-    if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
-      return settingsSectionTitle(SettingsSectionId.ModelAgents);
-    }
-    if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
-      return settingsSectionTitle(SettingsSectionId.TaskAutomation);
-    }
-    if (this.selectedSectionId === SettingsSectionId.StorageAbout) {
-      return settingsSectionTitle(SettingsSectionId.StorageAbout);
-    }
-    return '';
+    return settingsSectionTitle(this.selectedSectionId as SettingsSectionId);
+  }
+
+  private isCollectionSection(): boolean {
+    return this.selectedSectionId === SettingsSectionId.DataCollection ||
+      settingsParentSection(this.selectedSectionId) === SettingsSectionId.DataCollection;
   }
 
   private confirmDanger(config: SettingsConfirmConfig, action: () => void): void {
@@ -558,20 +576,9 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
     onValueChange: (value: string) => void, onNormalize: () => void) {
-    SettingInput({
-      label: label,
-      value: value,
-      placeholder: placeholder,
-      onValueChange: (input: string) => {
-        // 编辑期间保留原文，避免小数和临时空值被立即改写。
-        onValueChange(input);
-      },
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onInputBlur: () => {
-        // 失焦后由调用点读取当前字段再归一化，避免使用上一轮渲染入参。
-        onNormalize();
-      }
-    })
+    CollectionFormDivider()
+    CollectionFormInput({ label: label, value: value, placeholder: placeholder,
+      onChangeValue: onValueChange, onBlurValue: onNormalize })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
@@ -681,8 +688,9 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummarySettings() {
     Column() {
-      this.SettingToggle('微信消息自动汇总', '开启后采集任务会按默认参数汇总最近微信会话',
-        this.isWechatAutoSummaryEnabled(), (value: boolean) => { this.setWechatAutoSummaryEnabled(value); })
+      CollectionFormSwitch({ label: '微信消息自动汇总', detail: '采集任务按默认参数汇总最近会话',
+        selected: this.isWechatAutoSummaryEnabled(),
+        onChangeValue: (value: boolean): void => { this.setWechatAutoSummaryEnabled(value); } })
       if (this.isWechatAutoSummaryEnabled()) {
         this.WechatAutoSummaryInput('默认时间范围（天）', this.wechatAutoSummaryDefaultDays,
           DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
@@ -698,16 +706,16 @@ export struct SettingsCenterPage {
             this.wechatAutoSummaryDefaultMaxContacts = String(
               normalizeWechatAutoSummaryMaxContacts(this.wechatAutoSummaryDefaultMaxContacts));
           })
-      Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
+        Text('采集结果保存在本机，同步后可整理到个人记忆。')
         .fontSize(12)
-        .fontColor(AppTheme.text('#D26B31'))
+        .fontColor(AppTheme.text('#747C8A'))
           .width('100%')
-          .margin({ top: 8, bottom: 8 })
+          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
 
         Row() {
           Text('高级参数')
             .fontSize(14)
-            .fontWeight(FontWeight.Bold)
+            .fontWeight(FontWeight.Medium)
             .fontColor(AppTheme.text('#11182F'))
             .layoutWeight(1)
           Text(this.wechatAutoSummaryAdvancedOpen ? '收起' : '展开')
@@ -715,7 +723,7 @@ export struct SettingsCenterPage {
             .fontColor(AppTheme.text('#5B68FF'))
         }
         .width('100%')
-        .padding({ top: 12, bottom: 8 })
+        .padding({ left: 16, right: 16, top: 16, bottom: 14 })
         .onClick(() => { this.wechatAutoSummaryAdvancedOpen = !this.wechatAutoSummaryAdvancedOpen; })
 
         if (this.wechatAutoSummaryAdvancedOpen) {
@@ -757,7 +765,7 @@ export struct SettingsCenterPage {
       }
     }
     .width('100%')
-    .margin({ bottom: 12 })
+    .margin({ bottom: 0 })
   }
 
   @Builder ModelDownloadProgressPanel() {
@@ -974,10 +982,14 @@ export struct SettingsCenterPage {
 
   @Builder SelectedSectionContent() {
     Column() {
-      if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
+      if (this.selectedSectionId === SettingsSectionId.CloudModelAdvanced) {
+        this.CloudModelAdvancedSection()
+      } else if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
         this.PrivacySection()
       } else if (this.selectedSectionId === SettingsSectionId.DataCollection) {
         this.DataCollectionSection()
+      } else if (settingsParentSection(this.selectedSectionId) === SettingsSectionId.DataCollection) {
+        this.CollectionSourceSection()
       } else if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
         this.ModelAgentsSection()
       } else if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
@@ -1003,12 +1015,6 @@ export struct SettingsCenterPage {
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AgentConfirmPolicyGroup() }
-      })
-      SettingsGroupCard({
-        title: '数字分身图片服务',
-        subtitle: '配置头像生成服务地址、密钥、模型与图片尺寸',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.AvatarImageServiceGroup() }
       })
     }
     .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
@@ -1040,12 +1046,11 @@ export struct SettingsCenterPage {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
         Column({ space: 5 }) {
-          Text('隐私声明')
+          Text('隐私政策')
             .fontSize(16)
             .fontWeight(FontWeight.Medium)
             .fontColor(AppTheme.text($r('sys.color.ohos_id_color_text_primary')))
-          Text(this.privacyConsentState === 'accepted' ? '已同意 · 可随时撤回同意' :
-            (this.privacyConsentState === 'rejected' ? '已拒绝 · 任务与云端分析已关闭' : '未选择 · 阅读并管理云端分析授权'))
+          Text('查看应用隐私政策')
             .fontSize(12)
             .fontColor(AppTheme.text($r('sys.color.ohos_id_color_text_secondary')))
             .maxLines(2)
@@ -1062,7 +1067,7 @@ export struct SettingsCenterPage {
     .borderRadius(20)
     .backgroundColor(AppTheme.background($r('sys.color.ohos_id_color_dialog_bg')))
     .margin({ top: 16 })
-    .onClick(() => { PrivacyConsentDialog.show(this.getUIContext(), true); })
+    .onClick(() => { HuaweiPrivacyAccess.openPolicy(this.getUIContext()); })
   }
 
   @Builder AvatarImageServiceGroup() {
@@ -1107,42 +1112,75 @@ export struct SettingsCenterPage {
     })
   }
 
+  @Builder CollectionSourceEntries() {
+    CollectionSourceRow({ title: '日历分析', detail: '同步日程与个人记忆', icon: $r('app.media.source_calendar'),
+      showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.calendarMemoryRefreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
+      tint: '#FF9500', onOpen: (): void => { this.openSection(SettingsSectionId.CalendarAnalysis); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '邮箱分析', detail: '账号设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
+      showSync: true, syncEnabled: this.mailSourceSyncReady && !this.calendarMemoryRefreshing && !this.sourceSyncPending,
+      syncing: this.sourceSyncPending === 'mail', onSync: this.onQuickSyncMail,
+      onOpen: (): void => { this.openSection(SettingsSectionId.MailAnalysis); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '微信采集', detail: '默认范围与高级参数', icon: $r('app.media.source_wechat'),
+      tint: '#34C759', onOpen: (): void => { this.openSection(SettingsSectionId.WechatCollection); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '图库分析', detail: '读取照片、截图并理解内容', icon: $r('app.media.source_gallery'),
+      tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
+  }
+
+  @Builder CollectionAuxiliaryEntries() {
+    CollectionSourceRow({ title: '文字识别', detail: 'OCR 预筛与并发', icon: $r('app.media.source_gallery'),
+      tint: '#8E8E93', onOpen: (): void => { this.openSection(SettingsSectionId.OcrCollection); } })
+    CollectionFormDivider()
+    CollectionSourceRow({ title: '图片位置', detail: '拍摄位置解析与图片缩放', icon: $r('app.media.source_gallery'),
+      tint: '#8E8E93', onOpen: (): void => { this.openSection(SettingsSectionId.MapCollection); } })
+  }
+
+  private changeStartupSyncEnabled(enabled: boolean): void {
+    try {
+      new StartupSourceSync((getContext(this) as common.Context).filesDir).setEnabled(enabled);
+      this.startupSyncEnabled = enabled;
+    } catch (e) { showToastSafely('自动更新设置未保存，请重试'); }
+  }
+
+  @Builder StartupSyncSettings() {
+    CollectionFormSwitch({ label: '每日自动更新', selected: this.startupSyncEnabled,
+      detail: '距离上次成功满24小时后，检查已开启的邮件、日历和新增聊天',
+      onChangeValue: (enabled: boolean): void => { this.changeStartupSyncEnabled(enabled); } })
+  }
+
   @Builder DataCollectionSection() {
     Column() {
-      this.SectionTitle(SettingsSectionId.DataCollection)
-      SettingsGroupCard({
-        title: '微信汇总',
-        subtitle: '默认采集范围和高级滑动参数',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.WechatAutoSummarySettings() }
-      })
-      SettingsGroupCard({
-        title: '图库分析',
-        subtitle: '图库大模型服务与字段级请求策略',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.GalleryAnalysisGroup() }
-      })
-      SettingsGroupCard({
-        title: 'OCR',
-        subtitle: '本地 OCR 回退、关键词预筛和并发控制',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.OcrSettingsGroup() }
-      })
-      SettingsGroupCard({
-        title: 'Embedding',
-        subtitle: '图片检索向量服务和端云模式',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.EmbeddingSettingsGroup() }
-      })
-      SettingsGroupCard({
-        title: '地图服务',
-        subtitle: '图片位置解析和分析缩放参数',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.MapSettingsGroup() }
-      })
-    }
-    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
-    .margin({ top: 16, bottom: 110 })
+      CollectionFormGroup({ title: '同步', footer: '距上次成功处理满24小时后，打开应用时检查已开启的来源。未授权或未配置的来源会跳过；失败可手动重试。关闭不影响手动操作。',
+        contentBuilder: (): void => { this.StartupSyncSettings(); } })
+      CollectionFormGroup({ title: '采集来源', contentBuilder: (): void => { this.CollectionSourceEntries(); } })
+      CollectionFormGroup({ title: '辅助设置', contentBuilder: (): void => { this.CollectionAuxiliaryEntries(); } })
+    }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12, bottom: 110 })
+  }
+
+  @Builder CollectionSourceSection() {
+    Column() {
+      if (this.selectedSectionId === SettingsSectionId.CalendarAnalysis) {
+        CalendarMemoryPanel({ memoryRefreshing: this.calendarMemoryRefreshing,
+          onSync: async (): Promise<void> => { await this.onReadCalendarMemory(); },
+          onMemoryChanged: async (): Promise<void> => { await this.onSyncCalendarMemory(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.MailAnalysis) {
+        MailSettingsPanel({ memoryRefreshing: this.calendarMemoryRefreshing,
+          onChanged: (): void => { this.onMailChanged(); },
+          onSync: async (): Promise<void> => { await this.onSyncMail(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.WechatCollection) {
+        CollectionFormGroup({ title: '默认采集', footer: '设置自动保存。汇总页可以为本次采集调整联系人与时间范围。',
+          contentBuilder: (): void => { this.WechatAutoSummarySettings(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.OcrCollection) {
+        CollectionFormGroup({ title: '文字识别', footer: '设置自动保存，用于图库分析的本地文字识别。',
+          contentBuilder: (): void => { this.OcrSettingsGroup(); } })
+      } else if (this.selectedSectionId === SettingsSectionId.MapCollection) {
+        CollectionFormGroup({ title: '图片位置', footer: '设置自动保存，位置解析需要有效的地图服务 Key。',
+          contentBuilder: (): void => { this.MapSettingsGroup(); } })
+      }
+    }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 12, bottom: 110 })
   }
 
   @Builder GalleryAnalysisGroup() {
@@ -1184,18 +1222,17 @@ export struct SettingsCenterPage {
   }
 
   @Builder OcrSettingsGroup() {
-    this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启', this.gallerySkipOcr === 'true',
-      (value: boolean) => { this.gallerySkipOcr = value ? 'true' : 'false'; })
-    this.SettingToggle('OCR 关键词预筛', '自动分析时先用 OCR 关键词过滤图片',
-      this.galleryUseOcrKeywordFilter === 'true',
-      (value: boolean) => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; })
-    SettingInput({
-      label: 'OCR 并发请求数',
-      value: this.galleryOcrConcurrency,
-      placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.galleryOcrConcurrency = value; }
-    })
+    CollectionFormSwitch({ label: '跳过本地 OCR', detail: '设备不支持本地 OCR 时开启',
+      selected: this.gallerySkipOcr === 'true',
+      onChangeValue: (value: boolean): void => { this.gallerySkipOcr = value ? 'true' : 'false'; } })
+    CollectionFormDivider()
+    CollectionFormSwitch({ label: 'OCR 关键词预筛', detail: '自动分析前先用关键词过滤图片',
+      selected: this.galleryUseOcrKeywordFilter === 'true',
+      onChangeValue: (value: boolean): void => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; } })
+    CollectionFormDivider()
+    CollectionFormInput({ label: 'OCR 并发请求数', value: this.galleryOcrConcurrency,
+      placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY, inputType: InputType.Number,
+      onChangeValue: (value: string): void => { this.galleryOcrConcurrency = value; } })
   }
 
   @Builder EmbeddingSettingsGroup() {
@@ -1237,55 +1274,85 @@ export struct SettingsCenterPage {
   }
 
   @Builder MapSettingsGroup() {
-    SettingInput({
-      label: '图片分析缩放比例',
-      value: this.galleryImageScale,
-      placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.galleryImageScale = value; }
-    })
-    SensitiveSettingInput({
-      sensitiveId: 'galleryAmapWebKey',
-      activeSensitiveId: this.activeSensitiveInputId,
-      label: '高德 Web 服务 Key',
-      value: this.galleryAmapWebKey,
-      defaultValue: DEFAULT_GALLERY_AMAP_WEB_KEY,
+    CollectionFormInput({ label: '图片分析缩放比例', value: this.galleryImageScale, placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
+      onChangeValue: (value: string): void => { this.galleryImageScale = value; } })
+    CollectionFormDivider()
+    CollectionFormInput({ label: '高德 Web 服务 Key', value: this.galleryAmapWebKey, secret: true,
       placeholder: '用于拍摄位置逆地理编码',
-      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
-      onValueChange: (value: string) => { this.galleryAmapWebKey = value; }
-    })
+      onChangeValue: (value: string): void => { this.galleryAmapWebKey = value; } })
   }
 
   @Builder ModelAgentsSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.ModelAgents)
       SettingsGroupCard({
+        title: '云端模型',
+        subtitle: '留空使用默认配置，填写后同时用于 Planner 和 Decider',
+        purpose: '提供云端对话、任务规划和手机截图决策能力。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.UnifiedCloudModelGroup() }
+      })
+      SettingsGroupCard({
         title: '本地模型',
         subtitle: '已下载模型管理与加载路径切换',
+        purpose: '在手机上加载和运行端侧大模型，可选择 CPU 或 NPU 推理。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.LocalModelGroup() }
       })
       SettingsGroupCard({
         title: '本地模型下载',
         subtitle: '从 ModelScope 仓库下载本地模型',
+        purpose: '下载端侧推理所需的模型文件，供本地模型加载。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ModelDownloadGroup() }
       })
+    }
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder CloudModelAdvancedSection() {
+    Column() {
+      this.SectionTitle(SettingsSectionId.CloudModelAdvanced)
       SettingsGroupCard({
-        title: '云端 Planner/Decider',
-        subtitle: '云端智能体服务、模型和连通性测试',
+        title: 'Planner · 任务规划',
+        purpose: '用于云端对话、任务规划、个人记忆查询与信息整理。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.CloudPlannerDeciderGroup() }
+        contentBuilder: () => { this.CloudPlannerGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Decider · 看图决策',
+        purpose: '读取手机截图并决定点击、滑动、输入等操作，需要支持图片输入的模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.CloudDeciderGroup() }
       })
       SettingsGroupCard({
         title: '语音合成服务',
-        subtitle: '配置助手朗读的 TTS 服务、模型、音色与流式播放',
+        purpose: '把 AI 回复合成为语音，用于助手朗读和语音聊天。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.VoiceTtsServiceGroup() }
       })
       SettingsGroupCard({
+        title: '数字分身图片服务',
+        purpose: '根据个人画像生成数字分身头像，可分别配置文生图和图生图模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.AvatarImageServiceGroup() }
+      })
+      SettingsGroupCard({
+        title: '图库分析模型',
+        purpose: '识别照片和截图，提取主题、内容摘要与生活记忆，需要支持图片输入的模型。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.GalleryAnalysisGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Embedding · 语义检索',
+        purpose: '把图库内容摘要和搜索词转为向量，支持按含义查找图片，可选端侧或云端模式。',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.EmbeddingSettingsGroup() }
+      })
+      SettingsGroupCard({
         title: '上下文压缩',
-        subtitle: '聊天上下文压缩阈值和保留轮数',
+        purpose: '控制聊天历史何时压缩、保留多少轮对话，减少上下文占用。',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ContextCompressionGroup() }
       })
@@ -1294,7 +1361,77 @@ export struct SettingsCenterPage {
     .margin({ top: 16, bottom: 110 })
   }
 
-  @Builder CloudPlannerDeciderGroup() {
+  private storedCloudSettings(): CloudModelConfig {
+    return {
+      plannerBaseUrl: this.cloudPlannerBaseUrl, plannerModel: this.cloudPlannerModel,
+      plannerApiKey: this.cloudPlannerApiKey, deciderBaseUrl: this.cloudDeciderBaseUrl,
+      deciderModel: this.cloudDeciderModel, deciderApiKey: this.cloudDeciderApiKey, apiKey: this.cloudApiKey
+    };
+  }
+
+  private updateUnifiedCloudField(field: string, value: string): void {
+    let next = updateUnifiedCloudSetting(this.storedCloudSettings(), field, value);
+    this.cloudPlannerBaseUrl = next.plannerBaseUrl;
+    this.cloudDeciderBaseUrl = next.deciderBaseUrl;
+    this.cloudPlannerModel = next.plannerModel;
+    this.cloudDeciderModel = next.deciderModel;
+    this.cloudPlannerApiKey = next.plannerApiKey || '';
+    this.cloudDeciderApiKey = next.deciderApiKey || '';
+    this.cloudApiKey = next.apiKey;
+  }
+
+  @Builder UnifiedCloudModelGroup() {
+    SettingInput({
+      label: '云端模型 URL',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
+      placeholder: cloudSettingValuesDiffer(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl) ?
+        '已分别配置，填写后同时覆盖两者' : '留空使用默认 URL，可填服务地址或 chat/completions 地址',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('url', value); }
+    })
+    SettingInput({
+      label: '模型名',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerModel, this.cloudDeciderModel,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel),
+      placeholder: cloudSettingValuesDiffer(this.cloudPlannerModel, this.cloudDeciderModel,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel) ?
+        '已分别配置，填写后同时覆盖两者' : '留空使用默认模型，或输入服务商提供的模型 ID',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('model', value); }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'unifiedCloudApiKey', activeSensitiveId: this.activeSensitiveInputId,
+      label: 'API Key',
+      configuredPreviewText: '*****',
+      value: sharedCloudSettingEditorValue(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey),
+      placeholder: '自定义服务的 API Key',
+      defaultPreviewText: cloudSettingValuesDiffer(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey) ? '已分别配置' : '默认',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.updateUnifiedCloudField('key', value); }
+    })
+    Text('支持 DeepSeek、OpenRouter、OpenAI。自定义服务请填写模型 ID 和 API Key，截图操控需选择支持图片的模型。')
+      .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
+      .width('100%').margin({ top: 10 })
+    if (cloudSettingsUseSeparateValues(this.storedCloudSettings(), defaultChatCloudConfig())) {
+      Text('当前已分别配置 Planner / Decider，可进入更多设置查看；修改上方对应字段会同步覆盖两者。')
+        .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
+        .width('100%').margin({ top: 6 })
+    }
+    Button('更多设置  ›')
+      .width('100%').height(42).fontSize(14)
+      .fontColor(AppTheme.text('#5B68FF')).backgroundColor(AppTheme.background('#F0EEFC'))
+      .borderRadius(SETTINGS_CONTROL_RADIUS).margin({ top: 12 })
+      .onClick((): void => {
+        this.closeSensitiveInputs();
+        this.openSection(SettingsSectionId.CloudModelAdvanced);
+      })
+  }
+
+  @Builder CloudPlannerGroup() {
     SettingInput({
       label: 'Planner 服务',
       value: hiddenDefaultSettingEditorValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
@@ -1321,6 +1458,11 @@ export struct SettingsCenterPage {
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.cloudPlannerApiKey = value; }
     })
+    SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
+    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
+  }
+
+  @Builder CloudDeciderGroup() {
     SettingInput({
       label: 'Decider 服务',
       value: hiddenDefaultSettingEditorValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
@@ -1346,8 +1488,6 @@ export struct SettingsCenterPage {
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudDeciderModel = value; }
     })
-    SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
-    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput, aiGenerated: true })
   }
 
   @Builder CloudPlannerActionRow() {
@@ -1801,7 +1941,7 @@ export struct SettingsCenterPage {
   build() {
     if (isSettingsSectionSelected(this.selectedSectionId)) {
       FrostedPage({
-        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        pageBackgroundColor: this.isCollectionSection() ? '#F2F2F7' : SETTINGS_PAGE_BACKGROUND_COLOR,
         scrollers: [this.detailScroller],
         headerBuilder: (): void => { this.SettingsDetailHeader(); },
         contentBuilder: (): void => { this.SettingsDetailContent(); }

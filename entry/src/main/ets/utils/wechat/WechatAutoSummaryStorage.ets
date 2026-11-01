@@ -122,6 +122,10 @@ function wechatTimeRangeLine(conversation: WechatAutoSummaryConversation): strin
 }
 
 function wechatCollectionScopeLine(conversation: WechatAutoSummaryConversation, days: number): string {
+  if (conversation.collection_stop_reason !== undefined) {
+    return '请求最近 ' + days + ' 天；' + conversation.collection_stop_reason +
+      (conversation.coverage_complete === true ? '' : '；仅包含实际读取到的消息，不能保证覆盖整个时间范围');
+  }
   let historyMode = wechatSafeText(conversation.history_mode).trim();
   let timeMode = conversation.time_range !== undefined ? wechatSafeText(conversation.time_range.mode).trim() : '';
   if (historyMode === 'visible_page_only' || timeMode === 'visible_page_only') {

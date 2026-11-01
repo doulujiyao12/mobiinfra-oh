@@ -1,4 +1,4 @@
-import { PrivacyConsent } from '../PrivacyConsent';
+import { AppRequests } from '../AppRequests';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { GalleryLocationCacheRecord } from './GalleryTypes';
@@ -62,7 +62,7 @@ export class GalleryReverseGeocoder {
   }
 
   private async requestJson(url: string): Promise<AmapJson> {
-    let httpReq = PrivacyConsent.createHttp();
+    let httpReq = AppRequests.createHttp();
     try {
       let response = await httpReq.request(url, {
         method: http.RequestMethod.GET,
@@ -78,7 +78,7 @@ export class GalleryReverseGeocoder {
       let err = e as Error;
       throw err;
     } finally {
-      PrivacyConsent.destroyHttp(httpReq);
+      AppRequests.destroyHttp(httpReq);
     }
   }
 

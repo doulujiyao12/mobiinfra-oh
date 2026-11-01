@@ -1,4 +1,6 @@
 import fs from '@ohos.file.fs';
+import { DataManagerStorage } from '../../datamanager/DataManagerStorage';
+import { MemoryChangeJournal } from '../../datamanager/MemoryChangeJournal';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { decodeUtf8Compat, encodeUtf8Compat } from '../TextEncodingCompat';
 import {
@@ -272,6 +274,7 @@ export class GalleryStorage {
   static writeResult(filesDir: string, result: GalleryAnalysisResult): GalleryAnalysisResult {
     GalleryStorage.ensureWorkspace(filesDir);
     let normalized = GalleryStorage.normalizeResult(result);
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('gallery', normalized.date);
     GalleryStorage.ensureDirectory(GalleryStorage.itemDateDir(filesDir, normalized.date));
     // Commit references atomically before the image store can discard a full-size cache file.
     let path = GalleryStorage.itemPath(filesDir, normalized);
@@ -298,6 +301,7 @@ export class GalleryStorage {
   }
 
   static clear(filesDir: string): void {
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('gallery', '*');
     GalleryStorage.deletePathRecursively(GalleryStorage.rootDir(filesDir));
     GalleryStorage.ensureWorkspace(filesDir);
   }

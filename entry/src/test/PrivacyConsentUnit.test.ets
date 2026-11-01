@@ -1,27 +1,34 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { resolvePrivacyChoice, PRIVACY_VERSION } from '../main/ets/utils/PrivacyConsent';
+import { privacyManager } from '@kit.AppGalleryKit';
+import { platformPrivacyChoice } from '../main/ets/utils/PrivacyConsent';
+
+function result(type: privacyManager.AppPrivacyType, value: privacyManager.AppPrivacyResultType): privacyManager.AppPrivacyResult {
+  return { type: type, result: value, versionCode: 1, id: 'fixture' };
+}
 
 export default function privacyConsentUnitTest(): void {
-  describe('PrivacyConsentPolicy', () => {
-    it('requiresAnExplicitChoiceOnFreshInstall', 0, () => {
-      expect(resolvePrivacyChoice('', '')).assertEqual('unselected');
-      expect(resolvePrivacyChoice('unselected', PRIVACY_VERSION)).assertEqual('unselected');
+  describe('HuaweiPrivacyConsentPolicy', () => {
+    it('requiresAnActualPlatformPrivacyResult', 0, () => {
+      expect(platformPrivacyChoice([])).assertEqual('unselected');
+      expect(platformPrivacyChoice([result(privacyManager.AppPrivacyType.USER_AGREEMENT,
+        privacyManager.AppPrivacyResultType.FULL_MODE_AGREED)])).assertEqual('unselected');
     });
 
-    it('restoresBothAcceptanceAndRefusalWithoutAnotherStartupPrompt', 0, () => {
-      expect(resolvePrivacyChoice('accepted', PRIVACY_VERSION)).assertEqual('accepted');
-      expect(resolvePrivacyChoice('rejected', PRIVACY_VERSION)).assertEqual('rejected');
+    it('usesSystemAcceptanceAndRefusalWithoutAnAppDialog', 0, () => {
+      expect(platformPrivacyChoice([result(privacyManager.AppPrivacyType.PRIVACY_AGREEMENT,
+        privacyManager.AppPrivacyResultType.FULL_MODE_AGREED)])).assertEqual('accepted');
+      expect(platformPrivacyChoice([result(privacyManager.AppPrivacyType.PRIVACY_AGREEMENT,
+        privacyManager.AppPrivacyResultType.DISAGREED)])).assertEqual('rejected');
     });
 
-    it('doesNotTreatLegacyOrCorruptValuesAsConsent', 0, () => {
-      expect(resolvePrivacyChoice('true', PRIVACY_VERSION)).assertEqual('unselected');
-      expect(resolvePrivacyChoice('accepted ', PRIVACY_VERSION)).assertEqual('unselected');
-      expect(resolvePrivacyChoice('accepted', '')).assertEqual('unselected');
+    it('doesNotAcceptUnknownPlatformStatuses', 0, () => {
+      expect(platformPrivacyChoice([result(privacyManager.AppPrivacyType.PRIVACY_AGREEMENT,
+        99 as privacyManager.AppPrivacyResultType)])).assertEqual('unselected');
     });
 
-    it('requiresNewConsentWhenTheDeclarationVersionChanges', 0, () => {
-      expect(resolvePrivacyChoice('accepted', 'previous-version')).assertEqual('unselected');
-      expect(resolvePrivacyChoice('rejected', 'previous-version')).assertEqual('unselected');
+    it('respectsPlatformRequestsToResignAnUpdatedPolicy', 0, () => {
+      expect(platformPrivacyChoice([result(privacyManager.AppPrivacyType.PRIVACY_AGREEMENT,
+        privacyManager.AppPrivacyResultType.REQUIRE_RESIGNING_VERSION_UPDATE)])).assertEqual('unselected');
     });
   });
 }

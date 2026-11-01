@@ -10,6 +10,7 @@ export class SelfHdcTaskSettings implements SelfHdcSetupConnection {
   ip: string = '';
   port: string = '';
   autoIp: boolean = true;
+  // Legacy startup preference retained in saved settings; operation checks never use it.
   skipSetupReminder: boolean = false;
   private static refreshing: Promise<SelfHdcTaskSettings> | null = null;
 

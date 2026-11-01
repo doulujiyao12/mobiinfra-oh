@@ -1,5 +1,7 @@
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
+import { DataManagerStorage } from '../datamanager/DataManagerStorage';
+import { MemoryChangeJournal } from '../datamanager/MemoryChangeJournal';
 import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
@@ -225,6 +227,7 @@ export class WorkflowStorage {
   }
 
   static writeText(path: string, content: string): void {
+    MemoryChangeJournal.beforeMutation(path, new DataManagerStorage());
     try {
       let byteStr = encodeUtf8Compat(content);
       let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
@@ -1373,6 +1376,7 @@ export class WorkflowStorage {
           '规则：\n' +
           '1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n' +
           '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部“联系人”名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
+          '必须保留实际说话者；引用、转发和左侧消息中的“我”不能改写成手机用户本人。保留请求之后的答复、已发送、收到、完成、取消和改期，不要只摘录请求。群聊逐条使用可见发送人名，不要把群名当作每条消息的发送者。\n' +
           '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
           '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
           '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
@@ -1484,6 +1488,7 @@ export class WorkflowStorage {
             '规则：\n' +
             '1. 聊天对象能识别则输出联系人/群聊名称；无法识别用“当前聊天对象”，不要编造。\n' +
             '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部联系人名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
+            '必须保留实际说话者；引用、转发和左侧消息中的“我”不能改写成手机用户本人。保留请求之后的答复、已发送、收到、完成、取消和改期，不要只摘录请求。群聊逐条使用可见发送人名，不要把群名当作每条消息的发送者。\n' +
             '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；这些消息时间锚点是内容自身时间锚点，需要结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
             '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
             '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底；只有完全没有内容锚点时才使用任务执行日期兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
@@ -1637,6 +1642,7 @@ export class WorkflowStorage {
   }
 
   static deletePathRecursively(path: string): number {
+    MemoryChangeJournal.beforeMutation(path, new DataManagerStorage());
     try {
       let children = fs.listFileSync(path);
       let deleted = 0;
@@ -1777,6 +1783,7 @@ export class WorkflowStorage {
   }
 
   static deleteDailyLogs(filesDir: string): number {
+    new MemoryChangeJournal(filesDir, new DataManagerStorage()).mark('daily', '*');
     let deleted = WorkflowStorage.deletePathRecursively(WorkflowStorage.dailyLogDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
     return deleted;

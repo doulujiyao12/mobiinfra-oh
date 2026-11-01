@@ -65,6 +65,8 @@ export interface WechatAutoSummaryConversation {
   messages: WechatAutoSummaryMessage[];
   time_range?: WechatAutoSummaryTimeRange;
   history_mode?: string;
+  collection_stop_reason?: string;
+  coverage_complete?: boolean;
 }
 
 export interface WechatAutoSummaryResponse {

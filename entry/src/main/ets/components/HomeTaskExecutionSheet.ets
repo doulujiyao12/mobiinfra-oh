@@ -2,7 +2,7 @@ import { AppTheme } from '../utils/AppTheme';
 import { AppLogger } from '../utils/AppLogger';
 import {
   HomeTaskSuggestion, homeTaskSupportsQwen, homeTaskQwenDescription, homeTaskQwenUnavailableReason,
-  HOME_TASK_DESCRIPTION_LIMIT, homeTaskShortDraft
+  HOME_TASK_DESCRIPTION_LIMIT, homeTaskShortDraft, homeTaskQwenDescriptionLimit
 } from '../pages/home/HomeTaskSuggestion';
 
 @Component
@@ -25,6 +25,10 @@ export struct HomeTaskExecutionSheet {
     if (this.submitting) { return; }
     this.method = method;
     this.errorText = '';
+  }
+
+  private descriptionLimit(): number {
+    return this.method === 'phone' ? HOME_TASK_DESCRIPTION_LIMIT : homeTaskQwenDescriptionLimit(this.suggestion);
   }
 
   private async execute(): Promise<void> {
@@ -73,10 +77,12 @@ export struct HomeTaskExecutionSheet {
           .fontSize(12).fontColor(AppTheme.text('#8A758F')).width('100%').lineHeight(18)
       }
       TextArea({ text: this.method === 'phone' ? this.phoneDraft : this.qwenDraft,
-        placeholder: '一句话，只做一件事（最多60字）' })
-        .width('100%').height(90).fontSize(14).fontColor(AppTheme.text('#202839'))
+        placeholder: this.descriptionLimit() > HOME_TASK_DESCRIPTION_LIMIT ?
+          '可补充已知的时间、地点、交通、人数和出行目的（最多300字）' : '一句话，只做一件事（最多60字）' })
+        .width('100%').height(this.descriptionLimit() > HOME_TASK_DESCRIPTION_LIMIT ? 150 : 90)
+        .fontSize(14).fontColor(AppTheme.text('#202839'))
         .placeholderColor($r('app.color.ui_text_placeholder')).caretColor($r('app.color.ui_accent_blue'))
-        .backgroundColor(AppTheme.inputBackground()).borderRadius(14).padding(12).maxLength(HOME_TASK_DESCRIPTION_LIMIT)
+        .backgroundColor(AppTheme.inputBackground()).borderRadius(14).padding(12).maxLength(this.descriptionLimit())
         .enabled(!this.submitting)
         .onChange((text: string): void => {
           if (this.method === 'phone') { this.phoneDraft = text; } else { this.qwenDraft = text; }

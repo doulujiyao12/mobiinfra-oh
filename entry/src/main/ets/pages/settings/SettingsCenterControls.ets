@@ -37,6 +37,7 @@ import {
 export struct SettingsGroupCard {
   title: string = '';
   subtitle: string = '';
+  purpose: string = '';
   onHeaderClick: () => void = () => {};
   @BuilderParam contentBuilder: () => void = this.EmptyContent;
 
@@ -58,6 +59,15 @@ export struct SettingsGroupCard {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 4 })
+          .onClick(() => { this.onHeaderClick(); })
+      }
+      if (this.purpose.length > 0) {
+        Text('* 用途：' + this.purpose)
+          .fontSize(12)
+          .lineHeight(18)
+          .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
+          .width('100%')
+          .margin({ top: 6 })
           .onClick(() => { this.onHeaderClick(); })
       }
       Column() {
@@ -144,19 +154,22 @@ export struct SensitiveSettingInput {
   sensitiveId: string = '';
   @Prop activeSensitiveId: string = '';
   label: string = '';
-  value: string = '';
-  defaultValue: string = '';
+  @Prop value: string = '';
+  @Prop defaultValue: string = '';
+  @Prop defaultPreviewText: string = '默认';
+  configuredPreviewText: string = '';
   placeholder: string = '';
   onValueChange: (value: string) => void = (value: string) => {};
   onActiveSensitiveChange: (value: string) => void = (value: string) => {};
   @State private localVisible: boolean = false;
   @State private autoFocusEditor: boolean = false;
+  @State private multilineEditor: boolean = false;
 
   private previewText(): string {
     if (settingUsesDefaultValue(this.value, this.defaultValue)) {
-      return '默认';
+      return this.defaultPreviewText;
     }
-    let maskedValue = maskSensitiveSettingValue(this.value);
+    let maskedValue = this.configuredPreviewText.length > 0 ? this.configuredPreviewText : maskSensitiveSettingValue(this.value);
     if (maskedValue.length > 0) {
       return maskedValue;
     }
@@ -202,6 +215,8 @@ export struct SensitiveSettingInput {
   }
 
   private enterEditMode(): void {
+    // Keep the editor type stable while typing so a long key does not replace the focused input.
+    this.multilineEditor = settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder);
     if (this.isExternallyControlled()) {
       this.onActiveSensitiveChange(this.effectiveSensitiveId());
     } else {
@@ -247,11 +262,12 @@ export struct SensitiveSettingInput {
         .lineHeight(20)
         .fontColor(AppTheme.text(this.previewTextColor()))
         .width('100%')
-        .maxLines(settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ? 3 : 1)
+        .maxLines(this.configuredPreviewText.length > 0 ? 1 :
+          (settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ? 3 : 1))
         .textOverflow({ overflow: TextOverflow.Ellipsis })
     }
     .justifyContent(FlexAlign.Center)
-    .height(settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ?
+    .height(this.configuredPreviewText.length === 0 && settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ?
       SETTINGS_MULTILINE_FIELD_HEIGHT : SETTINGS_FIELD_HEIGHT)
     .layoutWeight(1)
     .backgroundColor(AppTheme.background(SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR))
@@ -261,7 +277,7 @@ export struct SensitiveSettingInput {
   }
 
   @Builder VisibleEditor() {
-    if (settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder)) {
+    if (this.multilineEditor) {
       TextArea({ placeholder: this.editorPlaceholder(), text: this.editorText() })
         .placeholderColor($r('app.color.ui_text_placeholder'))
         .caretColor($r('app.color.ui_accent_blue'))

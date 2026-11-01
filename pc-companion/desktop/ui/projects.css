@@ -1,0 +1,16 @@
+#projectPicker{width:min(640px,calc(100vw - 64px));max-height:calc(100vh - 80px);padding:28px;border:1px solid #e4e7ef;border-radius:24px;background:#fff;color:#172033;box-shadow:0 24px 100px #13213a30}
+#projectPicker::backdrop{background:#18223850;backdrop-filter:blur(6px)}
+#projectPicker .picker-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px}
+#projectPicker h2{margin:0 0 6px;font-size:22px}#projectPicker p{margin:0;font-size:14px;color:#657087;line-height:1.5}
+#closeProjects{border:0;background:#f3f5f9;border-radius:50%;width:36px;height:36px;padding:0;font-size:25px;flex-shrink:0}
+.picker-search{display:flex;align-items:center;gap:10px}.picker-search input{flex:1;min-width:0;font-size:15px}
+#projectPickerStatus{padding:12px 0;min-height:44px}#projectPickerStatus.error{color:#bd2a3e}
+.existing-projects{max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px 3px 4px}
+.project-option{display:flex;align-items:center;text-align:left;gap:14px;padding:16px;border:1px solid #e5e9f1;background:#f8f9fc;border-radius:16px;min-height:78px;width:100%}
+.project-option:hover{border-color:#768bf0;background:#f1f4ff}.project-option:focus-visible{outline:2px solid #5269dc;outline-offset:1px}.project-option:disabled{opacity:.65;cursor:default}
+.project-option .project-text{flex:1;min-width:0}.project-option strong{display:block;font-size:16px;font-weight:600;color:#172033;overflow-wrap:anywhere}
+.project-option small{display:block;color:#657087;font-size:13px;line-height:1.5;overflow-wrap:anywhere;margin-top:4px}
+.project-option .project-check{color:#5269dc;font-size:14px;white-space:nowrap}
+#projectPicker footer{display:flex;align-items:center;justify-content:space-between;gap:18px;border-top:1px solid #edf0f5;padding-top:18px;margin-top:18px}
+#projectPicker footer p{max-width:330px;font-size:13px}#projectPicker footer button{flex-shrink:0}
+@media(prefers-color-scheme:dark){#projectPicker{background:#202632;color:#edf0f6;border-color:#3b4455}#projectPicker p{color:#b6c0d0}#closeProjects{background:#303949;color:#e8edf5}.project-option{background:#282f3d;border-color:#404b5d}.project-option:hover{background:#303d58;border-color:#8d9cf1}.project-option strong{color:#edf0f6}.project-option small{color:#b6c0d0}.project-option .project-check{color:#a5b3ff}#projectPicker footer{border-color:#404b5d}#projectPickerStatus.error{color:#ff9aab}}

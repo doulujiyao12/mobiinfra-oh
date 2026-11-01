@@ -123,7 +123,15 @@ export class PhoneHdcActions {
           end = this.point(this.width * (direction === 'left' ? 0.3 : 0.7), this.height * 0.5);
         } else { throw new Error('PHONE_HDC_ARGUMENT: unknown swipe direction ' + direction); }
       }
-      commands.push(this.command('uitest uiInput swipe ' + start.x + ' ' + start.y + ' ' + end.x + ' ' + end.y,
+      let speedArgument = '';
+      if (payload['swipe_speed'] !== undefined) {
+        let speed = numberField(payload, 'swipe_speed');
+        if (!Number.isInteger(speed) || speed < 0 || speed > 20000) {
+          throw new Error('PHONE_HDC_ARGUMENT: swipe_speed must be an integer in 0..20000');
+        }
+        speedArgument = ' ' + speed;
+      }
+      commands.push(this.command('uitest uiInput swipe ' + start.x + ' ' + start.y + ' ' + end.x + ' ' + end.y + speedArgument,
         'swipe', 700));
     } else if (action === 'keyevent') {
       let key = phoneHdcString(payload, 'key').toUpperCase();
