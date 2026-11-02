@@ -1296,8 +1296,8 @@ export struct HomePage {
 
   private visibleRecommendations(): HomeRecommendationViewModel[] {
     let reminders = this.nonCalendarRecommendations();
+    if (this.profile.mailReminder !== undefined) { reminders.unshift(this.profile.mailReminder); }
     if (this.profile.calendarEnabled === true) { reminders.unshift(this.calendarOverview().reminder); }
-    if (this.profile.mailReminder !== undefined) { reminders.push(this.profile.mailReminder); }
     if (this.showAllRecommendations) {
       let pending = reminders.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
       let completed = reminders.filter((item: HomeRecommendationViewModel): boolean => item.completed);
@@ -1419,13 +1419,19 @@ export struct HomePage {
   @Builder RecommendationPagination() {
     if (this.shouldShowRecommendationPagination()) {
       Row() {
-        Button('‹')
-          .width(32)
-          .fontSize(20)
-          .fontColor(AppTheme.text(this.currentRecommendationPageIndex() > 0 ? '#8066FF' : '#A7ADBA'))
-          .height(32)
+        Button({ type: ButtonType.Circle }) {
+          Image($r('app.media.home_page_previous'))
+            .width(20)
+            .height(20)
+            .objectFit(ImageFit.Contain)
+            .fillColor(AppTheme.text(this.currentRecommendationPageIndex() > 0 ? '#8066FF' : '#A7ADBA'))
+        }
+          .width(36)
+          .height(36)
+          .padding(0)
+          .accessibilityText('上一页提醒')
           .backgroundColor(AppTheme.background(this.currentRecommendationPageIndex() > 0 ? '#F0ECFF' : '#EEF0F5'))
-          .borderRadius(16)
+          .borderRadius(18)
           .enabled(this.currentRecommendationPageIndex() > 0)
           .onClick(() => {
             this.setRecommendationPage(this.currentRecommendationPageIndex() - 1);
@@ -1436,13 +1442,19 @@ export struct HomePage {
           .textAlign(TextAlign.Center)
           .layoutWeight(1)
           .maxLines(1)
-        Button('›')
-          .width(32)
-          .fontSize(20)
-          .fontColor(AppTheme.text(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#8066FF' : '#A7ADBA'))
-          .height(32)
+        Button({ type: ButtonType.Circle }) {
+          Image($r('app.media.home_page_next'))
+            .width(20)
+            .height(20)
+            .objectFit(ImageFit.Contain)
+            .fillColor(AppTheme.text(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#8066FF' : '#A7ADBA'))
+        }
+          .width(36)
+          .height(36)
+          .padding(0)
+          .accessibilityText('下一页提醒')
           .backgroundColor(AppTheme.background(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#F0ECFF' : '#EEF0F5'))
-          .borderRadius(16)
+          .borderRadius(18)
           .enabled(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1)
           .onClick(() => {
             this.setRecommendationPage(this.currentRecommendationPageIndex() + 1);

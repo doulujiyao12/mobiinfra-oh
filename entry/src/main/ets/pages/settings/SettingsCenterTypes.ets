@@ -14,6 +14,11 @@ export enum SettingsSectionId {
   MapCollection = 10
 }
 
+export enum SettingsScrollTarget {
+  None = 0,
+  LocalModelDownload = 1
+}
+
 export interface SettingsSectionItem {
   id: SettingsSectionId;
   title: string;

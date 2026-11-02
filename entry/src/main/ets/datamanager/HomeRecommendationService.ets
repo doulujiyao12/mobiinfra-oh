@@ -3,7 +3,8 @@ import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { IndexService } from './IndexService';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
-import { chatPersonTitle, isChatCollectionEvent } from './ChatCollectionContext';
+import { chatAttributionFingerprint, chatHasKnownActionOwners, chatOtherOwnerNames, chatOtherSubjectNames,
+  chatPersonTitle, isChatCollectionEvent } from './ChatCollectionContext';
 import {
   DataManagerModelConfig,
   DataManagerProgressCallback,
@@ -235,7 +236,7 @@ export class HomeRecommendationService {
     Object.keys(todoEvents).forEach((eventId: string) => {
       let event = todoEvents[eventId];
       if (isChatCollectionEvent(event) && event.chat_attribution &&
-        (event.chat_attribution.status !== 'pending' || event.chat_attribution.action_owner === 'unknown')) { return; }
+        (event.chat_attribution.status !== 'pending' || !chatHasKnownActionOwners(event.chat_attribution))) { return; }
       let todoType = normalizeFreeText(event.todo.type);
       let deadline = normalizeFreeText(event.todo.deadline);
       let hasCurrentOrFutureDeadline = isCurrentOrFutureTodoDeadline(deadline, today);
@@ -300,7 +301,7 @@ export class HomeRecommendationService {
     ];
     context.plannerEvents.forEach((event: HomeRecommendationPlannerEvent) => {
       let actor = context.events[event.event_id]?.chat_attribution;
-      if (actor) { parts.push([actor.subject, actor.subject_name, actor.action_owner, actor.action_owner_name, actor.status].join(':')); }
+      if (actor) { parts.push(chatAttributionFingerprint(actor)); }
       parts.push([
         event.event_id,
         event.date,
@@ -435,7 +436,7 @@ export class HomeRecommendationService {
     let fingerprint = homeRecommendationSourceInputFingerprint(events);
     eventIds.forEach((id: string) => {
       let actor = context.events[id]?.chat_attribution;
-      if (actor) { fingerprint += '\u001f' + [actor.subject, actor.subject_name, actor.action_owner, actor.action_owner_name, actor.status].join(':'); }
+      if (actor) { fingerprint += '\u001f' + chatAttributionFingerprint(actor); }
     });
     return this.storage.sha256Text(fingerprint);
   }
@@ -456,8 +457,8 @@ export class HomeRecommendationService {
     let relatedNames: string[] = [];
     eventIds.forEach((id: string) => {
       let attribution = eventMap[id]?.chat_attribution;
-      if (attribution?.action_owner === 'other') { names.push(attribution.action_owner_name); }
-      else if (attribution?.subject === 'other') { relatedNames.push('关于' + attribution.subject_name); }
+      names = names.concat(chatOtherOwnerNames(attribution));
+      relatedNames = relatedNames.concat(chatOtherSubjectNames(attribution).map((name: string): string => '关于' + name));
     });
     return chatPersonTitle(title, names.length > 0 ? names : relatedNames);
   }

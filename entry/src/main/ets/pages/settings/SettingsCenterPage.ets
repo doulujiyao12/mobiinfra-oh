@@ -3,7 +3,7 @@ import { StartupSourceSync, STARTUP_SOURCE_SYNC_ENABLED_KEY } from '../../utils/
 import { CalendarMemoryPanel } from '../../components/CalendarMemoryPanel';
 import { MailSettingsPanel } from '../../components/MailSettingsPanel';
 import { FrostedPage } from '../../components/FrostedPage';
-import { promptAction, router } from '@kit.ArkUI';
+import { FrameCallback, promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
@@ -86,6 +86,7 @@ import {
   SettingsConfirmConfig,
   SettingsSectionItem,
   SettingsSectionId,
+  SettingsScrollTarget,
   settingsSectionSubtitle,
   settingsSectionTitle,
   settingsParentSection
@@ -121,6 +122,14 @@ import { PERSONAL_MEMORY_A2A_STATE_KEY, PersonalMemoryAccess } from '../../agent
 registerGallerySettingsDefaults();
 
 const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
+
+class SettingsScrollFrame extends FrameCallback {
+  private action: () => void;
+  constructor(action: () => void) { super(); this.action = action; }
+  onFrame(_frameTimeInNano: number): void {}
+  onIdle(_timeLeftInNano: number): void { this.action(); }
+}
+
 @Component
 export struct SettingsCenterPage {
   private pageScroller: Scroller = new Scroller();
@@ -132,6 +141,8 @@ export struct SettingsCenterPage {
   @Link threadNumInput: string;
   @Prop localNpuExecutionMode: string = 'cpu';
   @Link @Watch('onSelectedSectionChanged') selectedSectionId: number;
+  @Link @Watch('onScrollTargetChanged') scrollTarget: number;
+  private detailScrollRevision: number = 0;
   onBackRequest: () => boolean = (): boolean => false;
   @Link output: string;
   @Link chunkOmCacheOutput: string;
@@ -246,6 +257,7 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    this.scheduleDetailScroll();
     this.startupSyncEnabled = new StartupSourceSync((getContext(this) as common.Context).filesDir).isEnabled();
     try { DebugSettings.initialize(getContext(this) as common.Context); } catch (e) {
       showToastSafely('读取 Debug 设置失败：' + (e as Error).message, 2500);
@@ -349,21 +361,42 @@ export struct SettingsCenterPage {
   }
 
   private resetDetailScroll(): void {
+    if (!isSettingsSectionSelected(this.selectedSectionId)) { return; }
     try {
-      this.detailScroller.scrollEdge(Edge.Top);
+      let localDownload = this.selectedSectionId === SettingsSectionId.ModelAgents &&
+        this.scrollTarget === SettingsScrollTarget.LocalModelDownload;
+      this.detailScroller.scrollEdge(localDownload ? Edge.Bottom : Edge.Top);
+      if (localDownload) { this.scrollTarget = SettingsScrollTarget.None; }
     } catch (e) {}
   }
 
+  private scheduleDetailScroll(): void {
+    let revision = ++this.detailScrollRevision;
+    let section = this.selectedSectionId;
+    if (!isSettingsSectionSelected(section)) { return; }
+    // Wait for the detail layout, including the downloaded-model list, before
+    // scrolling. A newer navigation invalidates earlier frame callbacks.
+    this.getUIContext().postFrameCallback(new SettingsScrollFrame((): void => {
+      if (revision !== this.detailScrollRevision || section !== this.selectedSectionId) { return; }
+      this.resetDetailScroll();
+    }));
+  }
+
+  private onScrollTargetChanged(): void {
+    if (this.scrollTarget !== SettingsScrollTarget.None) { this.scheduleDetailScroll(); }
+  }
+
+  aboutToDisappear(): void { this.detailScrollRevision++; }
+
   private openSection(id: SettingsSectionId): void {
+    this.scrollTarget = SettingsScrollTarget.None;
     this.selectedSectionId = normalizeSettingsSectionId(id);
   }
 
   private onSelectedSectionChanged(): void {
     this.closeSensitiveInputs();
-    this.resetDetailScroll();
-    setTimeout(() => {
-      this.resetDetailScroll();
-    }, 0);
+    if (this.selectedSectionId !== SettingsSectionId.ModelAgents) { this.scrollTarget = SettingsScrollTarget.None; }
+    this.scheduleDetailScroll();
   }
 
   private closeSection(): void {
@@ -1936,6 +1969,7 @@ export struct SettingsCenterPage {
     .width('100%')
     .height('100%')
     .clip(false)
+    .onAppear((): void => { this.scheduleDetailScroll(); })
   }
 
   build() {

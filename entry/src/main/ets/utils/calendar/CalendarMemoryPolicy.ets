@@ -142,6 +142,7 @@ export interface CalendarMemorySnapshot {
   syncedAt: string;
   available: boolean;
   error: string;
+  readWarning?: string;
   windowStart: number;
   windowEnd: number;
   sources: CalendarSource[];

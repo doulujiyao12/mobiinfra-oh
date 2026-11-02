@@ -1,3 +1,5 @@
+import { normalizeChatMessageTimes } from './ChatMessageTime';
+
 export class WorkflowDateContext {
   private readonly startedAt: Date;
 
@@ -6,9 +8,14 @@ export class WorkflowDateContext {
   }
 
   datePrompt(): string {
+    let recent = [0, -1, -2, -3, -4, -5, -6].map((offset: number): string => {
+      let day = this.addDays(offset);
+      return this.formatDateIso(day) + ' ' + this.weekdayCn(day);
+    }).join('；');
     return '今天的日期是: ' + this.formatDateCn(this.startedAt) + ' ' + this.weekdayCn(this.startedAt) + '\n' +
       '当前本地时间是: ' + this.runTimestamp() + '\n' +
-      '规则说明：任务执行时间只作为默认参考；如果图片或文本中存在内容自身时间锚点，例如聊天日期分隔符、消息时间、截图拍摄时间、OCR 日期、文档日期等，必须优先以最近的内容时间锚点解析相对时间；只有完全无法确定内容时间锚点时，才使用任务执行日期兜底；写入总结或日志时保留原始表达，并在相对时间短语后用方括号[]补充绝对日期或时间；无法确定时不要编造。';
+      '规则说明：任务执行时间只作为默认参考；如果图片或文本中存在内容自身时间锚点，例如聊天日期分隔符、消息时间、截图拍摄时间、OCR 日期、文档日期等，必须优先以最近的内容时间锚点解析相对时间；只有完全无法确定内容时间锚点时，才使用任务执行日期兜底；写入总结或日志时保留原始表达，并在相对时间短语后用方括号[]补充绝对日期或时间；无法确定时不要编造。\n' +
+      '聊天采集日期参考（今天至前六天）：' + recent + '。昨天/前天相对采集日期；聊天分隔符单写星期几时取采集日及之前最近的那一天；明确写上周/本周时按自然周。日期无法确定用采集日期，时分也不确定用采集时间并标明兜底，不借用示例日期。';
   }
 
   runDate(): string {
@@ -32,6 +39,7 @@ export class WorkflowDateContext {
   }
 
   normalizeDailyLogText(text: string): string {
+    text = normalizeChatMessageTimes(text, this.startedAt);
     let output = '';
     let lineStart = 0;
     let skipNextBodyLine = false;

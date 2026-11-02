@@ -547,7 +547,7 @@ export class DataManagerFacade {
     // after a legacy consolidation check would reopen every historical source.
     let selection = !this.fullSourceCheck ?
       this.indexService.changedSourceSelection(modelConfig, stableUnique(this.changedDailyPaths.map((path: string): string =>
-        path.substring(0, 7) + '/' + this.storage.basename(path) + '.state.json'))) : undefined;
+        path.substring(0, 7) + '/' + this.storage.basename(path) + '.state.json')), this.changedDailyPaths) : undefined;
     let index = await this.indexService.build(modelConfig, progress, selection);
     dataManagerInfo(`DataManagerFacade index done: sourceFiles=${index.sourceFiles}, eventCount=${index.eventCount}, profileClaimCount=${index.profileClaimCount}`);
     this.emitProgress(progress, '索引', '正在生成采集分组', 96, 100, 96);

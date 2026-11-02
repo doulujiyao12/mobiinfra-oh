@@ -25,7 +25,9 @@ class Storage {
   listDir(dir) { return [...disk.keys()].filter(p => p.startsWith(dir + '/')).map(p => p.slice(dir.length + 1)).filter(p => !p.includes('/')); }
 }
 let granted = true, calendars = [], failRead = false, mutateSettings = null, reads = 0;
-let accessRequests = 0, fetchedFields = [], providerDefinitions = [], providerInstances = [];
+let accessRequests = 0, fetchedFields = [], instanceFields = [], providerDefinitions = [], providerInstances = [];
+let fastDeadlines = false;
+const diagnostics = [];
 const kit = { calendarManager: {
   getCalendarManager: () => ({ getAllCalendars: async () => calendars }),
   EventFilter: { filterById: ids => ids }
@@ -42,9 +44,10 @@ const external = {
 };
 const mocks = {
   'DataManagerStorage.ets': { DataManagerStorage: Storage },
-  'DataManagerLog.ets': { dataManagerInfo() {}, dataManagerWarn() {} },
+  'DataManagerLog.ets': { dataManagerInfo(message) { diagnostics.push(message); }, dataManagerWarn(message) { diagnostics.push(message); } },
   'GalleryMemorySync.ets': { GalleryMemorySync: {} },
-  'DataPipelineModelClient.ets': { DataPipelineModelClient: class {} }
+  'DataPipelineModelClient.ets': { DataPipelineModelClient: class {},
+    buildEnrichPromptPreview: events => ({ systemPrompt: 'fixture', userPrompt: JSON.stringify(events) }) }
 };
 function load(relative) {
   const file = path.resolve(root, relative.endsWith('.ets') ? relative : relative + '.ets');
@@ -63,7 +66,8 @@ function load(relative) {
     return load(path.resolve(path.dirname(file), request));
   };
   vm.runInNewContext(result.outputText, { require: requireMock, module, exports: module.exports, Date: Clock,
-    setTimeout, clearTimeout, console }, { filename: file });
+    setTimeout: (callback, delay) => setTimeout(callback, fastDeadlines && delay === 15000 ? 5 : delay),
+    clearTimeout, console }, { filename: file });
   return module.exports;
 }
 const base = 'entry/src/main/ets/';
@@ -83,10 +87,10 @@ function instance(def, offset, duration = 3600000) {
 function provider(id = 1, type = 'local') {
   return { id, getAccount: () => ({ displayName: '我的日历', name: 'private@example.com', type }),
     async queryEventInstances(start, end, ids, fields) {
-      reads++; fetchedFields = fields;
+      reads++; instanceFields = fields;
       if (failRead) throw Error('provider unavailable');
       if (mutateSettings) { const run = mutateSettings; mutateSettings = null; run(); }
-      return clone(providerInstances.filter(i => i.instanceStartTime < end && i.instanceEndTime > start));
+      return clone(providerInstances.filter(i => (!ids || ids.includes(i.id)) && i.instanceStartTime < end && i.instanceEndTime > start));
     },
     async getEvents(ids, fields) { fetchedFields = fields; return clone(providerDefinitions.filter(d => ids.includes(d.id))); }
   };
@@ -120,7 +124,8 @@ test('bounded recurring-instance reads include a series that started years ago',
   const result = await CalendarMemoryService.refresh(ctx);
   assert.equal(result.series.length, 1); assert.equal(result.occurrences.length, 3);
   assert.ok(result.series[0].recurrence.includes('recurrenceFrequency'));
-  assert.ok(fetchedFields.includes('recurrenceRule') && fetchedFields.includes('instanceEndTime'));
+  assert.ok(fetchedFields.includes('recurrenceRule') && instanceFields.includes('instanceEndTime'));
+  assert.ok(!fetchedFields.includes('instanceEndTime'), 'Definition queries request only definition columns');
   assert.ok(!JSON.stringify(result).includes('private@example.com'));
   assert.equal(store.reminders(now).length, 1);
 });
@@ -326,7 +331,7 @@ test('production index enrichment cannot fabricate completion, dates, or GUI act
     summary: '用户已经完成所有会议', domains: ['work'], enrichment_method: 'model',
     todo: { deadline: '1900-01-01', text: 'buy', type: 'buy', agent_task: 'pay' } })); } };
   const service = new IndexService(paths, storage, model), events = {};
-  await service.buildCalendarEvents(events, {}, { enabled: true });
+  await service.buildCalendarEvents(events, {}, { enabled: true, apiKey: 'fixture' });
   assert.equal(Object.keys(events).length, 4);
   assert.equal(classified, 2, 'Only one classification per repeat definition');
   assert.ok(Object.values(events).every(e => e.calendar && e.summary.includes('未确认实际参加或完成') && !e.todo.agent_task && e.event_date !== '1900-01-01'));
@@ -377,6 +382,152 @@ test('calendar progress reports provider chunks, definition counts and durable s
   assert.equal(steps.at(-1).percent,100);assert.equal(store.snapshot().available,true);
   assert.ok(steps.every((step,index)=>step.percent>=0&&step.percent<=100&&(!index||step.percent>=steps[index-1].percent)));
 });
+
+// Separate stores and provider hooks exercise two successful-but-inconsistent
+// queries, not a mocked reconciliation helper. No production model is called.
+let fixtureSerial = 0;
+async function withRecheckFixture(run) {
+  const before = calendars, beforeGrant = granted;
+  const context = { filesDir: '/calendar-recheck-' + (++fixtureSerial), applicationInfo: { accessTokenId: 7 } };
+  const local = new CalendarMemoryStore(context.filesDir), settings = local.settings();
+  settings.enabled = true; local.saveSettings(settings);
+  const healthy = definition(701), missing = definition(702, { recurrenceRule: { recurrenceFrequency: 1 } });
+  const state = { definitions: [healthy], initial: [instance(healthy, 86400000), instance(missing, 2 * 86400000)],
+    current: [instance(missing, 3 * 86400000)], definitionCalls: [], instanceCalls: [], progress: [],
+    onDefinitions: null, onRecheck: null };
+  const source = { id: 71, getAccount: () => ({ displayName: 'PRIVATE CALENDAR NAME', type: 'local' }),
+    async getEvents(ids, fields) {
+      state.definitionCalls.push(clone(ids));
+      if (state.onDefinitions) return await state.onDefinitions(ids, state.definitionCalls.length, fields);
+      return clone(state.definitions.filter(item => ids.includes(item.id)));
+    },
+    async queryEventInstances(start, end, ids, fields) {
+      state.instanceCalls.push({ start, end, ids: ids ? clone(ids) : null });
+      const values = ids && state.onRecheck ? await state.onRecheck(ids) : ids ? state.current : state.initial;
+      return clone(values.filter(item => (!ids || ids.includes(item.id)) &&
+        (item.instanceStartTime ?? item.startTime) < end && (item.instanceEndTime ?? item.endTime) > start));
+    }
+  };
+  const refresh = () => CalendarMemoryService.refresh(context, value => state.progress.push(clone(value)));
+  calendars = [source]; granted = true; diagnostics.length = 0;
+  try { await run({ context, local, state, source, healthy, missing, refresh }); }
+  finally { calendars = before; granted = beforeGrant; fastDeadlines = false; }
+}
+test('missing definitions: healthy reads never schedule a recheck', async () => withRecheckFixture(async f => {
+  f.state.definitions.push(f.missing);
+  const result = await f.refresh();
+  assert.equal(result.occurrences.length, 2);
+  assert.equal(f.state.definitionCalls.length, 1);
+  assert.equal(f.state.instanceCalls.filter(call => call.ids).length, 0);
+  assert.ok(!diagnostics.some(line => line.includes('CALENDAR_RECHECK_BEGIN')));
+}));
+test('missing definitions: a single retry recovers details and replaces rescheduled instances', async () => withRecheckFixture(async f => {
+  f.state.onDefinitions = async (ids, call) => clone((call === 1 ? [f.healthy] : [f.missing]).filter(item => ids.includes(item.id)));
+  const result = await f.refresh();
+  assert.equal(result.available, true); assert.equal(result.occurrences.length, 2);
+  assert.deepEqual(f.state.definitionCalls, [[701, 702], [702]], 'Retry only the missing ID');
+  const retry = f.state.instanceCalls.filter(call => call.ids);
+  assert.equal(retry.length, 1); assert.deepEqual(retry[0].ids, [702]);
+  assert.equal(retry[0].start, result.windowStart); assert.equal(retry[0].end, result.windowEnd);
+  assert.ok(result.occurrences.some(item => item.start === now + 3 * 86400000));
+  assert.ok(!result.occurrences.some(item => item.start === now + 2 * 86400000), 'Do not keep the initial stale instance');
+  assert.ok(diagnostics.some(line => line.includes('recoveredDefinitions=1') && line.includes('instanceFallbacks=0')));
+  assert.ok(f.state.progress.some(step => step.stage === '复查日程'));
+  assert.ok(f.state.progress.every((step, i, all) => !i || step.percent >= all[i - 1].percent));
+}));
+test('missing definitions: instance-only calendars remain usable with fresh recurring exceptions and stable identities', async () => withRecheckFixture(async f => {
+  f.state.current = [instance(f.missing, 3 * 86400000), { ...instance(f.missing, 4 * 86400000),
+    title: 'PRIVATE EXCEPTION TITLE', description: 'PRIVATE EXCEPTION CONTENT', location: { location: 'PRIVATE PLACE' } }];
+  const first = await f.refresh();
+  assert.equal(first.available, true); assert.equal(first.error, ''); assert.ok(!first.readWarning);
+  assert.equal(first.occurrences.length, 3); assert.equal(first.series.length, 2);
+  const events = f.local.events();
+  assert.equal(events.length, 3);
+  assert.ok(events.some(item => item.summary.includes('PRIVATE EXCEPTION TITLE') && item.summary.includes('PRIVATE PLACE')));
+  assert.ok(diagnostics.some(line => line.includes('CALENDAR_RECHECK_RESULT') && line.includes('instanceFallbacks=1')));
+  assert.ok(!diagnostics.join('\n').includes('PRIVATE'), 'Diagnostics contain IDs, reasons and counts, never titles, descriptions, accounts or places');
+  const fingerprint = f.local.fingerprint(); await f.refresh();
+  assert.equal(f.local.fingerprint(), fingerprint);
+  assert.equal(JSON.stringify(f.local.events()), JSON.stringify(events));
+  assert.equal(f.state.definitionCalls.length, 4, 'One retry per refresh, no third attempt');
+}));
+test('missing definitions: vanished or moved-out-of-window occurrences are removed without blocking healthy calendars', async () => withRecheckFixture(async f => {
+  f.state.current = [];
+  const result = await f.refresh();
+  assert.equal(result.available, true); assert.equal(result.occurrences.length, 1);
+  assert.equal(result.series.length, 1); assert.equal(result.series[0].eventId, 701);
+  assert.ok(!f.local.events().some(item => item.record_id === 702));
+  assert.ok(diagnostics.some(line => line.includes('noLongerInWindow=1') && line.includes('absentEventIds=702')));
+  assert.ok(!result.readWarning, 'A confirmed empty range is a normal deletion or reschedule, not an unreadable row');
+}));
+test('missing definitions: invalid refreshed instances are skipped with a persisted warning, then recover on a later read', async () => withRecheckFixture(async f => {
+  // The provider returns the recurring definition as if it were an occurrence,
+  // with valid base times but without the required occurrence times.
+  f.state.onRecheck = async () => [{ ...f.missing, startTime: now + 3 * 86400000, endTime: now + 3 * 86400000 + 3600000 }];
+  const result = await f.refresh();
+  assert.equal(result.available, true); assert.equal(result.error, ''); assert.equal(result.occurrences.length, 1);
+  assert.ok(result.readWarning.includes('1 项异常日程')); assert.equal(f.local.snapshot().readWarning, result.readWarning);
+  assert.ok(diagnostics.some(line => line.includes('CALENDAR_OCCURRENCE_SKIPPED') && line.includes('eventId=702') &&
+    line.includes('reason=missing_repeat_time')));
+  assert.ok(f.state.progress.at(-1).message.includes('异常日程'));
+  const panel = fs.readFileSync(path.join(root, base, 'components/CalendarMemoryPanel.ets'), 'utf8');
+  assert.ok(panel.includes('snapshot.readWarning'), 'The calendar settings display the persisted warning');
+  f.state.onRecheck = null;
+  const recovered = await f.refresh();
+  assert.equal(recovered.occurrences.length, 2); assert.ok(!recovered.readWarning, 'No stale warning after recovery');
+}));
+test('missing definitions: permission, provider and timeout failures never masquerade as deletions', async () => withRecheckFixture(async f => {
+  const saved = policy.emptyCalendarSnapshot();
+  saved.available = true; saved.syncedAt = '2026-10-22T12:00:00+08:00';
+  saved.series = [{ key: '71:702', calendarId: 71, eventId: 702, title: 'PREVIOUS', description: '', location: '',
+    timeZone: '', allDay: false, lunar: false, recurrence: '', sourceName: '' }];
+  saved.occurrences = [{ key: '71:702:old', seriesKey: '71:702', start: now, end: now + 3600000 }];
+  for (const phase of ['definitions', 'instances', 'timeout']) {
+    f.local.save(saved); f.state.definitionCalls.length = 0; diagnostics.length = 0;
+    f.state.onDefinitions = async (ids, call) => {
+      if (call > 1 && phase === 'definitions') throw Object.assign(Error('permission denied'), { code: 201 });
+      return clone(f.state.definitions.filter(item => ids.includes(item.id)));
+    };
+    f.state.onRecheck = async () => {
+      if (phase === 'timeout') return await new Promise(() => {});
+      throw Object.assign(Error('provider unavailable'), { code: 23900004 });
+    };
+    fastDeadlines = phase === 'timeout';
+    await assert.rejects(f.refresh(), phase === 'definitions' ? /permission denied/ : phase === 'timeout' ? /超时/ : /provider unavailable/);
+    assert.equal(f.local.snapshot().syncedAt, saved.syncedAt);
+    assert.equal(JSON.stringify(f.local.snapshot().occurrences), JSON.stringify(saved.occurrences));
+    assert.equal(f.local.snapshot().available, false);
+    assert.ok(diagnostics.some(line => line.includes('CALENDAR_READ_FAILED') && line.includes('phase=recheck-')));
+    assert.ok(!diagnostics.some(line => line.includes('noLongerInWindow=')), 'No deletion classification on failed API calls');
+  }
+}));
+test('missing definitions: large rechecks use at most 100 IDs per call and never cross calendar ownership', async () => withRecheckFixture(async f => {
+  f.state.definitions = [];
+  f.state.initial = Array.from({ length: 205 }, (_, i) => instance(definition(800 + i), 86400000 + i * 60000));
+  f.state.current = clone(f.state.initial);
+  const other = { ...f.source, id: 72, getAccount: () => ({ displayName: 'second', type: 'local' }),
+    queryEventInstances: async () => [instance(definition(800, { title: 'SECOND CALENDAR' }), 2 * 86400000)],
+    getEvents: async () => [definition(800, { title: 'SECOND CALENDAR' })] };
+  calendars.push(other);
+  const result = await f.refresh();
+  assert.equal(result.occurrences.length, 206);
+  assert.ok(result.series.some(item => item.key === '72:800' && item.title === 'SECOND CALENDAR'));
+  assert.ok(result.series.some(item => item.key === '71:800' && item.title !== 'SECOND CALENDAR'));
+  assert.equal(f.state.definitionCalls.length, 6, 'Three original batches and exactly three retry batches');
+  const targeted = f.state.instanceCalls.filter(call => call.ids);
+  assert.equal(targeted.length, 3);
+  assert.ok([...targeted.map(call => call.ids), ...f.state.definitionCalls].every(ids => ids.length <= 100));
+  assert.equal(new Set(targeted.flatMap(call => call.ids)).size, 205);
+}));
+test('missing definitions: recheck overflow or concurrent settings changes cannot publish partial data', async () => withRecheckFixture(async f => {
+  const saved = policy.emptyCalendarSnapshot(); saved.available = true; saved.syncedAt = 'old'; f.local.save(saved);
+  f.state.onRecheck = async () => Array.from({ length: 10001 }, (_, i) => instance(f.missing, 60000 * i, 1000));
+  await assert.rejects(f.refresh(), /日程数量过多/);
+  assert.equal(f.local.snapshot().syncedAt, 'old'); assert.equal(f.local.snapshot().occurrences.length, 0);
+  f.state.onRecheck = async () => { f.local.clear(); return f.state.current; };
+  await assert.rejects(f.refresh(), /配置已变化/);
+  assert.equal(f.local.settings().enabled, false); assert.equal(f.local.snapshot().occurrences.length, 0);
+}));
 (async () => {
   for (const [name, run] of cases) { await run(); console.log('PASS ' + name); }
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'entry/src/main/module.json5'), 'utf8'));

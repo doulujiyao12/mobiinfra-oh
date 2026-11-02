@@ -147,6 +147,7 @@ interface PendingSummaryJob {
   actual_id: string;
   prompt: string;
   image: string;
+  date_context: WorkflowDateContext;
   promise: Promise<SummaryJobResult>;
 }
 
@@ -1211,16 +1212,20 @@ export class WorkflowRunner {
       throw new Error('vlm_qa requires question and image');
     }
     let imageBase64 = WorkflowStorage.resolveWorkflowImageInputAsBase64(this.filesDir, image);
+    // Freeze the collection clock before the model request, including deferred
+    // summaries that finish after midnight. A response time is not a capture time.
+    let summaryDateContext = new WorkflowDateContext(new Date());
     let requiresStructuredOutput = inputs.json_schema !== undefined && inputs.json_schema !== null;
     let promptBody = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
-    let prompt = this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
+    let prompt = mode === 'summary' ? summaryDateContext.withDatePrompt(promptBody, 'VLM 图片问答问题') :
+      this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
     if (requiresStructuredOutput) {
       prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
         ArkJSON.stringify(inputs.json_schema);
     }
     if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
-      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, imageBase64));
+      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, imageBase64, summaryDateContext));
       let deferredOutput: ToolOutput = {
         step_dir: this.stepDir(actualId),
         tool_name: toolName,
@@ -1232,7 +1237,9 @@ export class WorkflowRunner {
       return deferredOutput as Object as WorkflowJsonMap;
     }
     this.log('VLM QA request started: ' + actualId);
-    let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
+    // Summary is the only visual evidence extraction stage. Preserve full page
+    // transcripts (including speakers and replies) instead of truncating at 1024.
+    let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), mode === 'summary' ? 4096 : 1024);
     this.ensureNotCancelled();
     this.log('VLM QA response:\n' + response);
     let output: ToolOutput = {
@@ -1248,19 +1255,20 @@ export class WorkflowRunner {
       output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
-      let dailyLogText = this.dailySummaryLogText(response, structuredOutput);
-      let dailyLogPath = this.appendDailySummaryLog(dailyLogText);
+      let dailyLogText = this.dailySummaryLogText(response, structuredOutput, summaryDateContext);
+      let dailyLogPath = this.appendDailySummaryLog(dailyLogText, summaryDateContext);
       output.response = dailyLogText;
       output.daily_log_path = dailyLogPath;
     }
     return output as Object as WorkflowJsonMap;
   }
 
-  private createSummaryJob(actualId: string, prompt: string, imageBase64: string): PendingSummaryJob {
+  private createSummaryJob(actualId: string, prompt: string, imageBase64: string, dateContext: WorkflowDateContext): PendingSummaryJob {
     return {
       actual_id: actualId,
       prompt: prompt,
       image: imageBase64,
+      date_context: dateContext,
       promise: this.startSummaryJob(actualId, prompt, imageBase64)
     };
   }
@@ -1268,7 +1276,7 @@ export class WorkflowRunner {
   private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
       this.ensureNotCancelled();
-      let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
+      let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), 4096);
       this.ensureNotCancelled();
       return this.normalizeSummaryJobResult({
         ok: true,
@@ -1327,8 +1335,8 @@ export class WorkflowRunner {
       }
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
-        let dailyLogText = this.dailySummaryLogText(result.response);
-        let dailyLogPath = this.appendDailySummaryLog(dailyLogText);
+        let dailyLogText = this.dailySummaryLogText(result.response, undefined, jobs[i].date_context);
+        let dailyLogPath = this.appendDailySummaryLog(dailyLogText, jobs[i].date_context);
         if (dailyLogPath.length > 0) {
           this.updateDeferredSummaryOutput(result.actual_id, dailyLogText, dailyLogPath);
           this.writeRunSummary('running');
@@ -1669,12 +1677,12 @@ export class WorkflowRunner {
     return value;
   }
 
-  private appendDailySummaryLog(summaryText: string): string {
+  private appendDailySummaryLog(summaryText: string, dateContext?: WorkflowDateContext): string {
     let text = summaryText.trim();
     if (text.length === 0) {
       return '';
     }
-    let dailyDir = WorkflowStorage.dailyLogDir(this.filesDir) + '/' + this.runDate;
+    let dailyDir = WorkflowStorage.dailyLogDir(this.filesDir) + '/' + (dateContext ? dateContext.runDate() : this.runDate);
     WorkflowStorage.ensureDirectory(dailyDir);
     let fileName = this.buildDailyLogFileName();
     let path = dailyDir + '/' + fileName;
@@ -1741,8 +1749,8 @@ export class WorkflowRunner {
     return response.trim();
   }
 
-  private dailySummaryLogText(response: string, structuredOutput?: WorkflowJsonMap): string {
-    return this.dateContext.normalizeDailyLogText(this.summaryLogText(response, structuredOutput).trim());
+  private dailySummaryLogText(response: string, structuredOutput?: WorkflowJsonMap, dateContext?: WorkflowDateContext): string {
+    return (dateContext || this.dateContext).normalizeDailyLogText(this.summaryLogText(response, structuredOutput).trim());
   }
 
   private structuredSummaryText(output?: WorkflowJsonMap): string {

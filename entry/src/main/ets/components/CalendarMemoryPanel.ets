@@ -32,6 +32,7 @@ export struct CalendarMemoryPanel {
     this.status = snapshot.error || (snapshot.syncedAt ?
       '上次读取 ' + new Date(snapshot.syncedAt).toLocaleString() + ' · ' + snapshot.occurrences.length + ' 项安排' :
       '尚未读取日历，开启后需系统授权');
+    if (!snapshot.error && snapshot.readWarning) { this.status += '\n' + snapshot.readWarning; }
   }
 
   private async synchronize(): Promise<void> {

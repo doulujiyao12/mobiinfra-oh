@@ -8,7 +8,7 @@ const tree = ts.createSourceFile('Index.ts', source, ts.ScriptTarget.Latest, tru
 const component = tree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'Index');
 const names = ['modelLoadableStatus','modelManifestLoadableStatus','hasModelWeightFile','isModelWeightFile',
   'ensureLocalChatModelIsAvailable','confirmModelScopeDownloadForLocalChat','ensureLocalModelLoaded',
-  'sendLocalChatMessage','submitLocalAgentTask'];
+  'sendLocalChatMessage','submitLocalAgentTask','openSettingsFromTab','clearSettingsOrigin'];
 const methods = names.map(name => {
   const method = component.members.find(item => ts.isMethodDeclaration(item) && item.name.getText(tree) === name);
   assert.ok(method, name); return method.getText(tree).replace(/\bprivate\s+/g, '');
@@ -32,7 +32,8 @@ vm.runInNewContext(output.outputText, { exports: exported, fs: filesystem,
   MODEL_DOWNLOAD_COMPLETE_FILE: COMPLETE, MODEL_DOWNLOAD_MANIFEST_FILE: MANIFEST,
   normalizeChatImageAttachments: items => items, LOCAL_CHAT_IMAGE_MAX_COUNT: 4,
   chatCanSendMessageWithImages: (text, images) => !!text.trim() || images.length > 0,
-  SettingsSectionId: { ModelAgents: 2 }, MainTabIndex: { Chat: 2 },
+  SettingsSectionId: { ModelAgents: 2 }, SettingsScrollTarget: { None: 0, LocalModelDownload: 1 },
+  SETTINGS_SECTION_NONE: -1, MainTabIndex: { Chat: 2, Mine: 5 },
   promptAction: { showDialog: options => { calls.dialogs.push(options); return dialog(options); } },
   AppTheme: { dialogText: color => color }, showToastSafely: text => calls.toasts.push(text),
   mnnllm: { loadModel: async () => { calls.loads++; return 'ok'; }, chat: () => { throw Error('inference must not start'); } },
@@ -50,11 +51,15 @@ function probe(directory = '/app/modelscope/owner__repo') {
   const app = new exported.Probe();
   Object.assign(app, { modelDir: directory, modelLoaded: false, downloading: false, modelScopeDownloading: false,
     modelManifest: null, localModelDownloadPromptVisible: false, userInput: '保留这条消息', localPendingChatImageUris: [],
+    settingsScrollTarget: 0,
     isThinking: false, localChatImagePreparing: false, localAgentCleaningUp: false, activeAgentRunner: null,
     activePhoneRunSession: null, restoringLocalSession: false,
     ensureAiServiceLogin: () => true, selectedAgentDeviceMode: () => 'phone',
     modelScopeRootDir: () => '/app/modelscope', readModelDownloadManifest: () => app.modelManifest,
-    openSettingsFromTab: (section, origin) => calls.navigations.push({ section, origin }),
+    openSettingsFromTab: (section, origin, target) => {
+      calls.navigations.push({ section, origin, target });
+      exported.Probe.prototype.openSettingsFromTab.call(app, section, origin, target);
+    },
     downloadModelScopeModel: async () => { throw Error('a chat prompt must not start a download'); },
     ensureActiveChatSession: () => { calls.effects.push('session'); throw Error('no session before model readiness'); },
     appendActiveChatMessage: () => calls.effects.push('message'),
@@ -91,7 +96,8 @@ test('local task dispatch checks the download before a task message, PC reminder
 });
 test('going to model settings never downloads or resends the pending chat automatically', async () => {
   const app = probe(); dialog = async () => ({ index: 1 });
-  await app.sendLocalChatMessage(); assert.deepEqual(calls.navigations, [{ section: 2, origin: 2 }]);
+  await app.sendLocalChatMessage(); assert.deepEqual(calls.navigations, [{ section: 2, origin: 2, target: 1 }]);
+  assert.equal(app.settingsScrollTarget, 1); assert.equal(app.currentTab, 5);
   assert.equal(calls.effects.length, 0); assert.equal(app.userInput, '保留这条消息');
 });
 test('a competing operation during readiness cannot create a second local send or task', async () => {
@@ -144,6 +150,56 @@ test('legacy imported folders and completed downloads remain usable; empty confi
     files.set(directory + '/config.json', { size: 0 });
     assert.equal(await app.ensureLocalChatModelIsAvailable(), false); assert.equal(app.modelLoaded, false);
   }
+});
+
+const settingsSource = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/settings/SettingsCenterPage.ets'), 'utf8')
+  .replace(/\bstruct SettingsCenterPage\b/, 'class SettingsCenterPage');
+const settingsTree = ts.createSourceFile('SettingsCenterPage.ts', settingsSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const settingsClass = settingsTree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'SettingsCenterPage');
+const frameClass = settingsTree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'SettingsScrollFrame');
+const scrollMethods = ['resetDetailScroll', 'scheduleDetailScroll', 'onScrollTargetChanged', 'onSelectedSectionChanged', 'openSection', 'aboutToDisappear'];
+const settingsOutput = ts.transpileModule(frameClass.getText(settingsTree) + '\nexport class SettingsProbe {\n' + scrollMethods.map(name => {
+  const method = settingsClass.members.find(item => ts.isMethodDeclaration(item) && item.name.getText(settingsTree) === name);
+  assert.ok(method, name); return method.getText(settingsTree).replace(/\bprivate\s+/g, '');
+}).join('\n') + '\n}', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true });
+assert.equal(settingsOutput.diagnostics.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
+const scrollExported = {};
+vm.runInNewContext(settingsOutput.outputText, { exports: scrollExported, FrameCallback: class {},
+  SettingsSectionId: { ModelAgents: 2 }, SettingsScrollTarget: { None: 0, LocalModelDownload: 1 },
+  Edge: { Top: 'top', Bottom: 'bottom' }, isSettingsSectionSelected: id => id >= 0, normalizeSettingsSectionId: id => id });
+function scrollProbe(section = 2, target = 0) {
+  const page = new scrollExported.SettingsProbe(), frames = [], edges = [];
+  Object.assign(page, { selectedSectionId: section, scrollTarget: target, detailScrollRevision: 0,
+    closeSensitiveInputs() {}, detailScroller: { scrollEdge: edge => edges.push(edge) },
+    getUIContext: () => ({ postFrameCallback: frame => frames.push(frame) }) });
+  return { page, frames, edges, flush() { while (frames.length) { const frame = frames.shift(); frame.onFrame(0); frame.onIdle(0); } } };
+}
+test('model download navigation scrolls after layout exactly once and supports repeated prompts', () => {
+  const view = scrollProbe(2, 1);
+  view.page.scheduleDetailScroll(); view.page.onSelectedSectionChanged();
+  assert.equal(view.edges.length, 0, 'Do not scroll before the new page has laid out');
+  view.flush(); assert.deepEqual(view.edges, ['bottom']); assert.equal(view.page.scrollTarget, 0);
+  view.page.onScrollTargetChanged(); assert.equal(view.frames.length, 0, 'Consuming the target must not scroll back up');
+  view.page.scrollTarget = 1; view.page.onScrollTargetChanged(); view.flush();
+  assert.deepEqual(view.edges, ['bottom', 'bottom']);
+});
+test('stale top callbacks, navigation away and component disposal cannot override the download destination', () => {
+  const view = scrollProbe(); view.page.scheduleDetailScroll();
+  view.page.scrollTarget = 1; view.page.onScrollTargetChanged(); view.flush();
+  assert.deepEqual(view.edges, ['bottom']);
+  view.edges.length = 0; view.page.scrollTarget = 1; view.page.onScrollTargetChanged();
+  view.page.selectedSectionId = 7; view.page.onSelectedSectionChanged(); view.flush();
+  assert.deepEqual(view.edges, ['top']); assert.equal(view.page.scrollTarget, 0);
+  view.edges.length = 0; view.page.scheduleDetailScroll(); view.page.aboutToDisappear(); view.flush();
+  assert.equal(view.edges.length, 0);
+});
+test('normal settings entries still start at the top and clear any old local-model destination', () => {
+  const view = scrollProbe(2, 1); view.page.openSection(2); view.page.onSelectedSectionChanged(); view.flush();
+  assert.deepEqual(view.edges, ['top']); assert.equal(view.page.scrollTarget, 0);
+  const app = probe(); app.settingsScrollTarget = 1; app.openSettingsFromTab(7, 0);
+  assert.equal(app.settingsScrollTarget, 0); app.settingsScrollTarget = 1; app.clearSettingsOrigin();
+  assert.equal(app.settingsScrollTarget, 0);
+  assert.ok(settingsSource.includes('.onAppear((): void => { this.scheduleDetailScroll(); })'), 'New detail content schedules its first layout scroll');
 });
 (async () => { for (const [name, run] of cases) { await run(); console.log('PASS ' + name); }
   console.log(cases.length + ' local model readiness checks passed; no downloads or inference');

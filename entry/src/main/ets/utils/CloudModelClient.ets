@@ -1389,7 +1389,7 @@ export class CloudModelClient {
       cloudDeciderApiKey(config), config.deciderModel, 256);
   }
 
-  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig, maxTokens: number = 1024): Promise<string> {
     // workflow 中的图片问答步骤可能比动作 JSON 更长，因此使用更大的 max_tokens 和较短超时。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
@@ -1403,7 +1403,7 @@ export class CloudModelClient {
       text: question
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      cloudDeciderApiKey(config), config.deciderModel, 1024, 60000);
+      cloudDeciderApiKey(config), config.deciderModel, maxTokens, 60000);
   }
 
   async chatImagesQuestion(question: string, imageBase64List: string[], config: CloudModelConfig): Promise<string> {
