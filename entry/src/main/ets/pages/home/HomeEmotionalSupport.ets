@@ -1,7 +1,7 @@
 import { IndexedEvent } from '../../datamanager/DataManagerTypes';
 import { CloudChatMessage } from '../../utils/CloudModelClient';
 import { parseJsonCompat, stringifyJsonCompat } from '../../utils/JsonCompat';
-import { chatPersonTitle, verifiedChatPersonName } from '../../datamanager/ChatCollectionContext';
+import { chatAttributionFingerprint, chatPersonTitle, chatSubjectKinds, verifiedChatPersonName } from '../../datamanager/ChatCollectionContext';
 
 const HOME_COMFORT_CONCERN_COUNT: number = 3;
 const HOME_COMFORT_CHAT_RECORD_LIMIT: number = 48;
@@ -40,6 +40,34 @@ export interface HomeComfortChatMessage {
   role: HomeComfortChatRole;
   content: string;
   createdAt: number;
+}
+
+export class HomeComfortReadError extends Error {
+  constructor() { super('聊天记录读取失败，请稍后重试'); this.name = 'HomeComfortReadError'; }
+}
+
+interface HomeComfortInputRecord { id: string; date: string; content: string; attribution: string; }
+interface HomeComfortInputIdentity { day: string; records: HomeComfortInputRecord[]; }
+
+export function homeComfortInputIdentity(events: IndexedEvent[], currentDate: string): string {
+  let input: HomeComfortInputIdentity = { day: currentDate, records: events.slice(0, HOME_COMFORT_CHAT_RECORD_LIMIT)
+    .map((event: IndexedEvent): HomeComfortInputRecord => ({ id: event.event_id, date: event.event_date,
+      content: compactText(event.normalized_fact || event.summary, 180),
+      attribution: event.chat_attribution ? chatAttributionFingerprint(event.chat_attribution) : '' })) };
+  return stringifyJsonCompat(input as Object);
+}
+
+export function homeComfortConcernTitle(title: string, subject: string, name: string = ''): string {
+  if (subject === 'other') { return chatPersonTitle(title, [name]); }
+  let aliases: string[] = ['我', '你', '您', '用户', '本人'];
+  if (name.trim()) { aliases.push(name.trim()); }
+  let result = title.trim();
+  let separator = result.search(/[：:]/);
+  let prefix = separator >= 0 ? result.substring(0, separator).trim() : '';
+  if (aliases.some((alias: string): boolean => prefix === alias || prefix === '关于' + alias)) {
+    return result.substring(separator + 1).trim();
+  }
+  return result;
 }
 
 interface HomeComfortConcernPayload {
@@ -245,8 +273,8 @@ export function buildHomeComfortConcernPrompt(events: IndexedEvent[], currentDat
     recent_chat_records: recentChatRecordPromptItems(events)
   };
   return '你是谨慎、温和的情感陪伴助手。你只能根据用户近 7 天的聊天记录，找出用户当前可能想向 AI 搭子倾诉、需要安慰或一起梳理的烦心事。' +
-    '\n先确认情绪属于谁。微信右侧气泡或发送人“我”才是用户；左侧、联系人、群成员、引用或转发内容中的“我”属于相应说话者，不能自动当作用户。subject 必须是 self、other 或 unknown；other 必须用 subject_name 返回原文可核对的真实联系人名。身份不明时不要生成该条。' +
-    '\n对方的压力、失落或烦恼不等于用户有这些情绪；只有记录表明用户正在关心或参与这件事时才可生成“关心某人”的陪伴话题，否则忽略。subject=other 时标题必须以“姓名：”开头，summary 和 opening 都要明确是该人的情况，不能安慰用户说“你最近压力很大”。先前的困扰若在已提供的同批次上下文中明确得到解决，不再当成当前困扰。' +
+    '\n先确认情绪属于谁。微信右侧气泡或发送人“我”才是用户；左侧、联系人、群成员、引用或转发内容中的“我”属于相应说话者，不能自动当作用户。subject 只返回 self 或 other；other 必须用 subject_name 返回原文可核对的真实联系人名。身份不明时不要生成该条。' +
+    '\n内容既可以是用户自己的烦恼，也可以是明确姓名的聊天对象的烦恼。subject=self 时 subject_name 留空，标题直接写内容，不加“我：”“用户：”、本人姓名或“关于本人”的前缀。对方直接在私聊向用户表达压力、失落或困扰时，可生成陪用户理解、关心这个人的话题；不要求用户也有相同情绪。转述的第三人、群聊里与用户无关的情绪不自动生成。subject=other 时标题必须以“姓名：”开头，summary 和 opening 都要明确是该人的情况，不能安慰用户说“你最近压力很大”。先前的困扰若在已提供的同批次上下文中明确得到解决，不再当成当前困扰。' +
     '\n只关注聊天中能被直接支持的情绪困扰，例如压力、疲惫、委屈、失落、孤独、人际矛盾、犹豫、担忧、挫败或难以排解的心情。不要使用用户画像，也不要利用聊天记录以外的信息。' +
     '\n待办、日程、提醒、尚未完成的工作、需要回复的消息、购物需求和出行计划本身都不是烦恼。除非聊天原文明示用户正因此难过、焦虑、受挫或为难，否则必须忽略，不得生成“记得处理”“还有事情没做”“该完成某事”一类内容。' +
     '\n最多生成 3 条彼此不同的内容；只有几条有充分依据就返回几条，没有明确烦恼线索时返回空数组，禁止为了凑数而推测或编造。推理时保持谨慎，但标题要直白、友好、容易理解，不要以“可能、也许、或许、似乎、看起来”开头。' +
@@ -272,7 +300,7 @@ export function parseHomeComfortConcerns(rawText: string, batchId: string,
     candidates = parsed.concerns;
   } else if (Array.isArray(parsed.worries)) {
     candidates = parsed.worries;
-  }
+  } else { throw new Error('解闷内容读取失败：模型未返回内容列表，已保留上次内容'); }
   let sourceEvents = events.slice(0, HOME_COMFORT_CHAT_RECORD_LIMIT);
   let keys: string[] = [];
   let result: HomeComfortConcern[] = [];
@@ -298,17 +326,18 @@ export function parseHomeComfortConcerns(rawText: string, batchId: string,
     let subjectName = '';
     let evidenceEvents = sourceEvents.filter((event: IndexedEvent, index: number): boolean =>
       evidence.some((item: HomeComfortEvidence): boolean => item.ref === 'record-' + String(index + 1)));
-    let knownSubjects = evidenceEvents.map((event: IndexedEvent): string => event.chat_attribution?.subject || 'unknown');
+    let knownSubjects = evidenceEvents.reduce((all: string[], event: IndexedEvent): string[] =>
+      all.concat(chatSubjectKinds(event.chat_attribution)), []);
     if (subject !== 'self' && subject !== 'other') { excludedSubjects++; continue; }
     if (subject === 'self' && knownSubjects.indexOf('other') >= 0 && knownSubjects.indexOf('self') < 0) { excludedSubjects++; continue; }
     if (subject === 'other') {
       subjectName = verifiedChatPersonName(compactModelText(candidate.subject_name, 40),
         evidenceEvents.map((event: IndexedEvent): string => event.normalized_fact + '\n' + event.summary).join('\n'));
       if (!subjectName) { excludedSubjects++; continue; }
-      title = chatPersonTitle(title, [subjectName]);
-      key = normalizedConcernKey(title);
-      if (keys.indexOf(key) >= 0) { continue; }
     }
+    title = homeComfortConcernTitle(title, subject, subject === 'other' ? subjectName : compactModelText(candidate.subject_name, 40));
+    key = normalizedConcernKey(title);
+    if (!key || keys.indexOf(key) >= 0) { continue; }
     let concern: HomeComfortConcern = {
       subject: subject,
       subjectName: subjectName,
@@ -322,8 +351,8 @@ export function parseHomeComfortConcerns(rawText: string, batchId: string,
     result.push(concern);
     keys.push(key);
   }
-  if (candidates.length > 0 && result.length === 0 && excludedSubjects === 0) {
-    throw new Error('Planner 未返回可溯源的烦恼线索');
+  if (candidates.length > 0 && result.length === 0) {
+    throw new Error(excludedSubjects > 0 ? '解闷内容的人物归属无法确认，已保留上次内容' : 'Planner 未返回可溯源的烦恼线索');
   }
   return result;
 }

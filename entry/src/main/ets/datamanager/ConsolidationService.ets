@@ -40,7 +40,10 @@ import {
 } from './DataManagerUtils';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import { ChatMemorySync } from './ChatMemorySync';
-import { normalizeMemorySceneIds, memorySceneLabel } from '../utils/WorkflowSceneConfig';
+import { normalizeMemorySceneIds } from '../utils/WorkflowSceneConfig';
+import { ChatFactDedupWindow, CHAT_DEDUP_MODEL_LIMIT, isExternalChatEntry, isSameChatCollection,
+  updateChatContextSources } from './ChatFactDedup';
+import { ChatDedupRequest } from './DataManagerTypes';
 
 export interface ConsolidationResult {
   sourceEntries: number;
@@ -389,7 +392,7 @@ export class ConsolidationService {
       return state;
     }
     this.emitProgress(progress, '拆分事实', `批量拆分 ${pendingEntries.length} 条日志`, 0, pendingEntries.length, startPercent);
-    let factsBySource = await this.modelClient.splitEntriesIntoFacts(pendingEntries, modelConfig);
+    let factsBySource = await this.modelClient.splitEntriesIntoFacts(pendingEntries, modelConfig, group.entries);
     let totalFacts = 0;
     pendingEntries.forEach((entry: SourceEntry) => {
       totalFacts += (factsBySource[entry.source_ref] || []).length;
@@ -397,19 +400,22 @@ export class ConsolidationService {
     let processedFacts = 0;
     let entryBatches: StringMap = {};
     group.entries.forEach((item: SourceEntry) => { entryBatches[item.source_ref] = item.collection_batch_id || ''; });
+    let chatWindow = group.entries.some((entry: SourceEntry): boolean => isExternalChatEntry(entry)) ?
+      new ChatFactDedupWindow(records) : null;
+    let chatInspected = 0;
+    let chatModelRequests = 0;
+    let chatDuplicates = 0;
     for (let entry of pendingEntries) {
       let facts = factsBySource[entry.source_ref] || [];
       for (let fact of facts) {
         processedFacts++;
         let percent = startPercent + Math.round((endPercent - startPercent) * processedFacts / Math.max(1, totalFacts));
         this.emitProgress(progress, '语义去重', `整理 ${group.fileName} (${processedFacts}/${Math.max(1, totalFacts)})`, processedFacts, Math.max(1, totalFacts), percent);
-        let scopedRecords = selectRecentScopeRecords(records, fact);
-        if (memorySceneLabel(entry.workflow_scene_id) === '聊天' && !/^app-chat__(local|cloud)__/.test(entry.file_name)) {
-          let batchId = entry.collection_batch_id || '';
-          scopedRecords = scopedRecords.filter((record: AggregatedRecord): boolean => record.source_refs.some((ref: string): boolean =>
-            ref === entry.source_ref || (batchId.length > 0 && entryBatches[ref] === batchId)));
-        }
-        let exactMatch = findExactExistingMatch(scopedRecords, fact);
+        let chat = isExternalChatEntry(entry);
+        let chatSelection = chat && chatWindow ? chatWindow.select(fact, entry, entryBatches) : null;
+        let scopedRecords = chatSelection ? chatSelection.candidates : selectRecentScopeRecords(records, fact);
+        let exactMatch = chatSelection ? chatSelection.exact : findExactExistingMatch(scopedRecords, fact);
+        if (chatSelection) { chatInspected += chatSelection.inspected; }
         if (exactMatch !== null) {
           let exactDecision: DedupDecision = {
             decision: 'duplicate',
@@ -420,17 +426,53 @@ export class ConsolidationService {
             merged_tags: []
           };
           updateExistingRecord(exactMatch, fact, exactDecision);
+          if (chat && chatWindow) {
+            updateChatContextSources(exactMatch, entryBatches);
+            chatWindow.remember(exactMatch);
+            chatDuplicates++;
+          }
           continue;
         }
-        let decision = await this.modelClient.decideDedup(fact, scopedRecords, modelConfig, dedupWindow);
-        let matchedRecord = this.findMatchedRecord(records, decision);
+        let chatRequest: ChatDedupRequest | undefined = chat ? {
+          cross_batch_record_ids: scopedRecords.filter((record: AggregatedRecord): boolean =>
+            !isSameChatCollection(record, entry, entryBatches)).map((record: AggregatedRecord): number => record.record_id)
+        } : undefined;
+        let decision: DedupDecision;
+        if (chat && scopedRecords.length === 0) {
+          decision = { decision: 'new', matched_record_ids: [], reason: 'no_similar_recent_chat',
+            merged_summary: '', merged_fact: '', merged_tags: [] };
+        } else {
+          if (chat) { chatModelRequests++; }
+          decision = await this.modelClient.decideDedup(fact, scopedRecords, modelConfig,
+            chat ? CHAT_DEDUP_MODEL_LIMIT : dedupWindow, chatRequest);
+        }
+        let matchedRecord = this.findMatchedRecord(chat ? scopedRecords : records, decision);
         let decisionText = normalizeFreeText(decision.decision);
+        // Across collections only a confirmed duplicate may reuse the record.
+        // New details or changed status stay independent; uncertain facts survive.
+        if (chat && matchedRecord && !isSameChatCollection(matchedRecord, entry, entryBatches) && decisionText !== 'duplicate') {
+          matchedRecord = null;
+        }
         if ((decisionText === 'duplicate' || decisionText === 'merge_with_existing') && matchedRecord !== null) {
           updateExistingRecord(matchedRecord, fact, decision);
-        } else if (decisionText === 'skip_ambiguous') {
+          if (chat && chatWindow) {
+            updateChatContextSources(matchedRecord, entryBatches);
+            chatWindow.remember(matchedRecord);
+            chatDuplicates++;
+          }
+        } else if (decisionText === 'skip_ambiguous' && !chat) {
           continue;
         } else {
-          records.push(createNewRecord(nextRecordId, fact, decision));
+          if (chat) {
+            decision.decision = 'new'; decision.matched_record_ids = [];
+            decision.merged_summary = ''; decision.merged_fact = ''; decision.merged_tags = [];
+          }
+          let record = createNewRecord(nextRecordId, fact, decision);
+          if (chat && chatWindow) {
+            updateChatContextSources(record, entryBatches);
+            chatWindow.remember(record);
+          }
+          records.push(record);
           nextRecordId++;
         }
       }
@@ -448,6 +490,10 @@ export class ConsolidationService {
     };
     this.storage.writeJsonAtomic(statePath, nextState as Object);
     this.storage.writeTextAtomic(markdownPath, renderConsolidatedMarkdown(records));
+    if (chatWindow) {
+      dataManagerInfo('SYNC_CHAT_DEDUP lookbackDays=2 localLimit=20 modelLimit=3 inspected=' + chatInspected +
+        ' comparisons=' + chatModelRequests + ' duplicates=' + chatDuplicates);
+    }
     return nextState;
   }
 

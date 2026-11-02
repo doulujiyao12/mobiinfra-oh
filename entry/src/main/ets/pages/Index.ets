@@ -115,12 +115,15 @@ import {
   HOME_COMFORT_CHAT_WINDOW_DAYS,
   HomeComfortChatMessage,
   HomeComfortConcern,
+  HomeComfortReadError,
   buildHomeComfortChatMessages,
   buildHomeComfortConcernPrompt,
+  homeComfortInputIdentity,
   parseHomeComfortConcerns,
   parseHomeComfortReply
 } from './home/HomeEmotionalSupport';
 import { HomeComfortChatStore } from './home/HomeComfortChatStore';
+import { HomeComfortConcernStore } from './home/HomeComfortConcernStore';
 import { mainTabBackgroundColor, mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { FLOATING_MAIN_TABS_INSET, FloatingMainTabs, supportsFloatingMainTabs } from './main/FloatingMainTabs';
 import { applyPageStatusBar } from '../utils/PageStatusBar';
@@ -3679,8 +3682,9 @@ struct Index {
       this.maybeShowCalendarConsent();
       if (AiServiceAccess.isAllowed() && !this.homeTaskSuggestionsAutoStarted) {
         this.homeTaskSuggestionsAutoStarted = true;
-        await this.refreshHomeTaskSuggestions(false);
-        await this.refreshHomeComfortConcerns(false);
+        // Cached comfort cards must not wait behind a separate model request.
+        let homeRefreshes: Promise<void>[] = [this.refreshHomeTaskSuggestions(false), this.refreshHomeComfortConcerns(false)];
+        await Promise.all(homeRefreshes);
       }
     }).catch(() => {
       dataManagerWarn('Startup services initialization failed');
@@ -6902,7 +6906,9 @@ struct Index {
 
   private recentHomeComfortChatEvents(): IndexedEvent[] {
     if (this.dataManagerFacade === null) {
-      return [];
+      let error = new HomeComfortReadError();
+      showToastSafely(error.message, 2500);
+      throw error;
     }
     // 解闷上下文独立于“猜你喜欢”：只读取今天及之前 6 天内的聊天场景索引。
     let today = new Date();
@@ -6922,7 +6928,9 @@ struct Index {
       return this.dataManagerFacade.queryIndexedEvents(options).events;
     } catch (e) {
       AppLogger.warnCause('HomeComfort', 'load recent chat events failed', e as Error);
-      return [];
+      let error = new HomeComfortReadError();
+      showToastSafely(error.message, 2500);
+      throw error;
     }
   }
 
@@ -6974,21 +6982,35 @@ struct Index {
     this.homeComfortConcernsLoading = true;
     this.homeComfortConcernError = '';
     try {
+      let today = currentLocalDateKey();
+      let store = new HomeComfortConcernStore(this.filesDir);
+      let cached = store.load(today);
+      if (this.homeComfortConcerns.length === 0 && cached) { this.homeComfortConcerns = cached.concerns; }
+      let recentEvents = this.recentHomeComfortChatEvents();
+      let input = homeComfortInputIdentity(recentEvents, today);
+      if (!showFailureToast && cached && cached.input === input) {
+        this.homeComfortConcerns = cached.concerns;
+        AppLogger.info('HomeComfort', 'reused cached concerns count=' + cached.concerns.length);
+        return;
+      }
+      if (recentEvents.length === 0) {
+        // This is a successful empty read. Actual read failures throw above and
+        // never clear a previous result or its conversation.
+        store.save(today, input, []);
+        this.homeComfortChatStore.clear();
+        this.homeComfortConcerns = [];
+        return;
+      }
       let cloudConfig = this.getConfiguredCloudConfig();
       if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
         throw new Error('请先在“我的”中配置 Planner 服务');
       }
-      let recentEvents = this.recentHomeComfortChatEvents();
-      if (recentEvents.length === 0) {
-        this.homeComfortChatStore.clear();
-        this.homeComfortConcerns = [];
-        throw new Error('近 7 天没有任务记录，请进入任务界面，执行采集任务后再试');
-      }
-      let prompt = buildHomeComfortConcernPrompt(recentEvents, currentLocalDateKey());
+      let prompt = buildHomeComfortConcernPrompt(recentEvents, today);
       let response = await this.cloudClient.chatPlanner(prompt, cloudConfig);
       this.homeComfortConcernBatch++;
       let batchId = new Date().getTime().toString() + '-' + this.homeComfortConcernBatch.toString();
       let concerns = parseHomeComfortConcerns(response, batchId, recentEvents);
+      store.save(today, input, concerns);
       this.homeComfortChatStore.clear();
       this.homeComfortConcerns = concerns;
       AppLogger.info('HomeComfort', 'generated concerns from recentChatEvents=' + recentEvents.length.toString());
@@ -6996,8 +7018,8 @@ struct Index {
       let err = e as Error;
       this.homeComfortConcernError = err.message.length > 0 ? err.message : '烦恼推测生成失败，请稍后重试';
       AppLogger.errorCause('HomeComfort', 'generate concerns failed', err);
-      if (showFailureToast) {
-        showToastSafely(this.homeComfortConcernError, 2000);
+      if (!(err instanceof HomeComfortReadError)) {
+        showToastSafely(showFailureToast ? this.homeComfortConcernError : '解闷内容读取失败，请稍后重试', 2500);
       }
     } finally {
       this.homeComfortConcernsLoading = false;
@@ -8068,8 +8090,7 @@ struct Index {
           this.currentTab = MainTabIndex.Task;
         },
         comfortConcerns: this.homeComfortConcerns,
-        comfortConcernsLoading: this.homeComfortConcernsLoading ||
-          (this.homeTaskSuggestionsLoading && this.homeComfortConcerns.length === 0),
+        comfortConcernsLoading: this.homeComfortConcernsLoading,
         comfortConcernError: this.homeComfortConcernError,
         onRefreshComfortConcerns: async (): Promise<void> => {
           await this.refreshHomeComfortConcerns(true);

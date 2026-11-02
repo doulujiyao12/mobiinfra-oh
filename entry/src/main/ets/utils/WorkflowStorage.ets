@@ -6,6 +6,7 @@ import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
+import { WECHAT_SUMMARY_PROMPT } from './WechatSummaryPrompt';
 import {
   WorkflowCondition,
   WorkflowDefaults,
@@ -953,7 +954,23 @@ export class WorkflowStorage {
 
   private static titleForWorkflow(workflow: WorkflowDefinition): string {
     let metadata = workflow.metadata;
-    return metadata && metadata.description ? metadata.description : '自定义 Workflow';
+    let description = metadata && metadata.description ? metadata.description : '自定义 Workflow';
+    let value = workflow.context ? workflow.context['contact_name'] : null;
+    if (typeof value !== 'string' || value.trim().length === 0) { return description; }
+    let contact = value.trim();
+    // Resolve generic display text only; preserve the workflow's description
+    // template so changing contacts never rewrites execution or source metadata.
+    return description.replace(/指定微信用户|\$\{context\.contact_name\}/g, (_match: string): string => contact);
+  }
+
+  private static copyDescriptionForWorkflow(workflow: WorkflowDefinition, copyTitle: string): string {
+    let description = workflow.metadata && workflow.metadata.description ? workflow.metadata.description : '';
+    let displayTitle = WorkflowStorage.titleForWorkflow(workflow);
+    let displayBase = WorkflowStorage.copyTitleBase(displayTitle);
+    if (description && description !== displayTitle && copyTitle.startsWith(displayBase)) {
+      return WorkflowStorage.copyTitleBase(description) + copyTitle.substring(displayBase.length);
+    }
+    return copyTitle;
   }
 
   private static sourceForWorkflow(workflow: WorkflowDefinition): string {
@@ -1054,9 +1071,11 @@ export class WorkflowStorage {
     }
 
     let copyTitle = WorkflowStorage.uniqueCopyTitle(tasks, sourceTask.title);
+    let sourceJson = WorkflowStorage.readTaskWorkflowJson(filesDir, sourceTask);
+    let sourceWorkflow = WorkflowStorage.validateWorkflowJson(sourceJson, false);
     let copyJson = WorkflowStorage.workflowJsonWithDescription(
-      WorkflowStorage.readTaskWorkflowJson(filesDir, sourceTask),
-      copyTitle
+      sourceJson,
+      WorkflowStorage.copyDescriptionForWorkflow(sourceWorkflow, copyTitle)
     );
     let copyId = WorkflowStorage.uniqueTaskId(filesDir, tasks);
     let copyTask = WorkflowStorage.createTaskFromJson(filesDir, sourceTask.sceneId, copyJson, copyId);
@@ -1368,26 +1387,7 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
-        question: '请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n' +
-          '请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n' +
-          '输出格式：\n' +
-          '聊天对象：xxx\n' +
-          '- 发送人｜消息发送绝对时间：消息原文（如含相对时间，在原文对应位置补充[事件绝对时间]）\n' +
-          '规则：\n' +
-          '1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n' +
-          '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部“联系人”名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
-          '必须保留实际说话者；引用、转发和左侧消息中的“我”不能改写成手机用户本人。保留请求之后的答复、已发送、收到、完成、取消和改期，不要只摘录请求。群聊逐条使用可见发送人名，不要把群名当作每条消息的发送者。\n' +
-          '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
-          '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
-          '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
-          '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充；原文无事件时间则不补充。\n' +
-          '7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n' +
-          '示例：\n' +
-          '任务执行时间：2026年06月09日 星期二 04:42\n' +
-          '截图时间锚点：昨天 下午 09:15\n' +
-          '消息：明天下午两点前修复新的 bug\n' +
-          '最终输出：\n' +
-          '- 我｜2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug',
+        question: WECHAT_SUMMARY_PROMPT,
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };
@@ -1480,26 +1480,7 @@ export class WorkflowStorage {
       WorkflowStorage.loopStep(3, [
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
         WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_b64}',
-          '请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n' +
-            '请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n' +
-            '输出格式：\n' +
-            '聊天对象（联系人/群聊名称）：xxx\n' +
-            '- 发送人｜消息发送绝对时间：消息原文（如含事件相对时间，在原文对应位置补充[事件绝对时间]）\n' +
-            '规则：\n' +
-            '1. 聊天对象能识别则输出联系人/群聊名称；无法识别用“当前聊天对象”，不要编造。\n' +
-            '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部联系人名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
-            '必须保留实际说话者；引用、转发和左侧消息中的“我”不能改写成手机用户本人。保留请求之后的答复、已发送、收到、完成、取消和改期，不要只摘录请求。群聊逐条使用可见发送人名，不要把群名当作每条消息的发送者。\n' +
-            '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；这些消息时间锚点是内容自身时间锚点，需要结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
-            '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
-            '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底；只有完全没有内容锚点时才使用任务执行日期兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
-            '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充事件绝对时间；原文无事件时间则不补充。\n' +
-            '7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n' +
-            '示例：\n' +
-            '任务执行时间：2026年06月09日 星期二 04:42\n' +
-            '截图时间锚点：昨天 下午 09:15\n' +
-            '消息：明天下午两点前修复新的 bug\n' +
-            '最终输出：\n' +
-            '- 我｜2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug'),
+          WECHAT_SUMMARY_PROMPT),
         WorkflowStorage.ifStep(3, WorkflowStorage.condition('${loop.last}', '==', false), [
           WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
           WorkflowStorage.sleepStep(2, 1.0)

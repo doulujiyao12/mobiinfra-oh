@@ -49,6 +49,10 @@ export interface NumberedEntry {
   text: string;
 }
 
+export interface ChatDedupRequest {
+  cross_batch_record_ids: number[];
+}
+
 export interface DedupDecision {
   decision: string;
   matched_record_ids: number[];
@@ -166,6 +170,8 @@ export interface CandidateFact {
 }
 
 export interface AggregatedRecord {
+  // Latest collection only; source_refs keeps the complete provenance.
+  chat_context_source_refs?: string[];
   record_id: number;
   first_seen_date: string;
   last_seen_date: string;
@@ -226,13 +232,23 @@ export interface ChatCollectionBatch {
 }
 
 export interface ChatEventContext {
+  source_refs?: string[];
   policy: string;
   batch_ids: string[];
-  input_hash: string;
+  revision?: string;
+  // Read old indexes without forcing a historical content-hash migration.
+  input_hash?: string;
   complete: boolean;
 }
 
+export interface ChatPersonRef {
+  kind: string;
+  name: string;
+}
+
 export interface ChatEventAttribution {
+  subjects?: ChatPersonRef[];
+  action_owners?: ChatPersonRef[];
   user_involved: boolean;
   subject: string;
   subject_name: string;
