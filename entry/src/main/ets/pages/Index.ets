@@ -136,7 +136,7 @@ import {
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { CodexScreen } from './codex/CodexTypes';
 import {
-  SETTINGS_SECTION_NONE, SettingsSectionId, isSettingsSectionSelected, settingsParentSection
+  SETTINGS_SECTION_NONE, SettingsSectionId, SettingsScrollTarget, isSettingsSectionSelected, settingsParentSection
 } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { AiLoginGuard } from '../components/AiLoginGuard';
@@ -572,6 +572,7 @@ struct Index {
   @State taskScene: number = 0;
   @State private taskConfigViewOpen: boolean = false;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
+  @State private settingsScrollTarget: number = SettingsScrollTarget.None;
   private settingsOriginTab: number = -1;
   private settingsEntrySection: number = SETTINGS_SECTION_NONE;
   @State private codexScreen: number = CodexScreen.Connections;
@@ -3364,7 +3365,9 @@ struct Index {
     this.startPcServerMonitor();
   }
 
-  private openSettingsFromTab(section: SettingsSectionId, origin: MainTabIndex): void {
+  private openSettingsFromTab(section: SettingsSectionId, origin: MainTabIndex,
+    scrollTarget: SettingsScrollTarget = SettingsScrollTarget.None): void {
+    this.settingsScrollTarget = scrollTarget;
     this.settingsOriginTab = origin;
     this.settingsEntrySection = section;
     this.settingsSectionId = section;
@@ -3372,6 +3375,7 @@ struct Index {
   }
 
   private clearSettingsOrigin(): void {
+    this.settingsScrollTarget = SettingsScrollTarget.None;
     this.settingsOriginTab = -1;
     this.settingsEntrySection = SETTINGS_SECTION_NONE;
   }
@@ -7565,7 +7569,7 @@ struct Index {
     this.localModelDownloadPromptVisible = true;
     try {
       if (await this.confirmModelScopeDownloadForLocalChat(modelStatus)) {
-        this.openSettingsFromTab(SettingsSectionId.ModelAgents, MainTabIndex.Chat);
+        this.openSettingsFromTab(SettingsSectionId.ModelAgents, MainTabIndex.Chat, SettingsScrollTarget.LocalModelDownload);
       }
     } finally {
       this.localModelDownloadPromptVisible = false;
@@ -8262,6 +8266,7 @@ struct Index {
         threadNumInput: $threadNumInput,
         localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
         selectedSectionId: $settingsSectionId,
+        scrollTarget: $settingsScrollTarget,
         output: $output,
         chunkOmCacheOutput: $chunkOmCacheOutput,
         cloudOutput: $cloudOutput,
