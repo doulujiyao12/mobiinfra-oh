@@ -80,7 +80,7 @@ test('missing legacy references stay explicit; record-N never indexes a fresh li
   disk.clear();const c=context();const result=await c.service.prepare(req({kind:'suggestion',eventIds:[],evidence:[
     {label:'近期记录',summary:'旧推荐保留的文字',ref:'record-1'}]}));
   assert.equal(c.calls[0].length,0);assert.match(result.prompt,/未找到可用文字原文/);assert.match(result.prompt,/旧推荐保留的文字/);
-  assert.ok(!result.prompt.includes('讨论研究计划')); 
+  assert.ok(!result.prompt.includes('讨论研究计划'));
 });
 test('recommendation generation retains stable event IDs and selected profile identity',()=>{
   const {parseHomeTaskSuggestions}=load(base+'pages/home/HomeTaskSuggestion');
