@@ -9,9 +9,11 @@
     "pages/settings/SelfHdcTestPage",
     "pages/settings/SelfHdcInputTestPage",
     "pages/collection/CollectionGroupDetailPage",
+    "pages/collection/PersonInfoPage",
     "pages/OpTest",
     "pages/ProfileTest",
     "pages/LogView",
-    "pages/gallery/GalleryPage"
+    "pages/gallery/GalleryPage",
+    "pages/recording/RecordingPage"
   ]
 }

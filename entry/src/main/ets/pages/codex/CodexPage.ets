@@ -10,6 +10,7 @@ import { AppTheme } from '../../utils/AppTheme';
 import { AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { MarkdownView } from '../../components/MarkdownView';
+import { codexLinkedArtifact, codexWebLink } from './CodexMarkdownLinks';
 import { CodexClient } from './CodexClient';
 import { CodexCredentialStore } from './CodexCredentialStore';
 import { CodexApprovalCard } from './CodexApprovalCard';
@@ -886,12 +887,21 @@ export struct CodexPage {
 
   @Builder private MessageBody(item: CodexItem) {
     if (item.kind === 'user' || item.kind === 'assistant' || item.kind === 'plan') {
-      MarkdownView({ text: item.text, variant: 'file_preview' })
+      MarkdownView({ text: item.text, variant: 'chat_assistant',
+        onLinkClick: (target: string): void => { this.openMarkdownLink(target); } })
     } else {
       Text(this.expandedTools.includes(item.id) ? item.text : item.text.slice(0, 160) + (item.text.length > 160 ? '\n点击展开…' : ''))
         .fontSize(12).fontFamily('monospace').fontColor(AppTheme.text('#293248'))
         .copyOption(CopyOptions.LocalDevice).onClick(() => { this.toggleTool(item.id); })
     }
+  }
+
+  private async openMarkdownLink(target: string): Promise<void> {
+    const artifact = codexLinkedArtifact(target, this.task?.artifacts || []);
+    if (artifact) { await this.openArtifact(artifact); return; }
+    if (!codexWebLink(target)) { this.artifactError = '请从当前会话的交付文件中打开'; return; }
+    try { await (this.getUIContext().getHostContext() as common.UIAbilityContext).openLink(target.trim()); }
+    catch (e) { this.errorText = '链接暂时无法打开'; }
   }
 
   @Builder private Message(item: CodexItem) {

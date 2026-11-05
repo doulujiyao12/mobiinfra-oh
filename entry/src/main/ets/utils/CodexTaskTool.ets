@@ -47,13 +47,13 @@ export function codexTaskToolPayload(result: CodexChatResult): string {
 
 export function createCodexTaskTool(): ChatTool {
   const schema: CodexToolSchema = { type: 'object', required: ['task'], additionalProperties: false, properties: {
-    task: { type: 'string', description: '交给 Codex 实际完成的任务。写清目标、已知资料、交付格式与必要约束；适合编程、PPT、Word、Excel、PDF等。只传当前任务必要资料。' },
+    task: { type: 'string', description: '交给 Codex 实际完成的任务。写清目标、已知资料、交付格式与必要约束；适合编程、PPT、Word、Excel、PDF等。可阅读的文字材料使用Word，展示材料优先PPT，不交付TXT。只传当前任务必要资料。' },
     continue_run_id: { type: 'string', description: '可选：继续本聊天中此前成功完成的 Codex 委托，填写最新一轮返回的 run_id。省略则新建独立 Codex 会话。不要猜测编号。' }
   } };
   return {
     name: 'run_codex_task',
     description: '委托用户已配对电脑上的 Codex 完成编程或文件制作，并等待文本及最终交付文件返回。首次会请用户选择电脑和目录。' +
-      '只有需要实际编程、生成/修改PPT、Word、Excel、PDF等文件时才调用，普通问答直接回答。' +
+      '需要实际编程、生成/修改PPT、Word、Excel、PDF等文件时调用；也可按用户要求继续本聊天已有的首页 Codex 调研或规划委托，普通问答直接回答。' +
       '把 Codex 当作工具：根据返回结果核对是否完成，需要修改时可继续同一委托；不要机械转述成功。' +
       'disconnected/failed 不代表远端未执行，禁止自动重新创建相同任务，应提示用户在任务卡片同步。' +
       '文件未全部接收时先提示同步原卡片，不要重新生成相同文件。' +

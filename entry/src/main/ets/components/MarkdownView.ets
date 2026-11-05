@@ -14,6 +14,7 @@ export type MarkdownViewVariant = 'chat_assistant' | 'chat_user' | 'collection_d
 export struct MarkdownView {
   @Prop text: string = '';
   @Prop variant: MarkdownViewVariant = 'file_preview';
+  onLinkClick: (target: string) => void = (_target: string): void => {};
 
   private blocks(): MarkdownBlock[] {
     return parseMarkdown(this.text);
@@ -114,6 +115,7 @@ export struct MarkdownView {
         .fontWeight(bold ? FontWeight.Bold : FontWeight.Regular)
         .fontColor(AppTheme.text(color))
         .lineHeight(lineHeight)
+        .copyOption(CopyOptions.LocalDevice)
         .width('100%')
     } else {
       Text() {
@@ -123,11 +125,13 @@ export struct MarkdownView {
             .fontWeight(bold || inline.type === 'strong' ? FontWeight.Bold : FontWeight.Regular)
             .fontColor(AppTheme.text(inline.type === 'link' ? this.accentColor() : color))
             .fontFamily(inline.type === 'code' ? 'monospace' : 'HarmonyOS Sans')
+            .onClick((): void => { if (inline.type === 'link') { this.onLinkClick(inline.href); } })
         }, (inline: MarkdownInline, index?: number) => String(index === undefined ? 0 : index) + inline.type + inline.text)
       }
       .fontSize(fontSize)
       .fontColor(AppTheme.text(color))
       .lineHeight(lineHeight)
+      .copyOption(CopyOptions.LocalDevice)
       .width('100%')
     }
   }
@@ -200,6 +204,7 @@ export struct MarkdownView {
         .fontFamily('monospace')
         .fontColor(AppTheme.text(this.primaryColor()))
         .lineHeight(this.baseLineHeight())
+        .copyOption(CopyOptions.LocalDevice)
         .width('100%')
     }
     .width('100%')

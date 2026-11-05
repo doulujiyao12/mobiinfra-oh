@@ -10,6 +10,12 @@ export interface AgentLoopNativeApi {
 
 // ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
 export interface LibEntryNative extends AgentLoopNativeApi {
+  completeText: (prompt: string, maxNewTokens: number, onToken?: (text: string) => void) => Promise<string>;
+  cancelText: () => string;
+  startRecordingScreen: (microphone: boolean) => Promise<void>;
+  readRecordingScreen: () => RecordingScreenBatch;
+  stopRecordingScreen: () => Promise<RecordingScreenBatch>;
+  recordingAvailableCpus: () => number;
   loadModel: (configPath: string, executionMode?: 'cpu' | 'online' | 'offline' | 'full_npu' | 'offline_npu2') => Promise<string>;
   generate: (prompt: string) => Promise<string>;
   profileGenerate: (prompt: string, topK?: number) => Promise<string>;
@@ -38,6 +44,15 @@ export interface LibEntryNative extends AgentLoopNativeApi {
 
 declare const native: LibEntryNative;
 export default native;
+export const completeText: (prompt: string, maxNewTokens: number, onToken?: (text: string) => void) => Promise<string>;
+export const cancelText: () => string;
+
+export interface RecordingScreenFrame { mic: boolean; timestampMs: number; receivedMs: number; data: ArrayBuffer; }
+export interface RecordingScreenBatch { frames: RecordingScreenFrame[]; elapsedMs: number; stopped: boolean; error: string; }
+export const startRecordingScreen: (microphone: boolean) => Promise<void>;
+export const readRecordingScreen: () => RecordingScreenBatch;
+export const stopRecordingScreen: () => Promise<RecordingScreenBatch>;
+export const recordingAvailableCpus: () => number;
 
 export const loadModel: (configPath: string, executionMode?: 'cpu' | 'online' | 'offline' | 'full_npu' | 'offline_npu2') => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;

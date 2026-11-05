@@ -97,7 +97,7 @@ function backend() {
         items: [], approvals: [], artifacts: [file('old', 'old-file')], updatedAt: Date.now(), revision: 1, error: '' };
       tasks.set(task.id, task); return { task };
     }
-    if (route === '/v1/attachments') return { attachment: { id: 'upload-1' } };
+    if (route === '/v1/uploads') return { attachment: { id: 'upload-1' } };
     const task = tasks.get(route.split('?')[0].split('/')[3]);
     assert.ok(task, route);
     if (route.endsWith('/turns')) {
@@ -123,7 +123,23 @@ async function main() {
   assert.equal(e.store.load(result.runId).task.items.length, 0, 'intermediate remote transcripts are not persisted');
   let post = calls.find(c => c.route === '/v1/tasks');
   assert.equal(post.body.mode, 'workspace-write'); assert.equal(post.body.approvalMode, 'ask');
+  assert.match(calls.find(c=>c.route.endsWith('/turns')).body.text,/Word（\.docx）/);
+  assert.match(calls.find(c=>c.route.endsWith('/turns')).body.text,/PowerPoint（\.pptx）/);
   const first = result;
+  // Preparation happens after the user's target choice and before creating or
+  // submitting a remote task; its selected facts persist in the actual input.
+  let prepared=false;
+  const enriched=await e.service.execute(request,{...e.execution,prepareTask:async task=>{prepared=true;return task+'\nVERIFIED PROFILE FACT';}});
+  assert(prepared);assert.match(e.store.load(enriched.runId).taskText,/VERIFIED PROFILE FACT/);
+  assert.match(calls.filter(c=>c.route.endsWith('/turns')).at(-1).body.text,/VERIFIED PROFILE FACT/);
+  let cancelledPreparation=false;
+  const beforeCancelled=calls.length;
+  const cancelled=await e.service.execute(request,{...e.execution,isCancelled:()=>cancelledPreparation,
+    prepareTask:async task=>{cancelledPreparation=true;return task;}});
+  assert.equal(cancelled.status,'cancelled');assert.equal(calls.length,beforeCancelled);
+  let unwantedReads=0;
+  await e.service.execute(request,{...e.execution,selectTarget:async()=>null,prepareTask:async task=>{unwantedReads++;return task;}});
+  assert.equal(unwantedReads,0,'Rejecting a device must not run the preparation Agent');
   result = await e.service.execute(request, e.execution);
   assert.notEqual(e.store.load(result.runId).taskId, e.store.load(first.runId).taskId);
   const creates = calls.filter(c => c.route === '/v1/tasks').length;
@@ -197,7 +213,7 @@ async function main() {
   assert.equal(calls.find(c => c.route.endsWith('/turns')).body.attachments[0], 'upload-1');
   backend(); e = env();
   result = await e.service.execute(request, { ...e.execution, imagePaths: ['/sandbox/other-chat/private.png'] });
-  assert.equal(result.status, 'failed'); assert.equal(calls.filter(c => c.route === '/v1/attachments' || c.route.endsWith('/turns')).length, 0);
+  assert.equal(result.status, 'failed'); assert.equal(calls.filter(c => c.route === '/v1/uploads' || c.route.endsWith('/turns')).length, 0);
   // Unsupported connectors fail before dispatch; in-app delegation has no second privacy gate.
   b = backend(); e = env(); b.info.permissionSettingsSupported = false;
   result = await e.service.execute(request, e.execution); assert.equal(result.status, 'failed');

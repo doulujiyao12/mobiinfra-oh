@@ -5,6 +5,7 @@ import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { PersonalInfoSection } from './PersonalInfoSection';
 import { WechatAutoSummarySettings, WechatCollectionForm } from '../../utils/wechat/WechatAutoSummarySettings';
 import {
   CollectionGroupViewModel,
@@ -13,7 +14,7 @@ import {
 import { collectionViewModelByTabIndex, createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
-import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig, PERSONAL_INFO_MEMORY_SCENE_ID } from '../../utils/WorkflowSceneConfig';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
@@ -594,6 +595,9 @@ export struct CollectionPage {
     CollectionSourceRow({ title: '图库分析', detail: '理解照片与截图中的内容', icon: $r('app.media.source_gallery'),
       tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
     CollectionFormDivider()
+    CollectionSourceRow({ title: '录音分析', detail: '多语种转写、说话人分段与声纹比较', icon: $r('app.media.source_recording_white'),
+      tint: '#007AFF', onOpen: (): void => { router.pushUrl({ url: 'pages/recording/RecordingPage' }); } })
+    CollectionFormDivider()
     CollectionSourceRow({ title: '日历分析', detail: '日程同步与一周安排', icon: $r('app.media.source_calendar'),
       showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
       syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
@@ -623,25 +627,31 @@ export struct CollectionPage {
 
         this.CollectionOverview()
 
-        Column() {
-          Row() {
-            Text(this.getCollectionTitle())
-              .fontSize(20)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(AppTheme.text('#151A28'))
-              .layoutWeight(1)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            this.GroupRangeLabel()
-          }
-          .width('100%')
-          .margin({ bottom: 4 })
-          this.CollectionRows()
-          this.GroupPagination()
+        if (this.collectionModule === PERSONAL_INFO_MEMORY_SCENE_ID) {
+          Column() { PersonalInfoSection() }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 20 })
         }
-        .width('92%')
-        .constraintSize({ maxWidth: 720 })
-        .margin({ top: 24 })
+
+        if (this.collectionModule !== PERSONAL_INFO_MEMORY_SCENE_ID || this.groupCount() > 0) {
+          Column() {
+            Row() {
+              Text(this.collectionModule === PERSONAL_INFO_MEMORY_SCENE_ID ? '从记录中整理' : this.getCollectionTitle())
+                .fontSize(20)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(AppTheme.text('#151A28'))
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              this.GroupRangeLabel()
+            }
+            .width('100%')
+            .margin({ bottom: 4 })
+            this.CollectionRows()
+            this.GroupPagination()
+          }
+          .width('92%')
+          .constraintSize({ maxWidth: 720 })
+          .margin({ top: 24 })
+        }
 
         this.WechatAutoSummaryCard()
 

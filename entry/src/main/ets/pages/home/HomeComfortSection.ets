@@ -224,7 +224,7 @@ export struct HomeComfortSection {
       return;
     }
     this.onRefresh().catch((e: Error) => {
-      showToastSafely('烦恼推测生成失败：' + e.message, 1800);
+      showToastSafely('聊天话题生成失败：' + e.message, 1800);
     });
   }
 
@@ -289,7 +289,7 @@ export struct HomeComfortSection {
           .width(28)
           .height(28)
           .color(AppTheme.text('#8B6BD6'))
-        Text('正在听听最近的心事')
+        Text('正在找找有趣的话题')
           .fontSize(13)
           .fontColor(AppTheme.text('#6F7684'))
           .margin({ left: 12 })

@@ -1,5 +1,6 @@
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { JsonMap } from './DataManagerTypes';
+import { parseModelJsonObject } from './ModelJsonResponse';
 
 // Extract only fully closed objects in the root JSON object's events array.
 // Strings, escapes and nested objects may span arbitrary SSE chunks. Draft
@@ -64,7 +65,7 @@ export class EventStreamParser {
       } else if (ch === '}' || ch === ']') {
         this.depth--;
         if (ch === '}' && this.eventsArray && this.depth === 2 && this.itemStart >= 0) {
-          try { result.push(ArkJSON.parse(this.buffer.substring(this.itemStart, this.cursor + 1)) as JsonMap); } catch (e) {}
+          try { result.push(parseModelJsonObject(this.buffer.substring(this.itemStart, this.cursor + 1))); } catch (e) {}
           this.itemStart = -1;
         }
         if (this.eventsArray && this.depth < 2) { this.stopped = true; break; }

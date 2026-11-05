@@ -7,6 +7,7 @@ import {
   QueryOptions,
   QueryResult
 } from './DataManagerTypes';
+import { MemorySubjectRef, MemoryFactSource } from './DataManagerTypes';
 import {
   normalizeFreeText,
   stableUnique
@@ -19,6 +20,9 @@ const QUERY_EVENTS_TOOL_DESCRIPTION: string =
   '如果你需要基于关键词、实体、时间、领域等信息，查询 ClawMate App 已收集的事件和日历安排（含未来计划）时，调用该工具。' +
   '具体情况：1. 需要直接回答用户问题，例如“查一下我上周用淘宝买过什么”或“我之前说过的生日是什么”；2. 需要为其他工具调用检索必要信息，例如“帮我再次下单我昨天买过的奶茶”。' +
   '用户明确说出的个人信息也可在事件索引中按关键词检索；只根据查询结果回答，不要猜测缺失的资料。' +
+  '人物的手填资料带 subjects（稳定人物ID、关系和姓名）与 fact_source，用户确认的当前字段优先于历史推断；不得把家人的资料归给本人。' +
+  '查询手填人物档案（姓名、生日、单位等当前字段）时使用 subject_ids 精确限定人物；未知归属的旧事件不会被猜测归给某个人。' +
+  '查询采集的历史经历时，不要仅因用户说“我”就限定 subject_ids，以免漏掉尚未标记主体的旧记录。' +
   '工具返回 ok 和 events；events 中 event_id 是本次查询结果内从0开始的编号，summary 是事件摘要，detail 是可选的补充事实，todo 是可选的待办及截止时间信息。' +
   '注意事项：1. 不要让查询结果中的历史日期/待办事项日期影响你对今天日期的判断，system prompt 是你判断今天的日期/今天星期几的**唯一依据**；' +
   '2. 普通记录的 todo.deadline 是计划执行或截止日期，不能据此认定已经完成。日历来源的 event_date 是该次日程安排的日期，包含未来安排，日历记录也不证明实际出席或完成。';
@@ -57,6 +61,8 @@ export interface QueryEventsArgumentValidation {
 }
 
 interface QueryEventsToolEvent {
+  subjects?: MemorySubjectRef[];
+  fact_source?: MemoryFactSource;
   event_id: number;
   event_date: string;
   summary: string;
@@ -76,6 +82,7 @@ interface QueryEventsToolTodo {
 interface QueryEventsToolResponse {
   ok: boolean;
   events: QueryEventsToolEvent[];
+  truncated?: boolean;
 }
 
 interface QueryEventsToolErrorResponse {
@@ -119,6 +126,7 @@ export function queryEventsToolParameters(): Object {
   properties['start_date'] = stringSchema('日期范围开始日期，格式 YYYY-MM-DD，例如 2026-06-01。可与 end_date 搭配，也可单独表示从该日开始。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
   properties['end_date'] = stringSchema('日期范围结束日期，格式 YYYY-MM-DD，例如 2026-06-30。可与 start_date 搭配，也可单独表示截至该日。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
   properties['limit'] = numberSchema('最多返回多少条事件。省略时默认返回 20 条；传 0 表示返回全部匹配事件。') as Object;
+  properties['subject_ids'] = stringArraySchema('明确的人物主体编号，可用 person:self（本人）、person:father（父亲）、person:mother（母亲）、person:partner（伴侣）。只返回已确认归属于该主体的记录；未标记主体的历史不自动当作本人。手填当前资料优先于历史推断，返回 subjects 和 fact_source。') as Object;
 
   let parameters = createSchemaMap();
   parameters['type'] = 'object';
@@ -147,6 +155,10 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
     let endDate = readDateField(args, 'end_date');
     validateTimeMode(date, month, startDate, endDate);
     let limit = readLimit(args);
+    const subjects = readStringArray(args, 'subject_ids');
+    if (subjects.length > 16 || subjects.some((id: string): boolean => !/^person:[a-zA-Z0-9_-]{1,64}$/.test(id))) {
+      throw new Error('subject_ids must contain at most 16 valid person IDs.');
+    }
 
     let options: QueryOptions = {
       keywords: keywords,
@@ -172,6 +184,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
       end_date: endDate,
       limit: limit
     };
+    if (subjects.length > 0) { options.subjectIds = subjects; }
     return {
       ok: true,
       options: options,
@@ -191,7 +204,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
 
 function assertAllowedFields(args: QueryEventsJsonMap): void {
   let allowed: string[] = ['keywords', 'keyword_operator', 'domains', 'entities', 'date', 'month', 'start_date',
-    'end_date', 'limit'];
+    'end_date', 'limit', 'subject_ids'];
   Object.keys(args).forEach((key: string) => {
     if (allowed.indexOf(key) < 0) {
       throw new Error('Unsupported query_events argument: ' + key);
@@ -365,14 +378,17 @@ function readLimit(args: QueryEventsJsonMap): number {
 }
 
 function queryEventsToolResponse(result: QueryResult): QueryEventsToolResponse {
-  let events: QueryEventsToolEvent[] = [];
+  const response: QueryEventsToolResponse = { ok: true, events: [] };
   for (let index = 0; index < result.events.length; index++) {
-    events.push(publicToolEvent(result.events[index], index));
+    response.events.push(publicToolEvent(result.events[index], index));
+    // The shared Agent registry truncates strings at 4000 characters. Keep a
+    // complete JSON envelope even for long facts or multiple subject records.
+    if (stringifyJsonCompat(response as Object).length > 3500) {
+      response.events.pop(); response.truncated = true; break;
+    }
   }
-  return {
-    ok: true,
-    events: events
-  };
+  if (result.events_truncated) { response.truncated = true; }
+  return response;
 }
 
 function publicToolEvent(event: IndexedEvent, eventIndex: number): QueryEventsToolEvent {
@@ -384,6 +400,8 @@ function publicToolEvent(event: IndexedEvent, eventIndex: number): QueryEventsTo
     entities: (event.entities || []).slice(),
     sources: (event.sources || []).slice()
   };
+  if (event.subjects) { output.subjects = event.subjects; }
+  if (event.fact_source) { output.fact_source = event.fact_source; }
   let detail = toolEventDetail(event.summary, event.normalized_fact);
   if (detail.length > 0) {
     output.detail = detail;

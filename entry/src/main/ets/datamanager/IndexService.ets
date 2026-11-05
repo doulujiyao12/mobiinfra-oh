@@ -1,7 +1,13 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
+import { JSON as ArkJSON, taskpool } from '@kit.ArkTS';
+import { WorkflowRunEvidence } from './WorkflowRunEvidence';
+import { readWorkflowRunEvidence } from './WorkflowRunEvidenceTask';
+import { SyncWorkSlice } from './SyncWorkSlice';
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
-import { DataPipelineModelClient, buildEnrichPromptPreview } from './DataPipelineModelClient';
+import { PersonMemoryStore } from './PersonMemoryStore';
+import { eventMatchesSubjects, queryPersonFacts, mergePersonFactResults } from './PersonMemory';
+import { DataPipelineModelClient, EventAnalysisFailureDetail, buildEnrichPromptPreview } from './DataPipelineModelClient';
+import { EVENT_ANALYSIS_ATTEMPTS, EVENT_ANALYSIS_POLICY } from './EventAnalysisPolicy';
 import { ProfileBlockCache, PROFILE_BLOCK_POLICY } from './ProfileBlockCache';
 import { profileEvidenceText } from './ProfileEvidence';
 import { IndexWriteBatch } from './IndexWriteBatch';
@@ -75,7 +81,6 @@ import {
   PERSONAL_INFO_MEMORY_SCENE_ID,
   normalizeMemorySceneId,
   normalizeMemorySceneIds,
-  workflowSceneConfigs,
   WorkflowSceneConfig
 } from '../utils/WorkflowSceneConfig';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
@@ -92,6 +97,7 @@ export interface IndexBuildResult {
 }
 
 export interface IndexCompletion {
+  event_analysis_policy?: string;
   chat_context_policy?: string;
   failed_event_count?: number;
   schema: string; revision: string; generated_at: string; event_count: number; claim_count: number;
@@ -103,6 +109,7 @@ type EventMap = Record<string, IndexedEvent>;
 type ObjectMap = Record<string, Object>;
 
 interface SourceManifestEntry {
+  analysis_policy?: string;
   failed_event_ids?: string[];
   chat_event_revisions?: StringMap;
   sha256: string;
@@ -120,7 +127,10 @@ interface EnrichmentManifest {
   model_name?: string;
 }
 interface EventCheckpoint { hash: string; eventHash: string; event: IndexedEvent; }
-interface EventFailureCheckpoint { hash: string; reason: string; failed_at: string; }
+interface EventFailureCheckpoint {
+  hash: string; reason: string; failed_at: string;
+  policy?: string; code?: string; scope?: string; attempts?: number; message?: string;
+}
 
 interface IndexManifest {
   generated_at: string;
@@ -228,6 +238,15 @@ interface EntityCandidateScore {
   eventCount: number;
 }
 
+interface WorkflowScreenshotReference {
+  key: string;
+  reference: string;
+  started: number;
+  finished: number;
+  order: number;
+  scope: string;
+}
+
 interface ImageReferenceCandidate {
   batch_id: string;
   order: number;
@@ -292,13 +311,10 @@ export function isQueryResultTruncated(selectedLength: number, requestedLimit: n
   return requestedLimit > 0 && selectedLength > requestedLimit;
 }
 
-export function isHomeTodoIndexCandidate(todo: IndexedEventTodo, eventSceneIds: number[], chatSceneIds: number[]): boolean {
+export function isHomeTodoIndexCandidate(todo: IndexedEventTodo): boolean {
   let type = normalizeFreeText(todo.type);
   let deadline = normalizeFreeText(todo.deadline);
   if (type.length === 0 && !isIsoDate(deadline)) {
-    return false;
-  }
-  if (!isIsoDate(deadline) && hasAnySceneId(eventSceneIds, chatSceneIds) && type !== 'buy') {
     return false;
   }
   return true;
@@ -328,15 +344,6 @@ export function monthLastDateForTemporalIndex(month: string): string {
 export function normalizeQueryKeywordOperator(value?: string): string {
   let normalized = normalizeFreeText(value === undefined ? '' : value).toLowerCase();
   return normalized === 'or' ? 'or' : 'and';
-}
-
-function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
-  for (let sceneId of selectedSceneIds) {
-    if (eventSceneIds.indexOf(sceneId) >= 0) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function eventEnrichInputFingerprint(event: IndexedEvent): string {
@@ -482,7 +489,7 @@ export class IndexService {
     let previousEvents = this.loadStoredEvents();
     let reuseAllowed = this.canReuseIndex(previousManifest, enrichment);
     let imageReferences: StringArrayMap = selection && (!selection.sources || selection.statePaths.length === 0) ? {} :
-      this.buildImageReferenceMap(statePaths, selection ? selection.evidencePaths : undefined);
+      await this.buildImageReferenceMap(statePaths, selection ? selection.evidencePaths : undefined);
     let events: EventMap = {};
     let sources: SourceManifestMap = {};
     if (selection) {
@@ -492,6 +499,7 @@ export class IndexService {
         let source = previousManifest.sources[relative];
         sources[relative] = { sha256: source.sha256, event_ids: source.event_ids,
           event_input_hashes: source.event_input_hashes, failed_event_ids: source.failed_event_ids || [],
+          analysis_policy: source.analysis_policy,
           chat_event_revisions: source.chat_event_revisions,
           enrichment: source.enrichment || previousManifest.enrichment };
         source.event_ids.forEach((id: string) => {
@@ -591,6 +599,7 @@ export class IndexService {
     let skippedFailedEventCount = this.failedEventIds.size;
     Object.keys(sources).forEach((key: string) => (sources[key].failed_event_ids || []).forEach((id: string) => this.failedEventIds.add(id)));
     let completion: IndexCompletion = { schema: 'memory-index-completion-v1', failed_event_count: this.failedEventIds.size,
+      event_analysis_policy: this.pendingFailureSources(manifest).length === 0 ? EVENT_ANALYSIS_POLICY : '',
       chat_context_policy: CHAT_CONTEXT_POLICY,
       revision: String(Date.now()) + '-' + String(Math.random()), generated_at: profile.generated_at,
       event_count: profile.event_count, claim_count: profile.claim_count,
@@ -640,6 +649,7 @@ export class IndexService {
     this.ensureCommitted();
     let manifest = this.loadManifest();
     let profile = this.storage.readJson<ProfileState | null>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), null);
+    if (modelConfig?.enabled && this.pendingFailureSources(manifest).length > 0) { return false; }
     if (!this.hasReusableIndexLayout(manifest) || !manifest.generated_at || !profile || !profile.generated_at || !profile.domains) { return false; }
     let required = ['events/partition-index.json', 'inverted/index.json', 'source/index.json', 'domain/index.json',
       'entity/index.json', 'workflow-scene/index.json', 'home-todo/index.json', 'profile/profile.md'];
@@ -684,6 +694,7 @@ export class IndexService {
   isCompleteGeneration(revision: string, modelConfig: DataManagerModelConfig): boolean {
     let receipt = this.completion();
     return receipt !== null && receipt.complete === true && receipt.revision === revision &&
+      (!modelConfig.enabled || receipt.event_analysis_policy === EVENT_ANALYSIS_POLICY) &&
       receipt.profile_identity === this.storage.sha256Text(this.modelClient.profileCacheIdentity(modelConfig)) &&
       receipt.calendar_hash === new CalendarMemoryStore(this.paths.filesDir).indexFingerprint() &&
       ['manifest.json', 'profile/state.json', 'profile/profile.md', 'events/partition-index.json',
@@ -700,7 +711,9 @@ export class IndexService {
       dataManagerInfo('SYNC_INDEX_PLAN scope=full reason=missing-published-layout');
       return undefined;
     }
-    sources = sources.slice();
+    // Upgrade only sources with unfinished event outcomes. Successfully indexed
+    // history keeps its checkpoints and is not reclassified on a prompt change.
+    sources = stableUnique(sources.concat(modelConfig.enabled ? this.pendingFailureSources(manifest) : []));
     // Context schema upgrades never enqueue untouched historical conversations.
     let paths = this.outputStatePathsFromIndex().filter((path: string): boolean =>
       sources.indexOf(this.storage.relativePath(this.paths.outputsRoot, path)) >= 0);
@@ -889,6 +902,8 @@ export class IndexService {
       this.sameEnrichment(previousSource && previousSource.enrichment ? previousSource.enrichment : previousManifest.enrichment,
         this.currentEnrichment(modelConfig));
     let canReuseSource = this.canReuseSource(previousSource, digest, previousEvents);
+    if (modelConfig.enabled && previousSource && (previousSource.failed_event_ids || []).length > 0 &&
+      previousSource.analysis_policy !== EVENT_ANALYSIS_POLICY) { canReuseSource = false; }
     if (previousSource && previousSource.event_ids.some((id: string): boolean => {
       let event = previousEvents[id];
       if (!event || !isChatCollectionEvent(event) || !event.chat_context?.revision) { return false; }
@@ -924,13 +939,6 @@ export class IndexService {
         let inputHash = this.eventEnrichInputHash(event);
         eventInputHashes[event.event_id] = inputHash;
         if (event.chat_context?.revision) { chatEventRevisions[event.event_id] = event.chat_context.revision; }
-        let previousRevision = previousSource?.chat_event_revisions ? previousSource.chat_event_revisions[event.event_id] : undefined;
-        if (reuseAllowed && isChatCollectionEvent(event) && previousSource && previousSource.failed_event_ids &&
-          previousSource.failed_event_ids.indexOf(event.event_id) >= 0 &&
-          (previousRevision === undefined || previousRevision === event.chat_context?.revision)) {
-          this.failedEventIds.add(event.event_id);
-          return;
-        }
         if (reuseAllowed && (this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents) ||
           isImmutableChatEventReusable(previousEvents[event.event_id], event)) &&
           (!modelConfig.enabled || isModelEnrichmentMethod(previousEvents[event.event_id].enrichment_method))) {
@@ -962,6 +970,7 @@ export class IndexService {
       enrichedEventsCount += enrichedEvents.length;
     }
     let sourceEntry: SourceManifestEntry = {
+      analysis_policy: EVENT_ANALYSIS_POLICY,
       sha256: digest,
       event_ids: eventIds,
       event_input_hashes: eventInputHashes,
@@ -978,11 +987,53 @@ export class IndexService {
     };
   }
 
-  query(options: QueryOptions): QueryResult {
+  query(options: QueryOptions, includeCurrentFacts: boolean = true): QueryResult {
+    const history = this.queryHistory(options);
+    return includeCurrentFacts ? this.withCurrentFacts(options, history) : history;
+  }
+
+  // Grouping/profile pipelines consume observations only. Editable current
+  // facts participate in interactive retrieval, not historical aggregation.
+  queryHistory(options: QueryOptions): QueryResult {
     this.ensureCommitted();
     let candidateIds = this.queryCandidateIds(options);
     let events = this.loadEventsByIds(candidateIds);
     return this.queryWithEvents(options, events);
+  }
+
+  private withCurrentFacts(options: QueryOptions, history: QueryResult): QueryResult {
+    const current = queryPersonFacts(new PersonMemoryStore(this.paths.filesDir, this.storage).events(), options);
+    return mergePersonFactResults(history, current, options.limit);
+  }
+
+  // Interactive retrieval uses the existing postings/temporal index, but does
+  // not hydrate every matching historical partition before applying a limit.
+  queryBounded(options: QueryOptions, candidateLimit: number = 160): QueryResult {
+    this.ensureCommitted();
+    const candidates = this.queryCandidateIds(options, false);
+    const wanted = new Set<string>(candidates);
+    const documents = this.loadTemporalDocuments();
+    const selected: BooleanMap = {}; const months: string[] = [];
+    const maximum = Math.max(1, Math.min(240, candidateLimit));
+    let count = 0;
+    for (let month of Object.keys(documents).sort().reverse()) {
+      if (count >= maximum || months.length >= 8) { break; }
+      const document = documents[month];
+      const days = this.temporalDays(document).sort((a: TemporalDayNode, b: TemporalDayNode): number => b.date.localeCompare(a.date));
+      const ids = days.length > 0 ? days.flatMap((day: TemporalDayNode): string[] => day.event_ids || []) : document.event_ids || [];
+      let included = false;
+      for (let id of ids) {
+        if (!wanted.has(id) || selected[id]) { continue; }
+        selected[id] = true; count++; included = true;
+        if (count >= maximum) { break; }
+      }
+      if (included) { months.push(month); }
+    }
+    const events: EventMap = {};
+    for (let month of months) { this.readWantedEventsFromPartition(this.paths.eventPartitionPath(month), selected, events); }
+    const result = this.queryWithEvents(options, this.filterCurrentCalendarEvents(events));
+    result.events_truncated = result.events_truncated || count < candidates.length;
+    return this.withCurrentFacts(options, result);
   }
 
   queryWithEvents(options: QueryOptions, events: Record<string, IndexedEvent>): QueryResult {
@@ -1054,7 +1105,7 @@ export class IndexService {
     }
 
     let selected = ids
-      .filter((id: string) => matching[id])
+      .filter((id: string) => matching[id] && eventMatchesSubjects(events[id], options.subjectIds))
       .map((id: string) => events[id])
       .sort((left: IndexedEvent, right: IndexedEvent) => {
         let leftSortDate = this.querySortDate(left, includeTodoDeadline);
@@ -1129,15 +1180,23 @@ export class IndexService {
 
   loadEventsByIds(eventIds: string[]): EventMap {
     this.ensureCommitted();
+    const current: EventMap = {};
+    if (eventIds.some((id: string): boolean => id.startsWith('person-fact:'))) {
+      new PersonMemoryStore(this.paths.filesDir, this.storage).events().forEach((event: IndexedEvent): void => {
+        if (eventIds.includes(event.event_id)) { current[event.event_id] = event; }
+      });
+    }
+    if (eventIds.length > 0 && eventIds.every((id: string): boolean => id.startsWith('person-fact:'))) { return current; }
     if (this.readScope) {
       let all = this.loadEvents(); let selected: EventMap = {};
       stableUnique(eventIds).forEach((id: string) => { if (all[id]) { selected[id] = this.copyEvent(all[id]); } });
+      Object.keys(current).forEach((id: string): void => { selected[id] = current[id]; });
       return selected;
     }
     let result: EventMap = {};
-    let uniqueIds = stableUnique(eventIds);
+    let uniqueIds = stableUnique(eventIds.filter((id: string): boolean => !id.startsWith('person-fact:')));
     if (uniqueIds.length === 0) {
-      return result;
+      return current;
     }
     let wanted: BooleanMap = {};
     uniqueIds.forEach((id: string) => wanted[id] = true);
@@ -1155,6 +1214,7 @@ export class IndexService {
         .filter((name: string) => loadedPartitions[name] !== true)
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
+    Object.keys(current).forEach((id: string): void => { result[id] = current[id]; });
     return this.filterCurrentCalendarEvents(result);
   }
 
@@ -1195,7 +1255,7 @@ export class IndexService {
     return result;
   }
 
-  private queryCandidateIds(options: QueryOptions): string[] {
+  private queryCandidateIds(options: QueryOptions, allowLegacy: boolean = true): string[] {
     let candidate: BooleanMap | null = null;
     let timeScope = this.queryTimeScope(options);
     let temporalIds = this.temporalCandidateIds(options);
@@ -1260,7 +1320,7 @@ export class IndexService {
     }
 
     if (candidate === null) {
-      return this.allEventIds();
+      return this.allEventIds(allowLegacy);
     }
     return Object.keys(candidate).filter((id: string) => candidate![id] === true).sort();
   }
@@ -1428,14 +1488,14 @@ export class IndexService {
     return first <= upper && last >= lower;
   }
 
-  private allEventIds(): string[] {
+  private allEventIds(allowLegacy: boolean = true): string[] {
     let documents = this.loadTemporalDocuments();
     let ids: string[] = [];
     Object.keys(documents).sort().forEach((month: string) => {
       ids = ids.concat(documents[month].event_ids || []);
     });
     ids = stableUnique(ids).sort();
-    return ids.length > 0 ? ids : Object.keys(this.loadEvents()).sort();
+    return ids.length > 0 || !allowLegacy ? ids : Object.keys(this.loadEvents()).sort();
   }
 
   private eventMonthsForIds(wanted: BooleanMap): string[] {
@@ -1576,6 +1636,8 @@ export class IndexService {
 
   private copyEvent(event: IndexedEvent): IndexedEvent {
     let copied: IndexedEvent = {
+      subjects: event.subjects,
+      fact_source: event.fact_source,
       calendar: event.calendar,
       chat_context: event.chat_context,
       chat_attribution: event.chat_attribution,
@@ -1690,16 +1752,19 @@ export class IndexService {
     return events;
   }
 
-  private buildImageReferenceMap(statePaths?: string[], changedPaths?: string[]): StringArrayMap {
+  private async buildImageReferenceMap(statePaths?: string[], changedPaths?: string[]): Promise<StringArrayMap> {
+    let work = new SyncWorkSlice();
+    await work.checkpoint();
     this.chatContexts = new ChatCollectionContextIndex();
-    let requested = this.sourceEvidenceReferences(statePaths);
+    let requested = await this.sourceEvidenceReferences(statePaths, work);
     let imageReferences: StringArrayMap = {};
     let pending: PendingImageEvidence[] = [];
     let cachedBatchIds = new Set<string>();
     let runNames = new Set<string>();
     let legacyScan = false;
     let cacheHits = 0;
-    Object.keys(requested).sort().forEach((relative: string) => {
+    for (let relative of Object.keys(requested).sort()) {
+      await work.checkpoint();
       let cached = changedPaths !== undefined && changedPaths.indexOf(relative) < 0 ?
         this.storage.readJson<SourceImageEvidence | null>(this.sourceEvidencePath(relative), null) : null;
       let cacheValid = this.validSourceEvidence(cached, relative);
@@ -1709,10 +1774,10 @@ export class IndexService {
         this.restoreSourceEvidence(cached, imageReferences);
         cached.entries.forEach((entry: SourceImageEvidenceEntry) => { if (entry.batch_id) { cachedBatchIds.add(entry.batch_id); } });
         cacheHits++;
-        return;
+        continue;
       }
       let path = this.storage.join(this.paths.dailyLogRoot, relative);
-      if (!this.storage.exists(path)) { return; }
+      if (!this.storage.exists(path)) { continue; }
       let text = this.storage.readText(path, '\u0000EVIDENCE_UNREADABLE\u0000');
       if (text === '\u0000EVIDENCE_UNREADABLE\u0000') { throw new Error('读取截图来源失败，请重试同步'); }
       let document = parseDailyLogDocument(text);
@@ -1729,7 +1794,7 @@ export class IndexService {
           legacyScan = true;
         }
       });
-    });
+    }
     // Only legacy logs lack a direct run identity. Preserve their existing
     // conservative text matching once, then persist its result per source file.
     let directRuns = new Set<string>(Array.from(runNames));
@@ -1737,40 +1802,44 @@ export class IndexService {
     let pendingPaths = new Set<string>(pending.map((item: PendingImageEvidence): string => item.relative));
     let unresolvedRuns = new Set<string>();
     let candidates: ImageReferenceCandidateMap = {};
-    Array.from(runNames).sort().forEach((runName: string) => {
+    for (let runName of Array.from(runNames).sort()) {
+      await work.checkpoint();
       let summaryPath = this.storage.join(this.paths.workflowRunsRoot, runName, 'run_summary.json');
       if (!this.storage.exists(summaryPath)) {
         unresolvedRuns.add(runName);
-        return;
+        continue;
       }
-      let payload = this.storage.readJson<JsonMap | null>(summaryPath, null);
-      if (payload === null) {
+      let payload: WorkflowRunEvidence | null = null;
+      try {
+        payload = await taskpool.execute(readWorkflowRunEvidence, summaryPath) as WorkflowRunEvidence | null;
+      } catch (e) {
         if (directRuns.has(runName)) { throw new Error('任务运行记录无法读取，请重试同步'); }
-        return;
+        // Legacy discovery is best effort, as before; raw records are untouched.
       }
-      let stepsValue = payload['steps'];
-      if (!stepsValue || typeof stepsValue !== 'object') {
+      if (payload === null) {
         unresolvedRuns.add(runName);
-        return;
+        continue;
       }
-      let steps = stepsValue as Record<string, JsonMap>;
+      let steps = payload.steps;
       let stepKeys = Object.keys(steps);
-      stepKeys.forEach((stepKey: string) => {
+      let screenshots = await this.workflowScreenshotReferences(runName, steps, stepKeys, work);
+      for (let stepKey of stepKeys) {
+        await work.checkpoint();
         let step = steps[stepKey];
         let outputValue = step['output'];
         if (!outputValue || typeof outputValue !== 'object') {
-          return;
+          continue;
         }
         let output = outputValue as JsonMap;
         if (normalizeFreeText(output['tool_name']) !== 'vlm_qa' || normalizeFreeText(output['mode']) !== 'summary') {
-          return;
+          continue;
         }
         let logRelative = this.pathAfterDirectory(output['daily_log_path'], 'daily-log');
-        let imagePath = this.workflowImageReferenceForToolOutput(output, runName, stepKey, steps, stepKeys);
         let summary = this.summaryOutputText(output);
         if (!pendingPaths.has(logRelative) || summary.length === 0) {
-          return;
+          continue;
         }
+        let imagePath = this.workflowImageReferenceForToolOutput(output, runName, stepKey, steps, stepKeys, screenshots);
         if (!candidates[logRelative]) {
           candidates[logRelative] = [];
         }
@@ -1781,10 +1850,11 @@ export class IndexService {
           image_path: imagePath,
           used: false
         });
-      });
-    });
+      }
+    }
 
-    pending.forEach((item: PendingImageEvidence) => {
+    for (let item of pending) {
+      await work.checkpoint();
       let relative = item.relative;
       let available = candidates[relative] || [];
       let document = item.document;
@@ -1795,7 +1865,8 @@ export class IndexService {
       let evidence: SourceImageEvidence = { schema: SOURCE_IMAGE_EVIDENCE_SCHEMA, summary_match_policy: SUMMARY_IMAGE_MATCH_POLICY, source_path: relative,
         resolved_runs: !Object.keys(batchMap).some((key: string): boolean =>
           unresolvedRuns.has(normalizeFreeText(batchMap[key]).replace(/^workflow:/, ''))), entries: [] };
-      parseNumberedEntries(document.body).forEach((entry: NumberedEntry) => {
+      for (let entry of parseNumberedEntries(document.body)) {
+        await work.checkpoint();
         let entryText = normalizeFreeText(entry.text);
         let ref = relative + '#' + entry.index;
         let batchId = chat && entryBatches ? normalizeFreeText(entryBatches[String(entry.index)]) : '';
@@ -1814,32 +1885,35 @@ export class IndexService {
         if (chat && batchId) { this.chatContexts.add(batchId, ref, entry.text, imageReferences[ref] || [], order); }
         evidence.entries.push({ source_ref: ref, batch_id: chat ? batchId : '', order: order,
           text: chat ? entry.text : '', image_paths: (imageReferences[ref] || []).slice() });
-      });
+      }
       this.storage.writeJsonAtomic(this.sourceEvidencePath(relative), evidence);
-    });
+    }
     // A collection can span source files. Restore only those batch documents,
     // after current pages, so old text never overwrites edited current evidence.
     if (changedPaths !== undefined) {
       let excludedSources = stableUnique(changedPaths.concat(Array.from(pendingPaths)));
-      this.chatContexts.all().forEach((batch: ChatCollectionBatch) => {
+      for (let batch of this.chatContexts.all()) {
+        await work.checkpoint();
         let persisted = this.storage.readJson<ChatCollectionBatch | null>(this.chatBatchPath(batch.batch_id), null);
         if (this.validPersistedChatBatch(persisted, batch.batch_id) && persisted) {
           this.chatContexts.restore(persisted, excludedSources);
         } else if (cachedBatchIds.has(batch.batch_id)) { throw new Error('聊天批次缓存不完整，请进行完整检查'); }
-      });
+      }
     }
-    this.chatContexts.all().forEach((batch: ChatCollectionBatch) => {
+    for (let batch of this.chatContexts.all()) {
+      await work.checkpoint();
       this.storage.writeJsonAtomic(this.chatBatchPath(batch.batch_id), batch);
-    });
+    }
     dataManagerInfo('SYNC_IMAGE_EVIDENCE sources=' + Object.keys(requested).length + ' cached=' + cacheHits +
       ' rawLogs=' + pending.length + ' runs=' + runNames.size + ' legacyScan=' + legacyScan);
     return imageReferences;
   }
 
-  private sourceEvidenceReferences(statePaths?: string[]): StringArrayMap {
+  private async sourceEvidenceReferences(statePaths: string[] | undefined, work: SyncWorkSlice): Promise<StringArrayMap> {
     let requested: StringArrayMap = {};
     if (statePaths !== undefined) {
-      statePaths.forEach((path: string) => {
+      for (let path of statePaths) {
+        await work.checkpoint();
         let state = this.storage.readJson<ConsolidatedState>(path, this.emptyConsolidatedState());
         (state.records || []).forEach((record: AggregatedRecord) => (record.source_refs || []).forEach((ref: string) => {
           let match = /^(\d{4}-\d{2}-\d{2}\/[^/\\]+\.md)#\d+$/.exec(ref);
@@ -1848,7 +1922,7 @@ export class IndexService {
           if (!requested[relative]) { requested[relative] = []; }
           if (requested[relative].indexOf(ref) < 0) { requested[relative].push(ref); }
         }));
-      });
+      }
     } else {
       this.storage.listDir(this.paths.dailyLogRoot).filter((day: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(day))
         .forEach((day: string) => this.storage.listDir(this.storage.join(this.paths.dailyLogRoot, day))
@@ -1899,7 +1973,7 @@ export class IndexService {
   }
 
   private workflowImageReferenceForToolOutput(output: JsonMap, runName: string, stepKey: string,
-    steps: Record<string, JsonMap>, stepKeys: string[]): string {
+    steps: Record<string, JsonMap>, stepKeys: string[], screenshots: WorkflowScreenshotReference[]): string {
     let directImage = this.workflowImageRelativePath(output['image'], runName);
     if (directImage.length > 0) {
       return directImage;
@@ -1908,7 +1982,7 @@ export class IndexService {
     if (directImagePath.length > 0) {
       return directImagePath;
     }
-    return this.nearestScreenshotImageReference(runName, stepKey, steps, stepKeys);
+    return this.nearestScreenshotImageReference(stepKey, steps, stepKeys, screenshots);
   }
 
   private pathAfterDirectory(value: Object | string | number | boolean | null | undefined, directoryName: string): string {
@@ -1947,8 +2021,25 @@ export class IndexService {
     return '';
   }
 
-  private nearestScreenshotImageReference(runName: string, toolStepKey: string,
-    steps: Record<string, JsonMap>, stepKeys: string[]): string {
+  private async workflowScreenshotReferences(runName: string, steps: Record<string, JsonMap>,
+    stepKeys: string[], work: SyncWorkSlice): Promise<WorkflowScreenshotReference[]> {
+    let screenshots: WorkflowScreenshotReference[] = [];
+    for (let index = 0; index < stepKeys.length; index++) {
+      await work.checkpoint();
+      let key = stepKeys[index];
+      let step = steps[key];
+      let output = this.stepOutputMap(step);
+      if (output === null) { continue; }
+      let reference = this.screenshotImageReference(runName, key, output);
+      if (!reference) { continue; }
+      screenshots.push({ key: key, reference: reference, started: this.stepTime(step, 'started_at'),
+        finished: this.stepTime(step, 'finished_at'), order: index, scope: this.stepScope(key) });
+    }
+    return screenshots;
+  }
+
+  private nearestScreenshotImageReference(toolStepKey: string,
+    steps: Record<string, JsonMap>, stepKeys: string[], screenshots: WorkflowScreenshotReference[]): string {
     let toolStep = steps[toolStepKey];
     let toolStarted = this.stepTime(toolStep, 'started_at');
     let toolOrder = this.stepOrder(toolStepKey, stepKeys);
@@ -1956,23 +2047,11 @@ export class IndexService {
     let bestReference = '';
     let bestSameScope = false;
     let bestScore = -1;
-    for (let index = 0; index < stepKeys.length; index++) {
-      let candidateKey = stepKeys[index];
-      if (candidateKey === toolStepKey) {
-        continue;
-      }
-      let candidateStep = steps[candidateKey];
-      let output = this.stepOutputMap(candidateStep);
-      if (output === null) {
-        continue;
-      }
-      let reference = this.screenshotImageReference(runName, candidateKey, output);
-      if (reference.length === 0) {
-        continue;
-      }
-      let candidateFinished = this.stepTime(candidateStep, 'finished_at');
-      let candidateStarted = this.stepTime(candidateStep, 'started_at');
-      let candidateOrder = this.stepOrder(candidateKey, stepKeys);
+    for (let candidate of screenshots) {
+      if (candidate.key === toolStepKey) { continue; }
+      let candidateFinished = candidate.finished;
+      let candidateStarted = candidate.started;
+      let candidateOrder = candidate.order;
       let beforeTool = false;
       if (toolStarted > 0 && candidateFinished > 0) {
         beforeTool = candidateFinished <= toolStarted;
@@ -1984,11 +2063,11 @@ export class IndexService {
       if (!beforeTool) {
         continue;
       }
-      let sameScope = this.stepScope(candidateKey) === toolScope;
+      let sameScope = candidate.scope === toolScope;
       let score = candidateFinished > 0 ? candidateFinished : candidateOrder;
       if (bestReference.length === 0 || (sameScope && !bestSameScope) ||
         (sameScope === bestSameScope && score > bestScore)) {
-        bestReference = reference;
+        bestReference = candidate.reference;
         bestSameScope = sameScope;
         bestScore = score;
       }
@@ -2004,7 +2083,8 @@ export class IndexService {
     if (directImagePath.length > 0) {
       return directImagePath;
     }
-    if (normalizeFreeText(output['image_b64']).length > 0) {
+    let encoded = output['image_b64'];
+    if (typeof encoded === 'string' && encoded.length > 0) {
       return 'runs/' + runName + '/run_summary.json#steps/' + stepKey + '/output/image_b64';
     }
     if (normalizeFreeText(output['image_path']).length > 0) {
@@ -2137,15 +2217,19 @@ export class IndexService {
         ArkJSON.stringify(buildEnrichPromptPreview([event], chatBatches));
       let failureHash = this.storage.sha256Text('event-failure-v1:' + policy + ':' + this.storage.sha256Text(config.apiKey) + ':' + failureInput);
       failureHashes[event.event_id] = failureHash;
-      let failed = this.storage.readJson<EventFailureCheckpoint | null>(
-        this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.failed.json'), null);
-      if (failed && failed.hash === failureHash) { this.failedEventIds.add(event.event_id); return; }
       let receipt = this.storage.readJson<EventCheckpoint | null>(
         this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.json'), null);
       if (receipt && receipt.hash === hash && receipt.event && receipt.event.event_id === event.event_id &&
         isModelEnrichmentMethod(receipt.event.enrichment_method) && receipt.eventHash === this.storage.sha256Text(ArkJSON.stringify(receipt.event))) {
         ready[event.event_id] = receipt.event;
-      } else { pending.push(event); }
+        return;
+      }
+      let failed = this.storage.readJson<EventFailureCheckpoint | null>(this.eventFailurePath(event.event_id), null);
+      if (failed && failed.hash === failureHash && failed.policy === EVENT_ANALYSIS_POLICY &&
+        (failed.attempts || 0) >= EVENT_ANALYSIS_ATTEMPTS) {
+        this.failedEventIds.add(event.event_id); return;
+      }
+      pending.push(event);
     });
     dataManagerInfo('SYNC_ENRICH_PLAN pending=' + pending.length + ' checkpointHits=' + (events.length - pending.length));
     if (pending.length > 0) {
@@ -2161,17 +2245,34 @@ export class IndexService {
     };
     let analyzed = await this.modelClient.enrichEvents(pending, config, {
       onEvent: (event: IndexedEvent): void => { saveEvent(event); },
-      onFailure: (event: IndexedEvent, reason: string): void => {
-        let failure: EventFailureCheckpoint = { hash: failureHashes[event.event_id], reason: reason, failed_at: nowIsoLocal() };
-        this.storage.writeJsonAtomic(this.storage.join(directory, this.storage.sha256Text(event.event_id) + '.failed.json'), failure);
+      onFailure: (event: IndexedEvent, reason: string, detail?: EventAnalysisFailureDetail): void => {
+        let failure: EventFailureCheckpoint = { hash: failureHashes[event.event_id], reason: reason, failed_at: nowIsoLocal(),
+          policy: EVENT_ANALYSIS_POLICY, code: detail ? detail.code : reason, scope: detail ? detail.scope : 'batch',
+          attempts: detail?.attempts || EVENT_ANALYSIS_ATTEMPTS, message: detail?.message };
+        this.storage.writeJsonAtomic(this.eventFailurePath(event.event_id), failure);
         this.failedEventIds.add(event.event_id);
-        dataManagerWarn('SYNC_EVENT_FAILED event=' + event.event_id + ' reason=' + reason + ' automaticRetry=false');
+        dataManagerWarn('SYNC_EVENT_FAILED event=' + event.event_id + ' reason=' + reason + ' code=' + failure.code +
+          ' scope=' + failure.scope + ' attempts=' + failure.attempts + ' automaticRetry=false');
       }
     }, chatBatches);
     analyzed.forEach((event: IndexedEvent) => { if (!ready[event.event_id]) { saveEvent(event); } });
     dataManagerInfo('SYNC_ENRICH pending=' + pending.length + ' checkpointHits=' + (events.length - pending.length));
     return events.filter((event: IndexedEvent): boolean => ready[event.event_id] !== undefined)
       .map((event: IndexedEvent): IndexedEvent => ready[event.event_id]);
+  }
+
+  private eventFailurePath(eventId: string): string {
+    return this.storage.join(this.paths.consolidationRoot, 'sync-cache', 'events',
+      this.storage.sha256Text(eventId) + '.failed.json');
+  }
+
+  private pendingFailureSources(manifest: IndexManifest): string[] {
+    let sources: SourceManifestMap = manifest.sources;
+    if (!sources) { return []; }
+    return Object.keys(sources).filter((relative: string): boolean => {
+      let source = sources[relative];
+      return (source.failed_event_ids || []).length > 0 && source.analysis_policy !== EVENT_ANALYSIS_POLICY;
+    });
   }
 
   private writePostingIndex(kind: string, oldTerms: StringArrayMap, newTerms: StringArrayMap,
@@ -2289,11 +2390,10 @@ export class IndexService {
     let deadlinePostings: StringArrayMap = {};
     let typePostings: StringArrayMap = {};
     let noDeadlineEvents: IndexedEvent[] = [];
-    let chatSceneIds = this.chatSceneIds();
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
       let todo = this.copyTodo(event.todo);
-      if (!isHomeTodoIndexCandidate(todo, event.workflow_scene_ids || [], chatSceneIds)) {
+      if (!isHomeTodoIndexCandidate(todo)) {
         return;
       }
       if (todo.type.length > 0) {
@@ -2325,16 +2425,6 @@ export class IndexService {
       type_postings: typePostings
     };
     return document;
-  }
-
-  private chatSceneIds(): number[] {
-    let ids: number[] = [];
-    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
-      if (scene.tabId === 'chat') {
-        ids.push(scene.sceneId);
-      }
-    });
-    return ids;
   }
 
   private buildDomainDocument(events: EventMap): DomainDocument {

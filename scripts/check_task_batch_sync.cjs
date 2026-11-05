@@ -67,21 +67,34 @@ function batch(mode = 'phone', count = 3) {
 }
 function index() {
   const state = { accepted: true, login: true, memory: 0, calendar: 0, mail: 0, marks: [], failure: false, hasData: true,
-    checked: 0, calendarFailure: false };
-  const page = probe('pages/Index.ets', 'Index', ['syncCollectedWorkflowTasks', 'refreshDataManager', 'updateDataManagerProgress',
+    checked: 0, calendarFailure: false, mailFailure: false, calendarEnabled: true, mailEnabled: true,
+    calendarReady: true, mailReady: true, calendarChecks: 0, mailChecks: 0, failures: [], stages: [] };
+  const page = probe('pages/Index.ets', 'Index', ['syncCollectedWorkflowTasks', 'refreshDataManager', 'retryMemoryOperation', 'updateDataManagerProgress',
     'beginMemoryOperation','endMemoryOperation','startMemoryProgressTimer','stopMemoryProgressTimer'], {
     PrivacyConsent: { isAccepted: () => state.accepted },
-    CalendarMemoryStore: class { settings() { return { enabled: true }; } snapshot() { return { error: '', syncedAt: '' }; } },
-    MailStore: class { settings() { return { enabled: true }; } },
-    CalendarMemoryService: { refresh: async () => { state.calendar++; if (state.calendarFailure) throw Error('fixture calendar failure'); } },
-    MailService: { refresh: async () => { state.mail++; } },
-    StartupSourceSync: class { markSynced(key) { state.marks.push(key); } markAttempted() {} markFailed() {} },
+    CalendarMemoryStore: class { settings() { return { enabled: state.calendarEnabled }; } snapshot() { return { error: '', syncedAt: '' }; } },
+    MailStore: class { settings() { return { enabled: state.mailEnabled }; } },
+    CalendarMemoryService: {
+      canAutoRefresh: async () => { state.calendarChecks++; return state.calendarReady; },
+      refresh: async (_context, progress) => {
+        state.calendar++; if (state.calendarFailure) throw Error('fixture calendar failure');
+        progress?.({stage:'读取日历',message:'reading calendar',current:1,total:2,percent:50});
+      }
+    },
+    MailService: {
+      canAutoRefresh: async () => { state.mailChecks++; return state.mailReady; },
+      refresh: async (_dir, _config, _message, progress) => {
+        state.mail++; if (state.mailFailure) throw Error('fixture mail failure');
+        progress?.({stage:'AI筛选邮件',message:'analyzing mail',current:2,total:3,percent:70});
+      }
+    },
+    StartupSourceSync: class { markSynced(key) { state.marks.push(key); } markAttempted() {} markFailed(key) { state.failures.push(key); } },
     SyncMetrics: class { mark() {} finish() {} }, dataManagerInfo() {}, dataManagerWarn() {}, dataManagerError() {},
     getContext: () => ({}), showToastSafely() {}
   });
-  Object.assign(page, { filesDir: '/app', dataManagerRefreshing: false, dataManagerSyncFailed: false,
+  Object.assign(page, { filesDir: '/app', dataManagerRefreshing: false, dataManagerSyncFailed: false, memoryOperationEpoch: 0,
     ensurePrivacyConsent: async () => state.accepted, ensureAiServiceLogin: () => state.login,
-    appendCloudLog() {}, reloadDataManagerViewModels() {}, maybeShowCalendarConsent() {},
+    appendCloudLog() {}, reloadDataManagerViewModels() {}, maybeShowCalendarConsent() {}, refreshModelActivities() {},
     getDataManagerModelConfig: () => ({ enabled: true, baseUrl: 'https://model.invalid', model: 'fixture' }),
     dataManagerFacade: { hasDataToSync: () => state.hasData, recordSuccessfulMemoryCheck: () => { state.checked++; }, refresh: async (_config, progress) => {
       state.memory++; if (state.failure) throw Error('fixture model unavailable');
@@ -89,6 +102,8 @@ function index() {
       return { message: 'fixture completed', skipped: false };
     } }
   });
+  const update = page.updateDataManagerProgress.bind(page);
+  page.updateDataManagerProgress = progress => { state.stages.push(progress.stage); update(progress); };
   return { page, state };
 }
 const tests = [], test = (name, run) => tests.push([name, run]);
@@ -156,11 +171,38 @@ test('an explicitly started batch does not consult an app-wide privacy status',a
   const {page,state}=batch();state.accepted=false;await page.runEnabledTasks();assert.equal(state.syncs,1);
   assert.ok(state.events.includes('run:task-0'));assert.equal(page.batchRunning,false);
 });
-test('post-task sync reuses the full memory pipeline and progress without rereading mail/calendar', async () => {
+test('post-task sync reads ready calendar and mail once, then publishes the full memory pipeline with progress', async () => {
   const { page, state } = index(); await page.syncCollectedWorkflowTasks();
-  assert.equal(state.memory, 1); assert.equal(state.calendar, 0); assert.equal(state.mail, 0);
-  assert.deepEqual(state.marks, ['chat']); assert.equal(page.dataManagerProgressPercent, 100); assert.equal(page.dataManagerRefreshing, false);
-  await page.refreshDataManager(); assert.equal(state.memory, 2); assert.equal(state.calendar, 1); assert.equal(state.mail, 1);
+  assert.equal(state.memory, 1); assert.equal(state.calendar, 1); assert.equal(state.mail, 1);
+  assert.deepEqual(state.marks, ['calendar','mail','chat']); assert.equal(page.dataManagerProgressPercent, 100); assert.equal(page.dataManagerRefreshing, false);
+  assert.deepEqual(state.stages,['读取日历','AI筛选邮件','生成画像']);assert.equal(page.memoryOperationKind,'collection');
+  await page.refreshDataManager(); assert.equal(state.memory, 2); assert.equal(state.calendar, 2); assert.equal(state.mail, 2);
+});
+
+test('post-task sync skips disabled, unauthorized or unconfigured sources without blocking GUI results',async()=>{
+  for(const source of ['calendar','mail','both'])for(const disabled of [false,true]){
+    const {page,state}=index();
+    if(source!=='mail'){state.calendarReady=false;if(disabled)state.calendarEnabled=false;}
+    if(source!=='calendar'){state.mailReady=false;if(disabled)state.mailEnabled=false;}
+    await page.syncCollectedWorkflowTasks();assert.equal(state.memory,1);assert.equal(page.dataManagerSyncFailed,false);
+    assert.equal(state.calendar,source==='mail'?1:0);assert.equal(state.mail,source==='calendar'?1:0);
+    assert.equal(state.calendarChecks,state.calendarEnabled?1:0);assert.equal(state.mailChecks,state.mailEnabled?1:0);
+    assert.ok(state.marks.includes('chat'));assert.deepEqual(state.failures,[]);
+  }
+});
+
+test('post-task source failures retain GUI analysis and retry reads calendar and mail without running GUI again',async()=>{
+  for(const source of ['calendar','mail']){
+    const {page,state}=index();state[source+'Failure']=true;
+    await assert.rejects(page.syncCollectedWorkflowTasks(),new RegExp('fixture '+source+' failure'));
+    assert.equal(state.memory,1);assert.equal(state.calendar,1);assert.equal(state.mail,1);
+    assert.deepEqual(state.failures,[source]);assert.ok(state.marks.includes('chat'));
+    assert.equal(page.dataManagerSyncFailed,true);assert.equal(page.dataManagerRefreshing,false);
+    assert.ok(page.dataManagerProgressMessage.includes('其他记忆已同步'));
+    state[source+'Failure']=false;await page.retryMemoryOperation();
+    assert.equal(state.memory,2);assert.equal(state.calendar,2);assert.equal(state.mail,2);
+    assert.equal(page.dataManagerSyncFailed,false);assert.equal(page.memoryOperationKind,'collection');
+  }
 });
 test('a sync already in progress is awaited and followed by a fresh snapshot of collected files', async () => {
   const { page, state } = index(); page.dataManagerRefreshing = true;

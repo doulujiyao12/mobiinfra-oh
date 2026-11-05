@@ -12,6 +12,7 @@ import { decodeUtf8Compat } from './TextEncodingCompat';
 import { parseJsonCompat } from './JsonCompat';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { cloudApiProvider, normalizeCloudChatUrl } from './CloudApiCompatibility';
+import { cloudBadRequestCategory } from './CloudHttpDiagnostics';
 import { GalleryModelJson } from './gallery/GalleryTypes';
 import {
   PHONE_AGENT_ACTION_OUTPUT_RULES, PHONE_AGENT_MAX_ACTION_TOKENS,
@@ -748,7 +749,11 @@ export class CloudModelClient {
         ' preview=' + CloudModelClient.previewTextForLog(responseText, 512)));
       if (response.responseCode < 200 || response.responseCode >= 300) {
         if (options.logResponseContent === false) {
-          throw new Error('Cloud HTTP ' + response.responseCode.toString());
+          const category = response.responseCode === 400 ? ' [' + cloudBadRequestCategory(responseText) + ']' : '';
+          AppLogger.warn('CloudModel', 'chat rejected status=' + response.responseCode + category +
+            ' roles=' + options.messages.map((message: CloudChatMessage): string => message.role).join(',') +
+            ' tools=' + (options.tools?.length || 0));
+          throw new Error('Cloud HTTP ' + response.responseCode.toString() + category);
         }
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }

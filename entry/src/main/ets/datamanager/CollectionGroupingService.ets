@@ -34,6 +34,7 @@ import {
   summarizeText
 } from './DataManagerUtils';
 import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import { collectionChatIdentity } from './CollectionChatIdentity';
 
 export interface CollectionGroupingBuildResult {
   tabCount: number;
@@ -57,6 +58,8 @@ type CollectionAssignmentMap = Record<string, CollectionGroupAssignment>;
 
 const COLLECTION_GROUP_ASSIGNMENT_WINDOW_DAYS: number = 7;
 const DEFAULT_COLLECTION_TAB_CONCURRENCY: number = 3;
+const COLLECTION_GROUPING_POLICY: string = 'collection-readable-v5';
+interface GroupingPolicyReceipt { policy: string; }
 
 interface CollectionTabBuildResult {
   groupCount: number;
@@ -92,7 +95,7 @@ export function collectionTabSpecByIndex(index: number): CollectionTabSpec {
       return spec;
     }
   }
-  return specs[0];
+  return specs.find((spec: CollectionTabSpec): boolean => spec.tabIndex === 0) || specs[0];
 }
 
 export function emptyCollectionGroupsDocument(spec: CollectionTabSpec): CollectionGroupsDocument {
@@ -129,6 +132,7 @@ export function normalizeCollectionGroups(tabId: string, title: string, events: 
   events.forEach((event: IndexedEvent) => eventMap[event.event_id] = event);
   let assigned: BooleanMap = createBooleanMap();
   let normalized: CollectionGroupState[] = [];
+  if (tabId === 'chat') { candidateGroups = splitChatConversations(candidateGroups, eventMap); }
   candidateGroups.forEach((candidate: CollectionGroupState) => {
     let eventIds = stableUnique((candidate.event_ids || [])
       .map((id: string) => normalizeFreeText(id))
@@ -139,6 +143,8 @@ export function normalizeCollectionGroups(tabId: string, title: string, events: 
     eventIds.forEach((id: string) => assigned[id] = true);
     let groupEvents = eventIds.map((id: string) => eventMap[id]);
     let group = groupFromEvents(tabId, title, candidate.title, groupEvents);
+    group.title_topic = candidate.title_topic;
+    group.conversation_key = candidate.conversation_key;
     group.source = normalizeFreeText(candidate.source) || group.source;
     group.domain = normalizeFreeText(candidate.domain) || group.domain;
     group.status = normalizeFreeText(candidate.status) || group.status;
@@ -208,11 +214,11 @@ export class CollectionGroupingService {
       return async (): Promise<CollectionTabBuildResult> => {
         this.emitProgress(progress, '检查分组', `检查${spec.title}分组`, completedTabs, specs.length,
           96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
-        let result = this.indexService.query(spec.query);
+        let result = this.indexService.query(spec.query, false);
         let events = result.events;
         let inputHash = this.inputHash(spec, events, modelConfig);
         let previous = this.loadGroupsDocumentBySpec(spec);
-        if (!force && previous.input_hash === inputHash && (previous.groups.length > 0 || events.length === 0)) {
+        if (!force && previous.policy === COLLECTION_GROUPING_POLICY && previous.input_hash === inputHash && (previous.groups.length > 0 || events.length === 0)) {
           completedTabs++;
           this.emitProgress(progress, '检查分组', `已检查 ${completedTabs}/${specs.length} 个场景，复用${spec.title}分组`, completedTabs, specs.length,
             96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
@@ -228,6 +234,7 @@ export class CollectionGroupingService {
           96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
         let groups = await this.buildGroupsForTab(spec, events, modelConfig, previous);
         let document: CollectionGroupsDocument = {
+          policy: COLLECTION_GROUPING_POLICY,
           generated_at: nowIsoLocal(),
           tab_id: spec.tabId,
           title: spec.title,
@@ -256,6 +263,8 @@ export class CollectionGroupingService {
       reusedGroupDocs += result.reusedGroupDocs;
       updatedGroupDocs += result.updatedGroupDocs;
     });
+    let policy: GroupingPolicyReceipt = { policy: COLLECTION_GROUPING_POLICY };
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.collectionGroupsRoot, 'policy.json'), policy as Object);
     this.emitProgress(progress, '采集分组', '采集分组完成', specs.length, specs.length, 99);
     return {
       tabCount: specs.length,
@@ -278,6 +287,8 @@ export class CollectionGroupingService {
 
   cachedBuildResult(groupCount: number | undefined, eventCount: number | undefined): CollectionGroupingBuildResult | null {
     let specs = collectionTabSpecs();
+    let policy = this.storage.readJson<GroupingPolicyReceipt>(this.storage.join(this.paths.collectionGroupsRoot, 'policy.json'), { policy: '' });
+    if (policy.policy !== COLLECTION_GROUPING_POLICY) { return null; }
     if (groupCount === undefined || eventCount === undefined ||
       specs.some((spec: CollectionTabSpec): boolean => !this.storage.exists(this.paths.collectionGroupsPath(spec.tabId)))) { return null; }
     return { tabCount: specs.length, groupCount: groupCount, eventCount: eventCount,
@@ -311,7 +322,8 @@ export class CollectionGroupingService {
 
   private async buildIncrementalGroupsForTab(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig,
     previous: CollectionGroupsDocument): Promise<CollectionGroupState[]> {
-    let planning = prepareIncrementalCollectionGroups(spec.tabId, spec.title, events, previous.groups || []);
+    let planning = prepareIncrementalCollectionGroups(spec.tabId, spec.title, events, previous.groups || [],
+      previous.policy !== COLLECTION_GROUPING_POLICY);
     let assignments: CollectionGroupAssignment[] = [];
     if (planning.pendingEvents.length > 0 && modelConfig.enabled) {
       try {
@@ -334,7 +346,7 @@ export class CollectionGroupingService {
 
   private inputHash(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig): string {
     let parts: string[] = [
-      'collection_grouping_title_policy_v4',
+      COLLECTION_GROUPING_POLICY,
       spec.tabId,
       spec.title,
       modelConfig.enabled ? 'model' : 'heuristic',
@@ -403,7 +415,7 @@ export function collectionGroupSourceInputFingerprint(eventIds: string[], eventM
 }
 
 export function prepareIncrementalCollectionGroups(tabId: string, title: string, events: IndexedEvent[],
-  previousGroups: CollectionGroupState[]): IncrementalCollectionGroupPlan {
+  previousGroups: CollectionGroupState[], migrateLegacyTitles: boolean = false): IncrementalCollectionGroupPlan {
   let eventMap = eventMapFromEvents(events);
   let eventHashes: StringMap = createStringMap();
   events.forEach((event: IndexedEvent) => eventHashes[event.event_id] = collectionGroupEventInputFingerprint(event));
@@ -423,7 +435,11 @@ export function prepareIncrementalCollectionGroups(tabId: string, title: string,
         return;
       }
       let previousHash = previous.event_input_hashes ? normalizeFreeText(previous.event_input_hashes[id]) : '';
-      if (previousHash.length > 0 && previousHash === eventHashes[id] && covered[id] !== true) {
+      // Older group documents may predate per-event receipts. A title migration
+      // can retain their existing membership; genuinely new IDs and mismatched
+      // receipts still follow the normal incremental assignment path.
+      let retained = previousHash.length > 0 ? previousHash === eventHashes[id] : migrateLegacyTitles;
+      if (retained && covered[id] !== true) {
         retainedIds.push(id);
         covered[id] = true;
       } else {
@@ -446,6 +462,13 @@ export function prepareIncrementalCollectionGroups(tabId: string, title: string,
     }
   });
   let pendingEvents = events.filter((event: IndexedEvent): boolean => pending[event.event_id] === true && covered[event.event_id] !== true);
+  // Repair only already covered groups locally. New/changed events retain the
+  // existing incremental model assignment path; event/index receipts are untouched.
+  if (reusedGroups.some((group: CollectionGroupState): boolean => group.title_topic === undefined ||
+    (tabId === 'chat' && !group.conversation_key))) {
+    let coveredEvents = events.filter((event: IndexedEvent): boolean => covered[event.event_id] === true);
+    reusedGroups = finalizeIncrementalCollectionGroups(tabId, title, coveredEvents, reusedGroups);
+  }
   return {
     eventMap: eventMap,
     reusedGroups: reusedGroups,
@@ -544,8 +567,8 @@ function heuristicGroupKey(tabId: string, event: IndexedEvent): string {
     if (isGalleryChatEvent(event)) {
       return 'gallery-chat';
     }
-    let contact = chatContactName([event], source);
-    return contact || source || keyword || 'chat';
+    let identity = collectionChatIdentity(event);
+    return identity.key + '|' + firstTopicFromEvent(event, identity.name);
   }
   if (tabId === 'orders') {
     return [entity || source || displayDomainName(domain), domain].join('|');
@@ -572,7 +595,7 @@ function groupFromEvents(tabId: string, title: string, preferredTitle: string, e
   let ids = sorted.map((event: IndexedEvent) => event.event_id);
   let group: CollectionGroupState = {
     group_id: '',
-    title: summarizeText(groupTitle, 28),
+    title: groupTitle,
     source: source,
     time: sorted.length > 0 ? sorted[0].event_date : '',
     meta: `${ids.length} 条`,
@@ -589,17 +612,7 @@ function deriveGroupTitle(tabId: string, title: string, events: IndexedEvent[], 
   let entity = events.length > 0 ? firstEntityName(events[0]) : '';
   let keyword = events.length > 0 ? firstMeaningfulKeyword(events[0]) : '';
   if (tabId === 'chat') {
-    if (hasGalleryChatEvent(events)) {
-      return '聊天截图';
-    }
-    let contact = chatContactName(events, source);
-    if (contact.length > 0) {
-      return `与${contact}的对话`;
-    }
-    if (keyword.length > 0) {
-      return `${keyword}沟通`;
-    }
-    return '聊天整理';
+    return '聊天记录';
   }
   if (tabId === 'orders') {
     if (entity.length > 0) {
@@ -631,8 +644,7 @@ function prepareCollectionGroupTitles(tabId: string, title: string, groups: Coll
     if (groupEvents.length === 0) {
       return;
     }
-    let replacement = normalizeGroupTitleForTab(tabId, title, group, groupEvents);
-    group.title = summarizeText(replacement, 28);
+    group.title = normalizeGroupTitleForTab(tabId, title, group, groupEvents);
   });
   return groups;
 }
@@ -640,14 +652,22 @@ function prepareCollectionGroupTitles(tabId: string, title: string, groups: Coll
 function normalizeGroupTitleForTab(tabId: string, title: string, group: CollectionGroupState, events: IndexedEvent[]): string {
   let prefix = sourcePrefixForGroup(tabId, group, events);
   let topic = topicForGroup(tabId, title, group, events, prefix);
+  group.title_topic = topic;
+  if (tabId === 'chat' && events.length > 0) { group.conversation_key = collectionChatIdentity(events[0]).key; }
   if (prefix.length === 0) {
-    return topic;
+    return compactGroupText(topic, 24);
   }
-  return `${prefix}-${topic}`;
+  return `${compactGroupText(prefix, 16)} · ${compactGroupText(topic, 20)}`;
 }
 
 function topicForGroup(tabId: string, title: string, group: CollectionGroupState, events: IndexedEvent[], prefix: string): string {
-  let fromTitle = cleanGroupTopic(group.title, prefix);
+  let rawTitle = group.title_topic !== undefined ? group.title_topic : group.title;
+  // A legacy assembled title is not an independent topic. Damaged nested
+  // prefixes and sentence-style identities are regenerated from event text.
+  let legacyDamaged = group.title_topic === undefined && tabId === 'chat' &&
+    (/[-·].*[-·]|的聊天中|的对话中|姓名未显示|^群内[-·]/.test(rawTitle) ||
+      (rawTitle.indexOf('-') > 0 && normalizeLookupText(rawTitle.split('-')[0]) !== normalizeLookupText(prefix)));
+  let fromTitle = legacyDamaged ? '' : cleanGroupTopic(rawTitle, prefix);
   if (fromTitle.length > 0) {
     return fromTitle;
   }
@@ -658,7 +678,7 @@ function topicForGroup(tabId: string, title: string, group: CollectionGroupState
     }
   }
   if (tabId === 'chat') {
-    return '聊天记录';
+    return '日常交流';
   }
   if (tabId === 'takeout') {
     return '外卖记录';
@@ -694,6 +714,7 @@ function topicFromSummary(value: string, prefix: string): string {
     .replace(/^当前页面显示的是?/g, '')
     .replace(/^当前页面显示/g, '')
     .replace(/^当前聊天对象是/g, '')
+    .replace(/^(?:用户)?(?:在)?与[^，。；;\n]{1,40}?(?:的聊天[中里]?|的对话[中里]?)/, '')
     .replace(/^用户于[0-9年月日:\-\s]+/g, '')
     .replace(/^用户/g, '')
     .replace(/^团队/g, '')
@@ -707,7 +728,7 @@ function topicFromSummary(value: string, prefix: string): string {
     text = text.slice(prefix.length);
   }
   text = text
-    .replace(/^(要求|提醒|计划|提及|发送了|发送|讨论|收到|分享|建议|进行|定义|提出|回复|表达|浏览|查看|在|与)/g, '')
+    .replace(/^(要求|提醒|计划|提及|发送了?|讨论了?|收到|分享|建议|进行|定义|提出|回复|表达|浏览|查看|在|与)/g, '')
     .replace(/^微信联系人[「“"][^」”"]{1,40}[」”"]/g, '')
     .trim();
   let parts = text.split(/[，。；;,.]/);
@@ -716,7 +737,7 @@ function topicFromSummary(value: string, prefix: string): string {
 
 function cleanGroupTopic(value: string, prefix: string): string {
   let topic = normalizeFreeText(value)
-    .replace(/\s+/g, '')
+    .replace(/\s+/g, ' ')
     .replace(/^[#\-]+/g, '')
     .replace(/^##/g, '')
     .replace(/^[「“"']+/g, '')
@@ -736,7 +757,52 @@ function cleanGroupTopic(value: string, prefix: string): string {
   if (isInvalidGroupTopic(topic, prefix)) {
     return '';
   }
-  return summarizeText(topic, 16);
+  topic = topic.replace(/^(?:了(?=关于)|关于)\s*/g, '').replace(/^关于\s*/, '');
+  return topic.substring(0, 120).trim();
+}
+
+// Conversation identity is an assignment boundary, not a display-title guess.
+// Split legacy mixed groups using indexed text/provenance only, without OCR or
+// model requests. Preserve a stable ID for one child and allocate the others.
+function splitChatConversations(groups: CollectionGroupState[], eventMap: EventMap): CollectionGroupState[] {
+  let output: CollectionGroupState[] = [];
+  for (let original of groups) {
+    let buckets: Record<string, string[]> = {};
+    let keys: string[] = [];
+    for (let id of original.event_ids || []) {
+      let event = eventMap[id];
+      if (!event) { continue; }
+      let key = collectionChatIdentity(event).key;
+      if (!buckets[key]) { buckets[key] = []; keys.push(key); }
+      buckets[key].push(id);
+    }
+    keys.forEach((key: string, index: number): void => {
+      let group = copyCollectionGroup(original);
+      group.event_ids = buckets[key]; group.conversation_key = key;
+      if (index > 0) { group.group_id = ''; }
+      if (keys.length > 1) { group.title = ''; group.title_topic = undefined; }
+      output.push(group);
+    });
+  }
+  return output;
+}
+
+export function readableCollectionGroupTitle(group: CollectionGroupState, eventMap: EventMap): string {
+  if (group.title_topic !== undefined) { return group.title; }
+  let copy = copyCollectionGroup(group);
+  let events = eventsForGroup(copy, eventMap);
+  if (events.length === 0) { return group.title; }
+  let tabId = (events[0].workflow_scene_ids || []).indexOf(3) >= 0 ? 'chat' : '';
+  return normalizeGroupTitleForTab(tabId, '相关记录', copy, events);
+}
+
+function compactGroupText(value: string, limit: number): string {
+  let text = normalizeFreeText(value);
+  if (text.length <= limit) { return text; }
+  let end = limit;
+  let code = text.charCodeAt(end - 1);
+  if (code >= 0xD800 && code <= 0xDBFF) { end--; }
+  return text.substring(0, end).trim() + '…';
 }
 
 function stripGroupTopicPrefix(value: string, prefix: string): string {
@@ -763,6 +829,10 @@ function stripGroupTopicPrefix(value: string, prefix: string): string {
     let source = normalizeFreeText(item);
     if (source.length === 0) {
       continue;
+    }
+    let separator = /[-·：:]/.exec(topic);
+    if (separator !== null && normalizeLookupText(topic.substring(0, separator.index)) === normalizeLookupText(source)) {
+      return topic.substring(separator.index + 1).trim();
     }
     if (topic.indexOf(source + '-') === 0) {
       return topic.slice(source.length + 1);
@@ -816,7 +886,7 @@ function sourcePrefixForGroup(tabId: string, group: CollectionGroupState, events
     return '';
   }
   if (tabId === 'chat') {
-    return chatConversationPrefix(events, group.source);
+    return chatConversationPrefix(events);
   }
   for (let event of events) {
     let prefix = sourcePrefixForEvent(tabId, event);
@@ -834,35 +904,13 @@ function sourcePrefixForGroup(tabId: string, group: CollectionGroupState, events
   return displayDomainName(group.domain || 'other');
 }
 
-function chatConversationPrefix(events: IndexedEvent[], groupSource: string): string {
+function chatConversationPrefix(events: IndexedEvent[]): string {
   if (hasGalleryChatEvent(events)) {
     return '图库聊天';
   }
-  for (let event of events) {
-    let explicit = explicitChatContactName(event);
-    if (explicit.length > 0) {
-      return explicit;
-    }
-  }
-  for (let event of events) {
-    let detail = sourceDetailName(event);
-    if (detail.length > 0) {
-      return detail;
-    }
-  }
-  for (let event of events) {
-    let person = firstPersonEntityName(event);
-    if (person.length > 0) {
-      return person;
-    }
-  }
-  for (let event of events) {
-    let sourceName = validChatContactNameForEvent(groupSource, event);
-    if (sourceName.length > 0) {
-      return sourceName;
-    }
-  }
-  return '微信';
+  if (events.length === 0) { return '微信会话'; }
+  let identities = stableUnique(events.map((event: IndexedEvent): string => collectionChatIdentity(event).key));
+  return identities.length > 1 ? '多个会话' : collectionChatIdentity(events[0]).name;
 }
 
 function sourcePrefixForEvent(tabId: string, event: IndexedEvent): string {
@@ -954,7 +1002,8 @@ function mergeGroupsByTitle(groups: CollectionGroupState[], eventMap: EventMap, 
   let grouped: CollectionGroupMap = new Object() as CollectionGroupMap;
   let order: string[] = [];
   groups.forEach((group: CollectionGroupState) => {
-    let key = normalizeLookupText(group.title);
+    let key = (tabId === 'chat' ? group.conversation_key || '' : normalizeLookupText(group.source)) + '|' +
+      normalizeLookupText(group.title_topic || group.title);
     if (key.length === 0) {
       key = stableUnique(group.event_ids || []).join('|');
     }
@@ -985,7 +1034,11 @@ function mergeGroupsByTitle(groups: CollectionGroupState[], eventMap: EventMap, 
     if (mergedEvents.length === 0) {
       return;
     }
-    merged.push(groupFromEvents(tabId, title, sourceGroups[0].title, mergedEvents));
+    let combined = groupFromEvents(tabId, title, sourceGroups[0].title, mergedEvents);
+    combined.group_id = sourceGroups[0].group_id;
+    combined.title_topic = sourceGroups[0].title_topic;
+    combined.conversation_key = sourceGroups[0].conversation_key;
+    merged.push(combined);
   });
   return merged;
 }
@@ -1014,6 +1067,8 @@ function copyCollectionGroup(group: CollectionGroupState): CollectionGroupState 
   return {
     group_id: normalizeFreeText(group.group_id),
     title: normalizeFreeText(group.title),
+    title_topic: group.title_topic,
+    conversation_key: group.conversation_key,
     source: normalizeFreeText(group.source),
     time: normalizeFreeText(group.time),
     meta: normalizeFreeText(group.meta),
@@ -1034,7 +1089,9 @@ function refreshCollectionGroupFromEvents(tabId: string, title: string, group: C
   let groupEvents = eventIds.map((id: string): IndexedEvent => eventMap[id]);
   let refreshed = groupFromEvents(tabId, title, group.title, groupEvents);
   refreshed.group_id = normalizeFreeText(group.group_id);
-  refreshed.title = summarizeText(normalizeFreeText(group.title) || refreshed.title, 28);
+  refreshed.title = normalizeFreeText(group.title) || refreshed.title;
+  refreshed.title_topic = group.title_topic;
+  refreshed.conversation_key = group.conversation_key;
   refreshCollectionGroupHashes(refreshed, eventMap);
   return refreshed;
 }
@@ -1054,6 +1111,7 @@ function refreshCollectionGroupHashes(group: CollectionGroupState, eventMap: Eve
 function finalizeIncrementalCollectionGroups(tabId: string, title: string, events: IndexedEvent[],
   candidates: CollectionGroupState[]): CollectionGroupState[] {
   let eventMap = eventMapFromEvents(events);
+  if (tabId === 'chat') { candidates = splitChatConversations(candidates, eventMap); }
   let assigned: BooleanMap = createBooleanMap();
   let usedGroupIds: BooleanMap = createBooleanMap();
   let result: CollectionGroupState[] = [];
@@ -1137,6 +1195,7 @@ function newCollectionAssignmentBucketKey(targetId: string, assignment: Collecti
 }
 
 function isCollectionAssignmentCandidate(event: IndexedEvent, group: CollectionGroupState): boolean {
+  if (group.conversation_key && group.conversation_key !== collectionChatIdentity(event).key) { return false; }
   let eventTime = dateToTime(event.event_date);
   let groupTime = dateToTime(group.time);
   if (eventTime <= 0 || groupTime <= 0) {
@@ -1154,216 +1213,6 @@ function stableTextHash(value: string): string {
   return (hash >>> 0).toString(16);
 }
 
-function chatContactName(events: IndexedEvent[], source: string): string {
-  for (let event of events) {
-    let explicit = explicitChatContactName(event);
-    if (explicit.length > 0) {
-      return explicit;
-    }
-  }
-  for (let event of events) {
-    let person = firstPersonEntityName(event);
-    if (person.length > 0) {
-      return person;
-    }
-  }
-  for (let event of events) {
-    let detail = sourceDetailName(event);
-    if (detail.length > 0) {
-      return detail;
-    }
-  }
-  let sourceName = normalizeFreeText(source);
-  for (let event of events) {
-    let sourceContact = validChatContactNameForEvent(sourceName, event);
-    if (sourceContact.length > 0) {
-      return sourceContact;
-    }
-  }
-  return '';
-}
-
-function sourceDetailName(event: IndexedEvent): string {
-  let sources = event.sources || [];
-  for (let index = 1; index < sources.length; index++) {
-    let source = validChatContactNameForEvent(sources[index], event);
-    if (source.length > 0) {
-      return source;
-    }
-  }
-  return '';
-}
-
-function explicitChatContactName(event: IndexedEvent): string {
-  let text = normalizeFreeText((event.normalized_fact || '') + ' ' + (event.summary || ''));
-  if (text.length === 0) {
-    return '';
-  }
-  let directPatterns: RegExp[] = [
-    /微信联系人[「“"]([^」”"]{1,40})[」”"]/,
-    /与联系人[「“"]([^」”"]{1,40})[」”"]/,
-    /(?:^|[\s\-，。；;])联系人\s*[:：]\s*([^，。；;\s\-#「」“”"]{1,40})/,
-    /(?:^|[\s\-，。；;])会话标题\s*[:：]\s*([^，。；;\s\-#「」“”"]{1,40})/
-  ];
-  for (let pattern of directPatterns) {
-    let match = pattern.exec(text);
-    if (match !== null) {
-      let name = validChatContactNameForEvent(match[1], event);
-      if (name.length > 0) {
-        return name;
-      }
-    }
-  }
-  let genericPatterns: RegExp[] = [
-    /与联系人\s*([^，。；;\s「」“”"]{1,40})(?:沟通|讨论|聊天|对话|提到|发送|发来)/,
-    /与(?:同事|朋友)?\s*([^，。；;\s]{1,40})(?:沟通|讨论|聊天|对话)/
-  ];
-  for (let pattern of genericPatterns) {
-    let match = pattern.exec(text);
-    if (match !== null) {
-      let name = validChatContactNameForEvent(match[1], event);
-      if (name.length > 0) {
-        return name;
-      }
-    }
-  }
-  return '';
-}
-
-function firstPersonEntityName(event: IndexedEvent): string {
-  let mentions = event.entity_mentions || [];
-  for (let mention of mentions) {
-    if (normalizeLookupText(mention.type) === 'person') {
-      let name = validChatContactName(mention.name);
-      if (name.length > 0) {
-        return name;
-      }
-    }
-  }
-  let entities = event.entities || [];
-  for (let entity of entities) {
-    let text = normalizeFreeText(entity);
-    let parts = text.split(':');
-    if (parts.length > 1 && normalizeLookupText(parts[0]) === 'person') {
-      let name = validChatContactName(parts.slice(1).join(':'));
-      if (name.length > 0) {
-        return name;
-      }
-    }
-  }
-  return '';
-}
-
-function validChatContactName(value: string): string {
-  let name = normalizeFreeText(value)
-    .replace(/^[「“"']+/g, '')
-    .replace(/[」”"']+$/g, '')
-    .trim();
-  if (isInvalidChatContactName(name)) {
-    return '';
-  }
-  return name;
-}
-
-function validChatContactNameForEvent(value: string, event: IndexedEvent): string {
-  let name = validChatContactName(value);
-  if (name.length === 0 || isNonContactEntityName(event, name) || isObjectLikeChatName(name)) {
-    return '';
-  }
-  return name;
-}
-
-function isNonContactEntityName(event: IndexedEvent, value: string): boolean {
-  let lookup = normalizeLookupText(value);
-  if (lookup.length === 0) {
-    return false;
-  }
-  let mentions = event.entity_mentions || [];
-  for (let mention of mentions) {
-    let type = normalizeLookupText(mention.type);
-    if (type === 'person') {
-      continue;
-    }
-    if (normalizeLookupText(mention.name) === lookup) {
-      return true;
-    }
-    for (let alias of mention.aliases || []) {
-      if (normalizeLookupText(alias) === lookup) {
-        return true;
-      }
-    }
-  }
-  for (let entity of event.entities || []) {
-    let parts = normalizeFreeText(entity).split(':');
-    if (parts.length <= 1 || normalizeLookupText(parts[0]) === 'person') {
-      continue;
-    }
-    if (normalizeLookupText(parts.slice(1).join(':')) === lookup) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isObjectLikeChatName(value: string): boolean {
-  let name = normalizeFreeText(value);
-  if (name === '文件传输助手' || name === '微信团队') {
-    return false;
-  }
-  let lookup = normalizeLookupText(name);
-  let knownObjects = [
-    '饿了么',
-    '美团',
-    '美团外卖',
-    '淘宝',
-    '京东',
-    '支付宝',
-    '高德',
-    '高德地图',
-    '携程',
-    '苏州',
-    '上海',
-    '杭州',
-    '数据归家首页',
-    'clawmate首页',
-    'workflow日志页面',
-    'mockdailylog数据',
-    'hdc导入脚本'
-  ];
-  if (knownObjects.indexOf(lookup) >= 0) {
-    return true;
-  }
-  return /(页面|界面|脚本|数据|日志|首页|订单|路线|酒店|高铁票|小程序|截图|图片)$/.test(name);
-}
-
-function isInvalidChatContactName(value: string): boolean {
-  let name = normalizeFreeText(value);
-  let lookup = normalizeLookupText(name);
-  if (lookup.length === 0) {
-    return true;
-  }
-  let blocked = [
-    '微信',
-    '微信聊天',
-    '本地日志',
-    '聊天',
-    '聊天记录',
-    '图库',
-    '图片',
-    '截图',
-    'photos',
-    'photo',
-    'gallery',
-    'galleryanalysis'
-  ];
-  if (blocked.indexOf(lookup) >= 0) {
-    return true;
-  }
-  if (/^wechat\d{8}t\d+$/i.test(lookup) || /^gallery\d+$/i.test(lookup) || lookup.indexOf('galleryitem') === 0) {
-    return true;
-  }
-  return false;
-}
 
 function hasGalleryChatEvent(events: IndexedEvent[]): boolean {
   for (let event of events) {

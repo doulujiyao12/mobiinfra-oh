@@ -20,6 +20,7 @@ import {
 import { ChatVoiceMetadata, optionalChatVoiceMetadata } from './VoiceInteractionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
 import { DebugSettings } from '../../utils/DebugSettings';
+import { MemorySupplementItem, normalizeMemorySupplement } from '../../utils/MemorySupplement';
 
 export interface ChatSessionViewState {
   sessions: ChatSessionSummary[];
@@ -141,7 +142,8 @@ export class ChatSessionController {
       createdAt: lastMessage.createdAt,
       imagePath: chatMessageImagePath(lastMessage),
       imagePaths: chatMessageImagePaths(lastMessage),
-      codexRunId: lastMessage.codexRunId
+      codexRunId: lastMessage.codexRunId,
+      memorySupplement: lastMessage.memorySupplement
     };
     let traceVoiceMetadata = chatMessageVoiceMetadataForStorage(lastMessage);
     if (traceVoiceMetadata !== undefined) {
@@ -184,7 +186,8 @@ export class ChatSessionController {
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
       imagePath: sessionImagePath,
-      imagePaths: [sessionImagePath]
+      imagePaths: [sessionImagePath],
+      memorySupplement: resultMessage.memorySupplement
     };
     let resultVoiceMetadata = chatMessageVoiceMetadataForStorage(resultMessage);
     if (resultVoiceMetadata !== undefined) {
@@ -337,7 +340,7 @@ export class ChatSessionController {
   }
 
   static updateMessageContentInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
-    messageId: string, content: string, trace?: string[]): ChatSessionViewState {
+    messageId: string, content: string, trace?: string[], memorySupplement?: MemorySupplementItem[]): ChatSessionViewState {
     if (filesDir.length === 0 || sessionId.length === 0 || messageId.length === 0) {
       return state;
     }
@@ -376,7 +379,8 @@ export class ChatSessionController {
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message),
-        codexRunId: message.codexRunId
+        codexRunId: message.codexRunId,
+        memorySupplement: memorySupplement === undefined ? message.memorySupplement : normalizeMemorySupplement(memorySupplement)
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
@@ -426,7 +430,8 @@ export class ChatSessionController {
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message),
-        codexRunId: message.codexRunId
+        codexRunId: message.codexRunId,
+        memorySupplement: message.memorySupplement
       };
       let voiceMetadata = optionalChatVoiceMetadata(voice);
       if (voiceMetadata !== undefined) {

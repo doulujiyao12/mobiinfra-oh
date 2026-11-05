@@ -225,6 +225,9 @@ async function main() {
   const { CodexClient } = load('entry/src/main/ets/pages/codex/CodexClient.ets');
   const client = new CodexClient();
   client.configure({ origin: 'https://example.com', token: 'a'.repeat(43) });
+  const beforeOversize = fetchCount;
+  await assert.rejects(client.call('/v1/tasks/session/turns', { text: '中'.repeat(22000) }), /本次未发送/);
+  assert.equal(fetchCount, beforeOversize, 'oversized UTF-8 JSON is rejected on the phone before HTTP submission');
   await client.call('/v1/info');
   const creates = sessionCreates; await client.call('/v1/info'); assert.equal(sessionCreates, creates, 'successes reuse one RCP transport');
   let reachable; client.onReachability = value => { reachable = value; };

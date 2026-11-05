@@ -1,4 +1,6 @@
 #include <napi/native_api.h>
+#include "recording/RecordingScreenCapture.h"
+#include "recording/RecordingCpu.h"
 
 static napi_value MakeString(napi_env env, const char* value) {
     napi_value ret;
@@ -43,6 +45,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"copyModel", nullptr, Disabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadModel", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"completeText", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelText", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat", nullptr, Disabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isChatRunning", nullptr, False, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -65,6 +69,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"clearLogs", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    RegisterRecordingScreenCapture(env, exports);
+    RegisterRecordingCpu(env, exports);
     return exports;
 }
 EXTERN_C_END

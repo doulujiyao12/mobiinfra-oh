@@ -1,4 +1,6 @@
 import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
+import { HomeCodexRequest } from '../../datamanager/HomeCodexContext';
+import { homeReminderSupportsCodex, homeReminderCodexRequest, homeSuggestionCodexRequest } from './HomeCodexHandoff';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import {
@@ -50,6 +52,8 @@ export struct HomePage {
   @Prop taskSuggestionError: string = '';
   onRefreshTaskSuggestions: () => Promise<void> = async () => {};
   onOpenTasks: () => void = (): void => {};
+  @Prop codexBusy: boolean = false;
+  onDelegateToCodex: (request: HomeCodexRequest) => Promise<void> = async (): Promise<void> => {};
   onOpenCalendarSettings: () => void = (): void => {};
   onOpenMailSettings: () => void = (): void => {};
   onMailChanged: () => void = (): void => {};
@@ -294,7 +298,7 @@ export struct HomePage {
           .fontColor(AppTheme.text('#7E8596'))
           .margin({ left: this.isWideProfileOverview() ? 8 : 6 })
         Blank()
-        Text(this.avatarUpdatedCompactLabel())
+        Text(this.profile.updatedLabel)
           .fontSize(this.isWideProfileOverview() ? 12 : 10)
           .fontColor(AppTheme.text('#9298A6'))
           .maxLines(1)
@@ -431,22 +435,6 @@ export struct HomePage {
       return this.profile.avatarActionLabel;
     }
     return this.profile.avatarUri.length > 0 ? '更新数字分身' : '生成数字分身';
-  }
-
-  private avatarUpdatedLabel(): string {
-    if (this.profile.avatarUpdatedLabel.length > 0) {
-      return this.profile.avatarUpdatedLabel;
-    }
-    return this.profile.updatedLabel;
-  }
-
-  private avatarUpdatedCompactLabel(): string {
-    let label = this.avatarUpdatedLabel();
-    let timeSeparator = label.indexOf('T');
-    if (timeSeparator > 0 && label.length >= 16) {
-      return label.substring(0, 16).replace('T', ' ');
-    }
-    return label;
   }
 
   private async submitAvatarGeneration(): Promise<void> {
@@ -1359,6 +1347,25 @@ export struct HomePage {
     return this.agentTaskSubmitting && this.agentTaskSubmittingAction === action ? '下发中' : idleLabel;
   }
 
+  private async delegateToCodex(request: HomeCodexRequest): Promise<void> {
+    if (this.codexBusy || this.agentTaskSubmitting) { return; }
+    this.agentTaskSubmitting = true;
+    this.closeRecommendationDetail();
+    this.closeTaskSuggestionDetail();
+    try { await this.onDelegateToCodex(request); }
+    catch (e) { showToastSafely('暂时无法交给 Codex：' + (e as Error).message, 2500); }
+    finally { this.agentTaskSubmitting = false; }
+  }
+
+  @Builder private CodexAction(request: HomeCodexRequest) {
+    Button(this.codexBusy ? 'Codex 正在处理' : '交给 Codex')
+      .width('100%').height(48).fontSize(16).fontWeight(FontWeight.Medium)
+      .fontColor(AppTheme.text('#5968FF'))
+      .backgroundColor(AppTheme.background('#F0F2FF')).borderRadius(16)
+      .enabled(!this.codexBusy && !this.agentTaskSubmitting)
+      .onClick((): void => { this.delegateToCodex(request); })
+  }
+
   private async submitAgentTask(taskDescription: string, keepTargetAppAfterFinish: boolean,
     submittingAction: string): Promise<boolean> {
     let task = taskDescription.trim();
@@ -1531,8 +1538,16 @@ export struct HomePage {
   }
 
   @Builder TaskExecutionSheetContent() {
-    HomeTaskExecutionSheet({ suggestion: this.executionCandidate,
+    HomeTaskExecutionSheet({ suggestion: this.executionCandidate, codexBusy: this.codexBusy,
       onExecute: async (method: string, draft: string): Promise<boolean> => {
+        if (method === 'codex') {
+          if (this.codexBusy || this.agentTaskSubmitting) { return false; }
+          const codexRequest = homeSuggestionCodexRequest(this.executionCandidate);
+          codexRequest.userGoal = draft.trim();
+          this.executionSheetOpen = false;
+          await this.delegateToCodex(codexRequest);
+          return true;
+        }
         let request = buildHomeTaskExecutionRequest(this.executionCandidate, method, draft);
         AppLogger.info('HomeSuggestion', 'DISPATCH route=' + method + ' id=' + this.executionCandidate.id +
           ' chars=' + request.taskDescription.length.toString());
@@ -1816,6 +1831,7 @@ export struct HomePage {
       .scrollBar(BarState.Off)
 
       Column() {
+        this.CodexAction(homeSuggestionCodexRequest(item))
         Button(this.agentTaskButtonLabel('guess-' + item.id, '执行这个任务'))
           .width('100%')
           .height(48)
@@ -1824,6 +1840,7 @@ export struct HomePage {
           .fontColor(AppTheme.text(Color.White))
           .backgroundColor(AppTheme.filledBackground(this.agentTaskSubmitting ? '#B6BDD0' : this.taskSuggestionAccent(item.category)))
           .borderRadius(16)
+          .margin({ top: 8 })
           .enabled(!this.agentTaskSubmitting)
           .onClick(() => {
             this.executeTaskSuggestion(item);
@@ -2061,6 +2078,11 @@ export struct HomePage {
           }.width('100%').constraintSize({ maxHeight: 240 }).scrollBar(BarState.Auto).margin({ top: 12 })
         }
         this.RecommendationCompletedCheckbox(item)
+        if (homeReminderSupportsCodex(item)) {
+          Column() {
+            this.CodexAction(homeReminderCodexRequest(item))
+          }.width('100%').margin({ top: 16 })
+        }
         if (item.agentTask.length > 0) {
           Column() {
             Text('执行任务')

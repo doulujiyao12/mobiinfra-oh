@@ -2,6 +2,7 @@ import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AppRequests } from '../../utils/AppRequests';
 import { codexResponseText } from './CodexResponseText';
+import { checkCodexJsonBudget } from '../../utils/CodexRequestBudget';
 import {
   CodexConnection, CodexEnvelope, CodexCreateBody, CodexTurnBody, CodexUploadBody, CodexApprovalBody,
   normalizeCodexOrigin, validCodexToken, validCodexCa, CodexPairBody, CodexPairingBundle, validateCodexPairing, CodexForkBody, CodexResumeBody
@@ -101,8 +102,9 @@ export class CodexClient {
     const session = this.transport();
     const headers: rcp.RequestHeaders = { 'Content-Type': 'application/json', 'Accept-Encoding': this.compressionEnabled ? 'gzip' : 'identity' };
     if (authenticated) { headers['Authorization'] = 'Bearer ' + this.token; }
-    const request = new rcp.Request(this.origin + route, body === undefined ? 'GET' : 'POST', headers,
-      body === undefined ? undefined : JSON.stringify(body));
+    const encoded = body === undefined ? undefined : JSON.stringify(body);
+    if (encoded !== undefined) { checkCodexJsonBudget(route, encoded); }
+    const request = new rcp.Request(this.origin + route, body === undefined ? 'GET' : 'POST', headers, encoded);
     let cancelled: boolean = false;
     const close = (): void => {
       if (!cancelled) { cancelled = true; try { session.cancel(request); } catch (e) { } }

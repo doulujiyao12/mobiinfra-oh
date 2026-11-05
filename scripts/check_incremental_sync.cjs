@@ -55,13 +55,13 @@ function load(relative) {
   const file=path.resolve(root,relative.endsWith('.ets')?relative:relative+'.ets');
   if(mocks[path.basename(file)]) return mocks[path.basename(file)];
   if(loaded.has(file)) return loaded.get(file);
-  const output=ts.transpileModule(fs.readFileSync(file,'utf8'),{fileName:file.replace(/\.ets$/,'.ts'),reportDiagnostics:true,
+  const output=ts.transpileModule(fs.readFileSync(file,'utf8').replace(/^@Concurrent\s*$/gm,''),{fileName:file.replace(/\.ets$/,'.ts'),reportDiagnostics:true,
     compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}});
   assert.equal((output.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,file);
   const exports={}; loaded.set(file,exports);
   vm.runInNewContext(output.outputText,{exports,console,Date,setTimeout,clearTimeout,require:id=>{
-    if(id==='@kit.ArkTS') return {JSON};
-    if(id==='@ohos.file.fs')return {default:{accessSync:p=>storage.exists(p)||storage.isDirectory(p),listFileSync:p=>storage.listDir(p)}};
+    if(id==='@kit.ArkTS') return {JSON,taskpool:{execute:async(fn,...args)=>fn(...args)}};
+    if(id==='@ohos.file.fs')return {default:{readTextSync:p=>{if(!disk.has(p))throw Error('missing file');return storage.readText(p);},accessSync:p=>storage.exists(p)||storage.isDirectory(p),listFileSync:p=>storage.listDir(p)}};
     if(!id.startsWith('.')) throw Error('Unexpected dependency: '+id);
     return load(path.resolve(path.dirname(file),id));
   }},{filename:file}); return exports;
@@ -319,7 +319,7 @@ test('ArkTS modules reject delete operators while allowing Map and Set deletion 
 
 test('production declarations check changed business modules with strict types and platform-only stubs',()=>{
   const sources=new Map(),etsRoot=path.join(root,'entry/src/main/ets');
-  const actual=['datamanager/ProfileBlockCache','datamanager/IndexWriteBatch','datamanager/SyncMetrics','datamanager/MemoryChangeJournal',
+  const actual=['datamanager/WorkflowRunEvidence','datamanager/WorkflowRunEvidenceTask','datamanager/SyncWorkSlice','datamanager/ProfileBlockCache','datamanager/IndexWriteBatch','datamanager/SyncMetrics','datamanager/MemoryChangeJournal',
     'datamanager/DataManagerStorage','datamanager/DataManagerTypes','datamanager/DataManagerPaths','datamanager/IndexService','datamanager/ChatFactDedup',
     'datamanager/DataPipelineModelClient','datamanager/ModelStreamActivity','datamanager/EventStreamParser','datamanager/DataManagerUtils','datamanager/ChatMemoryExtraction','datamanager/ConsolidationService',
     'datamanager/DataManagerFacade','datamanager/CollectionGroupingService','datamanager/HomeRecommendationService',
@@ -330,7 +330,7 @@ test('production declarations check changed business modules with strict types a
     'datamanager/avatar/AvatarTypes','utils/WorkflowSceneConfig','utils/JsonCompat','utils/DateUtils',
     'utils/StartupSourceSync','utils/mail/MailTypes','utils/ChatMessageTime','utils/WorkflowDateContext',
     'pages/home/HomeEmotionalSupport','pages/home/HomeComfortConcernStore'];
-  for(const name of actual)sources.set(path.join(etsRoot,name+'.ts'),fs.readFileSync(path.join(etsRoot,name+'.ets'),'utf8'));
+  for(const name of actual)sources.set(path.join(etsRoot,name+'.ts'),fs.readFileSync(path.join(etsRoot,name+'.ets'),'utf8').replace(/^@Concurrent\s*$/gm,''));
   const stubs={
     'datamanager/DataManagerLog': 'export declare function dataManagerInfo(s:string):void;export declare function dataManagerWarn(s:string):void;export declare function dataManagerError(s:string):void;',
     'utils/TextEncodingCompat':'export declare function decodeUtf8Compat(b:Uint8Array):string;export declare function encodeUtf8Compat(s:string):Uint8Array;',
@@ -349,7 +349,7 @@ test('production declarations check changed business modules with strict types a
       ensureCurrentForeground():Promise<AvatarHomeViewModel>;listVersionViewModels():AvatarVersionViewModel[];}`
   };
   for(const[name,text]of Object.entries(stubs))sources.set(path.join(etsRoot,name+'.ts'),text);
-  sources.set(path.join(root,'.codex-tmp/sync-kits.d.ts'),"declare module '@kit.ArkTS' { export const JSON:typeof globalThis.JSON; } declare module '@kit.CryptoArchitectureKit' { export namespace cryptoFramework { interface DataBlob { data:Uint8Array; } function createMd(name:string):any; } } declare module '@ohos.file.fs' { const fs:any; export default fs; }");
+  sources.set(path.join(root,'.codex-tmp/sync-kits.d.ts'),"declare module '@kit.ArkTS' { export const JSON:typeof globalThis.JSON; export namespace taskpool { function execute(func:Function,...args:Object[]):Promise<Object>; } } declare module '@kit.CryptoArchitectureKit' { export namespace cryptoFramework { interface DataBlob { data:Uint8Array; } function createMd(name:string):any; } } declare module '@ohos.file.fs' { const fs:any; export default fs; }");
   const options={noEmit:true,strict:true,skipLibCheck:true,target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,moduleResolution:ts.ModuleResolutionKind.NodeJs};
   const host=ts.createCompilerHost(options),read=host.readFile.bind(host),exists=host.fileExists.bind(host);
   host.readFile=file=>sources.get(path.resolve(file))??read(file);host.fileExists=file=>sources.has(path.resolve(file))||exists(file);
@@ -873,6 +873,29 @@ test('sync reminder and recent-sync label use persisted successful activity inst
   } finally {chat.ChatMemorySync=original;}
 });
 
+test('home profile time follows the published text, independently of avatar generation and mail sync',()=>{
+  reset();const facade=Object.create(DataManagerFacade.prototype),profile={generated_at:'2026-11-03T01:14:44',event_count:2};
+  facade.paths=paths;facade.storage=storage;facade.indexService={loadProfileState:()=>profile};
+  facade.homeRecommendationService={pruneInactiveRecommendationsForToday(){}};
+  facade.avatarService={homeView:()=>({avatarUpdatedLabel:'2026-09-06T20:00:11',avatarStatus:'stale'})};
+  facade.homeProfileDomains=()=>[];facade.homeRecommendations=()=>[];
+  facade.formatHomeUpdatedLabel=value=>'text:'+value;facade.lastSyncLabel=()=>{throw Error('Mail activity is not the text-profile clock');};
+  const calendar=mocks['CalendarMemoryStore.ets'].CalendarMemoryStore.prototype;
+  const previous={settings:calendar.settings,snapshot:calendar.snapshot};
+  calendar.settings=()=>({enabled:false});calendar.snapshot=()=>({error:''});
+  try {
+    const first=facade.loadHomeViewModel();assert.equal(first.updatedLabel,'text:2026-11-03T01:14:44');
+    assert.equal(first.avatarUpdatedLabel,'2026-09-06T20:00:11');
+    new StartupSourceSync('/app').markSynced('mail',Date.now());
+    assert.equal(facade.loadHomeViewModel().updatedLabel,first.updatedLabel);
+    profile.generated_at='2026-11-03T10:30:00';
+    const next=facade.loadHomeViewModel();assert.equal(next.updatedLabel,'text:2026-11-03T10:30:00');
+    assert.equal(next.avatarUpdatedLabel,first.avatarUpdatedLabel);
+    const home=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/home/HomePage.ets'),'utf8');
+    assert.ok(/Text\('画像摘要由 AI 分析生成'\)[\s\S]*?Text\(this\.profile\.updatedLabel\)/.test(home));
+  } finally {calendar.settings=previous.settings;calendar.snapshot=previous.snapshot;}
+});
+
 test('a recent source sync never marks earlier unsynced gallery records as ingested',()=>{
   reset();const reminder=load(base+'DataManagerSyncReminder'),oldAt='2026-10-20T12:00:00';
   const old=reminder.syncSnapshotTimeMs(oldAt),day=86400000,photoCreated=old+day;
@@ -1335,10 +1358,10 @@ test('legacy recovery: completed cached sources cannot hide an active WeChat mod
     storage.writeJsonAtomic(paths.outputStatePath('2026-10',name),{metadata:{},records:[reviewRecord(1)]});
   await service.build(config);
   storage.writeJsonAtomic(paths.outputStatePath('2026-10','com.tencent.wechat.md'),{metadata:{},records:[reviewRecord(1,'工作会议讨论新方案')]});
-  let release;const gate=new Promise(resolve=>release=resolve),progress=[];
+  let release,entered;const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve),progress=[];
   const analyze=model.enrichEvents.bind(model);
-  model.enrichEvents=async events=>{if(events.length)await gate;return analyze(events);};
-  const build=service.build(config,value=>progress.push(value));await new Promise(resolve=>setImmediate(resolve));
+  model.enrichEvents=async events=>{if(events.length){entered();await gate;}return analyze(events);};
+  const build=service.build(config,value=>progress.push(value));await started;
   const waiting=progress.at(-1);release();await build;
   assert.equal(waiting.stage,'索引分析');assert.match(waiting.message,/微信/);
 });
@@ -1450,7 +1473,7 @@ test('stream: successful event is durable before its batch times out, failure is
   storage.writeJsonAtomic(file,{metadata:{},records:[reviewRecord(1),reviewRecord(2)]});let requests=0;
   cloudHandler=async(options,stream)=>{
     requests++;assert.equal(options.readTimeout,120000);assert.equal(options.separateReasoning,true);
-    const item=reviewEnrichment(options).events[0],partial='{"events":['+JSON.stringify(item)+',';
+    const items=reviewEnrichment(options).events,partial='{"events":['+(items.length>1?JSON.stringify(items[0])+',':'');
     stream.onProgress({phase:'receiving',responseCode:200,receivedBytes:partial.length,contentChars:partial.length,
       reasoningChars:0,contentDelta:partial,reasoningDelta:'',finishReason:''});
     assert.ok([...disk.keys()].some(p=>p.includes('/sync-cache/events/')&&!p.endsWith('.failed.json')));
@@ -1459,7 +1482,7 @@ test('stream: successful event is durable before its batch times out, failure is
   const service=new IndexService(paths,storage,model),result=await service.build(config);
   assert.equal(Object.keys(service.loadEvents()).length,1);assert.equal(result.failedEventCount,1);
   assert.equal([...disk.keys()].filter(p=>p.endsWith('.failed.json')).length,1);
-  const unchanged=await new IndexService(paths,storage,model).build(config);assert.equal(requests,1);
+  const unchanged=await new IndexService(paths,storage,model).build(config);assert.equal(requests,3);
   assert.equal(unchanged.failedEventCount,0,'Untouched historical failures are not counted as current skips');
   assert.equal(service.completion().failed_event_count,1,'The persisted historical total is retained');
   const facade=Object.create(DataManagerFacade.prototype);facade.indexService=service;
@@ -1468,7 +1491,7 @@ test('stream: successful event is durable before its batch times out, failure is
   const next=new DataPipelineModelClient(),nextModel=new Model();nextModel.enrichEvents=next.enrichEvents.bind(next);
   storage.writeJsonAtomic(file,{metadata:{},records:[reviewRecord(1),reviewRecord(2,'工作会议修改后的新内容')]});
   cloudHandler=async options=>{requests++;assert.equal(JSON.parse(options.messages[1].content).events.length,1);return JSON.stringify(reviewEnrichment(options));};
-  const repaired=await new IndexService(paths,storage,nextModel).build(config);assert.equal(repaired.failedEventCount,0);assert.equal(requests,2);
+  const repaired=await new IndexService(paths,storage,nextModel).build(config);assert.equal(repaired.failedEventCount,0);assert.equal(requests,4);
 });
 
 test('stream: repeated output aborts only its event batch, keeps success and persists failure with Debug off',async()=>{
@@ -1477,7 +1500,7 @@ test('stream: repeated output aborts only its event batch, keeps success and per
   const file=paths.outputStatePath('2026-10','com.tencent.wechat.md');
   storage.writeJsonAtomic(file,{metadata:{},records:[reviewRecord(1),reviewRecord(2)]});let requests=0,reachedTail=false;
   cloudHandler=async(options,stream)=>{
-    requests++;const item=reviewEnrichment(options).events[0],partial='{"events":['+JSON.stringify(item)+',';
+    requests++;const items=reviewEnrichment(options).events,partial='{"events":['+(items.length>1?JSON.stringify(items[0])+',':'');
     let total=partial.length;
     stream.onProgress({phase:'receiving',responseCode:200,receivedBytes:total,contentChars:total,
       reasoningChars:0,contentDelta:partial,reasoningDelta:'',finishReason:''});
@@ -1490,7 +1513,7 @@ test('stream: repeated output aborts only its event batch, keeps success and per
   assert.equal(reachedTail,false);assert.equal(result.failedEventCount,1);assert.equal(Object.keys(service.loadEvents()).length,1);
   const failure=[...disk.entries()].find(([p])=>p.endsWith('.failed.json'));assert.equal(JSON.parse(failure[1]).reason,'repeated_output');
   assert.equal(real.modelActivities()[0].phase,'repeated');assert.equal(real.modelActivities()[0].preview,'');
-  await new IndexService(paths,storage,model).build(config);assert.equal(requests,1);
+  await new IndexService(paths,storage,model).build(config);assert.equal(requests,3);
   cloudHandler=async options=>JSON.stringify(reviewEnrichment(options));
   assert.equal((await real.enrichEvents([event('following-batch')],config)).length,1,'Other event requests still run');
 });
@@ -1818,20 +1841,163 @@ test('chat contract: malformed streamed items fail individually while valid late
   cloudHandler=async()=>JSON.stringify({events:[{event_id:bad.event_id,keywords:[],domains:['other'],entities:[],todo:{}}]});
   await assert.rejects(new DataPipelineModelClient().enrichEvents([bad],config,undefined,index.all()),/CHAT_ATTRIBUTION_INVALID/);
 });
-test('chat context: persisted workflow pages recover one collection even when no image was saved',()=>{
+
+function outcomeItem(e) {
+  return {event_id:e.event_id,keywords:[],domains:['other'],entities:[],todo:{type:'',deadline:'',text:'',agent_task:''},
+    chat:{subjects:[{kind:'other',name:'小王'}],action_owners:[{kind:'self',name:''}],user_involved:true,
+      status:'resolved',evidence_source_refs:e.source_refs}};
+}
+function bufferedOutcomes(stream,items) {
+  // Legacy/proxied endpoints can return a complete response without SSE deltas.
+  stream.onProgress({phase:'buffered',responseCode:200,receivedBytes:0,contentChars:0,reasoningChars:0,
+    contentDelta:'',reasoningDelta:'',finishReason:''});
+  return JSON.stringify({events:items});
+}
+
+test('event outcomes: buffered attribution errors never reject valid siblings in either response order',async()=>{
+  const invalids=[['chat_missing',item=>{delete item.chat;}],
+    ['status_missing_or_invalid',item=>{delete item.chat.status;}],
+    ['evidence_ref_outside_collection',item=>{item.chat.evidence_source_refs=['2026-10-31/wechat.md#3'];}],
+    ['action_owners_name_not_in_evidence',item=>{item.chat.action_owners=[{kind:'other',name:'凭空人物'}];}],
+    ['pending_people_unidentified',item=>{item.chat.status='pending';item.chat.action_owners=[];}]];
+  for(const [code,mutate] of invalids)for(const reverse of [false,true]) {
+    reset();const index=contextFixture(),good=chatFixture('good'),bad=chatFixture('bad');
+    for(const e of [good,bad])e.chat_context=index.forRefs(e.source_refs);
+    const broken=outcomeItem(bad);mutate(broken);const items=[broken,outcomeItem(good)];if(reverse)items.reverse();
+    cloudHandler=async(options,stream)=>bufferedOutcomes(stream,items);const successes=[],failures=[];
+    const results=await new DataPipelineModelClient().enrichEvents([bad,good],config,{onEvent:e=>successes.push(e.event_id),
+      onFailure:(e,reason,detail)=>failures.push([e.event_id,reason,clone(detail)])},index.all());
+    assert.deepEqual(results.map(e=>e.event_id),['good']);assert.deepEqual(successes,['good']);
+    assert.deepEqual(failures,[['bad','invalid_chat_attribution',{code,scope:'event',attempts:3}]]);
+  }
+});
+
+test('event outcomes: stray objects, missing IDs and invalid ordinary fields stay isolated',async()=>{
+  reset();const events=['good','missing','bad'].map(id=>event(id)),failures=[];
+  const invalid=outcomeItem(events[2]);delete invalid.domains;
+  cloudHandler=async(options,stream)=>bufferedOutcomes(stream,[null,17,{event_id:'foreign'},invalid,outcomeItem(events[0])]);
+  const results=await new DataPipelineModelClient().enrichEvents(events,config,{onEvent:()=>{},
+    onFailure:(e,reason,detail)=>failures.push([e.event_id,reason,clone(detail)])});
+  assert.deepEqual(results.map(e=>e.event_id),['good']);
+  assert.deepEqual(failures,[['missing','missing_event',{code:'event_not_returned',scope:'event',attempts:3}],
+    ['bad','invalid_event_payload',{code:'event_fields_missing',scope:'event',attempts:3}]]);
+});
+
+test('event outcomes: streamed corrections and repeated IDs save each valid event only once',async()=>{
+  reset();const index=contextFixture(),events=['corrected','good'].map(id=>chatFixture(id));
+  events.forEach(e=>e.chat_context=index.forRefs(e.source_refs));const accepted=[],failed=[];
+  const broken=outcomeItem(events[0]);broken.chat.evidence_source_refs=[];
+  const items=[broken,...events.map(outcomeItem),outcomeItem(events[0])];
+  cloudHandler=async(options,stream)=>{
+    const content=JSON.stringify({events:items});let length=0;
+    for(const piece of [content.slice(0,80),content.slice(80,200),content.slice(200)]){
+      length+=piece.length;stream.onProgress({phase:'receiving',responseCode:200,receivedBytes:length,contentChars:length,
+        reasoningChars:0,contentDelta:piece,reasoningDelta:'',finishReason:''});
+    }
+    assert.deepEqual(accepted,['corrected','good'],'Accept complete objects before the response ends');return content;
+  };
+  const result=await new DataPipelineModelClient().enrichEvents(events,config,{onEvent:e=>accepted.push(e.event_id),
+    onFailure:(e,reason)=>failed.push(reason)},index.all());
+  assert.deepEqual(result.map(e=>e.event_id),['corrected','good']);assert.deepEqual(accepted,['corrected','good']);assert.deepEqual(failed,[]);
+});
+
+test('event outcomes: buffered successes and exact failure receipts survive publication failure and restart',async()=>{
+  reset();const real=new DataPipelineModelClient(),model=new Model();model.enrichEvents=real.enrichEvents.bind(real);model.fail=true;
+  const fixture=evidenceFixture('2026-11-02','wechat.md','mixed',['小王告诉我会议已结束','我请小王回复材料']);let calls=0;
+  cloudHandler=async(options,stream)=>{
+    calls++;const items=JSON.parse(options.messages[1].content).events.map(outcomeItem);
+    for(const item of items)if(item.event_id.endsWith('#2'))item.chat.evidence_source_refs=[];
+    return bufferedOutcomes(stream,items);
+  };
+  await assert.rejects(new IndexService(paths,storage,model).build(config),/interrupted/);
+  const failure=JSON.parse([...disk.entries()].find(([file])=>file.endsWith('.failed.json'))[1]);
+  assert.equal(failure.policy,'event-analysis-v3');assert.equal(failure.attempts,3);assert.equal(failure.code,'evidence_refs_missing');assert.equal(failure.scope,'event');
+  assert.equal(failure.reason,'invalid_chat_attribution');assert.ok(failure.failed_at);
+  assert.equal([...disk.keys()].filter(file=>file.includes('/sync-cache/events/')&&!file.endsWith('.failed.json')).length,1);
+  model.fail=false;const service=new IndexService(paths,storage,model),result=await service.build(config);
+  assert.equal(calls,3,'Exhausted retries and completed outcomes persist outside the publication transaction');
+  assert.equal(result.failedEventCount,1);assert.equal(Object.keys(service.loadEvents()).length,1);
+  assert.ok(logs.some(line=>line.includes('code=evidence_refs_missing scope=event')));
+});
+
+test('event outcomes: checkpoint storage errors remain fatal for streamed, buffered and failed items',async()=>{
+  for(const mode of ['streamed','buffered','failure']) {
+    reset();const client=new DataPipelineModelClient(),service=new IndexService(paths,storage,client),e=event('write-failure');
+    cloudHandler=async(options,stream)=>{
+      const items=mode==='failure'?[]:[outcomeItem(e)];
+      return mode==='streamed'?JSON.stringify({events:items}):bufferedOutcomes(stream,items);
+    };
+    failWrite=file=>file.includes('/sync-cache/events/');
+    await assert.rejects(service.enrichWithCheckpoint([e],config),/保存事件检查点失败/);
+    assert.equal([...disk.keys()].filter(file=>file.endsWith('.failed.json')).length,0);
+    assert.equal(service.failedEventIds.size,0,'A storage failure is not a completed model rejection');
+  }
+});
+
+test('event outcomes: a valid durable success takes precedence over an obsolete failure marker',async()=>{
+  reset();const client=new DataPipelineModelClient(),e=event('recovered'),service=new IndexService(paths,storage,client);
+  cloudHandler=async()=>JSON.stringify({events:[]});await service.enrichWithCheckpoint([e],config);
+  const failureFile=[...disk.keys()].find(file=>file.endsWith('.failed.json')),failure=disk.get(failureFile);
+  disk.delete(failureFile);cloudHandler=async()=>JSON.stringify({events:[outcomeItem(e)]});
+  await new IndexService(paths,storage,client).enrichWithCheckpoint([e],config);disk.set(failureFile,failure);
+  cloudHandler=async()=>{throw Error('Must reuse the valid durable success');};
+  const next=new IndexService(paths,storage,client);assert.equal((await next.enrichWithCheckpoint([e],config)).length,1);
+  assert.equal(next.failedEventIds.size,0);
+});
+
+test('event outcomes: legacy unfinished sources recover without rereading successful history',async()=>{
+  reset();const model=new Model(),service=new IndexService(paths,storage,model),day='2026-11-02';
+  const selected=evidenceFixture(day,'selected.md','selected',['我等小王回复材料','小王说已经发出']);
+  const untouched=evidenceFixture(day,'untouched.md','untouched');
+  const relative='2026-11/selected.md.state.json',requested=[];
+  model.enrichEvents=async(events,c,callbacks)=>{const good=[];for(const e of events){
+    if(e.source_state_file===relative)callbacks.onFailure(e,'invalid_or_failed_response');
+    else {callbacks.onEvent(e);good.push(e);}}return good;};
+  await service.build(config);
+  const manifest=storage.readJson(paths.indexesRoot+'/manifest.json',{});
+  delete manifest.sources[relative].analysis_policy;storage.writeJsonAtomic(paths.indexesRoot+'/manifest.json',manifest);
+  for(const [file,text] of disk)if(file.endsWith('.failed.json')){
+    const receipt=JSON.parse(text);delete receipt.attempts;receipt.policy='event-outcome-v2';disk.set(file,JSON.stringify(receipt));
+  }
+  model.enrichEvents=async(events,c,callbacks)=>{const result=[];for(const e of events){requested.push(e.event_id);
+    if(e.record_id===1){const good={...e,domains:['other'],enrichment_method:'model_batch'};callbacks.onEvent(good);result.push(good);}
+    else callbacks.onFailure(e,'invalid_chat_attribution',{code:'evidence_refs_missing',scope:'event',attempts:3});
+  }return result;};
+  reads.clear();const selection=service.changedSourceSelection(config,[]);
+  assert.deepEqual(clone(selection.sources),[relative]);
+  const first=await service.build(config,undefined,selection);
+  assert.deepEqual(requested.sort(),[relative+'#1',relative+'#2']);assert.equal(first.failedEventCount,1);
+  assert.equal(reads.get(untouched.state)||0,0);assert.equal(reads.get(untouched.log)||0,0);
+  assert.equal(Object.keys(service.loadEvents()).length,2);requested.length=0;
+  const next=service.changedSourceSelection(config,[]);assert.equal(next.sources.length,0);
+  await service.build(config,undefined,next);assert.equal(requested.length,0);
+});
+
+test('event outcomes: recovery selection depends on unfinished policy, never on a specific error or topic',()=>{
+  reset();const service=new IndexService(paths,storage,new Model());reads.clear();
+  const manifest={sources:{
+    'old-timeout':{failed_event_ids:['a'],analysis_policy:'old'},
+    'old-attribution':{failed_event_ids:['b']},
+    'exhausted':{failed_event_ids:['c'],analysis_policy:'event-analysis-v3'},
+    'successful':{failed_event_ids:[]}}};
+  assert.deepEqual(clone(service.pendingFailureSources(manifest)),['old-timeout','old-attribution']);
+  assert.equal(reads.size,0,'Selection uses the source manifest, not a scan of historical receipts or raw logs');
+});
+
+test('chat context: persisted workflow pages recover one collection even when no image was saved',async()=>{
   reset();const daily=paths.dailyLogRoot+'/2026-10-31/com.tencent.mm__basic.md';
   storage.writeTextAtomic(daily,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3},latest_entry_index:2})+'\n-->\n\n1. 小王说请发PPT\n\n2. 我说已发送，小王说收到\n');
   storage.writeJsonAtomic(paths.workflowRunsRoot+'/run-a/run_summary.json',{steps:{'3.1':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'小王说请发PPT'}},
     '3.2':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'我说已发送，小王说收到'}}}});
-  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  const service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap();
   const context=service.chatContexts.forRefs(['2026-10-31/com.tencent.mm__basic.md#1']);
   assert.equal(context.complete,true);const batches=service.loadChatContextBatches([chatFixture('wx',{chat_context:context})]);
   assert.equal(batches[0].entries.length,2);assert.ok(batches[0].entries[1].text.includes('已发送'));
 });
-test('chat context: fast WeChat collection uses run ID and workflow metadata keeps collection boundaries',()=>{
+test('chat context: fast WeChat collection uses run ID and workflow metadata keeps collection boundaries',async()=>{
   reset();const dir=paths.dailyLogRoot+'/2026-10-31/';
   storage.writeTextAtomic(dir+'com.tencent.mm__wechat_auto_summary__r.md','<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3,run_id:'quick-r'}})+'\n-->\n\n1. 小王：我很累\n');
-  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  const service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap();
   const ctx=service.chatContexts.forRefs(['2026-10-31/com.tencent.mm__wechat_auto_summary__r.md#1']);
   assert.equal(ctx.batch_ids[0],'wechat:quick-r');assert.equal(ctx.complete,true);
   const parsed=load(base+'DataManagerUtils').parseDailyLogDocument('<!-- DAILY_LOG_METADATA\n'+JSON.stringify({entry_batch_ids:{'1':'workflow:old','2':'workflow:new'}})+'\n-->\n');
@@ -1959,7 +2125,7 @@ test('comfort cache: network or invalid-person responses cannot overwrite succes
   assert.equal(storage.readText('/app/home-comfort/concerns.json'),before);assert.equal(state.toasts.length,2);
   assert.equal(state.clears,1,'Only the successful initial generation clears the conversation');
 });
-test('comfort cache: genuine empty results are cached, input and attribution changes invalidate them, and old days expire',async()=>{
+test('comfort cache: empty checks are cached, input changes invalidate them, and prior topics survive the next day',async()=>{
   reset();const events=[chatFixture('wx',{normalized_fact:'小王说最近压力很大'})];
   const first=comfortPageFixture(events);first.state.reply='{"concerns":[]}';await first.page.refreshHomeComfortConcerns(false);
   const reopened=comfortPageFixture(events);await reopened.page.refreshHomeComfortConcerns(false);assert.equal(reopened.state.calls,0);
@@ -1967,9 +2133,88 @@ test('comfort cache: genuine empty results are cached, input and attribution cha
   const key=comfort.homeComfortInputIdentity(events,'2026-11-02');events[0].chat_attribution={subject:'other',subject_name:'小王'};
   assert.notEqual(comfort.homeComfortInputIdentity(events,'2026-11-02'),key);
   const {HomeComfortConcernStore}=load('entry/src/main/ets/pages/home/HomeComfortConcernStore');
-  assert.equal(new HomeComfortConcernStore('/app',storage).load('2026-11-03'),null);
+  assert.equal(new HomeComfortConcernStore('/app',storage).load('2026-11-03').concerns.length,1);
   const many=Array.from({length:49},(_,i)=>({...events[0],event_id:'wx'+i})),bounded=comfort.homeComfortInputIdentity(many,'2026-11-02');
   many[48].normalized_fact='outside prompt window';assert.equal(comfort.homeComfortInputIdentity(many,'2026-11-02'),bounded);
+});
+
+test('comfort topics: neutral interests and plans can start a conversation without inventing distress',()=>{
+  const e=chatFixture('interest',{summary:'用户最近在学摄影',normalized_fact:'用户最近开始学习摄影，想试试拍夜景'});
+  const prompt=comfort.buildHomeComfortConcernPrompt([e],'2026-11-03');
+  assert.ok(prompt.includes('不必存在烦恼或负面情绪'));
+  assert.ok(prompt.includes('兴趣好奇、新鲜经历、工作或学习进展'));
+  assert.ok(!prompt.includes('没有明确烦恼时输出'));
+  const [topic]=comfort.parseHomeComfortConcerns(concernResponse({subject:'self',subject_name:'',title:'最近拍到了什么',
+    summary:'你最近开始学习摄影，可以聊聊拍照体验',opening:'最近最想尝试拍什么？'}),'interest',[e]);
+  assert.equal(topic.title,'最近拍到了什么');
+  const messages=comfort.buildHomeComfortChatMessages(topic,[{role:'user',content:'想聊摄影',id:'m',createdAt:1}],[e],'2026-11-03');
+  assert.ok(messages[0].content.includes('不必把普通话题解释成情绪问题'));
+});
+
+test('comfort topics: empty generation retains previous topics and conversations through refresh and restart',async()=>{
+  reset();const events=[chatFixture('wx',{normalized_fact:'小王说最近压力很大'})];
+  const first=comfortPageFixture(events);await first.page.refreshHomeComfortConcerns(false);
+  const original=clone(first.page.homeComfortConcerns),clears=first.state.clears;
+  events.push(chatFixture('new',{normalized_fact:'聊到了一个新话题'}));
+  first.state.reply='{"concerns":[]}';await first.page.refreshHomeComfortConcerns(false);
+  assert.deepEqual(clone(first.page.homeComfortConcerns),original);assert.equal(first.state.clears,clears);
+  await first.page.refreshHomeComfortConcerns(false);assert.equal(first.state.calls,2,'The empty result is a completed check');
+  const reopened=comfortPageFixture(events);await reopened.page.refreshHomeComfortConcerns(false);
+  assert.equal(reopened.state.calls,0);assert.deepEqual(clone(reopened.page.homeComfortConcerns),original);
+  await first.page.refreshHomeComfortConcerns(true);assert.equal(first.state.calls,3,'Manual refresh can check again');
+  assert.equal(first.state.clears,clears);assert.deepEqual(clone(first.page.homeComfortConcerns),original);
+});
+
+test('comfort topics: zero recent input or an empty next-day check never removes the last successful cards',async()=>{
+  reset();const e=chatFixture('wx',{normalized_fact:'小王说最近压力很大'});
+  const first=comfortPageFixture([e]);await first.page.refreshHomeComfortConcerns(false);
+  const previous=clone(first.page.homeComfortConcerns);
+  const nextDay=comfortPageFixture([e],'2026-11-03');nextDay.state.reply='{"concerns":[]}';
+  await nextDay.page.refreshHomeComfortConcerns(false);assert.deepEqual(clone(nextDay.page.homeComfortConcerns),previous);
+  assert.equal(nextDay.state.calls,1);assert.equal(nextDay.state.clears,0);
+  const noInput=comfortPageFixture([],'2026-11-04');await noInput.page.refreshHomeComfortConcerns(false);
+  assert.deepEqual(clone(noInput.page.homeComfortConcerns),previous);assert.equal(noInput.state.calls,0);assert.equal(noInput.state.clears,0);
+  const again=comfortPageFixture([],'2026-11-04');await again.page.refreshHomeComfortConcerns(false);
+  assert.deepEqual(clone(again.page.homeComfortConcerns),previous);assert.equal(again.state.calls,0);
+});
+
+test('comfort topics: new nonempty topics replace previous cards and empty first use stays a valid empty cache',async()=>{
+  reset();const empty=comfortPageFixture([]);await empty.page.refreshHomeComfortConcerns(false);
+  assert.equal(empty.page.homeComfortConcerns.length,0);assert.equal(empty.state.clears,0);assert.equal(empty.state.calls,0);
+  const e=chatFixture('wx',{normalized_fact:'小王说最近压力很大'}),first=comfortPageFixture([e]);
+  await first.page.refreshHomeComfortConcerns(false);const old=first.page.homeComfortConcerns[0].id;
+  first.state.reply=concernResponse({title:'小王：最近想聊什么'});await first.page.refreshHomeComfortConcerns(true);
+  assert.notEqual(first.page.homeComfortConcerns[0].id,old);assert.equal(first.state.clears,2);
+  assert.equal(first.page.homeComfortConcerns[0].title,'小王：最近想聊什么');
+});
+
+test('chat undated actions: contact, replies and prerequisites survive enrichment, indexing and reminder planning',async()=>{
+  reset();const ref='2026-11-02/dialog.md#1',index=new chatContext.ChatCollectionContextIndex();
+  index.add('undated',ref,'会话类型：私聊\n会话名称：同事甲\n位置：右侧｜发送人：我｜聊天对象：同事甲｜原文：确认材料后联系同事甲。',[],1);
+  const values=['确认材料后联系同事甲','回复同事甲','同事甲处理材料','普通聊天'];
+  const events=values.map((text,i)=>chatFixture('undated-'+i,{event_date:'2026-11-02',source_refs:[ref],summary:text,normalized_fact:text}));
+  for(const e of events)e.chat_context=index.forRefs(e.source_refs);
+  cloudHandler=async options=>{
+    assert.ok(options.messages[0].content.includes('明确日期不是行动或关注的必要条件'));
+    const input=JSON.parse(options.messages[1].content);
+    return JSON.stringify({events:input.events.map((e,i)=>({event_id:e.event_id,keywords:[],domains:['other'],entities:[],
+      todo:{type:'',deadline:'',time_text:'',text:i===3?'':values[i],agent_task:'打开手机执行'},
+      chat:{subjects:[{kind:'other',name:'同事甲'}],action_owners:[{kind:'self',name:''}],user_involved:true,
+        status:i===1?'resolved':i===2?'unknown':'pending',evidence_source_refs:[ref]}}))});
+  };
+  const result=await new DataPipelineModelClient().enrichEvents(events,config,undefined,index.all());
+  assert.equal(result[0].todo.type,'other');assert.equal(result[0].todo.deadline,'');
+  assert.equal(result[0].todo.text,values[0]);assert.equal(result[0].todo.agent_task,'');
+  for(const e of result.slice(1))assert.equal(e.todo.type,'','Resolved, uncertain and empty outputs stay nonactionable');
+  const service=new IndexService(paths,storage,new Model()),map=Object.fromEntries(result.map(e=>[e.event_id,e]));
+  const doc=service.buildHomeTodoDocument(map);assert.deepEqual(clone(doc.no_deadline_event_ids),['undated-0']);
+  const {isHomeTodoIndexCandidate}=load(base+'IndexService');
+  assert.equal(isHomeTodoIndexCandidate({type:'other',text:'联系同事甲',deadline:'',agent_task:''}),true);
+  assert.equal(isHomeTodoIndexCandidate({type:'',text:'普通聊天',deadline:'',agent_task:''}),false);
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const planner=new HomeRecommendationService(paths,storage,new Model(),{loadHomeTodoCandidateEvents:()=>map});
+  planner.currentDateKey=()=> '2026-11-03';
+  assert.deepEqual(clone(planner.planningContext().candidateEventIds),['undated-0']);
 });
 test('comfort startup: cache restore starts without waiting for the task suggestion request',async()=>{
   reset();const {page}=comfortPageFixture([]);let release;const blocked=new Promise(resolve=>{release=resolve;});let comfortStarted=false;
@@ -2022,12 +2267,12 @@ test('chat evidence: one forged cross-batch citation cannot be hidden beside a v
     evidence_source_refs:['2026-10-31/wechat.md#1','2026-10-31/wechat.md#3']};
   assert.equal(chatContext.normalizeChatAttribution(raw,e,index.all()).status,'unknown');
 });
-test('chat evidence: duplicate legacy summaries in two runs never guess a collection identity',()=>{
+test('chat evidence: duplicate legacy summaries in two runs never guess a collection identity',async()=>{
   reset();const file='com.tencent.mm__basic.md',daily=paths.dailyLogRoot+'/2026-10-31/'+file;
   storage.writeTextAtomic(daily,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3}})+'\n-->\n\n1. 小王说请发PPT\n');
   for(const run of ['a','b'])storage.writeJsonAtomic(paths.workflowRunsRoot+'/'+run+'/run_summary.json',
     {steps:{'1':{output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:daily,response:'小王说请发PPT'}}}});
-  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap();
+  const service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap();
   assert.equal(service.chatContexts.forRefs(['2026-10-31/'+file+'#1']).complete,false);
 });
 test('chat dedup: consolidation merges nearby repeated collections and preserves the latest context separately',async()=>{
@@ -2164,81 +2409,81 @@ function evidenceFixture(day,filename,run,texts=['小王请我发论文，我说
     summary:text,normalized_fact:text,first_seen_date:day,last_seen_date:day,source_dates:[day],workflow_scene_ids:[3],source_refs:[refs[i]]}));
   storage.writeJsonAtomic(state,{metadata:{},records});return {relative,log,refs,state,records};
 }
-test('index evidence: a new collection never opens unrelated historical logs or runs',()=>{
+test('index evidence: a new collection never opens unrelated historical logs or runs',async()=>{
   reset();for(let i=0;i<250;i++)evidenceFixture('2020-01-01','old-'+i+'.md','old-'+i);
   const fresh=evidenceFixture('2026-11-01','wechat.md','20261101-new');reads.clear();
-  const service=new IndexService(paths,storage,new Model()),images=service.buildImageReferenceMap([fresh.state],[fresh.relative]);
+  const service=new IndexService(paths,storage,new Model()),images=await service.buildImageReferenceMap([fresh.state],[fresh.relative]);
   assert.equal(images[fresh.refs[0]][0],'runs/20261101-new/image-0.png');
   assert.deepEqual([...reads.keys()].filter(file=>file.startsWith(paths.workflowRunsRoot+'/')),[paths.workflowRunsRoot+'/20261101-new/run_summary.json']);
   assert.deepEqual([...reads.keys()].filter(file=>file.startsWith(paths.dailyLogRoot+'/')),[fresh.log]);
 });
-test('index evidence: cached pages survive a new source without rereading their raw log or run',()=>{
+test('index evidence: cached pages survive a new source without rereading their raw log or run',async()=>{
   reset();const old=evidenceFixture('2026-10-30','wechat.md','old');
-  let service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([old.state],[old.relative]);
+  let service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([old.state],[old.relative]);
   const fresh=evidenceFixture('2026-10-31','wechat.md','new');
   storage.writeJsonAtomic(old.state,{metadata:{},records:[old.records[0],{...fresh.records[0],record_id:2}]});reads.clear();
-  service=new IndexService(paths,storage,new Model());const images=service.buildImageReferenceMap([old.state],[fresh.relative]);
+  service=new IndexService(paths,storage,new Model());const images=await service.buildImageReferenceMap([old.state],[fresh.relative]);
   assert.equal(images[old.refs[0]][0],'runs/old/image-0.png');assert.equal(images[fresh.refs[0]][0],'runs/new/image-0.png');
   assert.equal(reads.has(old.log),false);assert.equal(reads.has(paths.workflowRunsRoot+'/old/run_summary.json'),false);
   assert.equal(service.chatContexts.forRefs(old.refs).complete,true);
 });
-test('index evidence: normalized committed summaries retain image links when structured model output differs',()=>{
+test('index evidence: normalized committed summaries retain image links when structured model output differs',async()=>{
   reset();const original='位置：左侧｜发送人：同事甲｜聊天对象：我｜时间原文：昨天09:00｜原文：请买书';
   const committed=messageTime.normalizeChatMessageTimes(original,new Date(2026,10,2,10));
   const data=evidenceFixture('2026-11-02','chat.md','committed-run',[committed]);
   const summaryPath=paths.workflowRunsRoot+'/committed-run/run_summary.json',image=paths.workflowRunsRoot+'/committed-run/image-0.png';
   storage.writeJsonAtomic(summaryPath,{steps:{'3.iter1.1':{started_at:1,output:{action:'screenshot',image_path:image}},'3.iter1.2':{started_at:2,output:{
     tool_name:'vlm_qa',mode:'summary',daily_log_path:data.log,structured_output:{summary:original,contains_today_chat:true},response:committed}}}});
-  const service=new IndexService(paths,storage,new Model());const refs=service.buildImageReferenceMap([data.state],[data.relative]);
+  const service=new IndexService(paths,storage,new Model());const refs=await service.buildImageReferenceMap([data.state],[data.relative]);
   assert.deepEqual(clone(refs[data.refs[0]]),['runs/committed-run/image-0.png']);
   assert.equal(reads.has(image),false,'Image association must not read image contents');
   const cachePath=service.sourceEvidencePath(data.relative),cache=storage.readJson(cachePath,null);
   delete cache.summary_match_policy;cache.entries[0].image_paths=[];storage.writeJsonAtomic(cachePath,cache);reads.clear();
-  const repaired=new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
+  const repaired=await new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
   assert.deepEqual(clone(repaired[data.refs[0]]),['runs/committed-run/image-0.png']);assert.ok(reads.has(summaryPath));
-  reads.clear();new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
+  reads.clear();await new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
   assert.equal(reads.has(summaryPath),false);assert.equal(reads.has(data.log),false,'A repaired cache must not scan old evidence again');
   const healthy=storage.readJson(cachePath,null);delete healthy.summary_match_policy;storage.writeJsonAtomic(cachePath,healthy);reads.clear();
-  new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
+  await new IndexService(paths,storage,new Model()).buildImageReferenceMap([data.state],[]);
   assert.equal(reads.has(summaryPath),false,'Healthy old image mappings do not require migration');
 });
-test('index evidence: edited or deleted pages invalidate only their source and cannot return through old batch context',()=>{
+test('index evidence: edited or deleted pages invalidate only their source and cannot return through old batch context',async()=>{
   reset();const before=evidenceFixture('2026-11-01','wechat.md','run',['小王请我发论文','我说已经发出']);
-  const service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([before.state],[before.relative]);
+  const service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([before.state],[before.relative]);
   const after=evidenceFixture('2026-11-01','wechat.md','run',['小王改为明天再发论文']);reads.clear();
-  service.buildImageReferenceMap([after.state],[after.relative]);const context=service.chatContexts.all()[0];
+  await service.buildImageReferenceMap([after.state],[after.relative]);const context=service.chatContexts.all()[0];
   assert.equal(context.entries.length,1);assert.equal(context.entries[0].text,'小王改为明天再发论文');
   assert.ok(!JSON.stringify(context).includes('已经发出'));assert.equal(reads.has(after.log),true);
 });
-test('index evidence: source cache corruption rebuilds locally and missing runs are not sealed as resolved',()=>{
+test('index evidence: source cache corruption rebuilds locally and missing runs are not sealed as resolved',async()=>{
   reset();const first=evidenceFixture('2026-11-01','wechat.md','run');
-  let service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([first.state],[first.relative]);
+  let service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([first.state],[first.relative]);
   storage.writeTextAtomic(service.sourceEvidencePath(first.relative),'broken-json');reads.clear();
-  service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([first.state],[]);
+  service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([first.state],[]);
   assert.equal(reads.has(first.log),true);assert.equal(service.chatContexts.forRefs(first.refs).complete,true);
   storage.removeFile(paths.workflowRunsRoot+'/run/run_summary.json');
-  service.buildImageReferenceMap([first.state],[first.relative]);
+  await service.buildImageReferenceMap([first.state],[first.relative]);
   assert.equal(storage.readJson(service.sourceEvidencePath(first.relative),null).resolved_runs,false);
   evidenceFixture('2026-11-01','wechat.md','run');reads.clear();
-  assert.equal(service.buildImageReferenceMap([first.state],[])[first.refs[0]][0],'runs/run/image-0.png');
+  assert.equal((await service.buildImageReferenceMap([first.state],[]))[first.refs[0]][0],'runs/run/image-0.png');
 });
-test('index evidence: a legacy match is cached and full verification can still repair it',()=>{
+test('index evidence: a legacy match is cached and full verification can still repair it',async()=>{
   reset();const data=evidenceFixture('2026-11-01','wechat.md','legacy');
   storage.writeTextAtomic(data.log,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3}})+'\n-->\n\n1. 小王请我发论文，我说已经发出\n');
-  let service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([data.state],[data.relative]);reads.clear();
-  service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([data.state],[]);
+  let service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([data.state],[data.relative]);reads.clear();
+  service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([data.state],[]);
   assert.equal(reads.has(data.log),false);assert.equal([...reads.keys()].some(file=>file.startsWith(paths.workflowRunsRoot+'/')),false);
-  reads.clear();service.buildImageReferenceMap([data.state]);assert.equal(reads.has(data.log),true);
+  reads.clear();await service.buildImageReferenceMap([data.state]);assert.equal(reads.has(data.log),true);
 });
-test('index evidence: restored sibling source pages retain collection context and truncation stays incomplete',()=>{
+test('index evidence: restored sibling source pages retain collection context and truncation stays incomplete',async()=>{
   reset();const a=evidenceFixture('2026-11-01','a.md','shared',['小王请我发论文']);
   const b=evidenceFixture('2026-11-01','b.md','shared',['我说已经发出']);
   // Both outputs belong to one real run; the helper above replaced its summary.
   const steps={};for(const data of [a,b])steps[data.relative]={output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:data.log,
     response:data.records[0].summary,image_path:paths.workflowRunsRoot+'/shared/'+data.relative.slice(11)+'.png'}};
   storage.writeJsonAtomic(paths.workflowRunsRoot+'/shared/run_summary.json',{steps});
-  let service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([a.state,b.state],[a.relative,b.relative]);
-  service=new IndexService(paths,storage,new Model());service.buildImageReferenceMap([a.state],[]);
+  let service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([a.state,b.state],[a.relative,b.relative]);
+  service=new IndexService(paths,storage,new Model());await service.buildImageReferenceMap([a.state],[]);
   assert.equal(service.chatContexts.all()[0].entries.length,2);assert.ok(service.chatContexts.all()[0].entries.some(e=>e.text.includes('已经发出')));
   const index=new chatContext.ChatCollectionContextIndex();index.restore({batch_id:'large',complete:false,
     entries:[{source_ref:'2026-11-01/b.md#1',text:'[中间内容省略]',image_paths:[],order:0}]});
@@ -2254,6 +2499,77 @@ test('index evidence: failed analysis publishes neither new evidence caches nor 
   assert.equal(storage.exists(service.sourceEvidencePath(fresh.relative)),false);
   assert.equal(storage.exists(service.sourceEvidencePath(old.relative)),true);
 });
+test('index evidence: reconnect retries keep timers responsive and preserve the previous committed generation',async()=>{
+  reset();const model=new Model(),service=new IndexService(paths,storage,model);
+  const old=evidenceFixture('2026-10-31','old.md','old');await service.build(config);
+  const generation=storage.readText(paths.indexesRoot+'/completion.json');
+  const fresh=Array.from({length:48},(_,i)=>evidenceFixture('2026-11-01','new-'+i+'.md','new-'+i));
+  const rawBefore=new Map([...disk].filter(([file])=>file.startsWith(paths.dailyLogRoot+'/')||file.startsWith(paths.workflowRunsRoot+'/')));
+  const originalRead=storage.readText,originalEnrich=model.enrichEvents;
+  // Simulate expensive local run decoding. The host taskpool mock deliberately
+  // runs inline: explicit index work slices must still admit real timer turns.
+  storage.readText=function(file,fallback){if(file.endsWith('/run_summary.json')){const until=Date.now()+2;while(Date.now()<until){}}return originalRead.call(this,file,fallback);};
+  let ticks=0;const timer=setInterval(()=>ticks++,1);
+  try {
+    model.enrichEvents=async()=>{throw Error('network disconnected');};
+    for(let attempt=0;attempt<2;attempt++) {
+      const before=ticks;
+      await assert.rejects(service.build(config),/network disconnected/);
+      assert.ok(ticks-before>=3,'Preparing a retry must yield repeatedly, not merely once before a blocking scan');
+      assert.equal(storage.readText(paths.indexesRoot+'/completion.json'),generation);
+      assert.ok(fresh.every(item=>!storage.exists(service.sourceEvidencePath(item.relative))));
+    }
+    model.enrichEvents=originalEnrich;
+    await service.build(config);
+    assert.ok(fresh.every(item=>storage.exists(service.sourceEvidencePath(item.relative))));
+    assert.ok(storage.exists(service.sourceEvidencePath(old.relative)));
+    for(const [file,text] of rawBefore)assert.equal(disk.get(file),text,'Retry must not discard original collected evidence');
+  } finally {clearInterval(timer);storage.readText=originalRead;model.enrichEvents=originalEnrich;}
+});
+
+test('index evidence: background projection excludes image bytes while preserving all fallback matching metadata',async()=>{
+  reset();const {readWorkflowRunEvidence}=load(base+'WorkflowRunEvidenceTask');
+  const image='A'.repeat(4*1024*1024),file=paths.workflowRunsRoot+'/large/run_summary.json';
+  const payload={request:image,steps:{
+    'a.0':{output:{unrelated:image}},
+    'a.1':{started_at:1,finished_at:2,output:{action:'screenshot',image_b64:image,image_path:'/missing/screen.png'}},
+    'a.2':{started_at:3,output:{tool_name:'vlm_qa',mode:'summary',daily_log_path:'/daily-log/2026-11-01/a.md',response:'exact committed text',
+      structured_output:{summary:'original model text',unused:image},request:image}}
+  }};
+  storage.writeJsonAtomic(file,payload);const before=disk.get(file),result=await readWorkflowRunEvidence(file);
+  assert.deepEqual(Object.keys(result.steps),Object.keys(payload.steps));
+  assert.equal(result.steps['a.1'].started_at,1);assert.equal(result.steps['a.1'].finished_at,2);
+  assert.equal(result.steps['a.1'].output.image_b64,'present');
+  assert.equal(result.steps['a.2'].output.response,'exact committed text');
+  assert.equal(result.steps['a.2'].output.structured_output.summary,'original model text');
+  assert.ok(JSON.stringify(result).length<1000,'Embedded screenshots must never return to the UI thread');
+  assert.equal(disk.get(file),before);
+  storage.writeTextAtomic(file,'{truncated');assert.throws(()=>readWorkflowRunEvidence(file));
+});
+
+test('index evidence: screenshot references are resolved once per run and retain scope/time/order precedence',async()=>{
+  reset();const service=new IndexService(paths,storage,new Model());
+  const {compactWorkflowRunEvidence}=load(base+'WorkflowRunEvidence');
+  const {SyncWorkSlice}=load(base+'SyncWorkSlice');
+  const steps={
+    'same.early':{started_at:1,finished_at:2,output:{action:'screenshot',image_b64:'image'}},
+    'other.new':{started_at:7,finished_at:8,output:{action:'screenshot',image_b64:'image'}},
+    'same.future':{started_at:20,finished_at:21,output:{action:'screenshot',image_b64:'image'}},
+    'same.tool':{started_at:10,output:{tool_name:'vlm_qa',mode:'summary'}},
+    'none.tool':{started_at:10,output:{tool_name:'vlm_qa',mode:'summary'}},
+    'no-clock.tool':{output:{tool_name:'vlm_qa',mode:'summary'}}
+  };
+  const compact=compactWorkflowRunEvidence({steps}).steps,keys=Object.keys(compact);
+  let resolved=0;const resolve=service.screenshotImageReference;
+  service.screenshotImageReference=function(...args){resolved++;return resolve.apply(this,args);};
+  const refs=await service.workflowScreenshotReferences('run',compact,keys,new SyncWorkSlice());
+  const count=resolved;
+  for(let i=0;i<100;i++)assert.equal(service.nearestScreenshotImageReference('same.tool',compact,keys,refs),'runs/run/run_summary.json#steps/same.early/output/image_b64');
+  assert.equal(service.nearestScreenshotImageReference('none.tool',compact,keys,refs),'runs/run/run_summary.json#steps/other.new/output/image_b64');
+  assert.equal(service.nearestScreenshotImageReference('no-clock.tool',compact,keys,refs),'runs/run/run_summary.json#steps/same.future/output/image_b64');
+  assert.equal(resolved,count,'Matching must not repeatedly traverse raw screenshot data or check files');
+});
+
 test('index evidence: scoped builds do not stringify retained historical event contents for delta comparison',async()=>{
   reset();const model=new Model(),service=new IndexService(paths,storage,model);
   const old=evidenceFixture('2020-01-01','old.md','old'),fresh=evidenceFixture('2026-11-01','new.md','new');
@@ -2374,6 +2690,386 @@ test('chat dedup: index retains provenance but sends only the latest collection 
   assert.equal(chatContext.normalizeChatAttribution(forged,indexed,service.chatContexts.all()).status,'unknown');
   await service.build(config,undefined,service.changedSourceSelection(config,['2026-10/wechat.md.state.json'],[]));
   assert.equal(requests,1,'Warm source must keep the latest single-batch context and reuse its analysis');
+});
+
+test('analysis recovery: syntax repairs preserve quoted facts and reject ambiguous or truncated data',()=>{
+  const {parseModelJsonObject}=load(base+'ModelJsonResponse');
+  const samples=[
+    ['```json\n{unquoted: \'中文事实\', values:[1,2,], flag:True, absent:None,}\n```',
+      {unquoted:'中文事实',values:[1,2],flag:true,absent:null}],
+    ['说明：{“text”：“保留‘原文’”， “ok”：false，}',{text:'保留‘原文’',ok:false}],
+    ['{/* 注释 */ "text":"http://example.invalid/a,} // 字符串", "line":"上句\n下句",}',
+      {text:'http://example.invalid/a,} // 字符串',line:'上句\n下句'}],
+    ['{"path":"C:\\question\\file",}',{path:'C:\\question\file'}],
+    ['<think>思考</think>\n{"quoted":"他说\\"你好\\""}',{quoted:'他说"你好"'}]
+  ];
+  for(const [source,want] of samples)assert.deepEqual(clone(parseModelJsonObject(source)),want);
+  for(const source of ['{"a":1 2}','{"a":"未结束','{"events":[{"event_id":"a"}',
+    '{"a":1}{"b":2}','[{"a":1}]','{"a":function(){}}','{"a":NaN}']) {
+    assert.throws(()=>parseModelJsonObject(source),undefined,source);
+  }
+});
+
+test('analysis recovery: two retry rounds isolate unfinished IDs and never resave valid siblings',async()=>{
+  reset();const events=['first','second','third'].map(id=>event(id)),seen=new Map(),requests=[],saved=[],failed=[];
+  cloudHandler=async options=>{
+    const body=JSON.parse(options.messages[1].content),input=body.events;requests.push(input.map(e=>e.event_id));
+    if(requests.length>1){assert.equal(body.previous_issues.length,1);assert.equal(body.previous_issues[0].event_id,input[0].event_id);
+      assert.ok(['event_fields_missing','event_not_returned'].includes(body.previous_issues[0].error_code));}
+    const items=[];for(const e of input){const n=(seen.get(e.event_id)||0)+1;seen.set(e.event_id,n);
+      if(e.event_id==='third'&&n<3)continue;
+      const item=outcomeItem(e);if(e.event_id==='second'&&n===1)delete item.domains;items.push(item);}
+    return JSON.stringify({events:items});
+  };
+  const result=await new DataPipelineModelClient().enrichEvents(events,config,{onEvent:e=>saved.push(e.event_id),
+    onFailure:(...args)=>failed.push(args)});
+  assert.deepEqual(result.map(e=>e.event_id),['first','second','third']);
+  assert.deepEqual(saved,['first','second','third']);assert.equal(failed.length,0);
+  assert.deepEqual(requests,[['first','second','third'],['second'],['third'],['third']]);
+  assert.deepEqual([...seen],[['first',1],['second',2],['third',3]]);
+});
+
+test('analysis recovery: complete streamed facts survive truncation and repaired JSON needs no model retry',async()=>{
+  reset();const events=['saved','unfinished'].map(id=>event(id)),requests=[],saved=[];
+  cloudHandler=async(options,stream)=>{
+    const input=JSON.parse(options.messages[1].content).events;requests.push(input.map(e=>e.event_id));
+    if(input.length===2){const content='{"events":['+JSON.stringify(outcomeItem(input[0]))+',';
+      stream.onProgress({phase:'receiving',responseCode:200,receivedBytes:content.length,contentChars:content.length,
+        reasoningChars:0,contentDelta:content,reasoningDelta:'',finishReason:''});
+      return {content,finishReason:'length'};}
+    return '{"events":['+JSON.stringify(outcomeItem(input[0])).replace('"keywords":[]','keywords:[]')+',],}';
+  };
+  const result=await new DataPipelineModelClient().enrichEvents(events,config,{onEvent:e=>saved.push(e.event_id),
+    onFailure:()=>assert.fail('Both results should recover')});
+  assert.equal(result.length,2);assert.deepEqual(saved,['saved','unfinished']);
+  assert.deepEqual(requests,[['saved','unfinished'],['unfinished']]);
+});
+
+test('analysis recovery: exhausted event receipts carry attempt count and failure detail across restart',async()=>{
+  reset();let calls=0;cloudHandler=async()=>{calls++;throw Error('Operation timed out');};
+  const e=event('timeout'),service=new IndexService(paths,storage,new DataPipelineModelClient());
+  assert.equal((await service.enrichWithCheckpoint([e],config)).length,0);assert.equal(calls,3);
+  const file=[...disk.keys()].find(p=>p.endsWith('.failed.json')),failure=storage.readJson(file,{});
+  assert.equal(failure.attempts,3);assert.equal(failure.policy,'event-analysis-v3');assert.equal(failure.code,'timeout');
+  assert.match(failure.message,/超时/);
+  await new IndexService(paths,storage,new DataPipelineModelClient()).enrichWithCheckpoint([e],config);
+  assert.equal(calls,3,'Unchanged exhausted inputs must not start an unlimited retry loop');
+  cloudHandler=async options=>{calls++;return JSON.stringify({events:JSON.parse(options.messages[1].content).events.map(outcomeItem)});};
+  const changed={...e,normalized_fact:'新证据明确了具体事项'};
+  assert.equal((await service.enrichWithCheckpoint([changed],config)).length,1);assert.equal(calls,4);
+});
+
+test('analysis recovery: cancellation, authorization and checkpoint errors never consume automatic retries',async()=>{
+  for(const message of ['用户已取消同步','Cloud HTTP 401: unauthorized','保存事件检查点失败：disk full']){
+    reset();let calls=0;cloudHandler=async()=>{calls++;throw Error(message);};
+    await assert.rejects(new DataPipelineModelClient().enrichEvents([event('fatal')],config),new RegExp(message));
+    assert.equal(calls,1);assert.equal([...disk.keys()].filter(p=>p.endsWith('.failed.json')).length,0);
+  }
+});
+
+test('analysis recovery: explicit message speakers remain separate from recipients and matter subjects',()=>{
+  const {chatPromptMessages}=load(base+'ChatMessageEvidence');
+  const text='- 位置：右侧｜发送人：我｜聊天对象：小林｜时间：今天｜原文：我最近状态不好。\n'+
+    '- 位置：左侧｜发送人：小林｜聊天对象：我｜时间：今天｜原文：我可以来看看你吗？\n'+
+    '- 位置：右侧｜发送人：我｜聊天对象：小林｜时间：今天｜原文：他说"好的"\n'+
+    "'- 位置：右侧｜发送人：我｜聊天对象：小林｜时间：今天｜原文：我回去休息',";
+  const messages=chatPromptMessages(text);
+  assert.equal(messages.length,4);assert.deepEqual(clone(messages[0].speaker),{kind:'self',name:''});
+  assert.deepEqual(clone(messages[1].speaker),{kind:'other',name:'小林'});
+  assert.equal(messages[0].recipient,'小林');assert.equal(messages[2].text,'他说"好的"');
+  assert.equal(messages[3].text,'我回去休息');
+});
+
+test('analysis recovery: care, research and planning signals reach the planner without deadlines or GUI commands',async()=>{
+  reset();const registry=new chatContext.ChatCollectionContextIndex();
+  const ref='2026-11-03/wechat.md#1',raw='- 位置：右侧｜发送人：我｜聊天对象：小林｜原文：我这几天不舒服，想了解怎样安排作息。';
+  registry.add('workflow:follow-up',ref,raw,[],1);
+  const events=['care','research','plan'].map(type=>chatFixture(type,{event_date:'2026-11-03',source_refs:[ref],
+    chat_context:registry.forRefs([ref]),normalized_fact:'用户表达了自己的状态和具体研究规划问题'}));
+  cloudHandler=async options=>{
+    const input=JSON.parse(options.messages[1].content);
+    assert.equal(input.chat_batches[0].entries[0].text,raw,'The original capture is retained');
+    assert.equal(input.chat_batches[0].entries[0].messages[0].speaker.kind,'self');
+    assert.match(options.messages[0].content,/不是把发送人、收信人或会话名称抄进去/);
+    return JSON.stringify({events:input.events.map(e=>({event_id:e.event_id,keywords:['近况'],domains:['other'],entities:[],
+      todo:{type:e.event_id,deadline:'',time_text:'',text:'可以关注或探索具体事项',agent_task:'不应保留的GUI命令'},
+      chat:{subjects:[{kind:'self',name:''}],action_owners:[{kind:'self',name:''}],user_involved:true,status:'pending',evidence_source_refs:[ref]}}))});
+  };
+  const indexed=await new DataPipelineModelClient().enrichEvents(events,config,undefined,registry.all());
+  assert.deepEqual(indexed.map(e=>e.todo.type),['care','research','plan']);
+  assert.ok(indexed.every(e=>!e.todo.deadline&&!e.todo.agent_task&&e.chat_attribution.subject==='self'));
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');let received=[];
+  const planner={async planHomeRecommendations(input){received=clone(input);return input.map(e=>({title:e.todo_type,tag:'',desc:e.todo_text,domain:'other',source_event_ids:[e.event_id]}));}};
+  const service=new HomeRecommendationService(paths,storage,planner,{loadHomeTodoCandidateEvents:()=>Object.fromEntries(indexed.map(e=>[e.event_id,e]))});
+  service.currentDateKey=()=> '2026-11-03';await service.build(config);
+  assert.ok(received.every(e=>e.chat_attribution.subject==='self'));
+  assert.deepEqual(service.loadDocument().recommendations.map(e=>e.tag).sort(),['值得关心','值得研究','可以规划'].sort());
+  cloudHandler=async options=>{const input=JSON.parse(options.messages[1].content);
+    assert.ok(input.events.every(e=>e.chat_attribution.subject==='self'));assert.match(options.messages[0].content,/建议不能写成必须执行/);
+    return JSON.stringify({recommendations:input.events.map(e=>({title:e.todo_type,tag:'值得关注',desc:e.todo_text,domain:'other',source_event_ids:[e.event_id]}))});};
+  await new DataPipelineModelClient().planHomeRecommendations(received,'2026-11-03',config);
+});
+
+test('analysis recovery: a same-day legacy recommendation cache cannot bypass the expanded planner policy',async()=>{
+  reset();const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const service=new HomeRecommendationService(paths,storage,new Model(),new IndexService(paths,storage,new Model()));
+  service.currentDateKey=()=> '2026-11-03';
+  const document={generated_at:'2026-11-03T01:00:00',input_hash:'old',total_events:0,recommendations:[]};
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),document);
+  assert.equal(service.cachedBuildResult('2026-11-03'),null);
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),{...document,policy:'home-follow-up-v2'});
+  assert.equal(service.cachedBuildResult('2026-11-03').reused,true);
+});
+
+test('analysis recovery: incomplete planning cannot silently discard a collected concern or replace prior cards',async()=>{
+  reset();let calls=0;const events=[{event_id:'care-1',date:'2026-11-03',todo_type:'care',todo_deadline:'',
+    todo_text:'关注近况',summary:'状态变化',normalized_fact:'明确的状态变化',sources:[],domains:['other'],keywords:[],image_paths:[]}];
+  cloudHandler=async()=>{calls++;return JSON.stringify({recommendations:[]});};
+  await assert.rejects(new DataPipelineModelClient().planHomeRecommendations(events,'2026-11-03',config),/遗漏/);
+  assert.equal(calls,3,'Planner envelope validation owns its existing bounded JSON retry budget');
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const e=event('care-1','2026-11-03',{todo:{type:'care',deadline:'',text:'关注近况',agent_task:''}});
+  const service=new HomeRecommendationService(paths,storage,{planHomeRecommendations:async()=>{throw Error('model unavailable');}},
+    {loadHomeTodoCandidateEvents:()=>({'care-1':e})});
+  service.currentDateKey=()=> '2026-11-03';
+  const previous={generated_at:'2026-11-03T01:00:00',input_hash:'previous',total_events:0,
+    recommendations:[{id:'old',title:'已有卡片',completed:true,source_event_ids:['old-event']}]};
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),previous);
+  await assert.rejects(service.build(config),/unavailable/);
+  assert.deepEqual(clone(service.loadDocument()),previous,'Last successful cards remain byte-for-byte data intact');
+});
+
+function readableChatEvent(id,name,topic,extra={}) {
+  return event(id,'2026-11-03',{workflow_scene_ids:[3],sources:['微信',name],keywords:[topic],
+    summary:'会话标题：'+name+'\n用户讨论'+topic,normalized_fact:'用户讨论'+topic,
+    source_state_file:'outputs/2026-11/com.tencent.wechat__basic-gui-task__'+name+'.md.state.json',
+    source_refs:['2026-11-03/com.tencent.wechat__basic-gui-task__'+name+'.md#'+id],...extra});
+}
+function readableGroup(id,title,events) {
+  const {collectionGroupEventInputFingerprint}=load(base+'CollectionGroupingService');
+  return {group_id:id,title,source:'微信',time:'2026-11-03',meta:'',status:'已整理',domain:'work',
+    event_ids:events.map(e=>e.event_id),source_input_hash:'',
+    event_input_hashes:Object.fromEntries(events.map(e=>[e.event_id,collectionGroupEventInputFingerprint(e)]))};
+}
+test('readable groups: conversation evidence wins over mentioned people and sentence fragments',()=>{
+  const {collectionChatIdentity}=load(base+'CollectionChatIdentity');
+  const group=readableChatEvent('group','产品 研发组（23）','接口设计',{entity_mentions:[{type:'person',name:'陈禾',aliases:[]}]});
+  assert.equal(collectionChatIdentity(group).name,'产品 研发组');
+  const byPath=readableChatEvent('path','林岚','聚餐安排',{summary:'用户与陈禾的聊天中讨论晚餐安排',normalized_fact:'',sources:['微信']});
+  assert.equal(collectionChatIdentity(byPath).name,'林岚');
+  const legacy=event('legacy','2026-11-03',{sources:['微信'],workflow_scene_ids:[3],keywords:[],
+    summary:'用户与陈禾的聊天中讨论了关于晚餐安排',normalized_fact:''});
+  assert.equal(collectionChatIdentity(legacy).name,'陈禾');
+  const noConversation={...legacy,summary:'陈禾想了解旅游线路',entity_mentions:[{type:'person',name:'陈禾',aliases:[]}]};
+  assert.equal(collectionChatIdentity(noConversation).known,false);
+});
+test('readable groups: nested titles repair locally and remain stable after repeated normalization',()=>{
+  const {normalizeCollectionGroups}=load(base+'CollectionGroupingService');
+  const a=readableChatEvent('a','林岚','聚餐安排'),b=readableChatEvent('b','陈禾','聚餐安排');
+  let groups=normalizeCollectionGroups('chat','聊天记录',[a,b],[
+    readableGroup('old-a','陈禾的聊天中-旧联系人-聚餐安排',[a]),readableGroup('old-b','聚餐安排',[b])]);
+  assert.deepEqual(clone(groups.map(g=>g.title).sort()),['林岚 · 聚餐安排','陈禾 · 聚餐安排'].sort());
+  const initial=clone(groups);
+  for(let i=0;i<3;i++)groups=normalizeCollectionGroups('chat','聊天记录',[a,b],groups);
+  assert.deepEqual(clone(groups),initial);assert.ok(groups.every(g=>g.title_topic==='聚餐安排'));
+  const legacy=event('legacy','2026-11-03',{workflow_scene_ids:[3],sources:['微信'],keywords:[],
+    normalized_fact:'',summary:'用户与陈禾的聊天中讨论了关于晚餐安排'});
+  const fixed=normalizeCollectionGroups('chat','聊天记录',[legacy],[readableGroup('bad','陈禾的聊天中-旧联系人-话题',[legacy])]);
+  assert.equal(fixed[0].title,'陈禾 · 晚餐安排');
+});
+test('readable groups: anonymous and mixed conversations never merge by a shared display label',()=>{
+  const {normalizeCollectionGroups,prepareIncrementalCollectionGroups}=load(base+'CollectionGroupingService');
+  const anonymous=(id,batch)=>readableChatEvent(id,'私聊联系人（姓名未显示）','聚餐安排',{
+    summary:'用户讨论聚餐安排',normalized_fact:'用户讨论聚餐安排',
+    chat_context:{policy:'fixture',batch_ids:[batch],complete:true}});
+  const a=anonymous('a','batch-a'),b=anonymous('b','batch-a');
+  const known=readableChatEvent('known','林岚','接口设计');
+  const input=[a,b,known];const old=readableGroup('mixed','姓名未显示-历史拼接标题',input);
+  const result=prepareIncrementalCollectionGroups('chat','聊天记录',input,[old]);
+  assert.equal(result.pendingEvents.length,0);assert.equal(result.reusedGroups.length,3);
+  assert.equal(result.reusedGroups.filter(g=>g.group_id==='mixed').length,1);
+  const groups=normalizeCollectionGroups('chat','聊天记录',input,result.reusedGroups);
+  assert.equal(groups.length,3);assert.deepEqual(clone(groups.flatMap(g=>g.event_ids).sort()),['a','b','known']);
+  assert.equal(new Set(groups.map(g=>g.conversation_key)).size,3);
+});
+test('readable groups: display truncation cannot combine different full topics',()=>{
+  const {normalizeCollectionGroups}=load(base+'CollectionGroupingService');
+  const prefix='下一代端侧智能体框架的工具调用与数据管理';
+  const a=readableChatEvent('a','林岚',prefix+'协议'),b=readableChatEvent('b','林岚',prefix+'性能');
+  const groups=normalizeCollectionGroups('chat','聊天记录',[a,b],[readableGroup('a',a.keywords[0],[a]),readableGroup('b',b.keywords[0],[b])]);
+  assert.equal(groups.length,2);assert.equal(new Set(groups.map(g=>g.title_topic)).size,2);
+  assert.ok(groups.every(g=>g.title.includes('…')));
+});
+test('readable groups: migration retains old membership and only assigns genuinely new or edited events',async()=>{
+  const {prepareIncrementalCollectionGroups,applyIncrementalCollectionGroupAssignments}=load(base+'CollectionGroupingService');
+  const a=readableChatEvent('a','林岚','聚餐安排'),b=readableChatEvent('b','林岚','人数确认');
+  const legacy=readableGroup('stable-id','林岚-聚餐安排',[a]);legacy.event_input_hashes={};
+  const plan=prepareIncrementalCollectionGroups('chat','聊天记录',[a,b],[legacy],true);
+  assert.deepEqual(clone(plan.pendingEvents.map(e=>e.event_id)),['b']);
+  const joined=applyIncrementalCollectionGroupAssignments('chat','聊天记录',[a,b],plan.reusedGroups,plan.pendingEvents,
+    [{event_id:'b',group_id:'stable-id',title:'不应改名',source:'微信',domain:'work'}]);
+  assert.equal(joined.length,1);assert.equal(joined[0].group_id,'stable-id');assert.equal(joined[0].title,'林岚 · 聚餐安排');
+  assert.equal(joined[0].event_ids.length,2);
+  const edited={...a,keywords:['行程变更']};
+  assert.deepEqual(clone(prepareIncrementalCollectionGroups('chat','聊天记录',[edited],[readableGroup('receipt','聚餐安排',[a])],true)
+    .pendingEvents.map(e=>e.event_id)),['a']);
+  const other=readableChatEvent('other','陈禾','聚餐安排');
+  const rejected=applyIncrementalCollectionGroupAssignments('chat','聊天记录',[a,other],plan.reusedGroups,[other],
+    [{event_id:'other',group_id:'stable-id',title:'聚餐安排',source:'微信',domain:'work'}]);
+  assert.equal(rejected.length,2);
+  const client=new DataPipelineModelClient();let requests=0;
+  cloudHandler=async options=>{requests++;const data=JSON.parse(options.messages[1].content);
+    assert.deepEqual(data.events[0].candidate_group_ids,[]);assert.equal(data.existing_groups.length,0);
+    return JSON.stringify({assignments:[{event_id:'other',group_id:'new:1',title:'聚餐安排',source:'微信',domain:'work'}]});};
+  await client.assignCollectionGroupEvents('chat','聊天记录',[other],plan.reusedGroups,{a,other},config);assert.equal(requests,1);
+});
+test('readable groups: legacy repair saves once without a model call and future fast paths reuse it',async()=>{
+  reset();const {CollectionGroupingService}=load(base+'CollectionGroupingService');
+  const a=readableChatEvent('a','林岚','聚餐安排');const old=readableGroup('old-id','陈禾的聊天中-旧联系人-聚餐安排',[a]);
+  old.event_input_hashes={};storage.writeJsonAtomic(paths.collectionGroupsPath('chat'),{tab_id:'chat',input_hash:'legacy',groups:[old]});
+  const model={planCollectionGroups:async()=>{throw Error('migration must not call planner');},
+    assignCollectionGroupEvents:async()=>{throw Error('migration must not reassign old events');}};
+  const service=new CollectionGroupingService(paths,storage,model,{query:q=>({events:q.workflowSceneIds[0]===3?[a]:[]})});
+  assert.equal(service.cachedBuildResult(1,1),null);await service.buildAll(config);
+  const saved=storage.readJson(paths.collectionGroupsPath('chat'),null);
+  assert.equal(saved.groups[0].title,'林岚 · 聚餐安排');assert.equal(saved.groups[0].group_id,'old-id');
+  const oldWrites=writes.length;const second=await service.buildAll(config);
+  assert.equal(second.updatedGroupDocs,0);assert.equal(second.reusedGroupDocs,12);
+  assert.ok(writes.slice(oldWrites).every(p=>p.endsWith('/policy.json')));
+  assert.equal(service.cachedBuildResult(1,1).updatedGroupDocs,0);
+});
+
+test('people: atomic edits stay outside history, preserve other people and reject stale editors',()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage);
+  assert.deepEqual(clone(store.people().map(p=>p.label)),['本人','父亲','母亲','伴侣']);assert.equal(store.hasFacts(),false);
+  const self=store.save('person:self',{name:'林清',wechat_name:'清清'},0);
+  assert.equal(self.revision,1);assert(store.hasFacts());const count=writes.length;
+  assert.equal(store.save('person:self',{name:' 林清 ',wechat_name:'清清'},1).revision,1);assert.equal(writes.length,count);
+  store.save('person:father',{name:'林远'},0);store.save('person:mother',{name:'陈禾'},0);
+  assert.equal(store.people().find(p=>p.id==='person:father').values.name,'林远');
+  assert.throws(()=>store.save('person:self',{name:'stale'},0),/其他页面更新/);
+  assert.equal(store.people().find(p=>p.id==='person:self').values.name,'林清');
+  assert(writes.every(p=>p==='/app/people-memory/subjects.json'));
+  failWrite=p=>p.includes('people-memory');assert.throws(()=>store.save('person:self',{name:'failed'},1),/injected/);
+  assert.equal(store.people().find(p=>p.id==='person:self').values.name,'林清');
+});
+test('people: editing and clearing a field replaces its stable fact without stale copies or birth-date timestamps',()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage);
+  const p=store.save('person:self',{name:'林清',birth_date:'1990-02-03',home_address:'旧地址'},0);
+  let current=store.events(),address=current.find(e=>e.fact_source.field==='home_address');const id=address.event_id;
+  assert.notEqual(current.find(e=>e.fact_source.field==='birth_date').event_date,'1990-02-03');
+  const next=store.save(p.id,{name:'林清',birth_date:'1990-02-03',home_address:'新地址'},p.revision);
+  current=store.events();assert.equal(current.filter(e=>e.event_id===id).length,1);assert.match(current.find(e=>e.event_id===id).summary,/新地址/);
+  store.save(p.id,{name:'林清',birth_date:'1990-02-03'},next.revision);
+  assert(!store.events().some(e=>e.event_id===id));
+  const {normalizedPersonValues}=load(base+'PersonMemory');
+  for(const date of ['2023-02-29','2000-13-01','2999-01-01','2024-2-3'])assert.throws(()=>normalizedPersonValues({birth_date:date},'2026-11-05'));
+  assert.equal(normalizedPersonValues({birth_date:'2000-02-29'},'2026-11-05').birth_date,'2000-02-29');
+});
+test('people: exact and bounded index queries expose subject-scoped current facts without rebuilding history',()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage),index=new IndexService(paths,storage,new Model());
+  store.save('person:self',{name:'林清',company:'本人单位'},0);store.save('person:father',{name:'林清',company:'父亲单位'},0);
+  const old={historical:event('historical','2025-02-01',{summary:'一次工作记录',normalized_fact:'一次工作记录'})};
+  index.writeEventPartitions(old);index.writeTemporalDocuments(old);
+  const q={keywords:['工作单位'],keywordOperator:'or',domains:[],entities:[],date:'',month:'',startDate:'',endDate:'',workflowSceneIds:[],limit:20,subjectIds:['person:father']};
+  reads.clear();const writeCount=writes.length;
+  for(const result of [index.query(q),index.queryBounded(q)]){
+    assert.equal(result.events.length,1);const fact=result.events[0];assert.match(fact.summary,/父亲单位/);
+    assert.equal(fact.subjects[0].id,'person:father');assert.equal(fact.subjects[0].is_self,false);assert.equal(fact.fact_source.authority,'user_confirmed');
+    assert.equal(fact.profile_domains.length,0);assert.equal(fact.todo.text,'');
+  }
+  assert.equal(writes.length,writeCount);assert.deepEqual(Object.keys(index.loadEvents()),['historical']);
+  const all={...q,keywords:[],subjectIds:[]};assert.equal(index.query(all,false).events.length,1);
+  const dad=store.events().find(e=>e.subjects[0].id==='person:father');reads.clear();
+  assert.equal(Object.keys(index.loadEventsByIds([dad.event_id])).length,1);
+  assert([...reads.keys()].every(p=>p.includes('people-memory')),'manual hydration must not read historical partitions');
+  assert(index.query({...q,subjectIds:['person:partner']}).events.length===0,'unconfigured person cannot inherit another person’s facts');
+});
+test('people: queries preserve family identity, domain/entity filters and legacy unowned events',()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage);
+  store.save('person:mother',{name:'陈禾',wechat_name:'小禾',company:'大学',home_address:'南京'},0);
+  const {queryPersonFacts,eventMatchesSubjects,mergePersonFactResults}=load(base+'PersonMemory');
+  const q={keywords:['单位','公司'],keywordOperator:'or',domains:['work'],entities:['person:小禾'],date:'',month:'',startDate:'',endDate:'',workflowSceneIds:[],limit:2};
+  assert.equal(queryPersonFacts(store.events(),q).length,1);
+  assert.equal(queryPersonFacts(store.events(),{...q,domains:['live']}).length,0);
+  assert.equal(queryPersonFacts(store.events(),{...q,subjectIds:['person:self']}).length,0);
+  const legacy=event('legacy');assert(eventMatchesSubjects(legacy));assert(!eventMatchesSubjects(legacy,['person:self']));
+  const unchanged={events:[legacy],total_events:1,events_truncated:false};assert.equal(mergePersonFactResults(unchanged,[],20),unchanged);
+  const merged=mergePersonFactResults(unchanged,store.events(),1);assert.equal(merged.events.length,1);assert(merged.events_truncated);assert.equal(merged.total_events,5);
+});
+test('people: normal tool schema and semantic options retain subject IDs and confirmed attribution',()=>{
+  reset();const tools=load(base+'DataManagerQueryEventsTool'),parsed=tools.normalizeQueryEventsToolArguments('{"keywords":["工作单位"],"subject_ids":["person:father"]}');
+  assert(parsed.ok);assert.deepEqual(clone(parsed.options.subjectIds),['person:father']);
+  assert(!tools.normalizeQueryEventsToolArguments('{"subject_ids":["bad/path"]}').ok);
+  assert(!Object.hasOwn(tools.normalizeQueryEventsToolArguments('{}').options,'subjectIds'));
+  const schema=tools.queryEventsToolParameters();assert(schema.properties.subject_ids);
+  const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage);
+  store.save('person:father',{name:'林远',company:'研究所'},0);
+  const {memoryEventText}=load(base+'MemorySemanticSearch');const text=memoryEventText(store.events()[0]);
+  assert.match(text,/person:father/);assert.match(text,/用户手填确认/);assert.match(text,/林远/);
+});
+test('people: first summary tab uses a stable scene ID and form routes remain native and dark-mode aware',()=>{
+  const scenes=load('entry/src/main/ets/utils/WorkflowSceneConfig'),groups=load(base+'CollectionGroupingService');
+  assert.equal(scenes.memorySceneConfigs()[0].sceneId,12);assert.equal(scenes.workflowSceneConfigs()[0].sceneId,0);
+  assert.equal(groups.collectionTabSpecByIndex(0).tabId,'shopping');assert.equal(groups.collectionTabSpecByIndex(12).tabId,'personal-info');
+  const source=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/collection/PersonInfoPage.ets'),'utf8');
+  assert.match(source,/onBackPress\(\)/);assert.match(source,/PERSON_MEMORY_REVISION_KEY/);assert.match(source,/CollectionFormInput/);assert.match(source,/AppTheme\.text/);
+  const routes=JSON.parse(fs.readFileSync(path.join(root,'entry/src/main/resources/base/profile/main_pages.json'),'utf8'));
+  assert(routes.src.includes('pages/collection/PersonInfoPage'));
+});
+test('people: form fields are UI builder content, not a regular callback; every tab retains the shared sync overview',()=>{
+  let directory=path.dirname(require.resolve(process.argv[2]||'typescript')),ets;
+  for(let i=0;i<6&&!ets;i++,directory=path.dirname(directory)){
+    const config=path.join(directory,'tsconfig.json');
+    if(fs.existsSync(config))ets=ts.parseConfigFileTextToJson(config,fs.readFileSync(config,'utf8')).config?.compilerOptions?.ets;
+  }
+  assert(ets,'This check requires the DevEco ArkTS parser configuration');
+  const parse=relative=>{const file=path.join(root,relative),source=ts.createSourceFile(file,fs.readFileSync(file,'utf8'),ts.ScriptTarget.ES2021,true,ts.ScriptKind.ETS,{ets});assert.equal(source.parseDiagnostics.length,0);return source;};
+  const find=(root,predicate)=>{const found=[];function visit(node){if(predicate(node))found.push(node);ts.forEachChild(node,visit);}visit(root);return found;};
+  const page=parse('entry/src/main/ets/pages/collection/PersonInfoPage.ets');
+  const containers=find(page,n=>ts.SyntaxKind[n.kind]==='EtsComponentExpression'&&n.expression.getText(page)==='CollectionFormGroup');
+  assert.equal(containers.length,1);assert(containers[0].body,'Form content must be a compiled trailing builder, not an ordinary arrow callback');
+  assert(find(containers[0].body,n=>ts.isCallExpression(n)&&n.expression.getText(page)==='ForEach').length>0);
+  assert(find(containers[0].body,n=>ts.isCallExpression(n)&&n.expression.getText(page)==='CollectionFormInput').length>0);
+  const groups=find(page,n=>ts.isCallExpression(n)&&n.expression.getText(page)==='this.FieldGroup').map(n=>n.arguments[0].text);
+  assert.deepEqual(groups,[...new Set(load(base+'PersonMemory').PERSON_FIELDS.map(f=>f.group))]);
+  const collection=parse('entry/src/main/ets/pages/collection/CollectionPage.ets');
+  const overview=find(collection,n=>ts.isCallExpression(n)&&n.expression.getText(collection)==='this.CollectionOverview');
+  assert.equal(overview.length,1);for(let parent=overview[0].parent;parent&&!ts.isMethodDeclaration(parent);parent=parent.parent)assert(!ts.isIfStatement(parent),'Overview/sync must be available in the personal tab too');
+});
+test('people: editing starts immediately, saves only the selected person and keeps failed saves on screen',()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),{samePersonValues}=load(base+'PersonMemory');
+  const file=path.join(root,'entry/src/main/ets/pages/collection/PersonInfoPage.ets'),source=fs.readFileSync(file,'utf8');
+  const names=['aboutToAppear','copyValues','edit','goBack','onBackPress','save'],methods=[];
+  // Only execute the production state handlers. UI rendering is checked separately above.
+  for(const name of names){const declaration=new RegExp('^\\s*(?:private )?'+name+'\\(','m').exec(source);assert(declaration);const start=declaration.index;
+    const body=source.indexOf('{',source.indexOf('):',start));let depth=1,end=body+1;
+    while(depth&&end<source.length){if(source[end]==='{')depth++;else if(source[end]==='}')depth--;end++;}
+    methods.push(source.slice(start,end));}
+  const output=ts.transpileModule('class EditorProbe {'+methods.join('\n')+'}\nexports.EditorProbe=EditorProbe;',
+    {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}});
+  const exported={},backs=[],dialogs=[],notifications=[],changes=[];
+  vm.runInNewContext(output.outputText,{exports:exported,PersonMemoryStore,samePersonValues,personSlot:load(base+'PersonMemory').personSlot,
+    PERSON_MEMORY_REVISION_KEY:'personMemoryRevision',router:{getParams:()=>({personId:'person:father'}),back:()=>backs.push(true)},
+    AlertDialog:{show:options=>dialogs.push(options)},AppStorage:{setOrCreate:(key,value)=>changes.push([key,value])},Date});
+  const editor=new exported.EditorProbe();Object.assign(editor,{values:{},ready:false,dirty:false,error:'',getUIContext:()=>({getHostContext:()=>({filesDir:'/app'}),getPromptAction:()=>({showToast:options=>notifications.push(options)})})});
+  editor.aboutToAppear();assert(editor.ready);assert.equal(editor.person.id,'person:father');
+  editor.edit({key:'name'},'林远');assert(editor.dirty);assert.equal(new PersonMemoryStore('/app',storage).hasFacts(),false);
+  assert.equal(editor.onBackPress(),true);assert.equal(dialogs.length,1);assert.equal(backs.length,0);dialogs[0].primaryButton.action();assert(editor.dirty);
+  editor.save();assert.equal(backs.length,1);assert.equal(notifications.length,1);assert.equal(changes.length,1);assert.equal(editor.dirty,false);
+  assert.equal(new PersonMemoryStore('/app',storage).people().find(p=>p.id==='person:father').values.name,'林远');
+  assert.deepEqual(clone(new PersonMemoryStore('/app',storage).people().find(p=>p.id==='person:self').values),{});
+  editor.edit({key:'home_address'},'新地址');failWrite=p=>p.includes('people-memory');editor.save();assert(editor.dirty);assert.match(editor.error,/injected/);assert.equal(backs.length,1);
+  assert(!new PersonMemoryStore('/app',storage).people().find(p=>p.id==='person:father').values.home_address);
+});
+test('people: query tool keeps subject metadata in bounded valid JSON for long multi-person results',async()=>{
+  reset();const {PersonMemoryStore}=load(base+'PersonMemoryStore'),store=new PersonMemoryStore('/app',storage);
+  for(const person of ['person:self','person:father','person:mother','person:partner'])store.save(person,{name:'同名测试',notes:'补充资料'.repeat(180),home_address:'详细地址'.repeat(60)},0);
+  const events=store.events(),{createQueryEventsTool}=load(base+'DataManagerQueryEventsTool');
+  const tool=createQueryEventsTool(()=>true,()=>({events,total_events:events.length,events_truncated:false}));
+  const text=await tool.execute('{}',{filesDir:'/app',sessionId:'test',userMessage:'查询'}),result=JSON.parse(text);
+  assert(text.length<=3500);assert(result.truncated);assert(result.events.length>0);
+  assert(result.events.every(event=>event.subjects.length===1&&event.fact_source.authority==='user_confirmed'));
 });
 
 (async()=>{const selected=cases.filter(([name])=>!process.env.SYNC_TEST_FILTER||name.includes(process.env.SYNC_TEST_FILTER));for(const[name,run]of selected){await run();console.log('PASS '+name);}console.log(selected.length+' incremental sync checks passed');})()

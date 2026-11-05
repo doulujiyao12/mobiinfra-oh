@@ -1261,6 +1261,7 @@ export default function dataManagerUnitTest() {
         demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐'),
         demoIndexedEvent('e2', '微信里继续讨论晚餐安排', '微信聊天', 'eat', '晚餐')
       ];
+      events.forEach((event: IndexedEvent): void => { event.sources.push('示例联系人'); event.summary = '会话标题：示例联系人\n' + event.summary; });
       let groups = heuristicCollectionGroups('chat', '最近聊天', events);
       expect(groups.length).assertEqual(1);
       expect(groups[0].event_ids.length).assertEqual(2);
@@ -1285,9 +1286,9 @@ export default function dataManagerUnitTest() {
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
       expect(groups.length).assertEqual(3);
       expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
-      expect(titles.indexOf('小赵-UI') >= 0 || titles.indexOf('小赵-工作UI优化任务') >= 0).assertTrue();
-      expect(titles.indexOf('小铭-模型') >= 0 || titles.indexOf('小铭-图片标签解析异常') >= 0).assertTrue();
-      expect(titles.indexOf('文件传输助手-微信联系人') >= 0 || titles.indexOf('文件传输助手-聊天记录') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · UI') >= 0 || titles.indexOf('小赵 · 工作UI优化任务') >= 0).assertTrue();
+      expect(titles.indexOf('小铭 · 模型') >= 0 || titles.indexOf('小铭 · 图片标签解析异常') >= 0).assertTrue();
+      expect(titles.indexOf('文件传输助手 · 微信联系人') >= 0 || titles.indexOf('文件传输助手 · 聊天记录') >= 0).assertTrue();
     });
 
     it('normalizesChatGroupTitlesToConversationAndTopic', 0, () => {
@@ -1307,8 +1308,8 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-register', '领取注册条', [register])
       ]);
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
-      expect(titles.indexOf('小赵-Bug修复与PR') >= 0).assertTrue();
-      expect(titles.indexOf('小赵-领取注册条') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · Bug修复与PR') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · 领取注册条') >= 0).assertTrue();
       expect(titles.indexOf('与小赵的对话') < 0).assertTrue();
     });
 
@@ -1329,8 +1330,8 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-takeout', '与饿了么的对话', [takeout])
       ]);
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
-      expect(titles.indexOf('小赵-苏州看展') >= 0).assertTrue();
-      expect(titles.indexOf('小赵-发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · 苏州看展') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · 发票需求') >= 0).assertTrue();
       expect(titles.indexOf('与苏州的对话') < 0).assertTrue();
       expect(titles.indexOf('与饿了么的对话') < 0).assertTrue();
     });
@@ -1346,10 +1347,10 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-hdc', '与HDC导入脚本的对话', [hdc])
       ]);
       expect(groups.length).assertEqual(1);
-      expect(groups[0].title).assertEqual('产品群-HDC脚本优化');
+      expect(groups[0].title).assertEqual('产品群 · HDC脚本优化');
     });
 
-    it('normalizesChatTitlesRejectsObjectLikeSourceDetailAndGenericContact', 0, () => {
+    it('normalizesChatTitlesRejectsObjectLikeSourceDetailAndNonConversationEntities', 0, () => {
       let sourceObject = demoIndexedEvent('e109', '当前页面显示群成员在讨论 HDC 导入脚本，建议默认使用 bundle alias 路径。', '微信', 'other', 'HDC脚本优化');
       sourceObject.sources = ['微信', 'HDC导入脚本'];
       sourceObject.source_refs = ['2026-06-05/com.tencent.wechat__basic-gui-task__产品群.md#4'];
@@ -1361,6 +1362,7 @@ export default function dataManagerUnitTest() {
       genericMerchant.entities = ['merchant:饿了么'];
       let sourcePlaceWithoutEntity = demoIndexedEvent('e111', '用户讨论苏州周末路线。', '微信', 'travel', '周末路线');
       sourcePlaceWithoutEntity.sources = ['微信', '苏州'];
+      sourcePlaceWithoutEntity.entity_mentions = [{ type: 'place', name: '苏州', aliases: [] }];
       let sourceMerchantWithoutEntity = demoIndexedEvent('e112', '用户讨论饿了么订单发票。', '微信', 'other', '发票需求');
       sourceMerchantWithoutEntity.sources = ['微信', '饿了么'];
       let directMetadataObject = demoIndexedEvent('e117',
@@ -1383,14 +1385,14 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-direct-object', '脚本配置优化', [directMetadataObject])
       ]);
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
-      expect(titles.indexOf('HDC导入脚本-HDC脚本优化') < 0).assertTrue();
-      expect(titles.indexOf('HDC导入脚本-脚本配置优化') < 0).assertTrue();
-      expect(titles.indexOf('饿了么-发票需求') < 0).assertTrue();
-      expect(titles.indexOf('苏州-周末路线') < 0).assertTrue();
-      expect(titles.indexOf('微信-HDC脚本优化') >= 0).assertTrue();
-      expect(titles.indexOf('微信-脚本配置优化') >= 0).assertTrue();
-      expect(titles.indexOf('微信-发票需求') >= 0).assertTrue();
-      expect(titles.indexOf('微信-周末路线') >= 0).assertTrue();
+      expect(titles.indexOf('HDC导入脚本 · HDC脚本优化') < 0).assertTrue();
+      expect(titles.indexOf('HDC导入脚本 · 脚本配置优化') < 0).assertTrue();
+      expect(titles.indexOf('饿了么 · 发票需求') < 0).assertTrue();
+      expect(titles.indexOf('苏州 · 周末路线') < 0).assertTrue();
+      expect(titles.indexOf('产品群 · HDC脚本优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信会话 · 脚本配置优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信会话 · 发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('微信会话 · 周末路线') >= 0).assertTrue();
     });
 
     it('normalizesBusinessTabTitlesToSourceAndTopic', 0, () => {
@@ -1415,9 +1417,9 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-vlog', '苏州旅行 Vlog', [video])
       ]);
 
-      expect(shoppingGroups[0].title).assertEqual('淘宝-耐克跑鞋浏览');
-      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
-      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行Vlog');
+      expect(shoppingGroups[0].title).assertEqual('淘宝 · 耐克跑鞋浏览');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖 · 黄焖鸡');
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩 · 苏州旅行 Vlog');
     });
 
     it('normalizesGroupTitleSeparatorsAfterSourcePrefixRemoval', 0, () => {
@@ -1435,8 +1437,8 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-chat', '小赵：注册条领取安排', [chat])
       ]);
 
-      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行与咖啡测评');
-      expect(chatGroups[0].title).assertEqual('小赵-注册条领取安排');
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩 · 苏州旅行与咖啡测评');
+      expect(chatGroups[0].title).assertEqual('小赵 · 注册条领取安排');
       expect(entertainmentGroups[0].title.indexOf('-：') < 0).assertTrue();
       expect(chatGroups[0].title.indexOf('-：') < 0).assertTrue();
     });
@@ -1472,10 +1474,10 @@ export default function dataManagerUnitTest() {
         demoCollectionGroupState('g-takeout', '黄焖鸡', [meituanTakeout])
       ]);
 
-      expect(shoppingGroups[0].title).assertEqual('京东-键盘退换货');
-      expect(travelGroups[0].title).assertEqual('携程-上海至苏州高铁');
-      expect(lifeGroups[0].title).assertEqual('美团-生活服务');
-      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
+      expect(shoppingGroups[0].title).assertEqual('京东 · 键盘退换货');
+      expect(travelGroups[0].title).assertEqual('携程 · 上海至苏州高铁');
+      expect(lifeGroups[0].title).assertEqual('美团 · 生活服务');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖 · 黄焖鸡');
     });
 
     it('heuristicChatGroupsDescribeGalleryChatImagesWithoutFakeContact', 0, () => {
@@ -1487,7 +1489,7 @@ export default function dataManagerUnitTest() {
 
       let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
       expect(groups.length).assertEqual(1);
-      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+      expect(groups[0].title.indexOf('图库聊天 · ') === 0 || groups[0].title.indexOf('图库 · ') === 0).assertTrue();
     });
 
     it('heuristicChatGroupsKeepGalleryChatAsScreenshotWhenPersonDetected', 0, () => {
@@ -1501,7 +1503,7 @@ export default function dataManagerUnitTest() {
 
       let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
       expect(groups.length).assertEqual(1);
-      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+      expect(groups[0].title.indexOf('图库聊天 · ') === 0 || groups[0].title.indexOf('图库 · ') === 0).assertTrue();
     });
 
     it('collectionGroupFingerprintIncludesTitleSourceSignals', 0, () => {
@@ -1525,6 +1527,7 @@ export default function dataManagerUnitTest() {
         demoIndexedEvent('e2', '联系人乙发来一张截图，并围绕截图里的信息继续沟通。', '联系人乙', 'work', '截图'),
         demoIndexedEvent('e3', '联系人丙围绕一个技术配置项和用户继续沟通。', '联系人丙', 'work', 'API')
       ];
+      events.forEach((event: IndexedEvent): void => { event.summary = '会话标题：' + event.sources[0] + '\n' + event.summary; });
       let candidates: CollectionGroupState[] = [
         { group_id: 'raw-1', title: '12讨论', source: '联系人甲', time: '', meta: '', status: '', domain: 'work', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() },
         { group_id: 'raw-2', title: '截图讨论', source: '联系人乙', time: '', meta: '', status: '', domain: 'work', event_ids: ['e2'], source_input_hash: '', event_input_hashes: createStringMap() },
@@ -1535,9 +1538,9 @@ export default function dataManagerUnitTest() {
       expect(titles.indexOf('12讨论') < 0).assertTrue();
       expect(titles.indexOf('截图讨论') < 0).assertTrue();
       expect(titles.indexOf('API讨论') < 0).assertTrue();
-      expect(titles.indexOf('联系人甲-') >= 0).assertTrue();
-      expect(titles.indexOf('联系人乙-') >= 0).assertTrue();
-      expect(titles.indexOf('联系人丙-') >= 0).assertTrue();
+      expect(titles.indexOf('联系人甲 · ') >= 0).assertTrue();
+      expect(titles.indexOf('联系人乙 · ') >= 0).assertTrue();
+      expect(titles.indexOf('联系人丙 · ') >= 0).assertTrue();
     });
 
     it('normalizeChatGroupsRefreshesLegacyRunIdAndCategoryTitles', 0, () => {
@@ -1558,8 +1561,8 @@ export default function dataManagerUnitTest() {
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
       expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
       expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
-      expect(titles.indexOf('小赵-') >= 0).assertTrue();
-      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · ') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天 · ') >= 0 || titles.indexOf('图库 · ') >= 0).assertTrue();
     });
 
     it('normalizeChatGroupsOverridesGalleryChatContactTitle', 0, () => {
@@ -1576,7 +1579,7 @@ export default function dataManagerUnitTest() {
 
       let groups = normalizeCollectionGroups('chat', '聊天记录', [galleryEvent], candidates);
       expect(groups.length).assertEqual(1);
-      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+      expect(groups[0].title.indexOf('图库聊天 · ') === 0 || groups[0].title.indexOf('图库 · ') === 0).assertTrue();
     });
 
     it('incrementalChatGroupsRefreshLegacyRunIdAndCategoryTitles', 0, () => {
@@ -1599,8 +1602,8 @@ export default function dataManagerUnitTest() {
       let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
       expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
       expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
-      expect(titles.indexOf('小赵-') >= 0).assertTrue();
-      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
+      expect(titles.indexOf('小赵 · ') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天 · ') >= 0 || titles.indexOf('图库 · ') >= 0).assertTrue();
     });
 
     it('incrementalCollectionGroupsReusesOldGroupAndFallsBackForUnrelatedNewEvent', 0, () => {
@@ -1608,6 +1611,8 @@ export default function dataManagerUnitTest() {
       let e2 = demoIndexedEvent('e2', '微信里继续讨论晚餐安排', '微信聊天', 'eat', '晚餐');
       let e3 = demoIndexedEvent('e3', '支付宝出现一条停车缴费通知', '支付宝', 'travel', '停车');
       e3.event_date = '2026-06-20';
+      e1.sources.push('示例联系人'); e2.sources.push('示例联系人');
+      e1.summary = '会话标题：示例联系人\n' + e1.summary; e2.summary = '会话标题：示例联系人\n' + e2.summary;
       let previous = [demoCollectionGroupState('old-dinner', '晚餐计划', [e1, e2])];
       let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, e2, e3], previous);
       expect(plan.reusedGroups.length).assertEqual(1);
@@ -1616,7 +1621,7 @@ export default function dataManagerUnitTest() {
 
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2, e3], plan.reusedGroups, plan.pendingEvents, []);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('微信-晚餐计划');
+      expect(oldGroup.title).assertEqual('示例联系人 · 晚餐计划');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
@@ -1658,6 +1663,8 @@ export default function dataManagerUnitTest() {
       let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
       let e2 = demoIndexedEvent('e2', '微信里补充晚餐人数', '微信聊天', 'eat', '晚餐');
       e2.event_date = '2026-05-30';
+      e1.sources.push('示例联系人'); e2.sources.push('示例联系人');
+      e1.summary = '会话标题：示例联系人\n' + e1.summary; e2.summary = '会话标题：示例联系人\n' + e2.summary;
       let previous = [demoCollectionGroupState('old-dinner', '稳定晚餐标题', [e1])];
       let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, e2], previous);
       let assignments: CollectionGroupAssignment[] = [{
@@ -1669,7 +1676,7 @@ export default function dataManagerUnitTest() {
       }];
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2], plan.reusedGroups, plan.pendingEvents, assignments);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('微信-稳定晚餐标题');
+      expect(oldGroup.title).assertEqual('示例联系人 · 稳定晚餐标题');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
@@ -2042,12 +2049,12 @@ export default function dataManagerUnitTest() {
 
     it('homeTodoIndexAllowsChatBuyWithoutDeadline', 0, () => {
       let todo: IndexedEventTodo = { type: 'buy', deadline: '', text: '购买咖啡豆', agent_task: '在淘宝中购买咖啡豆' };
-      expect(isHomeTodoIndexCandidate(todo, [3], [3])).assertTrue();
+      expect(isHomeTodoIndexCandidate(todo)).assertTrue();
     });
 
-    it('homeTodoIndexRejectsNonBuyChatWithoutDeadline', 0, () => {
+    it('homeTodoIndexAllowsChatActionWithoutDeadline', 0, () => {
       let todo: IndexedEventTodo = { type: 'plan', deadline: '', text: '安排周末聚餐', agent_task: '' };
-      expect(isHomeTodoIndexCandidate(todo, [3], [3])).assertFalse();
+      expect(isHomeTodoIndexCandidate(todo)).assertTrue();
     });
 
     it('agentTaskOnlyKeptForPureChatBuyTodo', 0, () => {

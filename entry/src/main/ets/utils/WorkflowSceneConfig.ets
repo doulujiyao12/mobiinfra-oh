@@ -32,7 +32,8 @@ export function workflowSceneConfigs(): WorkflowSceneConfig[] {
 }
 
 export function memorySceneConfigs(): WorkflowSceneConfig[] {
-  return WORKFLOW_SCENES.concat(MEMORY_EXTRA_SCENES);
+  const personal = MEMORY_EXTRA_SCENES.filter((scene: WorkflowSceneConfig): boolean => scene.sceneId === PERSONAL_INFO_MEMORY_SCENE_ID);
+  return personal.concat(WORKFLOW_SCENES, MEMORY_EXTRA_SCENES.filter((scene: WorkflowSceneConfig): boolean => scene.sceneId !== PERSONAL_INFO_MEMORY_SCENE_ID));
 }
 
 export function normalizeMemorySceneId(sceneId: number): number {

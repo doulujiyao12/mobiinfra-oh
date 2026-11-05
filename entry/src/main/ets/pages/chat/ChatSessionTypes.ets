@@ -1,4 +1,5 @@
 import { CloudChatMessage } from '../../utils/CloudModelClient';
+import { MemorySupplementItem } from '../../utils/MemorySupplement';
 import { CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE, chatModeLabel } from './ChatPageTypes';
 import {
   ChatVoiceMetadata,
@@ -32,6 +33,7 @@ export interface ChatMessage {
   streamingVersion?: number;
   voice?: ChatVoiceMetadata;
   codexRunId?: string;
+  memorySupplement?: MemorySupplementItem[];
 }
 
 export interface ChatAssistantThinkingParts {
@@ -428,7 +430,8 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message),
-        codexRunId: message.codexRunId
+        codexRunId: message.codexRunId,
+        memorySupplement: message.memorySupplement
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
@@ -459,7 +462,8 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message),
-        codexRunId: message.codexRunId
+        codexRunId: message.codexRunId,
+        memorySupplement: message.memorySupplement
       };
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {

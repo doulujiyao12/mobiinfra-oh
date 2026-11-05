@@ -45,6 +45,7 @@ export interface CodexChatExecution {
   selectTarget: (task: string, imageCount: number) => Promise<CodexChatTarget | null>;
   onCreated: (run: CodexChatRun) => void;
   isCancelled: () => boolean;
+  prepareTask?: (task: string) => Promise<string>;
 }
 export type CodexChatRunCallback = (request: CodexChatRequest) => Promise<CodexChatResult>;
 

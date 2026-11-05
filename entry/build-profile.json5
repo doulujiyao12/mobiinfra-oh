@@ -1,6 +1,9 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "sourceOption": {
+      "workers": ["./src/main/ets/workers/RecordingAnalysisWorker.ets", "./src/main/ets/workers/RecordingLiveWorker.ets"]
+    },
     "resOptions": {
       "copyCodeResource": {
         "enable": false

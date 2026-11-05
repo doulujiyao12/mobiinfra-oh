@@ -12,6 +12,7 @@ import {
   chatMessageVoiceMetadata
 } from './ChatSessionTypes';
 import { ChatVoiceMetadata, createEmptyChatVoiceMetadata } from './VoiceInteractionTypes';
+import { MemorySupplementItem, normalizeMemorySupplement, sameMemorySupplement } from '../../utils/MemorySupplement';
 
 @Observed
 export class ChatMessageDetailUiModel {
@@ -23,11 +24,14 @@ export class ChatMessageDetailUiModel {
   imagePath: string = '';
   imagePaths: string[] = [];
   codexRunId: string = '';
+  memorySupplement: MemorySupplementItem[] = [];
   streamingActive: boolean = false;
   streamingVersion: number = 0;
   voice: ChatVoiceMetadata = createEmptyChatVoiceMetadata();
 
   apply(message: ChatMessage): void {
+    const supplement = normalizeMemorySupplement(message.memorySupplement);
+    if (!sameMemorySupplement(this.memorySupplement, supplement)) { this.memorySupplement = supplement; }
     if (this.codexRunId !== (message.codexRunId || '')) { this.codexRunId = message.codexRunId || ''; }
     if (this.content !== message.content) {
       this.content = message.content;
@@ -153,7 +157,8 @@ export class ChatMessageUiModel {
       streamingActive: this.detail.streamingActive,
       streamingVersion: this.detail.streamingVersion,
       voice: this.detail.voice,
-      codexRunId: this.detail.codexRunId
+      codexRunId: this.detail.codexRunId,
+      memorySupplement: this.detail.memorySupplement
     };
   }
 }

@@ -1,15 +1,16 @@
-import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
+import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { AppTheme } from '../utils/AppTheme';
 import { clearPageStatusBarContext, refreshPageStatusBarAppearance } from '../utils/PageStatusBar';
 import { AppLogger } from '../utils/AppLogger';
 import { DebugSettings } from '../utils/DebugSettings';
 import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
-import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { appBackgroundTasks } from '../utils/AppBackgroundTasks';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { getAppBundleName } from '../utils/AppIdentity';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
+import { RECORDING_INBOX_KEY, RecordingInbox } from '../utils/recording/RecordingInbox';
 import { COLLECTION_REMINDER_READY_KEY, CollectionReminderService } from '../utils/CollectionReminderService';
 import {
   CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
@@ -39,6 +40,8 @@ interface DisplaySize {
 // 应用主 Ability：加载 Index 页面，并在 Agent 执行期间协调后台浮窗、
 // 长时任务权限和“从浮窗回到主应用”的能力。
 export default class EntryAbility extends UIAbility {
+  private recordingContentReady: boolean = false;
+  private recordingMainWindow: window.Window | null = null;
   private reminderMainWindow: window.Window | null = null;
   private reminderAbilityForeground: boolean = false;
   private reminderWindowCallback: ((event: window.WindowEventType) => void) | null = null;
@@ -106,7 +109,8 @@ export default class EntryAbility extends UIAbility {
     });
     AppLogger.info('Ability', 'Ability onCreate launchReason=' + String(launchParam.launchReason) +
       ', want=' + this.wantBrief(want));
-    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
+    if (RecordingInbox.accepts(want)) { this.receiveRecording(want); }
+    else { ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam)); }
   }
 
   onDestroy(): void {
@@ -125,6 +129,7 @@ export default class EntryAbility extends UIAbility {
     // The ordinary main window is not displayed above the secure lock screen. Wait for it to be visible and focused.
     try {
       this.reminderMainWindow = windowStage.getMainWindowSync();
+      this.recordingMainWindow = this.reminderMainWindow;
       this.reminderWindowCallback = (event: window.WindowEventType): void => {
         if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
           AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
@@ -139,11 +144,14 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       AppLogger.info('Ability', 'Succeeded in loading the content.');
+      this.recordingContentReady = true;
+      this.openRecordingInbox();
       this.syncReminderWindowReady();
     });
   }
 
   onWindowStageDestroy(): void {
+    this.recordingContentReady = false; this.recordingMainWindow = null;
     this.releaseReminderWindow();
     clearPageStatusBarContext();
     AppLogger.info('Ability', 'Ability onWindowStageDestroy');
@@ -152,7 +160,8 @@ export default class EntryAbility extends UIAbility {
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     AppLogger.info('Ability', 'Ability onNewWant launchReason=' + String(launchParam.launchReason) +
       ', want=' + this.wantBrief(want));
-    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
+    if (RecordingInbox.accepts(want)) { this.receiveRecording(want); }
+    else { ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam)); }
     try { CollectionReminderService.enqueueWant(want); }
     catch (e) { AppLogger.errorCause('CollectionReminder', 'Reminder Want rejected', e as Error); }
     this.syncReminderWindowReady();
@@ -194,6 +203,21 @@ export default class EntryAbility extends UIAbility {
       ', parameters=' + parameterKeys;
   }
 
+  private receiveRecording(want: Want): void {
+    RecordingInbox.receive(this.context, want).then((): void => { this.openRecordingInbox(); })
+      .catch((e: Error): void => {
+        AppStorage.setOrCreate('recordingAnalysisImportError', e.message);
+        this.openRecordingInbox();
+      });
+  }
+
+  private openRecordingInbox(): void {
+    if (!this.recordingContentReady || this.recordingMainWindow === null ||
+      !(AppStorage.get<string>(RECORDING_INBOX_KEY) || AppStorage.get<string>('recordingAnalysisImportError'))) { return; }
+    this.recordingMainWindow.getUIContext().getRouter().pushUrl({ url: 'pages/recording/RecordingPage' })
+      .catch((e: Error): void => { AppLogger.errorCause('Recording', 'Open recording page failed', e); });
+  }
+
   onForeground(): void {
     this.reminderAbilityForeground = true;
     AppTheme.syncSystemMode(this.context);
@@ -212,16 +236,9 @@ export default class EntryAbility extends UIAbility {
       AppLogger.warn('HuaweiAccount', 'foreground session restore unavailable');
     });
     this.destroyFloatWindow();
-    try {
-      // 当应用回到前台，停止后台长时任务，省电
-      backgroundTaskManager.stopBackgroundRunning(this.context).then(() => {
-        AppLogger.info('BackgroundTask', 'stopBackgroundRunning succeeded');
-      }).catch((err: Error) => {
-        AppLogger.warn('BackgroundTask', 'stopBackgroundRunning failed Cause: ' + JSON.stringify(err));
-      });
-    } catch (err) {
-      AppLogger.error('BackgroundTask', 'stopBackgroundRunning error: ' + JSON.stringify(err));
-    }
+    appBackgroundTasks.set(this.context, 'agent', 'dataTransfer', false).catch((error: Error): void => {
+      AppLogger.warnCause('BackgroundTask', 'Release Agent task failed', error);
+    });
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {
@@ -230,6 +247,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    this.context.eventHub.emit('recording-analysis-background');
     this.reminderAbilityForeground = false;
     AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);
     AppLogger.info('Ability', 'Ability onBackground');
@@ -237,32 +255,9 @@ export default class EntryAbility extends UIAbility {
     if (!AgentExecutionController.isExecutionActive()) {
       return;
     }
-    try {
-      // 配置 WantAgent，用于在通知栏显示后台任务并能点击回到应用
-      let wantAgentInfo: wantAgent.WantAgentInfo = {
-        wants: [
-          {
-            bundleName: getAppBundleName(),
-            abilityName: "EntryAbility"
-          }
-        ],
-        actionType: wantAgent.OperationType.START_ABILITY,
-        requestCode: 0,
-        wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
-      };
-
-      wantAgent.getWantAgent(wantAgentInfo).then((wantAgentObj) => {
-        // 当应用退到后台时，立刻向系统申请数据传输类的长时运行权限
-        backgroundTaskManager.startBackgroundRunning(this.context,
-          backgroundTaskManager.BackgroundMode.DATA_TRANSFER, wantAgentObj).then(() => {
-          AppLogger.info('BackgroundTask', 'startBackgroundRunning succeeded');
-        }).catch((err: Error) => {
-          AppLogger.error('BackgroundTask', 'startBackgroundRunning failed Cause: ' + JSON.stringify(err));
-        });
-      });
-    } catch (error) {
-      AppLogger.error('BackgroundTask', 'startBackgroundRunning error Cause: ' + JSON.stringify(error));
-    }
+    appBackgroundTasks.set(this.context, 'agent', 'dataTransfer', true).catch((error: Error): void => {
+      AppLogger.errorCause('BackgroundTask', 'Start Agent task failed', error);
+    });
   }
 
   private syncFloatWindow(): void {

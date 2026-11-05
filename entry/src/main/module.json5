@@ -52,7 +52,7 @@
           "abilities": [
             "EntryAbility"
           ],
-          "when": "inuse"
+          "when": "always"
         }
       }
     ],
@@ -83,7 +83,8 @@
         "startWindowIcon": "$media:Icon",
         "startWindowBackground": "$color:start_window_background",
         "backgroundModes": [
-          "dataTransfer"
+          "dataTransfer",
+          "audioRecording"
         ],
         "exported": true,
         "skills": [
@@ -103,6 +104,11 @@
             ],
             "domainVerify": true,
             "uris": [
+              { "scheme": "file", "type": "audio/wav", "maxFileSupported": 8, "linkFeature": "FileOpen" },
+              { "scheme": "file", "type": "audio/x-wav", "maxFileSupported": 8, "linkFeature": "FileOpen" },
+              { "scheme": "file", "type": "audio/wave", "maxFileSupported": 8, "linkFeature": "FileOpen" },
+              { "scheme": "file", "type": "audio/vnd.wave", "maxFileSupported": 8, "linkFeature": "FileOpen" },
+              { "scheme": "file", "pathRegex": ".*\\.[wW][aA][vV]$", "maxFileSupported": 8, "linkFeature": "FileOpen" },
               {
                 "scheme": "file",
                 "utd": "com.mobiinfra.profile-json",

@@ -14,6 +14,8 @@ const HOME_TASK_CONFIRMATION_SUFFIX: string = '；在提交订单、支付、转
 const HOME_TASK_ASK_USER: RegExp = /询问|先问|问一下|问用户|问我|征求|等待(?:用户|我)|(?:用户|我)(?:确认|选择|决定)/;
 
 export interface HomeTaskSuggestionEvidence {
+  eventId?: string;
+  profileDomain?: string;
   ref: string;
   kind: string;
   title: string;
@@ -361,6 +363,7 @@ function recentRecordEvidence(ref: string, event: IndexedEvent): HomeTaskSuggest
     metaParts.push(sourceText);
   }
   return {
+    eventId: event.event_id,
     ref: ref,
     kind: 'record',
     title: '近期记录',
@@ -378,6 +381,7 @@ function profileEvidence(ref: string, domain: HomeDomainViewModel): HomeTaskSugg
     metaParts.push(compactText(domain.claims[0], 80));
   }
   return {
+    profileDomain: domain.domain,
     ref: ref,
     kind: 'profile',
     title: domain.title + '画像',

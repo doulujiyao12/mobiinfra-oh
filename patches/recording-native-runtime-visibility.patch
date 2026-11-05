@@ -1,0 +1,19 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -960,6 +960,15 @@ ELSE()
+   ENDIF()
+   target_link_libraries(MNN PUBLIC ${MNN_EXTRA_DEPENDS})
+ ENDIF()
++if(OHOS AND (MNN_BUILD_SHARED_LIBS OR MNN_SEP_BUILD))
++    # Keep the static C++ runtime private when MNN shares a process with other engines.
++    # Exclude only runtime archives so MNN's public inference API stays exported.
++    target_link_options(MNN PRIVATE
++        "-Wl,--exclude-libs=libc++_static.a"
++        "-Wl,--exclude-libs=libc++abi.a"
++        "-Wl,--exclude-libs=libunwind.a")
++endif()
++
+ if (MSVC)
+   target_link_options(MNN PRIVATE "/IGNORE:4049,4217")
+   if (MNN_CUDA)

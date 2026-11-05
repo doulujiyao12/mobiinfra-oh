@@ -1,4 +1,6 @@
 import { util } from '@kit.ArkTS';
+import { CODEX_UPLOAD_ROUTE } from '../../utils/CodexRequestBudget';
+import { codexTaskWithDeliveryPolicy } from '../../utils/CodexDeliveryPolicy';
 import { fileIo } from '@kit.CoreFileKit';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
 import { CodexClient } from './CodexClient';
@@ -77,10 +79,15 @@ export class CodexChatService {
       if (execution.isCancelled() || target === null) {
         return { ok: false, status: 'rejected', runId: '', computer: '', summary: '', files: [], received: 0, error: '用户取消委托' };
       }
+      const preparedTask = execution.prepareTask ? await execution.prepareTask(request.task) : request.task;
+      if (execution.isCancelled()) {
+        return { ok: false, status: 'cancelled', runId: '', computer: '', summary: '', files: [], received: 0, error: '用户取消委托' };
+      }
+      if (!preparedTask.trim()) { throw new Error('Codex 委托内容为空'); }
       const run: CodexChatRun = { version: 1, id: util.generateRandomUUID(true), sessionId: execution.sessionId,
         connectionId: target.connectionId, computerName: previous?.computerName || '', origin: previous?.origin || '',
         workspaceId: target.workspaceId, workspaceName: previous?.workspaceName || '', model: '', effort: '',
-        taskText: request.task, taskId: previous?.taskId || '', requestId: util.generateRandomUUID(true), submitted: false,
+        taskText: preparedTask, taskId: previous?.taskId || '', requestId: util.generateRandomUUID(true), submitted: false,
         turnId: '', status: 'starting', notice: '正在连接所选电脑', answer: '', error: '',
         createdAt: Date.now(), updatedAt: Date.now(), artifacts: [], files: [] };
       operation = new CodexChatOperation(run); this.active.set(run.id, operation);
@@ -117,7 +124,7 @@ export class CodexChatService {
       run.submitted = true; run.notice = '任务正在下发，若断线将同步原任务'; this.save(operation);
       try {
         const envelope = await operation.client.call('/v1/tasks/' + run.taskId + '/turns', {
-          requestId: run.requestId, text: request.task + '\n\n交付要求：完成后简述结果和验证情况；只为最终交付文件提供绝对路径 Markdown 链接，成品优先保存到工作目录 outputs/。不要链接临时文件、凭据或依赖。',
+          requestId: run.requestId, text: codexTaskWithDeliveryPolicy(preparedTask),
           attachments: attachments, model: run.model, effort: run.effort, mode: 'workspace-write', approvalMode: 'ask' });
         this.acceptTask(operation, envelope);
       } catch (e) {
@@ -134,7 +141,7 @@ export class CodexChatService {
         try { this.save(operation); } catch (storageError) { operation.run.error += '（手机状态保存失败）'; }
         return codexChatResult(operation.run);
       }
-      return { ok: false, status: 'failed', runId: '', computer: '', summary: '', files: [], received: 0, error: (e as Error).message };
+      return { ok: false, status: execution.isCancelled() ? 'cancelled' : 'failed', runId: '', computer: '', summary: '', files: [], received: 0, error: (e as Error).message };
     } finally {
       if (operation !== null) {
         operation.client.close(); this.active.delete(operation.run.id);
@@ -241,7 +248,7 @@ export class CodexChatService {
           new Uint8Array(buffer).set(new Uint8Array(part, 0, count), offset); offset += count;
         }
         this.requireCurrent(operation);
-        const envelope = await operation.client.call('/v1/attachments', { workspaceId: operation.run.workspaceId,
+        const envelope = await operation.client.call(CODEX_UPLOAD_ROUTE, { workspaceId: operation.run.workspaceId,
           name: name, image: true, base64: new util.Base64Helper().encodeToStringSync(new Uint8Array(buffer)) });
         if (envelope.attachment === undefined) { throw new Error('电脑未确认图片上传'); }
         ids.push(envelope.attachment.id);

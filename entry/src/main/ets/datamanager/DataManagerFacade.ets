@@ -1,12 +1,14 @@
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
+import { PersonMemoryStore } from './PersonMemoryStore';
 import { MemoryChangeJournal, MemorySourceChange } from './MemoryChangeJournal';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { ModelStreamActivity } from './ModelStreamActivity';
 import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
 import { IndexService, IndexSourceSelection } from './IndexService';
-import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
+import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups, readableCollectionGroupTitle } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
+import { HomeCodexContext, HomeCodexRequest, HomeCodexContextService } from './HomeCodexContext';
 import { dataManagerInfo } from './DataManagerLog';
 import { SyncMetrics } from './SyncMetrics';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
@@ -315,12 +317,21 @@ export class DataManagerFacade {
 
   hasBuiltIndexes(): boolean {
     this.ensureReady();
-    return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json'));
+    return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json')) || new PersonMemoryStore(this.paths.filesDir, this.storage).hasFacts();
   }
 
   queryIndexedEvents(options: QueryOptions): QueryResult {
     this.ensureReady();
     return this.indexService.query(options);
+  }
+
+  queryIndexedEventsBounded(options: QueryOptions): QueryResult {
+    this.ensureReady();
+    return this.indexService.queryBounded(options);
+  }
+
+  prepareHomeCodexContext(request: HomeCodexRequest): Promise<HomeCodexContext> {
+    return new HomeCodexContextService(this.paths, this.storage, this.indexService).prepare(request);
   }
 
   loadProfileMarkdown(): string {
@@ -984,7 +995,9 @@ export class DataManagerFacade {
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
       avatarVersionId: avatar.avatarVersionId,
-      updatedLabel: this.lastSyncLabel([]),
+      // Text-profile publication and avatar generation have independent clocks.
+      // Mail-only syncs also must not advance the displayed profile timestamp.
+      updatedLabel: this.formatHomeUpdatedLabel(profile.generated_at),
       completeness: completeness,
       totalEvents: profile.event_count,
       calendarEnabled: new CalendarMemoryStore(this.paths.filesDir).settings().enabled,
@@ -1069,7 +1082,7 @@ export class DataManagerFacade {
 
   loadCollectionViewModel(tabIndex: number): CollectionViewModel {
     let spec = collectionTabSpecByIndex(tabIndex);
-    let result = this.indexService.query(spec.query);
+    let result = this.indexService.query(spec.query, false);
     return this.collectionViewModelFromQueryResult(tabIndex, result.events, result.total_events);
   }
 
@@ -1183,7 +1196,7 @@ export class DataManagerFacade {
     let thumbnailUri = this.collectionGroupThumbnail(events);
     let view: CollectionGroupViewModel = {
       id: group.group_id,
-      title: group.title,
+      title: readableCollectionGroupTitle(group, eventMap),
       source: this.collectionGroupAppSource(group, eventMap),
       time: group.time,
       meta: group.meta.length > 0 ? group.meta : `${events.length} 条`,
@@ -1434,6 +1447,8 @@ export class DataManagerFacade {
   }
 
   private todoTypeTag(type: string, hasDeadline: boolean): string {
+    if (type === 'care') { return '值得关心'; }
+    if (type === 'research') { return '值得研究'; }
     if (type === 'buy') {
       return '待购买';
     }
@@ -1459,7 +1474,7 @@ export class DataManagerFacade {
       return '待预约';
     }
     if (type === 'plan') {
-      return '待安排';
+      return '可以规划';
     }
     if (type === 'attend') {
       return '待出席';

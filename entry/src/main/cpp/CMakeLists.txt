@@ -38,3 +38,11 @@ else()
         MNN
     )
 endif()
+
+target_sources(entry PRIVATE recording/RecordingScreenCapture.cpp recording/RecordingCpu.cpp)
+target_link_libraries(entry PUBLIC libnative_avscreen_capture.so libnative_media_core.so)
+target_compile_features(entry PRIVATE cxx_std_17)
+
+# Do not let this module's static runtime interpose C++ exceptions in other engines.
+set_property(TARGET entry APPEND_STRING PROPERTY LINK_FLAGS
+    " -Wl,--exclude-libs=libc++_static.a -Wl,--exclude-libs=libc++abi.a -Wl,--exclude-libs=libunwind.a")

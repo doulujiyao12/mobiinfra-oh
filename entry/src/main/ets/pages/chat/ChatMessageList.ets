@@ -1,5 +1,6 @@
 import { AppTheme } from '../../utils/AppTheme';
 import { CodexChatRunCard } from '../codex/CodexChatRunCard';
+import { MemorySupplementCard } from '../../components/MemorySupplementCard';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -855,6 +856,7 @@ struct ChatMessageContentBlock {
 @Component
 struct ChatMessageRow {
   @ObjectLink message: ChatMessageUiModel;
+  @ObjectLink detail: ChatMessageDetailUiModel;
   @Prop messageId: string = '';
   @Prop role: ChatMessageRole = 'assistant';
   @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
@@ -871,7 +873,7 @@ struct ChatMessageRow {
   @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   @Prop voiceReplayGloballyBlocked: boolean = false;
 
-  build() {
+  @Builder private MessageBubbleRow() {
     Row() {
       if (chatIsUserRole(this.role)) {
         Blank()
@@ -920,6 +922,20 @@ struct ChatMessageRow {
     .width('100%')
     .alignItems(VerticalAlign.Top)
     .margin({ top: MESSAGE_ROW_TOP_MARGIN })
+  }
+
+  build() {
+    Column() {
+      // 异步检索只更新 detail，LazyForEach 不会为同一消息重新调用 item builder。
+      // 在持有 @ObjectLink 的组件内选择内容，才能从文字提示切换为可展开卡片。
+      if (this.detail.codexRunId) {
+        CodexChatRunCard({ runId: this.detail.codexRunId })
+      } else if (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE && this.detail.memorySupplement.length > 0) {
+        MemorySupplementCard({ items: this.detail.memorySupplement })
+      } else {
+        this.MessageBubbleRow()
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 }
 
@@ -1304,30 +1320,25 @@ export struct ChatMessageList {
       List({ scroller: this.messageScroller }) {
         LazyForEach(this.messageDataSource, (message: ChatMessageUiModel, index: number) => {
           ListItem() {
-            Column() {
-              if (message.detail.codexRunId) {
-                CodexChatRunCard({ runId: message.detail.codexRunId })
-              } else {
-                ChatMessageRow({
-                  message: message,
-                  messageId: message.id,
-                  role: message.role,
-                  kind: message.kind,
-                  createdAt: message.createdAt,
-                  shouldRenderFull: this.shouldRenderFullMessage(index),
-                  modeLabel: this.modeLabel,
-                  modeMark: this.modeMark,
-                  onToggleTaskTrace: this.onToggleTaskTrace,
-                  onToggleThinking: this.onToggleThinking,
-                  onPreviewDebugImage: this.onPreviewDebugImage,
-                  onPlayVoiceMessage: this.onPlayVoiceMessage,
-                  onReplayVoiceMessage: this.onReplayVoiceMessage,
-                  voiceActiveMessageId: this.voiceActiveMessageId,
-                  voiceStatus: this.voiceStatus,
-                  voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked()
-                })
-              }
-            }.width('100%').alignItems(HorizontalAlign.Start)
+            ChatMessageRow({
+              message: message,
+              detail: message.detail,
+              messageId: message.id,
+              role: message.role,
+              kind: message.kind,
+              createdAt: message.createdAt,
+              shouldRenderFull: this.shouldRenderFullMessage(index),
+              modeLabel: this.modeLabel,
+              modeMark: this.modeMark,
+              onToggleTaskTrace: this.onToggleTaskTrace,
+              onToggleThinking: this.onToggleThinking,
+              onPreviewDebugImage: this.onPreviewDebugImage,
+              onPlayVoiceMessage: this.onPlayVoiceMessage,
+              onReplayVoiceMessage: this.onReplayVoiceMessage,
+              voiceActiveMessageId: this.voiceActiveMessageId,
+              voiceStatus: this.voiceStatus,
+              voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked()
+            })
           }
           .selectable(false)
         }, (message: ChatMessageUiModel, _index: number) => this.messageDataSource.keyFor(message))

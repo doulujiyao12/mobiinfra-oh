@@ -3,6 +3,7 @@ import {
   CloudChatCompletionResult,
   CloudChatMessage,
   CloudChatToolDefinition,
+  CloudTextPart,
   CloudModelClient,
   CloudModelConfig,
   cloudPlannerApiKey
@@ -23,6 +24,12 @@ export type ChatReactContentDeltaHandler = (delta: string) => void;
 
 export interface ChatReactAgentRunOptions {
   maxIterations?: number;
+  // Opt-in bounded tool workflows can reserve one final response without tools.
+  maxToolCalls?: number;
+  finalizeOnLimit?: boolean;
+  // A bounded workflow may supply a clean, data-only selection context instead
+  // of continuing its entire tool-call history for the final response.
+  finalizationMessages?: () => CloudChatMessage[];
   filesDir?: string;
   sessionId?: string;
   userMessage?: string;
@@ -95,11 +102,16 @@ export class ChatReactAgent {
     let toolsEnabled = options.enableTools !== false;
     let tools = toolsEnabled ? this.registry.getOpenAiTools() : [];
     let toolCallCount = 0;
+    const maxToolCalls = options.maxToolCalls === undefined ? Number.MAX_SAFE_INTEGER :
+      Math.max(0, Math.floor(options.maxToolCalls));
+    let iterations = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      if (toolsEnabled && toolCallCount >= maxToolCalls) { break; }
       if (options.beforeIteration !== undefined) {
         await options.beforeIteration();
       }
+      iterations = iteration;
       let completionOptions = this.buildCompletionOptions(workingMessages, config, tools, options);
       let result = await this.requestCompletion(completionOptions, options);
       if (!toolsEnabled || result.toolCalls.length === 0) {
@@ -116,6 +128,13 @@ export class ChatReactAgent {
       workingMessages.push(result.assistantMessage);
       for (let i = 0; i < result.toolCalls.length; i++) {
         let toolCall = result.toolCalls[i];
+        if (toolCallCount >= maxToolCalls) {
+          // Every requested ID still needs a response for a valid chat history.
+          // Excess calls are acknowledged without executing another tool.
+          workingMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: toolCall.function.name,
+            content: '{"ok":false,"error":"工具查询预算已用完，请根据已有结果完成最终答复。"}' });
+          continue;
+        }
         let toolContext: ChatToolExecutionContext = {
           filesDir: options.filesDir === undefined ? '' : options.filesDir,
           sessionId: options.sessionId === undefined ? '' : options.sessionId,
@@ -148,7 +167,27 @@ export class ChatReactAgent {
       }
     }
 
-    return this.limitResult(maxIterations, toolCallCount);
+    if (options.finalizeOnLimit === true) {
+      if (options.beforeIteration !== undefined) { await options.beforeIteration(); }
+      const finalMessages = options.finalizationMessages === undefined ? workingMessages.slice() : options.finalizationMessages().slice();
+      const instruction = '工具检索阶段已结束。现在不能再调用任何工具。' +
+        '请仅依据已经获得的资料，按最初要求的格式完成最终答复；只选择实际返回的资料，不补造事实。' +
+        '未查到的信息保持缺失，不要为了完善答案再次请求工具。';
+      // Qwen and other strict chat templates allow system only at the start.
+      // Preserve the tool observations; only replace the copied leading prompt.
+      if (finalMessages.length > 0 && finalMessages[0].role === 'system') {
+        const original = finalMessages[0].content;
+        const extra: CloudTextPart = { type: 'text', text: '\n\n' + instruction };
+        finalMessages[0] = { role: 'system', content: typeof original === 'string' ? original + extra.text : original.concat([extra]) };
+      } else {
+        finalMessages.unshift({ role: 'system', content: instruction });
+      }
+      const completion = this.buildCompletionOptions(finalMessages, config, [], options);
+      const result = await this.requestCompletion(completion, options);
+      return { content: result.content.trim(), iterations: iterations + 1, toolCallCount: toolCallCount,
+        reachedLimit: result.toolCalls.length > 0 || result.finishReason === 'tool_calls', finishReason: result.finishReason };
+    }
+    return this.limitResult(iterations, toolCallCount);
   }
 
   private async requestCompletion(completionOptions: CloudChatCompletionOptions,

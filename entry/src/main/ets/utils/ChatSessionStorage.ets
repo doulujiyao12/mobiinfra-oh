@@ -1,6 +1,7 @@
 import fs from '@ohos.file.fs';
 import { DataManagerStorage } from '../datamanager/DataManagerStorage';
 import { MemoryChangeJournal } from '../datamanager/MemoryChangeJournal';
+import { normalizeMemorySupplement } from './MemorySupplement';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
@@ -365,6 +366,8 @@ export class ChatSessionStorage {
       if (typeof message.codexRunId === 'string' && /^[a-zA-Z0-9-]{32,36}$/.test(message.codexRunId)) {
         normalizedMessage.codexRunId = message.codexRunId;
       }
+      const supplement = normalizeMemorySupplement(message.memorySupplement);
+      if (supplement.length > 0 && message.kind === 'context_notice') { normalizedMessage.memorySupplement = supplement; }
       let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
       if (voiceMetadata !== undefined) {
         normalizedMessage.voice = voiceMetadata;

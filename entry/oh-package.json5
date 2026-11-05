@@ -6,6 +6,7 @@
   "author": "",
   "license": "",
   "dependencies": {
+    "sherpa_onnx": "1.13.3",
     "libentry.so": "file:./src/main/cpp/types/libentry"
   }
 }

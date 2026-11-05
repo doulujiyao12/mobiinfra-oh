@@ -2,6 +2,8 @@
 
 
 #include <napi/native_api.h>
+#include "recording/RecordingScreenCapture.h"
+#include "recording/RecordingCpu.h"
 #include <hilog/log.h>
 #include <string>
 #include <sstream>
@@ -27,6 +29,10 @@
 #include <vector>
 #include <utility>
 #include <errno.h>
+#include <stdexcept>
+#include "rapidjson/document.h"
+#include "rapidjson/stringbuffer.h"
+#include "rapidjson/writer.h"
 
 #include "llm/llm.hpp"
 #include "rawfile/raw_dir.h"
@@ -79,6 +85,9 @@ static std::atomic<uint64_t> g_next_chat_request_id{0};
 static std::atomic<uint64_t> g_latest_chat_request_id{0};
 static std::atomic<uint64_t> g_running_chat_request_id{0};
 static std::atomic<uint64_t> g_cancelled_chat_request_id{0};
+static std::atomic<uint64_t> g_next_text_request_id{0};
+static std::atomic<uint64_t> g_active_text_request_id{0};
+static std::atomic<uint64_t> g_cancelled_text_request_id{0};
 
 static void appLog(const char* fmt, ...);
 
@@ -814,7 +823,7 @@ static int g_agent_step = 0;
 
 struct AsyncData {
     // NAPI 异步任务通用上下文：后台线程写 outputStr，Complete 阶段 resolve/reject Promise。
-    napi_async_work work;
+    napi_async_work work = nullptr;
     napi_deferred deferred;
     std::string inputStr;
     std::string npuMode = "cpu";
@@ -822,6 +831,8 @@ struct AsyncData {
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
     uint64_t chatRequestId = 0;
+    uint64_t textRequestId = 0;
+    int maxNewTokens = 768;
 };
 
 struct OpProfileStat {
@@ -1240,8 +1251,8 @@ private:
 // 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。
 class TsfnStreambuf : public std::streambuf {
 public:
-    TsfnStreambuf(napi_threadsafe_function tsfn, uint64_t requestId = 0, LlmContext* context = nullptr)
-        : tsfn_(tsfn), requestId_(requestId), context_(context) {}
+    TsfnStreambuf(napi_threadsafe_function tsfn, uint64_t requestId = 0, LlmContext* context = nullptr, bool isolatedText = false)
+        : tsfn_(tsfn), requestId_(requestId), context_(context), isolatedText_(isolatedText) {}
     std::string str() const { return accumulated_; }
 
 protected:
@@ -1274,7 +1285,9 @@ protected:
 
 private:
     bool applyCancellationOnInferenceThread() {
-        if (!isChatRequestCancelled(requestId_)) {
+        bool cancelled = isolatedText_ ?
+            g_cancelled_text_request_id.load(std::memory_order_acquire) == requestId_ : isChatRequestCancelled(requestId_);
+        if (!cancelled) {
             return false;
         }
         // LlmContext::status 不是原子类型，因此只能由正在执行 response() 的线程写入。
@@ -1288,6 +1301,7 @@ private:
     napi_threadsafe_function tsfn_;
     uint64_t requestId_;
     LlmContext* context_;
+    bool isolatedText_ = false;
     std::string accumulated_;
 };
 
@@ -1639,6 +1653,139 @@ static napi_value GenerateAsync(napi_env env, napi_callback_info info) {
     napi_queue_async_work(env, asyncData->work);
 
     return promise;
+}
+
+// Isolated feature inference: never append recording text to g_messages, never
+// cancel a chat request, and restore the loaded model's configuration afterwards.
+static std::string isolatedTextConfig(const std::string& original) {
+    rapidjson::Document d; d.Parse(original.c_str());
+    if (d.HasParseError() || !d.IsObject()) throw std::runtime_error("Invalid local model configuration");
+    auto& a = d.GetAllocator();
+    if (d.HasMember("reuse_kv")) d["reuse_kv"].SetBool(false); else d.AddMember("reuse_kv", false, a);
+    if (d.HasMember("use_template")) d["use_template"].SetBool(true); else d.AddMember("use_template", true, a);
+    if (d.HasMember("jinja") && d["jinja"].IsObject()) {
+        auto& j = d["jinja"];
+        if (!j.HasMember("context")) j.AddMember("context", rapidjson::Value(rapidjson::kObjectType), a);
+        if (j["context"].IsObject()) {
+            auto& c = j["context"];
+            if (c.HasMember("enable_thinking")) c["enable_thinking"].SetBool(false);
+            else c.AddMember("enable_thinking", false, a);
+        }
+    }
+    rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer); d.Accept(writer);
+    return buffer.GetString();
+}
+
+class TextRequestLifetime {
+public:
+    explicit TextRequestLifetime(uint64_t id) : id_(id) {}
+    ~TextRequestLifetime() {
+        uint64_t expected = id_; g_active_text_request_id.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
+private:
+    uint64_t id_;
+};
+
+class IsolatedModelScope {
+public:
+    explicit IsolatedModelScope(Llm* model) : model_(model), config_(model->dump_config()) {
+        model_->reset();
+    }
+    ~IsolatedModelScope() {
+        try {
+            model_->reset(); model_->set_config(config_);
+            const_cast<LlmContext*>(model_->getContext())->status = LlmStatus::NORMAL_FINISHED;
+            if (g_offlineNpu2State) g_offlineNpu2State->error.clear();
+        } catch (...) { LOGE("Failed to restore isolated text model state"); }
+    }
+    void prepare() { if (!model_->set_config(isolatedTextConfig(config_))) throw std::runtime_error("Local model configuration failed"); }
+private:
+    Llm* model_;
+    std::string config_;
+};
+
+static void CompleteTextExecute(napi_env, void* data) {
+    auto* request = static_cast<AsyncData*>(data);
+    TextRequestLifetime lifetime(request->textRequestId);
+    request->success = false;
+    std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || g_agent_mode || !g_fullNpuAgentPrefix.empty() ||
+        g_latest_chat_request_id.load(std::memory_order_acquire) != 0) {
+        request->outputStr = "本地模型正在使用，请稍后重试"; return;
+    }
+    auto cancelled = [request]() { return g_cancelled_text_request_id.load(std::memory_order_acquire) == request->textRequestId; };
+    try {
+        if (cancelled()) throw std::runtime_error("摘要已停止");
+        if (g_fullNpu) {
+            std::string error;
+            auto emit = [request](const std::string& text) {
+                if (!request->tsfn) return;
+                auto* value = new std::string(text);
+                if (napi_call_threadsafe_function(request->tsfn, value, napi_tsfn_blocking) != napi_ok) delete value;
+            };
+            bool ok = false;
+            try {
+                ok = g_fullNpu->response(KirinFullNpu::Runtime::chatTemplate({{"user", request->inputStr}}),
+                    cancelled, emit, request->outputStr, error, request->maxNewTokens);
+            } catch (...) { g_fullNpu->reset(); throw; }
+            g_fullNpu->reset();
+            if (!ok) throw std::runtime_error(error);
+        } else {
+            if (!g_llm) throw std::runtime_error("本地模型尚未加载");
+            IsolatedModelScope scope(g_llm.get()); scope.prepare();
+            OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
+            auto* context = const_cast<LlmContext*>(g_llm->getContext());
+            TsfnStreambuf buffer(request->tsfn, request->textRequestId, context, true); std::ostream stream(&buffer);
+            g_llm->response(request->inputStr, &stream, nullptr, request->maxNewTokens);
+            if (g_offlineNpu2State && !g_offlineNpu2State->error.empty()) throw std::runtime_error(g_offlineNpu2State->error);
+            if (context->status == LlmStatus::INTERNAL_ERROR) throw std::runtime_error("本地摘要推理失败");
+            request->outputStr = buffer.str();
+        }
+        if (cancelled()) throw std::runtime_error("摘要已停止");
+        if (request->outputStr.empty()) throw std::runtime_error("本地模型没有返回摘要");
+        request->success = true;
+    } catch (const std::exception& e) { request->outputStr = e.what(); }
+    catch (...) { request->outputStr = "本地摘要推理失败"; }
+}
+
+static napi_value CompleteTextAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 3; napi_value args[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    size_t length = 0; int32_t maximum = 768;
+    if (argc < 2 || napi_get_value_string_utf8(env, args[0], nullptr, 0, &length) != napi_ok ||
+        length == 0 || length > 131072 || napi_get_value_int32(env, args[1], &maximum) != napi_ok || maximum < 1 || maximum > 2048) {
+        napi_throw_error(env, nullptr, "Invalid isolated text request"); return nullptr;
+    }
+    auto* request = new AsyncData(); request->inputStr.resize(length + 1);
+    napi_get_value_string_utf8(env, args[0], &request->inputStr[0], length + 1, &length); request->inputStr.resize(length);
+    request->maxNewTokens = maximum; request->textRequestId = g_next_text_request_id.fetch_add(1) + 1;
+    uint64_t expected = 0;
+    if (!g_active_text_request_id.compare_exchange_strong(expected, request->textRequestId)) {
+        delete request; napi_throw_error(env, nullptr, "本地模型正在使用，请稍后重试"); return nullptr;
+    }
+    if (argc >= 3) {
+        napi_valuetype type; napi_typeof(env, args[2], &type);
+        if (type == napi_function) {
+            napi_value label; napi_create_string_utf8(env, "IsolatedTextToken", NAPI_AUTO_LENGTH, &label);
+            napi_create_threadsafe_function(env, args[2], nullptr, label, 0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &request->tsfn);
+        }
+    }
+    napi_value promise, label; napi_create_promise(env, &request->deferred, &promise);
+    napi_create_string_utf8(env, "CompleteText", NAPI_AUTO_LENGTH, &label);
+    if (napi_create_async_work(env, nullptr, label, CompleteTextExecute, AsyncComplete, request, &request->work) != napi_ok ||
+        napi_queue_async_work(env, request->work) != napi_ok) {
+        g_active_text_request_id.store(0);
+        if (request->tsfn) napi_release_threadsafe_function(request->tsfn, napi_tsfn_abort);
+        if (request->work) napi_delete_async_work(env, request->work);
+        napi_value error; napi_create_string_utf8(env, "无法启动本地摘要", NAPI_AUTO_LENGTH, &error);
+        napi_reject_deferred(env, request->deferred, error); delete request;
+    }
+    return promise;
+}
+
+static napi_value CancelText(napi_env env, napi_callback_info) {
+    g_cancelled_text_request_id.store(g_active_text_request_id.load(std::memory_order_acquire), std::memory_order_release);
+    napi_value value; napi_create_string_utf8(env, "cancel requested", NAPI_AUTO_LENGTH, &value); return value;
 }
 
 static std::string formatProfileReport(const std::map<std::string, OpProfileStat>& stats,
@@ -2017,7 +2164,8 @@ static napi_value IsChatRunning(napi_env env, napi_callback_info info) {
     (void)info;
     // latest id 从 ChatAsync 入队时设置，并在 ChatExecute 的生命周期结束时清零。
     // 使用它而不是 running id，可以覆盖尚在等待 g_mutex 的已入队请求。
-    bool active = g_latest_chat_request_id.load(std::memory_order_acquire) != 0;
+    bool active = g_latest_chat_request_id.load(std::memory_order_acquire) != 0 ||
+        g_active_text_request_id.load(std::memory_order_acquire) != 0;
     napi_value value;
     napi_get_boolean(env, active, &value);
     return value;
@@ -5660,6 +5808,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"copyModel",    nullptr, CopyModel,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"completeText", nullptr, CompleteTextAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelText", nullptr, CancelText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelChat",   nullptr, CancelChat,         nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -5685,6 +5835,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    RegisterRecordingScreenCapture(env, exports);
+    RegisterRecordingCpu(env, exports);
     return exports;
 }
 EXTERN_C_END

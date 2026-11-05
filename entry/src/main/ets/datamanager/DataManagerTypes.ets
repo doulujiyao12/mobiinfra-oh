@@ -258,7 +258,12 @@ export interface ChatEventAttribution {
   evidence_source_refs: string[];
 }
 
+export interface MemorySubjectRef { id: string; name: string; relation: string; is_self: boolean; }
+export interface MemoryFactSource { kind: string; subject_id: string; field: string; authority: string; }
+
 export interface IndexedEvent {
+  subjects?: MemorySubjectRef[];
+  fact_source?: MemoryFactSource;
   chat_context?: ChatEventContext;
   chat_attribution?: ChatEventAttribution;
   calendar?: CalendarEventMetadata;
@@ -329,6 +334,7 @@ export interface ProfileState {
 }
 
 export interface QueryOptions {
+  subjectIds?: string[];
   keywords: string[];
   keywordOperator?: string;
   includeTodoDeadlineInTimeRange?: boolean;
@@ -349,6 +355,8 @@ export interface QueryResult {
 }
 
 export interface CollectionGroupState {
+  title_topic?: string;
+  conversation_key?: string;
   group_id: string;
   title: string;
   source: string;
@@ -362,6 +370,7 @@ export interface CollectionGroupState {
 }
 
 export interface CollectionGroupsDocument {
+  policy?: string;
   generated_at: string;
   tab_id: string;
   title: string;
@@ -423,6 +432,7 @@ export interface HomeRecommendationState {
 }
 
 export interface HomeRecommendationsDocument {
+  policy?: string;
   generated_at: string;
   input_hash: string;
   total_events: number;
@@ -430,6 +440,7 @@ export interface HomeRecommendationsDocument {
 }
 
 export interface HomeRecommendationPlannerEvent {
+  chat_attribution?: ChatEventAttribution;
   event_id: string;
   date: string;
   todo_type: string;

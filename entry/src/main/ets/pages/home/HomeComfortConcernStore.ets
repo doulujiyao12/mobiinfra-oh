@@ -3,13 +3,13 @@ import { HomeComfortConcern, homeComfortConcernTitle } from './HomeEmotionalSupp
 
 export interface HomeComfortSnapshot {
   schema: string;
-  day: string;
+  day: string; // Last checked day; previous topics remain visible across days.
   input: string;
   concerns: HomeComfortConcern[];
 }
 
-// Small, app-private cache for the last successful result, including genuine
-// empty results. Only the bounded recent-chat input is compared; no history hash.
+// Small, app-private cache for the last successful topics/check. The check day
+// controls regeneration, not expiry of the last nonempty conversation topics.
 export class HomeComfortConcernStore {
   private storage: DataManagerStorage;
   private path: string;
@@ -21,7 +21,8 @@ export class HomeComfortConcernStore {
 
   load(day: string): HomeComfortSnapshot | null {
     let snapshot = this.storage.readJson<HomeComfortSnapshot | null>(this.path, null);
-    if (!snapshot || snapshot.schema !== 'home-comfort-v1' || snapshot.day !== day || typeof snapshot.input !== 'string' ||
+    if (!snapshot || snapshot.schema !== 'home-comfort-v1' || typeof snapshot.day !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.day) || snapshot.day > day || typeof snapshot.input !== 'string' ||
       !Array.isArray(snapshot.concerns) || snapshot.concerns.length > 3) { return null; }
     let valid = snapshot.concerns.every((item: HomeComfortConcern): boolean => item !== null && typeof item === 'object' &&
       typeof item.id === 'string' && typeof item.title === 'string' && typeof item.summary === 'string' &&

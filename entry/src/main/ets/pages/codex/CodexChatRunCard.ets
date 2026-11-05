@@ -1,6 +1,8 @@
 import { common } from '@kit.AbilityKit';
 import { AppTheme } from '../../utils/AppTheme';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { MarkdownView } from '../../components/MarkdownView';
+import { codexLinkedArtifact, codexMarkdownExcerpt, codexWebLink } from './CodexMarkdownLinks';
 import { CodexChatService } from './CodexChatService';
 import { CodexChatRun, codexChatStatus } from './CodexChatTypes';
 import { CodexAnswer, CodexApproval, CodexArtifact, CodexLocalArtifact } from './CodexTypes';
@@ -42,7 +44,14 @@ export struct CodexChatRunCard {
   private canStop(): boolean {
     return this.run?.submitted === true && !['completed', 'cancelled', 'failed'].includes(this.run?.status || '');
   }
-  private answerText(): string { return this.expanded ? this.run?.answer || '' : (this.run?.answer || '').slice(0, 1000); }
+  private answerText(): string { return codexMarkdownExcerpt(this.run?.answer || '', this.expanded); }
+  private async openMarkdownLink(target: string): Promise<void> {
+    const artifact = codexLinkedArtifact(target, this.files());
+    if (artifact) { await this.open(artifact, false); return; }
+    if (!codexWebLink(target)) { this.error = '请从本条委托的交付文件中打开'; return; }
+    try { await (this.getUIContext().getHostContext() as common.UIAbilityContext).openLink(target.trim()); }
+    catch (e) { this.error = '链接暂时无法打开'; }
+  }
   private async sync(): Promise<void> {
     if (this.busy) { return; }
     this.busy = true; this.error = '';
@@ -100,8 +109,9 @@ export struct CodexChatRunCard {
       }
       if (this.run?.answer) {
         AiGeneratedBadge({ compact: true })
-        Text(this.answerText()).fontSize(14).fontColor(AppTheme.text('#172033')).copyOption(CopyOptions.LocalDevice).width('100%')
-        if ((this.run?.answer.length || 0) > 1000) {
+        MarkdownView({ text: this.answerText(), variant: 'chat_assistant',
+          onLinkClick: (target: string): void => { this.openMarkdownLink(target); } })
+        if ((this.run?.answer.length || 0) > 1600) {
           Button(this.expanded ? '收起结果' : '展开结果').fontSize(12).height(30).backgroundColor(Color.Transparent)
             .fontColor(AppTheme.text('#5968FF')).onClick(() => { this.expanded = !this.expanded; })
         }

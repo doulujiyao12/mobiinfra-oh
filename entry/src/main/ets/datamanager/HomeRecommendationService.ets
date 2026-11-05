@@ -2,7 +2,7 @@ import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { IndexService } from './IndexService';
-import { dataManagerError, dataManagerInfo } from './DataManagerLog';
+import { dataManagerInfo } from './DataManagerLog';
 import { chatAttributionFingerprint, chatHasKnownActionOwners, chatOtherOwnerNames, chatOtherSubjectNames,
   chatPersonTitle, isChatCollectionEvent } from './ChatCollectionContext';
 import {
@@ -43,6 +43,7 @@ interface HomeRecommendationPlanningContext {
 }
 
 const HOME_TODO_NO_DEADLINE_RECENT_DAYS: number = 7;
+const HOME_FOLLOW_UP_POLICY: string = 'home-follow-up-v2';
 
 export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
   let parts: string[] = ['home_recommendation_source_v1'];
@@ -120,6 +121,7 @@ export function pruneHomeRecommendationsDocument(document: HomeRecommendationsDo
   }
 
   let prunedDocument: HomeRecommendationsDocument = {
+    policy: document.policy,
     generated_at: normalizeFreeText(document.generated_at),
     input_hash: normalizeFreeText(document.input_hash),
     total_events: candidateEventIds.length,
@@ -191,6 +193,7 @@ export class HomeRecommendationService {
     }
     let recommendations = await this.buildIncrementalRecommendations(previous, context, modelConfig);
     let document: HomeRecommendationsDocument = {
+      policy: HOME_FOLLOW_UP_POLICY,
       generated_at: nowIsoLocal(),
       input_hash: inputHash,
       total_events: context.candidateEventIds.length,
@@ -213,7 +216,8 @@ export class HomeRecommendationService {
   cachedBuildResult(day: string | undefined): HomeRecommendationBuildResult | null {
     if (day !== this.currentDateKey()) { return null; }
     let document = this.loadDocument();
-    if (!document.generated_at || !document.input_hash || !Array.isArray(document.recommendations)) { return null; }
+    if (document.policy !== HOME_FOLLOW_UP_POLICY || !document.generated_at || !document.input_hash ||
+      !Array.isArray(document.recommendations)) { return null; }
     return { totalEvents: document.total_events, recommendationCount: document.recommendations.length, reused: true, prunedCount: 0 };
   }
 
@@ -268,6 +272,7 @@ export class HomeRecommendationService {
     candidates.forEach((event: IndexedEvent) => {
       eventMap[event.event_id] = event;
       let plannerEvent: HomeRecommendationPlannerEvent = {
+        chat_attribution: event.chat_attribution,
         event_id: event.event_id,
         date: event.event_date,
         todo_type: event.todo.type,
@@ -294,7 +299,7 @@ export class HomeRecommendationService {
 
   private inputHash(context: HomeRecommendationPlanningContext, modelConfig: DataManagerModelConfig): string {
     let parts: string[] = [
-      'home_recommendations_todo',
+      HOME_FOLLOW_UP_POLICY,
       context.today,
       modelConfig.enabled ? 'model' : 'disabled',
       modelConfig.enabled ? modelConfig.baseUrl : ''
@@ -330,13 +335,10 @@ export class HomeRecommendationService {
     let recommendations = this.reusePreviousRecommendations(previous.recommendations || [], context, usedIds, covered);
     let remainingContext = this.remainingPlanningContext(context, covered);
     if (modelConfig.enabled && remainingContext.plannerEvents.length > 0) {
-      try {
-        let planned = await this.modelClient.planHomeRecommendations(remainingContext.plannerEvents, remainingContext.today, modelConfig);
-        recommendations = recommendations.concat(this.normalizeRecommendations(planned, remainingContext, usedIds));
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError(`Home recommendation planner failed: ${err.message}`);
-      }
+      // Publish only a complete planning result. A failed/partial response must
+      // not replace previous cards or certify the current input as processed.
+      let planned = await this.modelClient.planHomeRecommendations(remainingContext.plannerEvents, remainingContext.today, modelConfig);
+      recommendations = recommendations.concat(this.normalizeRecommendations(planned, remainingContext, usedIds));
     }
     dataManagerInfo(`Home recommendations incremental: reused=${Object.keys(covered).length}, plannedEvents=${remainingContext.plannerEvents.length}, recommendations=${recommendations.length}`);
     return recommendations;
@@ -498,6 +500,8 @@ export class HomeRecommendationService {
   }
 
   private todoTypeTag(type: string, hasDeadline: boolean): string {
+    if (type === 'care') { return '值得关心'; }
+    if (type === 'research') { return '值得研究'; }
     if (type === 'buy') {
       return '待购买';
     }
@@ -523,7 +527,7 @@ export class HomeRecommendationService {
       return '待预约';
     }
     if (type === 'plan') {
-      return '待安排';
+      return '可以规划';
     }
     if (type === 'attend') {
       return '待出席';
