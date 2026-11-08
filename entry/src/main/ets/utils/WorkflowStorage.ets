@@ -6,7 +6,7 @@ import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
-import { WECHAT_SUMMARY_PROMPT } from './WechatSummaryPrompt';
+import { WECHAT_SUMMARY_PROMPT, WECHAT_TODAY_CHAT_CHECK_PROMPT } from './WechatSummaryPrompt';
 import {
   WorkflowCondition,
   WorkflowDefaults,
@@ -1371,7 +1371,7 @@ export class WorkflowStorage {
     };
     let containsTodayChat: VlmJsonSchemaField = {
       type: 'boolean',
-      description: '如果当前截图中的聊天记录属于任务执行日期对应的今天则为 true；如果截图中已经出现早于任务执行日期的聊天日期分隔符、明确更早日期内容，或当前可见聊天记录已经不属于任务执行日期，则为 false'
+      description: WECHAT_TODAY_CHAT_CHECK_PROMPT
     };
     return {
       summary: summary,

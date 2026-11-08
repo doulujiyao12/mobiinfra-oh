@@ -13,6 +13,8 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(promptFile, 'utf8'), {
 }).outputText, {exports: exportsObject});
 const prompt = exportsObject.WECHAT_SUMMARY_PROMPT;
 assert.equal(typeof prompt, 'string');
+const todayPrompt = exportsObject.WECHAT_TODAY_CHAT_CHECK_PROMPT;
+assert.equal(typeof todayPrompt, 'string');
 function summaryQuestions(value) {
   if (Array.isArray(value)) return value.flatMap(summaryQuestions);
   if (!value || typeof value !== 'object') return [];
@@ -22,6 +24,20 @@ function summaryQuestions(value) {
 for (const name of ['default_weixin_chat.json', 'default_weixin_today_chat.json']) {
   const workflow = JSON.parse(fs.readFileSync(path.join(root, 'entry/src/main/resources/rawfile/workflows/configs', name), 'utf8'));
   assert.deepEqual(summaryQuestions(workflow), [prompt], name + ' differs from the shared prompt');
+  if (name === 'default_weixin_today_chat.json') {
+    const descriptions = [];
+    function todayDescriptions(value) {
+      if (Array.isArray(value)) { value.forEach(todayDescriptions); return; }
+      if (!value || typeof value !== 'object') return;
+      if (value.tool_name === 'vlm_qa' && value.inputs?.mode === 'summary') {
+        const field = value.inputs.json_schema?.contains_today_chat;
+        if (field) { assert.equal(field.type, 'boolean'); descriptions.push(field.description); }
+      }
+      Object.values(value).forEach(todayDescriptions);
+    }
+    todayDescriptions(workflow);
+    assert.deepEqual(descriptions, [todayPrompt], 'today schema and fallback must have identical instructions');
+  }
 }
 const storagePath = path.join(root, 'entry/src/main/ets/utils/WorkflowStorage.ets');
 const source = ts.createSourceFile(storagePath, fs.readFileSync(storagePath, 'utf8'), ts.ScriptTarget.Latest, true);
@@ -30,6 +46,10 @@ function visit(node, method = '') {
   if (ts.isMethodDeclaration(node) && node.name) method = node.name.getText(source);
   if (method === 'weixinTodaySummaryToolStep' && ts.isPropertyAssignment(node) && node.name.getText(source) === 'question') {
     assert.equal(node.initializer.getText(source), 'WECHAT_SUMMARY_PROMPT'); references.push(method);
+  }
+  if (method === 'weixinTodayJsonSchema' && ts.isVariableDeclaration(node) && node.name.getText(source) === 'containsTodayChat') {
+    const description = node.initializer.properties.find(item => item.name?.getText(source) === 'description');
+    assert.equal(description.initializer.getText(source), 'WECHAT_TODAY_CHAT_CHECK_PROMPT');
   }
   if (method === 'defaultWeixinWorkflow' && ts.isCallExpression(node) &&
       node.expression.getText(source) === 'WorkflowStorage.summaryToolStep') {
@@ -41,7 +61,7 @@ visit(source);
 assert.deepEqual(references.sort(), ['defaultWeixinWorkflow', 'weixinTodaySummaryToolStep']);
 assert.ok(source.statements.some(node => ts.isImportDeclaration(node) && node.moduleSpecifier.text === './WechatSummaryPrompt' &&
   node.importClause?.namedBindings?.elements?.some(item => item.name.text === 'WECHAT_SUMMARY_PROMPT')));
-console.log('PASS: two packaged defaults and two fallback builders share the same WeChat summary prompt.');
+console.log('PASS: two packaged defaults and fallback builders share the summary prompt; today-check schema descriptions also match.');
 
 // Run the actual storage/title/copy methods against in-memory task files.
 // This also checks that existing configs are corrected on reload, without

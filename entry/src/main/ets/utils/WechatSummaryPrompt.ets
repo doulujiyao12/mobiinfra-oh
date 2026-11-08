@@ -1,3 +1,13 @@
+// Keep the packaged default workflow schema description in sync with this fallback.
+export const WECHAT_TODAY_CHAT_CHECK_PROMPT: string =
+  '判断当前微信截图中的聊天记录是否属于今天，将结果写入 contains_today_chat。\n\n' +
+  '按以下顺序判断：\n\n' +
+  '1. 如果出现“昨天”“前天”“上周”、星期几或具体年月日，返回 false。\n' +
+  '   这一条优先级最高：即使同一页也出现“上午/下午＋时间”，仍返回 false。\n\n' +
+  '2. 如果没有出现上述日期标记，聊天记录只显示“上午/下午＋时间”，例如“上午 9:10”“下午 7:14”，返回 true。\n\n' +
+  '3. 如果没有显示具体日期，也返回 true。\n\n' +
+  'contains_today_chat 必须使用布尔值 true 或 false。';
+
 // Keep the packaged default workflow questions in sync with this fallback prompt.
 export const WECHAT_SUMMARY_PROMPT: string =
   '逐条记录当前微信截图中的可见消息，这是第${loop.index}次截图。任务聊天对象：${context.contact_name}（仅顶部名称不可见时参考）。\n' +
