@@ -30,6 +30,7 @@ export interface RecordingRecord {
   localSummaryDraft?: RecordingLocalSummaryDraft;
   audioDeleted?: boolean;
   transcriptionComplete?: boolean;
+  transcriptionEngine?: string;
 }
 export interface RecordingWatchSource { sourceId: string; recordingId: string; sha256: string; }
 export interface RecordingSummary {

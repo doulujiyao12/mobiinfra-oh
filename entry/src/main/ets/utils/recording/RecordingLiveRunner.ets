@@ -1,10 +1,11 @@
 import worker, { MessageEvents } from '@ohos.worker';
 import { RecordingAnalysis, RecordingSegment } from './RecordingTypes';
-import { RecordingLiveJob, RecordingLiveRequest, RecordingLiveUpdate, emptyLiveAnalysis, appendLiveUpdate } from './RecordingLiveTypes';
+import { RecordingLiveJob, RecordingLiveRequest, RecordingLiveUpdate, RecordingLiveTranscriber,
+  emptyLiveAnalysis, appendLiveUpdate } from './RecordingLiveTypes';
 
 // One request in flight, with bounded file windows instead of queued PCM.
 // Slow inference can lag without stopping capture or growing an IPC backlog.
-export class RecordingLiveRunner {
+export class RecordingLiveRunner implements RecordingLiveTranscriber {
   private thread: worker.ThreadWorker | null = null;
   private ready: boolean = false;
   private pending: boolean = false;

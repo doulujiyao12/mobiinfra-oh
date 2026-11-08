@@ -8,6 +8,7 @@ import { normalizeRecordingSummaryLists } from './RecordingSummaryLists';
 import { RECORDING_ANALYSIS_FILES, recordingAnalysisCheckpointPath } from './RecordingAnalysisCheckpoint';
 import { RECORDING_LIVE_FILE } from './RecordingLiveTypes';
 import { RecordingLiveCheckpoint } from './RecordingLiveCheckpoint';
+import { SYSTEM_ASR_FILE } from './RecordingSystemAsrPolicy';
 
 export class RecordingStore {
   readonly root: string;
@@ -23,6 +24,9 @@ export class RecordingStore {
   audioPath(id: string): string { return this.directory(id) + '/audio.wav'; }
   hasAudio(id: string): boolean { return fs.accessSync(this.audioPath(id)); }
   livePath(id: string): string { return this.directory(id) + '/' + RECORDING_LIVE_FILE; }
+  systemAsrPath(id: string): string { return this.directory(id) + '/' + SYSTEM_ASR_FILE; }
+  hasSystemAsrDraft(id: string): boolean { return fs.accessSync(this.systemAsrPath(id)); }
+  clearSystemAsrDraft(id: string): void { if (this.hasSystemAsrDraft(id)) { fs.unlinkSync(this.systemAsrPath(id)); } }
   clearLiveDraft(id: string): void { if (fs.accessSync(this.livePath(id))) { fs.unlinkSync(this.livePath(id)); } }
   hasAnalysisDraft(id: string, diarization?: boolean): boolean {
     if (diarization === undefined) { return this.hasAnalysisDraft(id, false) || this.hasAnalysisDraft(id, true); }
@@ -66,8 +70,9 @@ export class RecordingStore {
           record.duration = bytes / 32000; record.capturing = false; changed = true;
         } finally { fs.closeSync(file); }
       }
-      if (record.transcriptionComplete === false && fs.accessSync(this.livePath(record.id))) {
-        record.analysis = new RecordingLiveCheckpoint(this.livePath(record.id)).restore(record.duration); changed = true;
+      const draft = record.transcriptionEngine === 'system' ? this.systemAsrPath(record.id) : this.livePath(record.id);
+      if (record.transcriptionComplete === false && fs.accessSync(draft)) {
+        record.analysis = new RecordingLiveCheckpoint(draft).restore(record.duration); changed = true;
       }
       if (changed) { this.save(record); }
     }
@@ -157,7 +162,7 @@ export class RecordingStore {
     let dir = this.directory(id);
     if (!fs.accessSync(dir)) { return; }
     // Only this UUID's files; never recurse into a caller-provided path.
-    for (let name of ['record.json', 'record.json.tmp', 'audio.wav', 'audio.wav.part', RECORDING_LIVE_FILE].concat(RECORDING_ANALYSIS_FILES)) {
+    for (let name of ['record.json', 'record.json.tmp', 'audio.wav', 'audio.wav.part', RECORDING_LIVE_FILE, SYSTEM_ASR_FILE].concat(RECORDING_ANALYSIS_FILES)) {
       let path = dir + '/' + name;
       if (fs.accessSync(path)) { fs.unlinkSync(path); }
     }
@@ -165,7 +170,9 @@ export class RecordingStore {
   }
   removeAudio(record: RecordingRecord): void {
     if (record.capturing) { throw new Error('请先结束录音'); }
-    if (this.hasAnalysisDraft(record.id)) { throw new Error('请先完成或恢复转写，再删除音频，避免丢失已保存的转写进度'); }
+    if (this.hasAnalysisDraft(record.id) || this.hasSystemAsrDraft(record.id)) {
+      throw new Error('请先完成或恢复转写，再删除音频，避免丢失已保存的转写进度');
+    }
     // Commit the deletion intent first. A crash after unlink must not make the
     // retained text/summary look like a corrupt record on the next launch.
     const old = record.audioDeleted; record.audioDeleted = true;
@@ -178,6 +185,6 @@ export class RecordingStore {
     }
     const partial = this.audioPath(record.id) + '.part';
     if (fs.accessSync(partial)) { fs.unlinkSync(partial); }
-    this.clearAnalysisDraft(record.id); this.clearLiveDraft(record.id);
+    this.clearAnalysisDraft(record.id); this.clearLiveDraft(record.id); this.clearSystemAsrDraft(record.id);
   }
 }

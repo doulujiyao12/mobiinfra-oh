@@ -151,8 +151,9 @@ function wave({rate=16000,bits=16,channels=1,format=1,seconds=1,junk=false,silen
   return Buffer.concat([header,payload]);
 }
 let tests=0;
-function test(name,fn){fn();tests++;console.log('PASS',name);}
-async function testAsync(name,fn){await fn();tests++;console.log('PASS',name);}
+function selectedTest(name){return !process.env.RECORDING_TEST_FILTER||name.includes(process.env.RECORDING_TEST_FILTER);}
+function test(name,fn){if(!selectedTest(name))return;fn();tests++;console.log('PASS',name);}
+async function testAsync(name,fn){if(!selectedTest(name))return;await fn();tests++;console.log('PASS',name);}
 (async()=>{
   const wav=load(base+'RecordingWav'),types=load(base+'RecordingTypes');
   test('Focused ArkTS guards catch raw rethrows, constructor properties and a custom Entry root',()=>{
@@ -322,7 +323,7 @@ async function testAsync(name,fn){await fn();tests++;console.log('PASS',name);}
     const text=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/recording/RecordingPage.ets'),'utf8').replace('struct RecordingPage','class RecordingPage');
     const tree=ts.createSourceFile('page.ts',text,ts.ScriptTarget.Latest,true);
     const component=tree.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='RecordingPage');
-    const method=component.members.filter(n=>ts.isMethodDeclaration(n)&&['startRecording','clockTime'].includes(n.name?.getText(tree))).map(n=>n.getText(tree)).join('\n');
+    const method=component.members.filter(n=>ts.isMethodDeclaration(n)&&['startRecording','clockTime','useSystemAsr'].includes(n.name?.getText(tree))).map(n=>n.getText(tree)).join('\n');
     for(const source of ['environment','mixed','system']){
       let permissions=0,saved=null,started=null;const exported={};
       vm.runInNewContext(ts.transpileModule('exports.Page=class {'+method+'}',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
@@ -499,7 +500,7 @@ async function testAsync(name,fn){await fn();tests++;console.log('PASS',name);}
     const filename=path.join(root,'entry/src/main/ets/pages/recording/RecordingPage.ets');
     const source=fs.readFileSync(filename,'utf8').replace('struct RecordingPage','class RecordingPage');
     const tree=ts.createSourceFile('page.ts',source,ts.ScriptTarget.Latest,true),component=tree.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='RecordingPage');
-    const names=['beginRename','finishRename','remove','recordTitle','clockTime','refreshSelected','reload','message'];
+    const names=['beginRename','finishRename','remove','recordTitle','clockTime','refreshSelected','reload','message','recordingSearchActive'];
     const methods=component.members.filter(n=>ts.isMethodDeclaration(n)&&names.includes(n.name?.getText(tree))).map(n=>n.getText(tree)).join('\n');
     let confirmation=0;const exported={};
     vm.runInNewContext(ts.transpileModule('exports.Page=class {'+methods+'}',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
@@ -507,7 +508,8 @@ async function testAsync(name,fn){await fn();tests++;console.log('PASS',name);}
     const open=store.create('录制'),target=store.create('录制');
     for(const r of [open,target]){files.set(store.audioPath(r.id),wave());store.save(r);}
     const page=new exported.Page();Object.assign(page,{alive:true,busy:false,selected:open,store,reference:null,
-      recordingListScroller:{closeAllSwipeActions(){}},playback:{stop:async()=>{}},records:[]});
+      recordingListScroller:{closeAllSwipeActions(){}},playback:{stop:async()=>{}},records:[],
+      recordingAiSearch:false,recordingSearchQuery:'',recordingSearchHits:[],refreshRecordingCalendar(){}});
     page.beginRename(target);page.editTitle='项目会议';page.finishRename();
     assert.equal(page.selected.id,open.id);assert.equal(store.list().find(r=>r.id===target.id).title,'项目会议');
     assert.equal(store.list().find(r=>r.id===target.id).titleEdited,true);

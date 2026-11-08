@@ -6,6 +6,14 @@ import { RecordingSummaryService } from '../../utils/recording/RecordingSummaryS
 import { LocalTextInference } from '../../utils/LocalTextInference';
 import { RecordingWatchSync, RecordingWatchDevice } from '../../utils/recording/RecordingWatchSync';
 import { RecordingSummaryView } from './RecordingSummaryView';
+import { RecordingSettingsView } from './RecordingSettingsView';
+import { RecordingCalendarView } from './RecordingCalendarView';
+import { MarkdownView } from '../../components/MarkdownView';
+import { RecordingSearchService } from '../../utils/recording/RecordingSearchService';
+import { RecordingSearchHit, searchRecordingKeywords } from '../../utils/recording/RecordingSearch';
+import { RecordingCalendarScope, RecordingCalendarWeek, recordingCalendarMonth, recordingCalendarMonthTitle,
+  shiftRecordingCalendarMonth, recordingCalendarCounts, recordingCalendarWeeks, recordingCalendarWeekIndex,
+  filterRecordingCalendar, recordingCardClock, recordingCardPreview } from '../../utils/recording/RecordingCalendar';
 import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
 import { AppHeader } from '../../components/AppHeader';
@@ -14,22 +22,23 @@ import { RecordingStore } from '../../utils/recording/RecordingStore';
 import { DEFAULT_RECORDING_MODEL_URL, RecordingModelProgress, RecordingModels, RECORDING_MODELS } from '../../utils/recording/RecordingModels';
 import { RecordingCapture } from '../../utils/recording/RecordingCapture';
 import { RecordingLiveRunner } from '../../utils/recording/RecordingLiveRunner';
+import { RecordingSystemAsrRunner } from '../../utils/recording/RecordingSystemAsrRunner';
+import { SYSTEM_ASR_MODEL_ID } from '../../utils/recording/RecordingSystemAsrPolicy';
 import { RecordingLiveCheckpoint } from '../../utils/recording/RecordingLiveCheckpoint';
-import { RecordingLiveUpdate, emptyLiveAnalysis } from '../../utils/recording/RecordingLiveTypes';
+import { RecordingLiveUpdate, RecordingLiveTranscriber, emptyLiveAnalysis } from '../../utils/recording/RecordingLiveTypes';
 import { recordingAudioSource, recordingAudioSourceLabel } from '../../utils/recording/RecordingAudioSource';
 import { RecordingPlayback } from '../../utils/recording/RecordingPlayback';
 import { applyPageStatusBar } from '../../utils/PageStatusBar';
 import { RECORDING_INBOX_KEY } from '../../utils/recording/RecordingInbox';
+import { DEFAULT_RECORDING_TRANSCRIPTION_ENGINE, DEFAULT_RECORDING_SUMMARY_SOURCE, DEFAULT_RECORDING_LIVE_TRANSCRIBE,
+  DEFAULT_RECORDING_AI_SEARCH, initializeRecordingPreferences } from '../../utils/recording/RecordingPreferences';
 import { RecordingAnalysis, RecordingJob, RecordingRecord, RecordingSegment, RecordingSpeaker,
   RecordingWorkerMessage, SpeechRange, applyRecordingSummary, recordingUsesAutomaticTitle,
   recordingTime, recordingTimeline, voiceSimilarity } from '../../utils/recording/RecordingTypes';
 
-PersistentStorage.persistProp('recordingAutoSummary', true);
-PersistentStorage.persistProp('recordingAudioSource', 'environment');
-PersistentStorage.persistProp('recordingSummarySource', 'cloud');
-PersistentStorage.persistProp('recordingLiveTranscribe', true);
-PersistentStorage.persistProp('recordingSpeakerSeparation', false);
+initializeRecordingPreferences();
 const SPEAKER_COLORS: string[] = ['#007AFF', '#AF52DE', '#229B78', '#DD8D24', '#DD5E83'];
+const RECORDING_DOCK_INSET: number = 72;
 interface VoiceReference { recordId: string; modelId: string; name: string; embedding: number[]; }
 
 @Entry
@@ -37,6 +46,24 @@ interface VoiceReference { recordId: string; modelId: string; name: string; embe
 struct RecordingPage {
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   @State private records: RecordingRecord[] = [];
+  @State private recordingSearchQuery: string = '';
+  @StorageLink('recordingAiSearch') private recordingAiSearch: boolean = DEFAULT_RECORDING_AI_SEARCH;
+  @State private calendarMonth: string = recordingCalendarMonth(new Date());
+  @State private calendarDay: string = '';
+  @State private calendarScope: RecordingCalendarScope = 'all';
+  @State private calendarWeeks: RecordingCalendarWeek[] = [];
+  @State private calendarWeekIndex: number = 0;
+  private calendarCounts: Map<string, number> = new Map<string, number>();
+  @State private recordingSearchHits: RecordingSearchHit[] = [];
+  @State private recordingSearchBusy: boolean = false;
+  @State private recordingSearchRan: boolean = false;
+  @State private recordingSearchAnswer: string = '';
+  @State private recordingSearchStatus: string = '';
+  @State private recordingSearchNotice: string = '';
+  @State private recordingSearchRange: string = '';
+  @State private recordingSearchError: string = '';
+  private recordingSearchService: RecordingSearchService = new RecordingSearchService();
+  private recordingSearchEpoch: number = 0;
   @State private selected: RecordingRecord | null = null;
   @State private busy: boolean = false;
   @State private recording: boolean = false;
@@ -53,7 +80,7 @@ struct RecordingPage {
   @State private modelProgressSize: string = '';
   @State private showModelProgress: boolean = false;
   @State private filterSpeaker: number = -2;
-  @State private languageIndex: number = 0;
+  @StorageLink('recordingLanguageIndex') private languageIndex: number = 0;
   @State private playing: number = -2;
   @State private reference: VoiceReference | null = null;
   @State private comparison: string = '';
@@ -63,19 +90,23 @@ struct RecordingPage {
   private playback: RecordingPlayback = new RecordingPlayback();
   @StorageLink('recordingAutoSummary') private autoSummary: boolean = true;
   @StorageLink('recordingAudioSource') private audioSource: string = 'environment';
-  @StorageLink('recordingSummarySource') private summarySource: string = 'cloud';
-  @StorageLink('recordingLiveTranscribe') private liveTranscribe: boolean = true;
+  @StorageLink('recordingSummarySource') private summarySource: string = DEFAULT_RECORDING_SUMMARY_SOURCE;
+  @StorageLink('recordingLiveTranscribe') private liveTranscribe: boolean = DEFAULT_RECORDING_LIVE_TRANSCRIBE;
   @StorageLink('recordingSpeakerSeparation') private separateSpeakers: boolean = false;
+  @StorageLink('recordingTranscriptionEngine') private transcriptionEngine: string = DEFAULT_RECORDING_TRANSCRIPTION_ENGINE;
   @State private speakerSwitchOn: boolean = false;
   @State private confirmingSpeakerSeparation: boolean = false;
   @State private liveSegments: RecordingSegment[] = [];
+  @State private livePreviewText: string = '';
+  @State private livePreviewStart: number = 0;
   @State private liveStatus: string = '';
-  private live: RecordingLiveRunner | null = null;
+  private live: RecordingLiveTranscriber | null = null;
+  private systemAsr: RecordingSystemAsrRunner | null = null;
   @State private showAudioSources: boolean = false;
   private audioSources: string[] = ['environment', 'mixed', 'system'];
   private captureStopPending: boolean = false;
   @State private showWatch: boolean = false;
-  @State private showOptions: boolean = false;
+  @State private showRecordingSettings: boolean = false;
   @State private showSpeakers: boolean = false;
   @State private showRename: boolean = false;
   @State private editTitle: string = '';
@@ -100,10 +131,10 @@ struct RecordingPage {
   private preparingModels: boolean = false;
   private recordingDraft: RecordingRecord | null = null;
   private scroller: Scroller = new Scroller();
+  private recordingSettingsScroller: Scroller = new Scroller();
   private recordingListScroller: ListScroller = new ListScroller();
   private renameTarget: RecordingRecord | null = null;
   private languages: string[] = ['auto', 'zh', 'en', 'ja', 'ko', 'yue'];
-  private languageLabels: string[] = ['自动识别', '普通话', '英语', '日语', '韩语', '粤语'];
   private backgroundCancelled: () => void = (): void => {
     if (this.recording) { this.error = '系统结束了后台录音，已保存录到的声音'; this.stopRecording().catch((e: Error): void => { this.message(e); }); }
   };
@@ -147,12 +178,111 @@ struct RecordingPage {
     (this.getUIContext().getHostContext() as common.UIAbilityContext).eventHub.off('recording-analysis-background', this.backgroundHandler);
   }
   private leavePage(): void {
+    this.stopRecordingSearch(false);
     if (this.externalInteraction) { return; }
     if (this.recording) { return; }
     if (this.busy) { this.cancel(); }
     this.playback.stop().catch((): void => {}); this.playing = -2;
   }
-  private reload(): void { if (this.store !== null) { this.records = this.store.list(); } }
+  private reload(): void {
+    if (this.store === null) { return; }
+    this.records = this.store.list();
+    this.refreshRecordingCalendar();
+    if (!this.recordingAiSearch && this.recordingSearchActive()) {
+      this.recordingSearchHits = searchRecordingKeywords(this.records, [this.recordingSearchQuery]);
+    } else {
+      let retained = this.recordingSearchHits.filter((hit: RecordingSearchHit): boolean =>
+        this.records.some((record: RecordingRecord): boolean => record.id === hit.recordId));
+      if (retained.length !== this.recordingSearchHits.length) {
+        this.stopRecordingSearch(false); this.recordingSearchAnswer = '';
+        this.recordingSearchNotice = '录音已变更，可重新搜索'; this.recordingSearchHits = retained;
+      }
+    }
+  }
+  private recordingSearchActive(): boolean { return this.recordingSearchQuery.trim().length > 0; }
+  private recordingDockVisible(): boolean {
+    return !this.showRecordingSettings && (this.recording || (this.selected === null && !this.recordingSearchActive()));
+  }
+  private stopRecordingSearch(notify: boolean): void {
+    let running = this.recordingSearchBusy;
+    this.recordingSearchEpoch++; this.recordingSearchService.cancel(); this.recordingSearchBusy = false;
+    this.recordingSearchStatus = '';
+    if (notify && running) { this.recordingSearchNotice = '搜索已停止'; }
+  }
+  private changeRecordingSearch(query: string): void {
+    this.stopRecordingSearch(false); this.recordingSearchQuery = query;
+    this.recordingSearchAnswer = ''; this.recordingSearchNotice = ''; this.recordingSearchRange = ''; this.recordingSearchError = '';
+    this.recordingSearchRan = !this.recordingAiSearch && query.trim().length > 0;
+    this.recordingSearchHits = this.recordingSearchRan ? searchRecordingKeywords(this.records, [query]) : [];
+  }
+  private recordingSearchRows(): RecordingRecord[] {
+    if (!this.recordingSearchActive()) { return filterRecordingCalendar(this.records, this.calendarScope, this.calendarMonth, this.calendarDay); }
+    let result: RecordingRecord[] = [];
+    for (let hit of this.recordingSearchHits) {
+      let record = this.records.find((value: RecordingRecord): boolean => value.id === hit.recordId);
+      if (record) { result.push(record); }
+    }
+    return result;
+  }
+  private recordingSearchExcerpt(id: string): string {
+    return this.recordingSearchHits.find((hit: RecordingSearchHit): boolean => hit.recordId === id)?.snippet || '';
+  }
+  private recordingSearchNumber(id: string): string {
+    return String(this.recordingSearchHits.findIndex((hit: RecordingSearchHit): boolean => hit.recordId === id) + 1);
+  }
+  private refreshRecordingCalendar(anchor: string = ''): void {
+    this.calendarCounts = recordingCalendarCounts(this.records);
+    let previousAnchor = this.calendarWeeks[this.calendarWeekIndex]?.key || '';
+    this.calendarWeeks = recordingCalendarWeeks(this.calendarMonth, this.calendarCounts);
+    let today = new Date();
+    let todayKey = recordingCalendarMonth(today) + '-' + String(today.getDate()).padStart(2, '0');
+    this.calendarWeekIndex = recordingCalendarWeekIndex(this.calendarWeeks, anchor || this.calendarDay || previousAnchor || todayKey);
+  }
+  private shiftRecordingMonth(offset: number): void {
+    if (this.busy) { return; }
+    this.calendarMonth = shiftRecordingCalendarMonth(this.calendarMonth, offset);
+    this.calendarDay = ''; this.calendarScope = 'month';
+    this.refreshRecordingCalendar(this.calendarMonth + '-01');
+  }
+  private selectRecordingDay(key: string): void {
+    if (this.busy || !this.calendarWeeks.some((week: RecordingCalendarWeek): boolean =>
+      week.days.some((day): boolean => day.key === key))) { return; }
+    this.calendarMonth = key.slice(0, 7); this.calendarDay = key; this.calendarScope = 'day';
+    this.refreshRecordingCalendar(key);
+    this.recordingListScroller.scrollToIndex(0);
+  }
+  private clearRecordingDate(): void {
+    this.calendarDay = ''; this.calendarScope = 'all';
+  }
+  private recordingCardText(record: RecordingRecord): string {
+    return this.recordingSearchActive() ? this.recordingSearchExcerpt(record.id) || recordingCardPreview(record) : recordingCardPreview(record);
+  }
+  private recordingCardMeta(record: RecordingRecord): string {
+    return recordingTime(record.duration) + ' · ' + (record.summary ? '已摘要' : record.analysis ?
+      record.transcriptionComplete === false ? '部分转写' : '已转写' : '待转写');
+  }
+  private async runRecordingSearch(): Promise<void> {
+    if (this.busy || this.recording || !this.recordingSearchActive()) { return; }
+    if (!this.recordingAiSearch) { this.changeRecordingSearch(this.recordingSearchQuery); return; }
+    this.stopRecordingSearch(false);
+    let epoch = this.recordingSearchEpoch;
+    this.recordingSearchBusy = true; this.recordingSearchRan = true;
+    this.recordingSearchHits = []; this.recordingSearchAnswer = ''; this.recordingSearchError = '';
+    this.recordingSearchNotice = ''; this.recordingSearchRange = '';
+    try {
+      let result = await this.recordingSearchService.search(this.recordingSearchQuery, this.records.slice(),
+        (text: string): void => { if (this.alive && epoch === this.recordingSearchEpoch) { this.recordingSearchStatus = text; } },
+        (hits: RecordingSearchHit[]): void => { if (this.alive && epoch === this.recordingSearchEpoch) { this.recordingSearchHits = hits; } });
+      if (this.alive && epoch === this.recordingSearchEpoch) {
+        this.recordingSearchHits = result.hits; this.recordingSearchAnswer = result.answer;
+        this.recordingSearchNotice = result.notice; this.recordingSearchRange = result.range;
+      }
+    } catch (e) {
+      if (this.alive && epoch === this.recordingSearchEpoch) { this.recordingSearchError = (e as Error).message || '搜索未完成，请重试'; }
+    } finally {
+      if (this.alive && epoch === this.recordingSearchEpoch) { this.recordingSearchBusy = false; this.recordingSearchStatus = ''; }
+    }
+  }
   private message(error: Error): void { if (this.alive) { this.error = error.message || '操作未完成，请重试'; } }
   private async importAudio(): Promise<void> {
     if (this.busy || this.store === null) { return; }
@@ -190,8 +320,11 @@ struct RecordingPage {
       }
       if (epoch !== this.epoch) { return; }
       let record = this.store.create('录制'); record.title = '录音 ' + this.clockTime(new Date(record.createdAt));
-      const useLive = this.liveTranscribe && this.models?.readyForTranscription(false) === true;
+      const systemAsr = this.useSystemAsr();
+      const useLive = this.liveTranscribe && (systemAsr || this.models?.readyForTranscription(false) === true);
+      record.transcriptionEngine = systemAsr ? 'system' : 'sensevoice';
       if (useLive) { record.analysis = emptyLiveAnalysis(0); record.transcriptionComplete = false; }
+      if (useLive && systemAsr && record.analysis !== null) { record.analysis.modelId = SYSTEM_ASR_MODEL_ID; record.analysis.method = 'system'; }
       record.capturing = true; record.audioSource = source; this.recordingDraft = record;
       this.externalInteraction = source !== 'environment';
       await this.capture.start(this.store.audioPath(record.id), (): void => {
@@ -215,18 +348,18 @@ struct RecordingPage {
         await appBackgroundTasks.set(context, 'recording', 'audioRecording', false); return;
       }
       this.recording = true; this.selected = null; this.seconds = 0; this.recordingStartedAt = Date.now();
-      this.liveSegments = []; this.liveStatus = '';
-      if (useLive && this.models !== null) {
-        const live = new RecordingLiveRunner(); this.live = live;
-        const checkpoint = new RecordingLiveCheckpoint(this.store.livePath(record.id));
+      this.liveSegments = []; this.livePreviewText = ''; this.livePreviewStart = 0; this.liveStatus = '';
+      if (useLive) {
+        const live: RecordingLiveTranscriber = systemAsr ? new RecordingSystemAsrRunner() : new RecordingLiveRunner(); this.live = live;
+        const checkpoint = new RecordingLiveCheckpoint(systemAsr ? this.store.systemAsrPath(record.id) : this.store.livePath(record.id));
         this.liveStatus = '正在准备实时转写';
-        live.start({ audioPath: this.store.audioPath(record.id), modelDir: this.models.directory, language: this.languages[this.languageIndex] },
+        live.start({ audioPath: this.store.audioPath(record.id), modelDir: this.models?.directory || '', language: this.languages[this.languageIndex] },
           (): number => this.capture.availableSamples(), (value: RecordingLiveUpdate): void => {
-            if (value.segments.length > 0 || value.kind === 'done') { checkpoint.append(value); }
+            if (value.segments.length > 0 || value.kind === 'checkpoint' || value.kind === 'done') { checkpoint.append(value); }
             if (!this.alive || epoch !== this.epoch) { return; }
-            this.liveSegments = this.liveSegments.concat(value.segments).slice(-8);
+            this.updateLiveTranscript(live, value);
             const lag = Math.max(0, (this.capture.availableSamples() - value.processed) / 16000);
-            this.liveStatus = lag > 8 ? '转写处理中，录音继续保存' : '按说话停顿更新';
+            this.liveStatus = lag > 8 ? '转写处理中，录音继续保存' : systemAsr ? '系统正在实时转写' : '按说话停顿更新';
             if (!this.recording) {
               this.progress = Math.min(99, Math.floor(value.processed * 100 / Math.max(1, this.capture.availableSamples())));
               this.status = '正在保存最后的转写 · ' + recordingTime(value.processed / 16000);
@@ -275,7 +408,7 @@ struct RecordingPage {
             if (this.alive && epoch === this.epoch) { this.error = '已有文字和录音已保存，可稍后完成转写：' + (e as Error).message; }
           }
           this.store.save(record);
-          if (record.transcriptionComplete) { this.store.clearLiveDraft(record.id); }
+          if (record.transcriptionComplete) { this.store.clearLiveDraft(record.id); this.store.clearSystemAsrDraft(record.id); }
         }
         saved = record;
         if (this.alive && epoch === this.epoch) { this.selected = record; this.refreshSelected(); this.reload(); this.detailTab = 'text'; }
@@ -325,25 +458,45 @@ struct RecordingPage {
   private async analyze(restart: boolean = false): Promise<void> {
     if (this.busy || this.selected === null || this.models === null || this.store === null) { return; }
     if (!this.store.hasAudio(this.selected.id)) { this.error = '音频已删除，无法重新转写；已有文字和摘要仍可查看'; return; }
-    if (!this.models.readyForTranscription(this.separateSpeakers)) { this.showModels = true; return; }
+    const systemAsr = this.useSystemAsr();
+    if (!systemAsr && !this.models.readyForTranscription(this.separateSpeakers)) { this.showModels = true; return; }
     await this.playback.stop(); this.playing = -2;
     let record = this.selected; let epoch = ++this.epoch;
+    const systemRunner: RecordingSystemAsrRunner | null = systemAsr ? new RecordingSystemAsrRunner() : null;
+    this.systemAsr = systemRunner;
     this.busy = true; this.jobKind = 'analysis'; this.progress = 0; this.error = ''; this.status = '正在准备转写';
     try {
-      let result = await this.analyzer.run({ audioPath: this.store.audioPath(record.id), modelDir: this.models.directory,
-        language: this.languages[this.languageIndex], restart: restart, diarization: this.separateSpeakers },
-        (value: RecordingWorkerMessage): void => {
+      const job: RecordingJob = { audioPath: this.store.audioPath(record.id), modelDir: this.models.directory,
+        language: this.languages[this.languageIndex], restart: restart, diarization: this.separateSpeakers };
+      const report = (value: RecordingWorkerMessage): void => {
         if (this.alive && epoch === this.epoch) { this.progress = value.progress; this.status = value.message; }
-      });
+      };
+      let result: RecordingAnalysis;
+      if (systemRunner !== null) {
+        if (record.analysis === null || record.transcriptionComplete === false) {
+          record.transcriptionEngine = 'system'; record.transcriptionComplete = false; this.store.save(record);
+        }
+        result = await systemRunner.run(job, this.store.systemAsrPath(record.id), report);
+      } else { result = await this.analyzer.run(job, report); }
       if (!this.alive || epoch !== this.epoch) { return; }
       record.analysis = result; record.transcriptionComplete = true; record.summary = undefined; record.localSummaryDraft = undefined;
+      record.transcriptionEngine = systemAsr ? 'system' : 'sensevoice';
       record.duration = result.duration; this.store.save(record);
       this.store.clearAnalysisDraft(record.id);
       this.store.clearLiveDraft(record.id);
+      this.store.clearSystemAsrDraft(record.id);
       this.selected = record; this.filterSpeaker = -2; this.visibleSegments = 60; this.reload();
       this.status = result.speech.length === 0 ? '未检测到人声，原录音已保留' : '转写已保存';
-    } catch (e) { if (this.alive && epoch === this.epoch) { this.message(e as Error); } }
-    finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
+    } catch (e) {
+      if (this.alive && epoch === this.epoch) {
+        if (systemRunner !== null && (record.analysis === null || record.transcriptionComplete === false)) {
+          record.analysis = systemRunner.snapshot(record.duration); record.transcriptionComplete = false;
+          try { this.store.save(record); this.selected = record; this.reload(); } catch (saveError) { this.message(saveError as Error); }
+        }
+        this.message(e as Error);
+      }
+    }
+    finally { if (this.systemAsr === systemRunner) { this.systemAsr = null; } if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
     if (epoch === this.epoch && this.autoSummary && !this.error && record.analysis !== null &&
       record.analysis.segments.some((segment: RecordingSegment): boolean => segment.text.trim().length > 0)) { await this.summarize(); }
   }
@@ -392,15 +545,33 @@ struct RecordingPage {
     if (this.preparingModels) { this.models?.cancel(); this.status = '正在停止模型准备'; return; }
     let transcribing = this.jobKind === 'analysis';
     this.epoch++; this.queueEpoch++; this.queueRemaining = 0;
-    this.analyzer.cancel(); this.summaryService.cancel(); this.watchSync.cancel().catch((): void => {});
+    this.analyzer.cancel(); this.systemAsr?.cancel(); this.summaryService.cancel(); this.watchSync.cancel().catch((): void => {});
     this.live?.cancel();
     if (this.models !== null) { this.models.cancel(); }
     this.busy = false; this.jobKind = ''; this.status = transcribing ?
       '转写已暂停，已完成的进度已保存，稍后可继续' : '已停止，录音和已有结果已保留';
   }
   private canResumeAnalysis(): boolean {
-    return this.selected !== null && this.store !== null &&
-      this.store.hasAnalysisDraft(this.selected.id, this.separateSpeakers);
+    return this.selected !== null && this.store !== null && (this.useSystemAsr() ?
+      this.store.hasSystemAsrDraft(this.selected.id) : this.store.hasAnalysisDraft(this.selected.id, this.separateSpeakers));
+  }
+  private useSystemAsr(): boolean { return this.transcriptionEngine === 'system' && !this.separateSpeakers; }
+  private selectTranscriptionEngine(engine: string): void {
+    if (this.busy || this.recording) { return; }
+    this.transcriptionEngine = engine;
+    if (engine === 'system') {
+      this.separateSpeakers = false; this.speakerSwitchOn = false; this.liveTranscribe = true;
+    }
+  }
+  private updateLiveTranscript(live: RecordingLiveTranscriber, value: RecordingLiveUpdate): void {
+    const preview = value.preview;
+    // ForEach rows below represent immutable, committed segments. Bind the
+    // changing hypothesis directly to primitive @State so the same sentence
+    // updates without relying on a new list key or an observable DTO object.
+    this.liveSegments = live.recent().filter((segment: RecordingSegment): boolean =>
+      preview === undefined || segment.id !== preview.id);
+    this.livePreviewStart = preview?.start || 0;
+    this.livePreviewText = preview?.text || '';
   }
   private async setSpeakerSeparation(value: boolean): Promise<void> {
     if (this.busy || this.recording || this.confirmingSpeakerSeparation) {
@@ -435,6 +606,7 @@ struct RecordingPage {
   }
   private openRecord(record: RecordingRecord): void {
     if (this.busy) { return; }
+    this.stopRecordingSearch(false);
     this.recordingListScroller.closeAllSwipeActions();
     this.playback.stop().catch((): void => {}); this.playing = -2;
     this.selected = record; this.detailTab = record.summary ? 'summary' : 'text'; this.visibleSegments = 60;
@@ -533,6 +705,10 @@ struct RecordingPage {
   private context(): common.UIAbilityContext { return this.getUIContext().getHostContext() as common.UIAbilityContext; }
   onBackPress(): boolean { this.goBack(); return true; }
   private goBack(): void {
+    if (this.showRecordingSettings) {
+      if (this.busy) { this.cancel(); return; }
+      this.showRecordingSettings = false; return;
+    }
     if (this.recording) {
       promptAction.showDialog({ title: '录音仍在继续', message: '结束并保存后可返回，锁屏不会中断录音。',
         buttons: [{ text: '继续录音', color: '#5260ED' }, { text: '结束并保存', color: '#FF453A' }] })
@@ -540,32 +716,19 @@ struct RecordingPage {
       return;
     }
     if (this.busy) { this.cancel(); return; }
+    if (this.recordingSearchBusy) { this.stopRecordingSearch(true); return; }
     if (this.selected !== null) {
       this.save(); this.selected = null; this.playback.stop().catch((): void => {}); this.playing = -2; this.status = ''; return;
     }
+    if (this.recordingSearchActive()) { this.changeRecordingSearch(''); return; }
     router.back();
   }
-  private async actions(): Promise<void> {
-    if (this.busy) { return; }
-    if (this.selected === null) {
-      let result = await promptAction.showActionMenu({ title: '录音', buttons: [
-        { text: '连接手表', color: '#172033' }, { text: '离线语音模型', color: '#172033' }, { text: '录音与转写设置', color: '#172033' }] });
-      if (result.index === 0) { this.showWatch = true; this.scanWatches(); }
-      if (result.index === 1) { this.showModels = true; }
-      if (result.index === 2) { this.showOptions = true; }
-    } else {
-      let result = await promptAction.showActionMenu({ title: '这段录音', buttons: [
-        { text: '重命名', color: '#172033' }, { text: '说话人与声纹', color: '#172033' },
-        { text: this.canResumeAnalysis() ? '转写进度' : '重新转写', color: '#172033' },
-        { text: '重新生成摘要', color: '#172033' }, { text: this.audioAvailable() ? '仅删除音频文件' : '音频已删除', color: '#FF453A' },
-        { text: '删除整条记录', color: '#FF453A' }] });
-      if (result.index === 0 && this.selected !== null) { this.beginRename(this.selected); }
-      if (result.index === 1) { this.showSpeakers = true; }
-      if (result.index === 2) { this.chooseAnalysis().catch((e: Error): void => { this.message(e); }); }
-      if (result.index === 3) { this.summarize(true); }
-      if (result.index === 4) { this.removeAudio().catch((e: Error): void => { this.message(e); }); }
-      if (result.index === 5) { this.remove().catch((e: Error): void => { this.message(e); }); }
-    }
+  private openRecordingSettings(): void {
+    if (this.busy || this.recording) { return; }
+    this.stopRecordingSearch(false);
+    this.speakerSwitchOn = this.separateSpeakers;
+    this.showRecordingSettings = true;
+    this.recordingSettingsScroller.scrollTo({ xOffset: 0, yOffset: 0 });
   }
   private async scanWatches(): Promise<void> {
     if (this.watchScanning || this.busy) { return; }
@@ -703,10 +866,6 @@ struct RecordingPage {
   }
 
   @Builder private HomeHeader() {
-    Column({ space: 12 }) {
-      Text('留住每一刻的声音').fontSize(28).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
-      Text('从手腕到手机，让声音留下来。').fontSize(17).lineHeight(26).fontColor(AppTheme.text('#737D90')).width('100%')
-    }.width('100%').padding({ top: 12, bottom: 20 })
     Row({ space: 12 }) {
       Text('声音来源').fontSize(17).fontColor(AppTheme.text('#172033'))
       Blank()
@@ -714,30 +873,27 @@ struct RecordingPage {
       Text('›').fontSize(24).fontColor(AppTheme.text('#8E8E93'))
     }.width('100%').padding(18).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
       .enabled(!this.busy).onClick((): void => { this.showAudioSources = true; })
-    if (this.audioSource !== 'environment') {
-      Text('系统内录会显示屏幕授权，仅录制声音，不录制画面。')
-        .fontSize(14).lineHeight(21).fontColor(AppTheme.text('#737D90')).width('100%').padding({ left: 6, right: 6 })
-    }
-    this.SummarySourceSelector()
-    Row() {
-      Text('边录边转写').fontSize(17).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: this.liveTranscribe }).enabled(!this.busy)
-        .onChange((value: boolean): void => { this.liveTranscribe = value; })
-    }.width('100%').padding(18).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
     Row({ space: 14 }) {
       Image($r('app.media.recording_watch')).width(28).height(28)
-      Column({ space: 5 }) {
-        Text('手表录音').fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
-        Text('连接并接收录音').fontSize(15).fontColor(AppTheme.text('#737D90'))
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Text('›').fontSize(28).fontColor(AppTheme.text('#8E8E93'))
-    }.padding(20).width('100%').borderRadius(20).backgroundColor(AppTheme.background('#FFFFFF'))
+      Text('连接手表').fontSize(17).fontColor(AppTheme.text('#172033')).layoutWeight(1)
+      Text('›').fontSize(24).fontColor(AppTheme.text('#8E8E93'))
+    }.padding(18).width('100%').borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
       .enabled(!this.busy).onClick((): void => { this.showWatch = true; this.scanWatches(); })
     Row() {
       Text('所有录音').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
       Blank()
-      Text(String(this.records.length) + ' 段').fontSize(15).fontColor(AppTheme.text('#8E8E93'))
-    }.width('100%').margin({ top: 24, bottom: 4 })
+      Text(String(this.recordingSearchRows().length) + ' 段').fontSize(14).fontColor(AppTheme.text('#8E8E93'))
+      Button('全部日期').fontSize(12).height(30).padding({ left: 10, right: 10 }).margin({ left: 8 })
+        .fontColor(AppTheme.text(this.calendarScope === 'all' ? '#007AFF' : '#737D90'))
+        .backgroundColor(this.calendarScope === 'all' ? AppTheme.background('#E5EEFF') : Color.Transparent)
+        .onClick((): void => { this.clearRecordingDate(); })
+    }.width('100%').margin({ top: 14, bottom: 4 })
+    RecordingCalendarView({ monthTitle: recordingCalendarMonthTitle(this.calendarMonth), weeks: this.calendarWeeks,
+      selectedDay: this.calendarScope === 'day' ? this.calendarDay : '', weekIndex: this.calendarWeekIndex, interactive: !this.busy,
+      onMonthShift: (offset: number): void => { this.shiftRecordingMonth(offset); },
+      onDaySelect: (key: string): void => { this.selectRecordingDay(key); },
+      onWeekChange: (index: number): void => { if (index >= 0 && index < this.calendarWeeks.length) { this.calendarWeekIndex = index; } }
+    })
   }
   @Builder private RecordActions(record: RecordingRecord) {
     Row({ space: 8 }) {
@@ -759,69 +915,150 @@ struct RecordingPage {
         .backgroundColor('#FF3B30').fontColor(Color.White).enabled(!this.busy)
         .accessibilityText('删除录音')
         .onClick((): void => { this.remove(record).catch((e: Error): void => { this.message(e); }); })
-    }.height('100%').padding({ left: 10, right: 2 }).alignItems(VerticalAlign.Center)
+    }.height(68).padding({ left: 10, right: 2 }).alignItems(VerticalAlign.Center)
+  }
+  @Builder private TimelineRecordingCard(record: RecordingRecord) {
+    Row({ space: 8 }) {
+      Column() {
+        if (this.recordingSearchActive()) {
+          Text(this.recordingSearchNumber(record.id)).fontSize(12).fontWeight(FontWeight.Medium)
+            .fontColor(AppTheme.text('#326ADB')).height(20)
+        } else {
+          Row().width(9).height(9).borderRadius(5).backgroundColor(AppTheme.text('#326ADB'))
+        }
+        Row().width(1).height(56).margin({ top: 8 }).backgroundColor(AppTheme.border('#D5D9E3'))
+      }.width(12).margin({ top: 20 }).flexShrink(0).alignItems(HorizontalAlign.Center)
+      Column({ space: 7 }) {
+        Row({ space: 8 }) {
+          Text(this.recordingCardMeta(record)).fontSize(12).fontColor(AppTheme.text('#737D90'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          Text(recordingCardClock(record, !this.recordingSearchActive() && this.calendarScope === 'day'))
+            .fontSize(12).fontColor(AppTheme.text('#8E8E93')).maxLines(1).flexShrink(0)
+        }.width('100%')
+        Text(this.recordTitle(record)).fontSize(18).fontWeight(FontWeight.Medium).lineHeight(25)
+          .fontColor(AppTheme.text('#172033')).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        Text(this.recordingCardText(record)).fontSize(14).lineHeight(22).fontColor(AppTheme.text('#737D90'))
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        .padding(16).borderRadius(22).backgroundColor(AppTheme.background('#FFFFFF'))
+    }.width('100%').alignItems(VerticalAlign.Top).enabled(!this.busy).onClick((): void => { this.openRecord(record); })
+  }
+  @Builder private SearchControls() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        TextInput({ text: this.recordingSearchQuery, placeholder: this.recordingAiSearch ? '例如：上周和谁聊了什么？' : '搜索标题、摘要或转写文字' })
+          .id('recording-search-input')
+          .fontSize(16).height(44).layoutWeight(1).maxLength(500).enterKeyType(EnterKeyType.Search)
+          .fontColor(AppTheme.text('#172033')).placeholderColor(AppTheme.text('#8E8E93'))
+          .backgroundColor(AppTheme.background('#EDEFF5')).borderRadius(14)
+          .onChange((value: string): void => { this.changeRecordingSearch(value); })
+          .onSubmit((): void => { this.runRecordingSearch(); })
+        Button(this.recordingSearchBusy ? '停止' : '搜索').fontSize(15).height(44).padding({ left: 12, right: 12 })
+          .fontColor(Color.White).backgroundColor(AppTheme.filledBackground(this.recordingSearchBusy ? '#D74D47' : '#326ADB'))
+          .enabled(!this.busy)
+          .onClick((): void => {
+            if (!this.recordingSearchActive()) { this.getUIContext().getFocusController().requestFocus('recording-search-input'); }
+            else if (this.recordingSearchBusy) { this.stopRecordingSearch(true); }
+            else { this.runRecordingSearch(); }
+          })
+        if (this.recordingSearchActive()) {
+          Button('取消').fontSize(15).height(44).padding({ left: 4, right: 0 })
+            .fontColor(AppTheme.text('#737D90')).backgroundColor(Color.Transparent)
+            .onClick((): void => { this.changeRecordingSearch(''); })
+        }
+      }.width('100%')
+    }.width('100%').padding({ left: 22, right: 22, top: 8, bottom: 10 }).enabled(!this.busy)
+  }
+  @Builder private SearchFeedback() {
+    Column({ space: 12 }) {
+      if (this.recordingSearchBusy) {
+        Row({ space: 8 }) {
+          LoadingProgress().width(18).height(18).color(AppTheme.text('#326ADB'))
+          Text(this.recordingSearchStatus || '正在搜索').fontSize(14).fontColor(AppTheme.text('#737D90')).layoutWeight(1)
+        }.width('100%')
+      }
+      if (this.recordingSearchRange) {
+        Text(this.recordingSearchRange).fontSize(13).fontColor(AppTheme.text('#8E8E93')).width('100%')
+      }
+      if (this.recordingSearchAnswer) {
+        Column({ space: 10 }) {
+          Text('AI 搜索结果').fontSize(15).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#326ADB')).width('100%')
+          MarkdownView({ text: this.recordingSearchAnswer, variant: 'chat_assistant' })
+        }.width('100%').padding(16).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
+      }
+      if (this.recordingSearchError) {
+        Text(this.recordingSearchError).fontSize(14).lineHeight(21).fontColor(AppTheme.text('#D74D47')).width('100%')
+      }
+      if (this.recordingSearchNotice) {
+        Text(this.recordingSearchNotice).fontSize(13).lineHeight(20).fontColor(AppTheme.text('#737D90')).width('100%')
+      }
+      Row() {
+        Text('相关录音').fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+        Blank()
+        Text(this.recordingSearchHits.length + ' 段').fontSize(14).fontColor(AppTheme.text('#8E8E93'))
+      }.width('100%')
+    }.width('100%').padding({ top: 4, bottom: 8 })
   }
   @Builder private Home() {
-    List({ scroller: this.recordingListScroller, space: 8 }) {
+    List({ scroller: this.recordingListScroller, space: 14 }) {
       ListItem() {
-        Column({ space: 18 }) { this.HomeHeader() }.width('100%')
+        Column({ space: 18 }) {
+          if (this.recordingSearchActive()) { this.SearchFeedback() } else { this.HomeHeader() }
+        }.width('100%')
       }
-      if (this.records.length === 0) {
+      if (this.recordingSearchRows().length === 0) {
         ListItem() {
           Column({ space: 12 }) {
             Image($r('app.media.source_recording')).width(40).height(40).opacity(0.6)
-            Text('第一段声音，从这里开始').fontSize(18).fontColor(AppTheme.text('#737D90'))
-            Text('轻点下方录音，也可以导入 WAV。').fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93'))
+            Text(this.recordingSearchActive() ? (this.recordingSearchBusy ? '正在寻找相关录音' :
+              this.recordingSearchError ? '搜索未完成' : this.recordingSearchNotice === '搜索已停止' ? '搜索已停止' :
+              this.recordingSearchRan ? '没有匹配的录音' : '点搜索，我来帮你找') :
+              this.calendarScope === 'day' ? '这一天还没有录音' : this.calendarScope === 'month' ? '本月还没有录音' : '暂无录音')
+              .fontSize(18).fontColor(AppTheme.text('#737D90'))
+            if (!this.recordingSearchActive()) { Text('轻点下方录音，也可以导入 WAV。').fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93')) }
           }.width('100%').padding({ top: 44, bottom: 44 })
         }
       } else {
-        ForEach(this.records, (record: RecordingRecord) => {
+        ForEach(this.recordingSearchRows(), (record: RecordingRecord) => {
           ListItem() {
-            Row({ space: 14 }) {
-              Image(record.watch ? $r('app.media.recording_watch') : $r('app.media.source_recording')).width(26).height(26)
-              Column({ space: 7 }) {
-                Text(this.recordTitle(record)).fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
-                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-                Text(this.recordDate(record)).fontSize(14).fontColor(AppTheme.text('#8E8E93')).maxLines(1).width('100%')
-              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-              Column({ space: 6 }) {
-                Text(record.summary ? '摘要' : record.analysis ? (record.transcriptionComplete === false ? '部分转写' : '已转写') : '待转写').fontSize(14).fontColor(AppTheme.text('#737D90'))
-                Text('›').fontSize(23).fontColor(AppTheme.text('#A3A9B4'))
-              }
-            }.width('100%').padding({ left: 18, right: 18, top: 20, bottom: 20 }).enabled(!this.busy)
-              .onClick((): void => { this.openRecord(record); })
-          }.width('100%').borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF')).clip(true).enabled(!this.busy)
+            this.TimelineRecordingCard(record)
+          }.width('100%').enabled(!this.busy)
             .swipeAction({ end: { builder: (): void => { this.RecordActions(record); } }, edgeEffect: SwipeEdgeEffect.Spring })
         }, (record: RecordingRecord): string => record.id)
       }
       ListItem() { Column({ space: 18 }) { this.Feedback() }.width('100%').padding({ top: 10 }) }
-    }.width('100%').layoutWeight(1).padding({ left: 22, right: 22, top: 14, bottom: 20 }).scrollBar(BarState.Off)
+    }.width('100%').layoutWeight(1).padding({ left: 22, right: 22, top: 14, bottom: 12 })
+      .contentEndOffset(this.recordingDockVisible() ? RECORDING_DOCK_INSET : 0).scrollBar(BarState.Off)
   }
   @Builder private RecordingDock() {
-    Row() {
-      Column({ space: 8 }) {
-        Button({ type: ButtonType.Circle }) { Image($r('app.media.recording_import')).width(25).height(25) }
-          .width(48).height(48).backgroundColor(AppTheme.background('#EDEFF8')).enabled(!this.busy)
-          .accessibilityText('导入 WAV').onClick((): void => { this.importAudio(); })
-        Text('导入').fontSize(15).fontColor(AppTheme.text('#737D90'))
-      }.layoutWeight(1)
-      Column({ space: 8 }) {
-        Button({ type: ButtonType.Circle }) {
-          if (this.recording) { Row().width(22).height(22).borderRadius(5).backgroundColor(Color.White) }
-          else { Row().width(42).height(42).borderRadius(21).backgroundColor('#FF453A') }
-        }.width(72).height(72).backgroundColor(this.recording ? '#FF453A' : AppTheme.background('#FFFFFF'))
-          .border({ width: 3, color: '#FF453A' }).enabled(!this.busy || this.recording)
-          .accessibilityText(this.recording ? '结束并保存录音' : '开始录音')
-          .onClick((): void => { if (this.recording) { this.stopRecording().catch((e: Error): void => { this.message(e); }); } else { this.startRecording(); } })
-        Text(this.recording ? '结束并保存' : '轻点录音').fontSize(15).fontColor(AppTheme.text('#737D90'))
-      }.layoutWeight(1)
-      Column({ space: 8 }) {
-        Button({ type: ButtonType.Circle }) { Image($r('app.media.recording_watch')).width(27).height(27) }
-          .width(48).height(48).backgroundColor(AppTheme.background('#EDEFF8')).enabled(!this.busy)
-          .accessibilityText('连接手表').onClick((): void => { this.showWatch = true; this.scanWatches(); })
-        Text('手表').fontSize(15).fontColor(AppTheme.text('#737D90'))
-      }.layoutWeight(1)
-    }.width('100%').alignItems(VerticalAlign.Center).padding({ top: 14, bottom: 28 })
+    Row({ space: 4 }) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 7 }) {
+          Image($r('app.media.recording_import')).width(19).height(19)
+          Text('导入').fontSize(14).fontColor(AppTheme.text('#5260ED')).maxLines(1)
+        }.width('100%').justifyContent(FlexAlign.Center)
+      }.layoutWeight(1).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent).enabled(!this.busy)
+        .accessibilityText('导入 WAV').onClick((): void => { this.importAudio(); })
+      Row().width(1).height(20).backgroundColor(AppTheme.border('#D5D9E3'))
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          Stack() {
+            if (this.recording) { Row().width(11).height(11).borderRadius(3).backgroundColor(Color.White) }
+            else { Row().width(18).height(18).borderRadius(9).backgroundColor('#FF453A') }
+          }.width(30).height(30).borderRadius(15).border({ width: 1.5, color: '#FF453A' })
+            .backgroundColor(this.recording ? '#FF453A' : Color.Transparent)
+          Text(this.recording ? '停止' : '录音').fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor(AppTheme.text('#D74D47')).maxLines(1)
+        }.width('100%').justifyContent(FlexAlign.Center)
+      }.layoutWeight(1.4).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent).enabled(!this.busy || this.recording)
+        .accessibilityText(this.recording ? '结束并保存录音' : '开始录音')
+        .onClick((): void => { if (this.recording) { this.stopRecording().catch((e: Error): void => { this.message(e); }); } else { this.startRecording(); } })
+    }.width(236).constraintSize({ maxWidth: '100%' }).alignItems(VerticalAlign.Center).padding(4).borderRadius(28)
+      .backgroundColor($r('app.color.ui_glass_mask'))
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, { colorMode: ThemeColorMode.SYSTEM })
+      .border({ width: 1, color: $r('app.color.ui_glass_border') })
+      .shadow({ radius: 12, color: AppTheme.shadow('#18000000'), offsetY: 3 })
+      .margin({ bottom: 8 })
   }
 
   @Builder private VoiceTimeline() {
@@ -836,26 +1073,28 @@ struct RecordingPage {
   }
   @Builder private Detail() {
     if (this.selected !== null) {
-      Column({ space: 16 }) {
-        Text(this.recordTitle(this.selected)).fontSize(24).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
-          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-        Text(this.recordDate(this.selected, false)).fontSize(14).lineHeight(22).fontColor(AppTheme.text('#8E8E93')).width('100%')
-        Row({ space: 18 }) {
+      Column({ space: 14 }) {
+        Row({ space: 10 }) {
+          Text(this.recordDate(this.selected, false)).fontSize(13).fontColor(AppTheme.text('#737D90'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          Button('设置').fontSize(14).height(32).padding({ left: 8, right: 8 })
+            .fontColor(AppTheme.text('#5260ED')).backgroundColor(Color.Transparent).enabled(!this.busy)
+            .accessibilityText('录音设置').onClick((): void => { this.openRecordingSettings(); })
+        }.width('100%')
+        Row({ space: 12 }) {
           Button({ type: ButtonType.Circle }) {
-            Image(this.playing === -1 ? $r('app.media.recording_stop') : $r('app.media.recording_play')).width(27).height(27)
-          }.width(64).height(64).backgroundColor(AppTheme.background('#EDEFFC')).enabled(!this.busy && this.audioAvailable())
+            Image(this.playing === -1 ? $r('app.media.recording_stop') : $r('app.media.recording_play')).width(21).height(21)
+          }.width(42).height(42).backgroundColor(AppTheme.background('#EDEFFC')).enabled(!this.busy && this.audioAvailable())
             .accessibilityText(this.playing === -1 ? '停止播放' : '播放录音').onClick((): void => { this.play(null); })
-          Column({ space: 13 }) {
-            this.VoiceTimeline()
+          Column({ space: 8 }) {
             Row() {
-              Text(!this.audioAvailable() ? '音频已删除' : this.playing === -1 ? '正在播放' : '播放录音').fontSize(15).fontColor(AppTheme.text('#737D90'))
+              Text(!this.audioAvailable() ? '音频已删除' : this.playing === -1 ? '正在播放' : '原始录音').fontSize(13).fontColor(AppTheme.text('#737D90'))
               Blank()
-              Text(recordingTime(this.selected.duration)).fontSize(15).fontColor(AppTheme.text('#737D90'))
+              Text(recordingTime(this.selected.duration)).fontSize(13).fontColor(AppTheme.text('#737D90'))
             }.width('100%')
+            this.VoiceTimeline()
           }.layoutWeight(1)
-        }.width('100%').padding({ top: 8, bottom: 16 })
-        this.SummarySourceSelector()
-        this.SpeakerSeparationSelector()
+        }.width('100%').padding(12).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
         if (!this.busy && this.audioAvailable() && this.analysis() !== null && (this.canResumeAnalysis() || this.selected.transcriptionComplete === false)) {
           Button(this.canResumeAnalysis() ? '继续转写' : '完成转写').fontSize(17).height(48).padding({ left: 28, right: 28 })
             .width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#5260ED'))
@@ -869,17 +1108,23 @@ struct RecordingPage {
           }
           if (!this.audioAvailable()) { Text('音频已删除，这条记录没有可用的转写文字。').fontSize(15).fontColor(AppTheme.text('#8E8E93')).width('100%') }
         } else {
-          Row({ space: 4 }) {
-            Button('转写').fontSize(17).fontWeight(FontWeight.Medium).height(42).layoutWeight(1)
-              .backgroundColor(AppTheme.background(this.detailTab === 'text' ? '#FFFFFF' : '#EDEFF5'))
-              .fontColor(AppTheme.text(this.detailTab === 'text' ? '#172033' : '#737D90'))
+          Row({ space: 8 }) {
+            Button('转写文本').fontSize(15).fontWeight(FontWeight.Medium).height(36).padding({ left: 18, right: 18 })
+              .backgroundColor(this.detailTab === 'text' ? AppTheme.filledBackground('#172033') : AppTheme.background('#EDEFF5'))
+              .fontColor(this.detailTab === 'text' ? Color.White : AppTheme.text('#737D90'))
               .onClick((): void => { this.detailTab = 'text'; })
-            Button('摘要').fontSize(17).fontWeight(FontWeight.Medium).height(42).layoutWeight(1)
-              .backgroundColor(AppTheme.background(this.detailTab === 'summary' ? '#FFFFFF' : '#EDEFF5'))
-              .fontColor(AppTheme.text(this.detailTab === 'summary' ? '#172033' : '#737D90'))
+            Button('AI 摘要').fontSize(15).fontWeight(FontWeight.Medium).height(36).padding({ left: 18, right: 18 })
+              .backgroundColor(this.detailTab === 'summary' ? AppTheme.filledBackground('#172033') : AppTheme.background('#EDEFF5'))
+              .fontColor(this.detailTab === 'summary' ? Color.White : AppTheme.text('#737D90'))
               .onClick((): void => { this.detailTab = 'summary'; })
-          }.width('100%').padding(4).borderRadius(16).backgroundColor(AppTheme.background('#EDEFF5'))
-          Column({ space: 18 }) {
+            Blank()
+            if (this.detailTab === 'text') {
+              Button('说话人').fontSize(13).height(36).padding({ left: 6, right: 6 })
+                .backgroundColor(Color.Transparent).fontColor(AppTheme.text('#5260ED'))
+                .onClick((): void => { this.showSpeakers = true; })
+            }
+          }.width('100%').padding({ top: 2, bottom: 2 })
+          Column({ space: 14 }) {
             if (this.detailTab === 'summary') {
               if (this.selected.summary) { RecordingSummaryView({ summary: this.selected.summary }) }
               if (!this.selected.summary || (this.selected.summary.source || 'cloud') !== this.summarySource ||
@@ -892,107 +1137,88 @@ struct RecordingPage {
                   .backgroundColor(AppTheme.background('#EDEFFC')).enabled(!this.busy).onClick((): void => { this.summarize(); })
               }
             } else { this.Transcript() }
-          }.width('100%').alignItems(HorizontalAlign.Start).padding(22).borderRadius(22).backgroundColor(AppTheme.background('#FFFFFF'))
+          }.width('100%').alignItems(HorizontalAlign.Start)
         }
       }.width('100%').alignItems(HorizontalAlign.Start)
     }
   }
   @Builder private Transcript() {
-    Row() {
-      Text('对话记录').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
-      Blank()
-      Text('说话人').fontSize(16).fontColor(AppTheme.text('#5260ED')).padding({ top: 10, bottom: 10 })
-        .onClick((): void => { this.showSpeakers = true; })
-    }.width('100%')
-    if (this.filterSpeaker !== -2) {
-      Text('仅看 ' + this.speakerName(this.filterSpeaker) + ' · 显示全部').fontSize(15).fontColor(AppTheme.text('#5260ED'))
-        .onClick((): void => { this.filterSpeaker = -2; this.visibleSegments = 60; })
-    }
-    if (this.segments().length === 0) { Text('这段录音没有可转写的人声。').fontSize(17).fontColor(AppTheme.text('#8E8E93')) }
-    ForEach(this.filteredSegments(), (segment: RecordingSegment) => {
-      Column({ space: 12 }) {
-        Row({ space: 10 }) {
-          Row().width(7).height(7).borderRadius(4).backgroundColor(this.color(segment.speaker))
-          Text(this.speakerName(segment.speaker)).fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.color(segment.speaker)).layoutWeight(1)
-          Text(recordingTime(segment.start)).fontSize(14).fontColor(AppTheme.text('#8E8E93'))
-          Button({ type: ButtonType.Circle }) {
-            Image(this.playing === segment.id ? $r('app.media.recording_stop') : $r('app.media.recording_play')).width(15).height(15)
-          }.width(44).height(44).backgroundColor(Color.Transparent).enabled(!this.busy && this.audioAvailable()).accessibilityText('播放这段对话')
-            .onClick((): void => { this.play(segment); })
-        }.width('100%')
-        Text(segment.text || '未识别到文字').fontSize(18).lineHeight(30).fontColor(AppTheme.text('#172033')).width('100%').copyOption(CopyOptions.InApp)
-      }.width('100%').padding({ top: 6, bottom: 20 })
-      Divider().color(AppTheme.border('#EDF0F5'))
-    }, (segment: RecordingSegment): string => String(segment.id) + segment.text)
-    if (this.segments().length > this.visibleSegments) {
-      Text('继续阅读').fontSize(17).fontColor(AppTheme.text('#5260ED')).padding(14).onClick((): void => { this.visibleSegments += 60; })
-    }
-    Text(this.analysis()?.method === 'live' || this.analysis()?.method === 'transcription' ?
-      '当前转写未区分说话人，可开启上方开关后重新转写。' :
-      '转写与说话人区分可能有误，可点播放核对。').fontSize(14).lineHeight(23).fontColor(AppTheme.text('#8E8E93')).width('100%')
-    if (this.selected?.transcriptionComplete === false) {
-      Text('这是已保存的部分转写，录音仍在时可以完成转写。').fontSize(14).lineHeight(23).fontColor(AppTheme.text('#B27A28')).width('100%')
-    }
+    // One reading column owns all paragraph spacing. Expanded builder children
+    // must not inherit the surrounding detail column's card spacing.
+    Column({ space: 0 }) {
+      if (this.filterSpeaker !== -2) {
+        Text('仅看 ' + this.speakerName(this.filterSpeaker) + ' · 显示全部').fontSize(13).fontColor(AppTheme.text('#5260ED'))
+          .padding({ top: 4, bottom: 12 }).onClick((): void => { this.filterSpeaker = -2; this.visibleSegments = 60; })
+      }
+      if (this.segments().length === 0) {
+        Text('这段录音没有可转写的人声。').fontSize(16).fontColor(AppTheme.text('#8E8E93')).padding({ top: 12, bottom: 12 })
+      }
+      ForEach(this.filteredSegments(), (segment: RecordingSegment) => {
+        Column({ space: 6 }) {
+          Row({ space: 9 }) {
+            Row({ space: 5 }) {
+              Row().width(5).height(5).borderRadius(3)
+                .backgroundColor(segment.speaker < 0 ? AppTheme.text('#326ADB') : this.color(segment.speaker))
+              Text(this.speakerName(segment.speaker)).fontSize(13).fontWeight(FontWeight.Medium)
+                .fontColor(segment.speaker < 0 ? AppTheme.text('#326ADB') : this.color(segment.speaker))
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 140 })
+            }.padding({ left: 7, right: 7, top: 4, bottom: 4 }).borderRadius(6).backgroundColor(AppTheme.background('#EAF0FB'))
+            Text(recordingTime(segment.start)).fontSize(12).fontColor(AppTheme.text('#8E8E93'))
+            Blank()
+            Button({ type: ButtonType.Circle }) {
+              Image(this.playing === segment.id ? $r('app.media.recording_stop') : $r('app.media.recording_play')).width(14).height(14)
+            }.width(32).height(32)
+              .backgroundColor(this.playing === segment.id ? AppTheme.background('#E6EBFF') : Color.Transparent)
+              .enabled(!this.busy && this.audioAvailable()).accessibilityText(this.playing === segment.id ? '停止播放这段对话' : '播放这段对话')
+              .onClick((): void => { this.play(segment); })
+          }.width('100%').height(32)
+          Text(segment.text || '未识别到文字').fontSize(17).lineHeight(27).fontColor(AppTheme.text('#172033'))
+            .width('100%').copyOption(CopyOptions.InApp)
+        }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 16 })
+      }, (segment: RecordingSegment): string => String(segment.id) + segment.text)
+      if (this.segments().length > this.visibleSegments) {
+        Text('继续阅读').fontSize(15).fontColor(AppTheme.text('#5260ED')).padding({ top: 8, bottom: 12 })
+          .onClick((): void => { this.visibleSegments += 60; })
+      }
+      if (this.selected?.transcriptionComplete === false) {
+        Text('部分转写已保存，可继续完成。').fontSize(13).lineHeight(21).fontColor(AppTheme.text('#B27A28'))
+          .width('100%').padding({ top: 8, bottom: 8 })
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
-  @Builder private SpeakerSeparationSelector() {
-    Row({ space: 12 }) {
-      Column({ space: 5 }) {
-        Text('区分说话人').fontSize(17).fontColor(AppTheme.text('#172033')).width('100%')
-        Text(this.separateSpeakers ? '区分不同声音，转写耗时更长' : '仅转写文字，速度更快')
-          .fontSize(15).fontColor(AppTheme.text('#737D90')).width('100%')
-      }.layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: this.speakerSwitchOn })
-        .enabled(!this.busy && !this.recording && !this.confirmingSpeakerSeparation)
-        .onChange((value: boolean): void => {
-          this.setSpeakerSeparation(value).catch((e: Error): void => { this.message(e); });
-        })
-    }.width('100%').padding(16).borderRadius(16).backgroundColor(AppTheme.background('#FFFFFF'))
-  }
-  @Builder private SummarySourceSelector() {
-    Row({ space: 8 }) {
-      Text('摘要方式').fontSize(16).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-      Button('本地').fontSize(15).height(36).width(72).padding(0)
-        .fontColor(this.summarySource === 'local' ? Color.White : AppTheme.text('#737D90'))
-        .backgroundColor(this.summarySource === 'local' ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
-        .onClick((): void => { this.summarySource = 'local'; })
-      Button('云端').fontSize(15).height(36).width(72).padding(0)
-        .fontColor(this.summarySource !== 'local' ? Color.White : AppTheme.text('#737D90'))
-        .backgroundColor(this.summarySource !== 'local' ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
-        .onClick((): void => { this.summarySource = 'cloud'; })
-    }.width('100%').padding(14).borderRadius(16).backgroundColor(AppTheme.background('#FFFFFF')).enabled(!this.busy)
-  }
-  @Builder private OptionsPanel() {
-    Column({ space: 24 }) {
-      Text('录音与转写').fontSize(25).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
-      Row() {
-        Text('音频语言').fontSize(18).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-        Select(this.languageLabels.map((label: string): SelectOption => ({ value: label }))).selected(this.languageIndex)
-          .value(this.languageLabels[this.languageIndex]).font({ size: 17 }).onSelect((index: number): void => { this.languageIndex = index; })
-      }.width('100%')
-      Divider().color(AppTheme.border('#EDF0F5'))
-      Row() {
-        Text('边录边转写').fontSize(18).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.liveTranscribe }).enabled(!this.busy)
-          .onChange((value: boolean): void => { this.liveTranscribe = value; })
-      }.width('100%')
-      Row() {
-        Text('转写后生成摘要').fontSize(18).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.autoSummary }).onChange((value: boolean): void => { this.autoSummary = value; })
-      }.width('100%')
-      this.SummarySourceSelector()
-      Text(this.summarySource === 'local' ? '在本机分段整理，每段保留摘要与待办。' : '转写在本机完成，摘要使用云端模型。')
-        .fontSize(14).lineHeight(22).fontColor(AppTheme.text('#737D90')).width('100%')
-      Text('单段最长 12 小时').fontSize(14).fontColor(AppTheme.text('#8E8E93')).width('100%')
-      Text('管理离线语音模型').fontSize(17).fontColor(AppTheme.text('#5260ED')).padding({ top: 12, bottom: 12 })
-        .onClick((): void => { this.showOptions = false; setTimeout((): void => { if (this.alive) { this.showModels = true; } }, 320); })
-    }.padding(26).width('100%').alignItems(HorizontalAlign.Start)
+  @Builder private SettingsContent() {
+    Scroll(this.recordingSettingsScroller) {
+      RecordingSettingsView({ busy: this.busy, separateSpeakers: this.separateSpeakers,
+        speakerSwitchOn: this.speakerSwitchOn, confirmingSpeakers: this.confirmingSpeakerSeparation,
+        modelsReady: this.modelCount === RECORDING_MODELS.length, hasRecord: this.selected !== null,
+        hasAudio: this.audioAvailable(), canResume: this.canResumeAnalysis(),
+        onEngineChange: (engine: string): void => { this.selectTranscriptionEngine(engine); },
+        onSpeakerChange: (value: boolean): void => { this.setSpeakerSeparation(value).catch((e: Error): void => { this.message(e); }); },
+        onSearchModeChange: (value: boolean): void => { this.recordingAiSearch = value; this.changeRecordingSearch(this.recordingSearchQuery); },
+        onModels: (): void => { this.showModels = true; },
+        onRename: (): void => {
+          if (this.selected !== null) { this.showRecordingSettings = false; this.beginRename(this.selected); }
+        },
+        onSpeakers: (): void => { this.showSpeakers = true; },
+        onTranscribe: (): void => {
+          this.showRecordingSettings = false; this.chooseAnalysis().catch((e: Error): void => { this.message(e); });
+        },
+        onSummarize: (): void => { this.showRecordingSettings = false; this.summarize(true); },
+        onDeleteAudio: (): void => { this.removeAudio().catch((e: Error): void => { this.message(e); }); },
+        onDelete: (): void => {
+          this.remove().then((): void => { if (this.selected === null) { this.showRecordingSettings = false; } })
+            .catch((e: Error): void => { this.message(e); });
+        },
+        feedbackBuilder: (): void => { this.Feedback(); }
+      }).width('100%').padding({ left: 22, right: 22, top: 12, bottom: 28 })
+    }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
   }
   @Builder private WatchPanel() {
     Scroll() {
       Column({ space: 22 }) {
         Image($r('app.media.recording_watch')).width(42).height(42)
-        Text('手腕上的声音，\n回到手机里。').fontSize(28).fontWeight(FontWeight.Bold).lineHeight(40).fontColor(AppTheme.text('#172033')).width('100%')
+        Text('连接手表').fontSize(22).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
         Text(this.watchStatus).fontSize(17).lineHeight(28).fontColor(AppTheme.text('#737D90')).width('100%')
         if (this.watchScanning || this.jobKind === 'watch') { LoadingProgress().width(32).height(32) }
         ForEach(this.watchDevices, (device: RecordingWatchDevice) => {
@@ -1075,47 +1301,59 @@ struct RecordingPage {
     if (this.status.length > 0 && !this.busy) { Text(this.status).fontSize(15).lineHeight(24).fontColor(AppTheme.text('#737D90')).width('100%') }
   }
   @Builder private Content() {
-    Column() {
-      if (this.selected === null && !this.recording) { this.Home() }
-      else {
-        Scroll(this.scroller) {
-          Column({ space: 18 }) {
-            if (this.recording) {
-              Column({ space: 24 }) {
-                Text('正在留住这一刻').fontSize(26).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
-                Text(recordingTime(this.seconds)).fontSize(48).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#FF453A'))
-                Text(recordingAudioSourceLabel(this.audioSource)).fontSize(17).fontColor(AppTheme.text('#8E8E93'))
-              }.width('100%').padding({ top: 26, bottom: 24 })
-              if (this.liveStatus) {
-                Column({ space: 14 }) {
-                  Row() {
-                    Text('实时转写').fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
-                    Blank()
-                    if (this.live !== null && this.liveSegments.length === 0) { LoadingProgress().width(20).height(20).color(AppTheme.text('#5260ED')) }
-                  }.width('100%')
-                  if (this.liveSegments.length === 0) {
-                    Text(this.live !== null ? '说话后稍作停顿，文字会出现在这里。' : this.liveStatus).fontSize(15).lineHeight(25).fontColor(AppTheme.text('#8E8E93')).width('100%')
-                  }
-                  ForEach(this.liveSegments.slice(-3), (segment: RecordingSegment) => {
-                    Column({ space: 5 }) {
-                      Text(recordingTime(segment.start)).fontSize(12).fontColor(AppTheme.text('#8E8E93')).width('100%')
-                      Text(segment.text).fontSize(17).lineHeight(27).fontColor(AppTheme.text('#25304A')).width('100%')
-                    }.width('100%').alignItems(HorizontalAlign.Start)
-                  }, (segment: RecordingSegment): string => segment.start.toString())
-                  Text(this.liveStatus).fontSize(12).fontColor(AppTheme.text('#8E8E93')).width('100%')
-                }.width('100%').alignItems(HorizontalAlign.Start).padding(20).borderRadius(20).backgroundColor(AppTheme.background('#FFFFFF'))
-              }
-            } else { this.Detail() }
-            this.Feedback()
-          }.width('100%').padding({ left: 22, right: 22, top: 14, bottom: 30 })
-        }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
-      }
-      if (this.selected === null || this.recording) { this.RecordingDock() }
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column() {
+        if (this.showRecordingSettings) { this.SettingsContent() }
+        else if (this.selected === null && !this.recording) { this.SearchControls(); this.Home() }
+        else {
+          Scroll(this.scroller) {
+            Column({ space: 18 }) {
+              if (this.recording) {
+                Column({ space: 24 }) {
+                  Text('正在录音').fontSize(20).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+                  Text(recordingTime(this.seconds)).fontSize(48).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#FF453A'))
+                  Text(recordingAudioSourceLabel(this.audioSource)).fontSize(17).fontColor(AppTheme.text('#8E8E93'))
+                }.width('100%').padding({ top: 26, bottom: 24 })
+                if (this.liveStatus) {
+                  Column({ space: 14 }) {
+                    Row() {
+                      Text('实时转写').fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+                      Blank()
+                      if (this.live !== null && this.liveSegments.length === 0 && !this.livePreviewText) { LoadingProgress().width(20).height(20).color(AppTheme.text('#5260ED')) }
+                    }.width('100%')
+                    if (this.liveSegments.length === 0 && !this.livePreviewText) {
+                      Text(this.live !== null ? '说话后稍作停顿，文字会出现在这里。' : this.liveStatus).fontSize(15).lineHeight(25).fontColor(AppTheme.text('#8E8E93')).width('100%')
+                    }
+                    ForEach(this.liveSegments.slice(this.livePreviewText ? -2 : -3), (segment: RecordingSegment) => {
+                      Column({ space: 5 }) {
+                        Text(recordingTime(segment.start)).fontSize(12).fontColor(AppTheme.text('#8E8E93')).width('100%')
+                        Text(this.useSystemAsr() ? segment.text.slice(-100) : segment.text)
+                          .fontSize(17).lineHeight(27).fontColor(AppTheme.text('#25304A')).width('100%')
+                      }.width('100%').alignItems(HorizontalAlign.Start)
+                    }, (segment: RecordingSegment): string => segment.id + ':' + segment.start)
+                    if (this.livePreviewText) {
+                      Column({ space: 5 }) {
+                        Text(recordingTime(this.livePreviewStart)).fontSize(12).fontColor(AppTheme.text('#8E8E93')).width('100%')
+                        Text(this.livePreviewText.slice(-100)).fontSize(17).lineHeight(27).fontColor(AppTheme.text('#25304A')).width('100%')
+                      }.width('100%').alignItems(HorizontalAlign.Start)
+                    }
+                    Text(this.liveStatus).fontSize(12).fontColor(AppTheme.text('#8E8E93')).width('100%')
+                  }.width('100%').alignItems(HorizontalAlign.Start).padding(20).borderRadius(20).backgroundColor(AppTheme.background('#FFFFFF'))
+                }
+              } else { this.Detail() }
+              this.Feedback()
+            }.width('100%').padding({ left: 20, right: 20, top: this.recording ? 14 : 2,
+              bottom: this.recordingDockVisible() ? RECORDING_DOCK_INSET + 12 : 28 })
+          }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
+        }
+      }.width('100%').height('100%')
+      if (this.recordingDockVisible()) { this.RecordingDock() }
     }.width('100%').height('100%')
   }
   @Builder private PageHeader() {
-    AppHeader({ title: this.selected === null ? '录音' : '录音详情', showBackButton: true, actionLabel: '更多',
-      onBackClick: (): void => { this.goBack(); }, onActionClick: (): void => { this.actions().catch((): void => {}); } })
+    AppHeader({ title: this.showRecordingSettings ? '录音设置' : this.selected === null ? '录音' : this.recordTitle(this.selected),
+      showBackButton: true, actionLabel: this.showRecordingSettings ? '' : '更多',
+      onBackClick: (): void => { this.goBack(); }, onActionClick: (): void => { this.openRecordingSettings(); } })
   }
   @Builder private AudioSourcesPanel() {
     Column({ space: 16 }) {
@@ -1131,13 +1369,12 @@ struct RecordingPage {
         }.padding(16).width('100%').borderRadius(16).backgroundColor(AppTheme.background('#F4F5FA'))
           .onClick((): void => { this.audioSource = source; this.showAudioSources = false; })
       }, (source: string): string => source)
-      Text('系统内录会显示屏幕授权，仅采集声音，不录制画面。部分应用或受保护内容可能无法录制。')
-        .fontSize(14).lineHeight(21).fontColor(AppTheme.text('#8E8E93')).width('100%')
     }.padding(24).width('100%')
   }
   build() {
     Stack() {
-      FrostedPage({ pageBackgroundColor: '#F6F7FA', scrollers: [this.scroller, this.recordingListScroller],
+      FrostedPage({ pageBackgroundColor: '#F6F7FA', scrollers: this.showRecordingSettings ?
+        [this.recordingSettingsScroller] : [this.scroller, this.recordingListScroller],
         headerBuilder: (): void => { this.PageHeader(); }, contentBuilder: (): void => { this.Content(); } })
       Row().width(0).height(0)
         .bindSheet(this.showAudioSources, this.AudioSourcesPanel(), { height: 460, showClose: true,
@@ -1148,9 +1385,6 @@ struct RecordingPage {
       Row().width(0).height(0)
         .bindSheet(this.showWatch, this.WatchPanel(), { height: SheetSize.LARGE, showClose: true,
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showWatch = false; } })
-      Row().width(0).height(0)
-        .bindSheet(this.showOptions, this.OptionsPanel(), { height: SheetSize.LARGE, showClose: true,
-          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showOptions = false; } })
       Row().width(0).height(0)
         .bindSheet(this.showSpeakers, this.SpeakersPanel(), { height: SheetSize.LARGE, showClose: true,
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showSpeakers = false; this.save(); } })

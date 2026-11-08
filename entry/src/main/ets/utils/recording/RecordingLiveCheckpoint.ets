@@ -1,7 +1,7 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { RecordingAnalysis } from './RecordingTypes';
-import { RecordingLiveUpdate, emptyLiveAnalysis, appendLiveUpdate } from './RecordingLiveTypes';
+import { RecordingLiveUpdate, RecordingLiveState, emptyLiveAnalysis, appendLiveUpdate } from './RecordingLiveTypes';
 import { writeExact } from './RecordingWav';
 
 // Append small completed batches. Do not rewrite hours of transcript every
@@ -18,9 +18,12 @@ export class RecordingLiveCheckpoint {
     } finally { fs.closeSync(file); }
   }
   restore(duration: number): RecordingAnalysis {
+    return this.restoreState(duration).analysis;
+  }
+  restoreState(duration: number): RecordingLiveState {
     const result = emptyLiveAnalysis(duration);
-    if (!fs.accessSync(this.path)) { return result; }
-    const lines = fs.readTextSync(this.path).split('\n'); let processed = 0;
+    if (!fs.accessSync(this.path)) { return { analysis: result, processed: 0, committed: 0 }; }
+    const lines = fs.readTextSync(this.path).split('\n'); let processed = 0; let resumeAt = 0;
     for (let i = 0; i < lines.length; i++) {
       if (!lines[i].trim()) { continue; }
       // An append that did not reach its newline was never committed.
@@ -28,7 +31,9 @@ export class RecordingLiveCheckpoint {
       const update = ArkJSON.parse(lines[i]) as RecordingLiveUpdate;
       if (update.processed < processed || update.processed > duration * 16000 + 1) { throw new Error('已保存的转写时间超出录音范围'); }
       appendLiveUpdate(result, update); processed = update.processed;
+      resumeAt = update.resumeAt === undefined ? processed : update.resumeAt;
+      if (!Number.isInteger(resumeAt) || resumeAt < 0 || resumeAt > processed) { throw new Error('已保存的转写恢复位置无效'); }
     }
-    return result;
+    return { analysis: result, processed: resumeAt, committed: processed };
   }
 }

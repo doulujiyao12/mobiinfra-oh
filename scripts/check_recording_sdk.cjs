@@ -37,6 +37,8 @@ files.push(path.join(root,'entry/src/main/ets/workers/RecordingAnalysisWorker.et
   path.join(root,'entry/src/main/ets/workers/RecordingLiveWorker.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingPage.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingSummaryView.ets'),
+  path.join(root,'entry/src/main/ets/pages/recording/RecordingSettingsView.ets'),
+  path.join(root,'entry/src/main/ets/pages/recording/RecordingCalendarView.ets'),
   path.join(root,'entry/src/main/ets/utils/LocalTextInference.ets'),
   path.join(root,'entry/src/main/ets/utils/AppBackgroundTasks.ets'));
 const authored = new Set(files.map(f=>path.resolve(f).replaceAll('\\','/')));
