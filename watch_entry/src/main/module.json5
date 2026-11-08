@@ -1,0 +1,42 @@
+{
+  "module": {
+    "name": "watch_entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "HiWearMainAbility",
+    "deviceTypes": ["wearable"],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:microphone_reason",
+        "usedScene": { "abilities": ["HiWearMainAbility"], "when": "always" }
+      },
+      { "name": "ohos.permission.KEEP_BACKGROUND_RUNNING" },
+      { "name": "ohos.permission.INTERNET" }
+    ],
+    "metadata": [
+      { "name": "wearEngineRemoteAppNameList", "value": "com.coevomind.clawmate" },
+      { "name": "wearEngineUIAbilityName", "value": "HiWearMainAbility" },
+      { "name": "wearEngineAwaitRegisterReceiver", "value": "true" }
+    ],
+    "abilities": [
+      {
+        "name": "HiWearMainAbility",
+        "srcEntry": "./ets/entryability/HiWearMainAbility.ets",
+        "description": "$string:module_desc",
+        "icon": "$media:watch_app_icon",
+        "label": "$string:watch_app_name",
+        "startWindowIcon": "$media:watch_app_icon",
+        "startWindowBackground": "$color:window_background",
+        "backgroundModes": ["audioRecording", "dataTransfer"],
+        "exported": true,
+        "skills": [
+          { "entities": ["entity.system.home"], "actions": ["ohos.want.action.home"] }
+        ]
+      }
+    ]
+  }
+}

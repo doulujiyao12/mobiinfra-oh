@@ -7,6 +7,7 @@
   "license": "",
   "dependencies": {
     "sherpa_onnx": "1.13.3",
+    "@clawmate/watch-bridge": "file:../phonebridge",
     "libentry.so": "file:./src/main/cpp/types/libentry"
   }
 }

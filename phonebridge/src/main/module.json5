@@ -1,0 +1,7 @@
+{
+  "module": {
+    "name": "phonebridge",
+    "type": "har",
+    "deviceTypes": ["phone", "tablet"]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "@clawmate/watch-bridge",
+  "version": "1.0.0",
+  "description": "ClawMate watch recording receiver for a HarmonyOS companion app",
+  "main": "Index.ets",
+  "dependencies": {}
+}

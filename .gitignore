@@ -41,3 +41,11 @@ build-profile.json5*
 mobiinfer
 /ppt/
 /video/
+
+# Generated files for all device modules
+**/oh_modules/
+**/BuildProfile.ets
+
+# Share module build settings; root signing configuration remains local.
+!/watch_entry/build-profile.json5
+!/phonebridge/build-profile.json5

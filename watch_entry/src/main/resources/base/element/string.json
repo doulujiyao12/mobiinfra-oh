@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "手表独立录音与本地语音记录"
+    },
+    {
+      "name": "microphone_reason",
+      "value": "用于在你开启监听后录音和检测声音；熄屏时可继续，录音可由你同步至配对手机。"
+    },
+    {
+      "name": "watch_app_name",
+      "value": "ClawMate"
+    }
+  ]
+}

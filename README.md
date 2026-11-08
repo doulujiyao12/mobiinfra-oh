@@ -42,7 +42,6 @@ cd mobiinfra-oh
     "signingConfigs": [],
     "products": [{
       "name": "default",
-      "signingConfig": "default",
       "targetSdkVersion": "6.1.1(24)",
       "compatibleSdkVersion": "6.0.0(20)",
       "runtimeOS": "HarmonyOS",
@@ -56,17 +55,21 @@ cd mobiinfra-oh
     }],
     "buildModeSet": [{ "name": "debug" }, { "name": "release" }]
   },
-  "modules": [{
-    "name": "entry",
-    "srcPath": "./entry",
-    "targets": [{ "name": "default", "applyToProducts": ["default"] }]
-  }]
+  "modules": [
+    { "name": "entry", "srcPath": "./entry", "targets": [{ "name": "default", "applyToProducts": ["default"] }] },
+    { "name": "watch_entry", "srcPath": "./watch_entry", "targets": [{ "name": "default", "applyToProducts": ["default"] }] },
+    { "name": "phonebridge", "srcPath": "./phonebridge", "targets": [{ "name": "default", "applyToProducts": ["default"] }] }
+  ]
 }
 ```
 
 </details>
 
 华为账号、地图等服务需要在 AppGallery Connect 中关联自己的应用、签名与服务配置，参见 [华为账号登录调试指南](docs/huawei-account-login-debug-guide.md)。包名的唯一配置源是 `AppScope/app.json5`；预置原生库位于 `entry/libs/arm64-v8a/`，更新时需与对应头文件及模型版本匹配。
+
+### 手机与 WATCH 6 Pro 分别调试
+
+工程现在包含手机 `entry`、手表 `watch_entry` 和手机接收库 `phonebridge`。在 DevEco 的运行配置中选择 `ClawMate Phone` 并选中手机，或选择 `ClawMate Watch` 并选中手表。两端独立安装调试，正式发布使用同一应用身份打包。首次依赖同步需解析新增本地 HAR 依赖；详细步骤、签名与上架约束见 [手表多端集成说明](docs/WATCH_INTEGRATION.md)。首次克隆也可复制不含签名材料的 `build-profile.example.json5` 为本机配置。
 
 ## 功能与使用
 

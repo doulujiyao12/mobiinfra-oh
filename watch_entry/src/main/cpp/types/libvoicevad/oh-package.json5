@@ -1,0 +1,6 @@
+{
+  "name": "libvoicevad.so",
+  "version": "1.0.0",
+  "types": "./index.d.ts",
+  "description": "On-device WebRTC voice activity detector"
+}

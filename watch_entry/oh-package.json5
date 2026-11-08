@@ -1,0 +1,8 @@
+{
+  "name": "watch_entry",
+  "version": "1.0.0",
+  "description": "Wearable entry module",
+  "dependencies": {
+    "libvoicevad.so": "file:./src/main/cpp/types/libvoicevad"
+  }
+}
