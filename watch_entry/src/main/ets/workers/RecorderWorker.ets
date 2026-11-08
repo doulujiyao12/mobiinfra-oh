@@ -38,9 +38,10 @@ function errorText(error: BusinessError): string {
   return `${error.message || '系统操作失败'}${error.code ? ` (${error.code})` : ''}`;
 }
 
-function send(kind: string, message: string = ''): void {
+function send(kind: string, message: string = '', requestId: string = ''): void {
   const event: CaptureEvent = new CaptureEvent();
   event.kind = kind;
+  event.requestId = requestId;
   event.message = message;
   event.durationMs = sessionBytes / (inputRate * 2) * 1000;
   event.segment = segmentIndex;
@@ -371,11 +372,21 @@ async function dispatch(command: CaptureCommand): Promise<void> {
     publishLibrary();
   } else if (command.kind === 'delete') {
     if (running || starting || closing) { throw new Error('请先结束录音再删除文件'); }
-    const parsed = parseRecordingName(command.name);
-    if (parsed === undefined || parsed.partial) { throw new Error('无效录音文件'); }
-    fs.unlinkSync(`${directory}/${command.name}`);
+    const names: string[] = Array.from(new Set<string>(command.names?.length ? command.names : [command.name]));
+    // Validate the complete selection before touching any file.
+    for (const name of names) {
+      const parsed = parseRecordingName(name);
+      if (parsed === undefined || parsed.partial) { throw new Error('无效录音文件'); }
+    }
+    const result: CaptureEvent = new CaptureEvent(); result.kind = 'deleted'; result.requestId = command.requestId || '';
+    for (const name of names) {
+      try { fs.unlinkSync(`${directory}/${name}`); result.deletedNames.push(name); }
+      catch (_) { result.failedNames.push(name); }
+    }
+    result.message = `已删除 ${result.deletedNames.length} 段录音` +
+      (result.failedNames.length > 0 ? `，${result.failedNames.length} 段未删除` : '');
     publishLibrary();
-    send('deleted', '录音已删除');
+    port.postMessage(result);
   }
 }
 
@@ -384,6 +395,6 @@ let commands: Promise<void> = Promise.resolve();
 port.onmessage = (event: MessageEvents): void => {
   const command: CaptureCommand = event.data as CaptureCommand;
   commands = commands.then(() => dispatch(command)).catch((error: BusinessError) => {
-    send('error', errorText(error));
+    send('error', errorText(error), command.requestId || '');
   });
 };

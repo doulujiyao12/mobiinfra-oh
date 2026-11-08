@@ -13,6 +13,8 @@ export class RecordingInfo {
 
 export class CaptureCommand {
   kind: string = '';
+  requestId: string = '';
+  names: string[] = [];
   filesDir: string = '';
   name: string = '';
   reason: string = '';
@@ -21,6 +23,9 @@ export class CaptureCommand {
 
 export class CaptureEvent {
   kind: string = '';
+  requestId: string = '';
+  deletedNames: string[] = [];
+  failedNames: string[] = [];
   message: string = '';
   durationMs: number = 0;
   level: number = 0;
@@ -31,6 +36,12 @@ export class CaptureEvent {
   inputRate: number = 0;
   listeningMs: number = 0;
   saving: boolean = false;
+}
+
+export class RecordingDeleteResult {
+  deletedNames: string[] = [];
+  failedNames: string[] = [];
+  protectedNames: string[] = [];
 }
 
 export class WatchState {

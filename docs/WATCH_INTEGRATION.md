@@ -13,7 +13,7 @@
 ## 模块边界
 
 - `entry` 保留手机 UI、本地 MNN/HiAI 推理、录音管理及转写流程。
-- `watch_entry` 保留默认声音触发保存、可选 WebRTC VAD 人声检测、WAV 分段恢复、列表播放删除和 Wear Engine 文件发送。采集和同步 IO 分别在模块自己的 Worker 中执行。
+- `watch_entry` 保留默认声音触发保存、可选 WebRTC VAD 人声检测、WAV 分段恢复、列表播放删除和 Wear Engine 文件发送。录音库支持按本地日期筛选，以及对当前列表多选、全选和确认批量删除；正在同步的录音会保留，部分文件删除失败不阻断其他已选择文件。采集和同步 IO 分别在模块自己的 Worker 中执行。
 - `phonebridge` 是接收端唯一实现。手机原来的 `utils/recording/WatchRecordingClient.ets` 是兼容导出，既有页面和存储逻辑无需迁移。
 - 两端入口不互相依赖，手机原生推理库不会作为手表依赖。人声检测库仅在手表模块编译。
 - 共享应用名已从旧的“数据归家”统一为 `ClawMate`，与手机和手表启动入口名称一致。

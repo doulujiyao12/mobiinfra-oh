@@ -5,10 +5,16 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { audio } from '@kit.AudioKit';
 import { media } from '@kit.MediaKit';
 import { preferences } from '@kit.ArkData';
-import { CaptureCommand, CaptureEvent, RecordingInfo, RecordingMode, WatchState } from '../model/RecorderModels';
+import { CaptureCommand, CaptureEvent, RecordingDeleteResult, RecordingInfo, RecordingMode, WatchState } from '../model/RecorderModels';
 import { backgroundTasks } from './BackgroundTasks';
 import { phoneSyncController } from './PhoneSyncController';
 type StateListener = (state: WatchState) => void;
+interface PendingDeletion {
+  id: string;
+  protectedNames: string[];
+  resolve: (result: RecordingDeleteResult) => void;
+  reject: (error: Error) => void;
+}
 
 class RecorderController {
   private context: common.UIAbilityContext | undefined = undefined;
@@ -24,6 +30,8 @@ class RecorderController {
   private taskCallbackRegistered: boolean = false;
   private transitionTimer: number = -1;
   private settings: preferences.Preferences | undefined = undefined;
+  private deletion: PendingDeletion | undefined = undefined;
+  private deletionSequence: number = 0;
 
   private onTaskCancel = (): void => {
     this.backgroundActive = false;
@@ -189,13 +197,47 @@ class RecorderController {
   refresh(): void { this.post('list'); }
 
   async deleteRecording(record: RecordingInfo): Promise<void> {
-    if (this.state.status !== 'ready') { return; }
-    if (phoneSyncController.isFileInUse(record.name)) {
-      this.state.error = '该录音正在同步，请完成或取消后再删除'; this.emit(); return;
+    await this.deleteRecordings([record]);
+  }
+
+  async deleteRecordings(records: RecordingInfo[]): Promise<RecordingDeleteResult> {
+    if (this.state.status !== 'ready' || this.captureWorker === undefined) { throw new Error('请等待当前操作完成'); }
+    const names: string[] = Array.from(new Set<string>(records.map((record: RecordingInfo): string => record.name)));
+    if (names.some((name: string): boolean => !this.state.records.some((record: RecordingInfo): boolean => record.name === name))) {
+      throw new Error('录音列表已变化，请重新选择');
     }
-    if (this.state.playingName === record.name) { await this.stopPlayback(); }
-    if (phoneSyncController.isFileInUse(record.name)) { return; }
-    this.post('delete', '', record.name);
+    if (names.length === 0) { return new RecordingDeleteResult(); }
+    // Reserve the controller before releasing playback; another tap must not
+    // start capture or queue another deletion while that asynchronous work runs.
+    this.state.status = 'deleting'; this.state.error = ''; this.state.notice = ''; this.emit();
+    try {
+      if (names.indexOf(this.state.playingName) >= 0) { await this.stopPlayback(); }
+      const protectedNames: string[] = names.filter((name: string): boolean => phoneSyncController.isFileInUse(name));
+      const deletingNames: string[] = names.filter((name: string): boolean => protectedNames.indexOf(name) < 0);
+      if (deletingNames.length === 0) {
+        const result: RecordingDeleteResult = new RecordingDeleteResult(); result.protectedNames = protectedNames;
+        this.state.status = 'ready'; this.emit(); return result;
+      }
+      if (this.shuttingDown || this.captureWorker === undefined || this.state.status !== 'deleting') {
+        throw new Error('录音服务不可用，请重新打开应用');
+      }
+      const command: CaptureCommand = new CaptureCommand();
+      command.kind = 'delete'; command.names = deletingNames; command.requestId = `delete_${++this.deletionSequence}`;
+      return await new Promise<RecordingDeleteResult>((resolve, reject) => {
+        this.deletion = { id: command.requestId, protectedNames: protectedNames, resolve: resolve, reject: reject };
+        try { this.captureWorker?.postMessage(command); }
+        catch (error) { this.failDeletion(new Error((error as Error).message)); }
+      });
+    } catch (error) {
+      if (this.state.status === 'deleting') { this.state.status = 'ready'; }
+      this.state.error = (error as Error).message; this.emit(); throw new Error((error as Error).message);
+    }
+  }
+
+  private failDeletion(error: Error): void {
+    const pending: PendingDeletion | undefined = this.deletion;
+    this.deletion = undefined;
+    if (pending !== undefined) { pending.reject(error); }
   }
 
   private async beginBackgroundTask(): Promise<void> {
@@ -258,14 +300,26 @@ class RecorderController {
       this.state.notice = event.message;
     } else if (event.kind === 'error') {
       this.state.error = event.message;
+      if (this.deletion !== undefined && event.requestId === this.deletion.id) {
+        this.failDeletion(new Error(event.message));
+      }
       if (this.state.status === 'loading') { this.state.status = 'failed'; }
     } else if (event.kind === 'deleted') {
       this.state.notice = event.message;
+      if (this.deletion !== undefined && event.requestId === this.deletion.id) {
+        const pending: PendingDeletion = this.deletion;
+        this.deletion = undefined;
+        const result: RecordingDeleteResult = new RecordingDeleteResult();
+        result.deletedNames = event.deletedNames; result.failedNames = event.failedNames;
+        result.protectedNames = pending.protectedNames;
+        this.state.status = 'ready'; pending.resolve(result);
+      }
     }
     this.emit();
   }
 
   private workerFailed(message: string): void {
+    this.failDeletion(new Error(message));
     this.clearTransitionTimer();
     this.state.status = 'failed';
     this.state.error = message;
@@ -362,6 +416,7 @@ class RecorderController {
         const timeout: number = setTimeout(() => { clearInterval(timer); resolve(); }, 2500);
       });
       this.shuttingDown = true;
+      this.failDeletion(new Error('应用已关闭，删除操作中断'));
       this.captureWorker.terminate();
       this.captureWorker = undefined;
     }
