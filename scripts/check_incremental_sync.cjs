@@ -321,7 +321,7 @@ test('production declarations check changed business modules with strict types a
   const sources=new Map(),etsRoot=path.join(root,'entry/src/main/ets');
   const actual=['datamanager/WorkflowRunEvidence','datamanager/WorkflowRunEvidenceTask','datamanager/SyncWorkSlice','datamanager/ProfileBlockCache','datamanager/IndexWriteBatch','datamanager/SyncMetrics','datamanager/MemoryChangeJournal',
     'datamanager/DataManagerStorage','datamanager/DataManagerTypes','datamanager/DataManagerPaths','datamanager/IndexService','datamanager/ChatFactDedup',
-    'datamanager/DataPipelineModelClient','datamanager/ModelStreamActivity','datamanager/EventStreamParser','datamanager/DataManagerUtils','datamanager/ChatMemoryExtraction','datamanager/ConsolidationService',
+    'datamanager/DataPipelineModelClient','datamanager/HomeRecommendationRequestCodec','datamanager/ModelStreamActivity','datamanager/EventStreamParser','datamanager/DataManagerUtils','datamanager/ChatMemoryExtraction','datamanager/ConsolidationService',
     'datamanager/DataManagerFacade','datamanager/CollectionGroupingService','datamanager/HomeRecommendationService',
     'datamanager/DataManagerImageResolver','datamanager/ChatMemorySync','datamanager/DataManagerSyncReminder',
     'utils/ChatSessionStorage','pages/chat/ChatSessionTypes','pages/chat/ChatPageTypes','pages/chat/VoiceInteractionTypes',
@@ -3070,6 +3070,82 @@ test('people: query tool keeps subject metadata in bounded valid JSON for long m
   const text=await tool.execute('{}',{filesDir:'/app',sessionId:'test',userMessage:'查询'}),result=JSON.parse(text);
   assert(text.length<=3500);assert(result.truncated);assert(result.events.length>0);
   assert(result.events.every(event=>event.subjects.length===1&&event.fact_source.authority==='user_confirmed'));
+});
+
+function reminderRecoveryEvents(count=2) {
+  return Array.from({length:count},(_,i)=>({event_id:'2026-11-07/long-workflow-record-'+i+'#'+('evidence-'.repeat(8))+i,
+    date:'2026-11-07',todo_type:'other',todo_deadline:'',todo_text:'联系相关人员确认计划 '+i,summary:'行动依据 '+i,
+    normalized_fact:'原文中的待办 '+i,sources:['微信'],domains:['other'],keywords:[],image_paths:[]}));
+}
+function reminderRecoveryResponse(ids) {
+  return JSON.stringify({recommendations:ids.map(id=>({title:'确认计划',tag:'待关注',desc:'根据已有约定跟进',domain:'other',source_event_ids:[id]}))});
+}
+
+test('reminder recovery: request aliases restore real evidence IDs and normalize harmless duplicate references',()=>{
+  const {HomeRecommendationRequestCodec}=load(base+'HomeRecommendationRequestCodec'),events=reminderRecoveryEvents();
+  const codec=new HomeRecommendationRequestCodec(events),result={recommendations:[{title:'确认计划',source_event_ids:[' e1 ','e1','e2']}]};
+  assert.equal(codec.encodeId(events[0].event_id),'e1');codec.validateAndDecode(result);
+  assert.deepEqual(clone(result.recommendations[0].source_event_ids),events.map(e=>e.event_id));
+  const invalid={recommendations:[{title:'一',source_event_ids:['e1']},{title:'二',source_event_ids:['e1','e2']}]},before=clone(invalid);
+  assert.throws(()=>codec.validateAndDecode(invalid),/重复分配/);assert.deepEqual(invalid,before);
+  assert.throws(()=>codec.validateAndDecode({recommendations:[{title:'一',source_event_ids:['e1']}]}),/已覆盖 1\/2，缺少 e2/);
+  assert.throws(()=>codec.validateAndDecode({recommendations:[{title:'一',source_event_ids:['e99']}]}),/未知来源/);
+  assert.throws(()=>codec.validateAndDecode({recommendations:[{title:'',source_event_ids:['e1','e2']}]}),/字段不完整/);
+});
+
+test('reminder recovery: validation retries carry actionable feedback and finish within three attempts',async()=>{
+  reset();const events=reminderRecoveryEvents(),client=new DataPipelineModelClient();let calls=0;
+  cloudHandler=async options=>{
+    calls++;const input=JSON.parse(options.messages[1].content);
+    assert.deepEqual(input.events.map(e=>e.event_id),['e1','e2']);assert.equal(options.temperature,0);
+    assert.ok(!options.messages[1].content.includes(events[0].event_id),'Long persistent IDs are not sent for copying');
+    if(calls===1)return reminderRecoveryResponse(['e1']);
+    assert.equal(options.messages.length,3,'Use one correction, not an ever-growing invalid conversation');
+    if(calls===2){assert.match(options.messages[2].content,/缺少 e2/);return reminderRecoveryResponse(['e1','e99']);}
+    assert.match(options.messages[2].content,/未知来源/);return reminderRecoveryResponse(['e1','e2']);
+  };
+  const result=await client.planHomeRecommendations(events,'2026-11-07',config);
+  assert.equal(calls,3);assert.deepEqual(clone(result.flatMap(r=>r.source_event_ids)),events.map(e=>e.event_id));
+  assert.equal(client.modelActivities().filter(a=>a.phase==='retrying').length,2);
+  assert.equal(client.modelActivities().filter(a=>a.phase==='succeeded').length,1);
+  const {modelStreamActivityText}=load(base+'ModelStreamActivity');
+  assert.match(modelStreamActivityText(client.modelActivities().find(a=>a.phase==='retrying')),/已发起重试/);
+  assert.ok(logs.some(line=>line.includes('缺少 e2')));
+});
+
+test('reminder recovery: malformed JSON and truncated output are corrected with the same retry budget',async()=>{
+  reset();const client=new DataPipelineModelClient();let calls=0;
+  cloudHandler=async options=>{
+    calls++;
+    if(calls===1)return '{"recommendations":[';
+    if(calls===2)return {content:reminderRecoveryResponse(['e1']),finishReason:'length'};
+    assert.match(options.messages[2].content,/截断/);return reminderRecoveryResponse(['e1','e2']);
+  };
+  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).length,2);
+  assert.equal(calls,3);
+});
+
+test('reminder recovery: transient request errors and validation failures share one three-attempt cap',async()=>{
+  reset();let calls=0;const client=new DataPipelineModelClient();
+  cloudHandler=async()=>{calls++;if(calls===1)throw Error('Cloud HTTP 503');if(calls===2)throw Error('operation timeout');return reminderRecoveryResponse(['e1','e2']);};
+  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).length,2);assert.equal(calls,3);
+  calls=0;cloudHandler=async()=>{calls++;if(calls===1)throw Error('operation timeout');return '{"recommendations":[]}';};
+  await assert.rejects(new DataPipelineModelClient().planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config),/遗漏/);
+  assert.equal(calls,3,'No nested transport/validation retries');
+});
+
+test('reminder recovery: auth, cancellation and repetition errors do not restart requests',async()=>{
+  reset();let calls=0;
+  for(const message of ['Cloud HTTP 400','Cloud HTTP 401','Cloud HTTP 403','用户取消操作','socket destroyed','MODEL_REPEATED_OUTPUT: stop']){
+    cloudHandler=async()=>{calls++;throw Error(message);};const before=calls;
+    await assert.rejects(new DataPipelineModelClient().planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config));
+    assert.equal(calls,before+1,message);
+  }
+});
+
+test('reminder recovery: exhausted validation preserves previously saved cards',async()=>{
+  await cases.find(([name])=>name==='analysis recovery: incomplete planning cannot silently discard a collected concern or replace prior cards')[1]();
+  await cases.find(([name])=>name==='analysis recovery: care, research and planning signals reach the planner without deadlines or GUI commands')[1]();
 });
 
 (async()=>{const selected=cases.filter(([name])=>!process.env.SYNC_TEST_FILTER||name.includes(process.env.SYNC_TEST_FILTER));for(const[name,run]of selected){await run();console.log('PASS '+name);}console.log(selected.length+' incremental sync checks passed');})()

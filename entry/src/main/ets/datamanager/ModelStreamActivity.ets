@@ -125,6 +125,7 @@ export class ModelStreamActivityStore {
 export function modelStreamActivityText(value: ModelStreamActivity): string {
   let count = '正文 ' + value.contentChars + ' 字' + (value.reasoningChars > 0 ? ' · 思考 ' + value.reasoningChars + ' 字' : '');
   if (value.phase === 'succeeded') { return '已完成 · ' + count + ' · ' + value.elapsedSeconds + ' 秒'; }
+  if (value.phase === 'retrying') { return '该次未完成，已发起重试 · ' + count; }
   if (value.phase === 'invalid') { return '回复校验失败 · ' + count; }
   if (value.phase === 'repeated') { return '重复输出已中断 · ' + count + ' · ' + value.elapsedSeconds + ' 秒'; }
   if (value.phase === 'failed') { return '请求失败 · ' + count + ' · ' + value.elapsedSeconds + ' 秒'; }

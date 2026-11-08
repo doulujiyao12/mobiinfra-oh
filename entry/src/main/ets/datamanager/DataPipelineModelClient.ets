@@ -12,6 +12,8 @@ import { collectionChatIdentity } from './CollectionChatIdentity';
 import { ProfileBlockModel, PROFILE_BLOCK_POLICY } from './ProfileBlockCache';
 import { profileEvidence, ProfileEventPromptPayload } from './ProfileEvidence';
 import { ProfileRequestCodec, ProfileResponseError } from './ProfileRequestCodec';
+import { HOME_RECOMMENDATION_ATTEMPTS, HomeRecommendationRequestCodec,
+  isRetryableHomeRecommendationRequestError } from './HomeRecommendationRequestCodec';
 import {
   DOMAIN_DESCRIPTIONS,
   AggregatedRecord,
@@ -1305,10 +1307,11 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     if (!this.isEnabled(config) || events.length === 0) {
       return [];
     }
+    let codec = new HomeRecommendationRequestCodec(events);
     let promptEvents: HomeRecommendationEventPromptPayload[] = events.map((event: HomeRecommendationPlannerEvent): HomeRecommendationEventPromptPayload => {
       let item: HomeRecommendationEventPromptPayload = {
         chat_attribution: event.chat_attribution,
-        event_id: event.event_id,
+        event_id: codec.encodeId(event.event_id),
         date: event.date,
         todo_type: event.todo_type,
         todo_deadline: event.todo_deadline,
@@ -1329,27 +1332,9 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     dataManagerInfo(`Home recommendation planner request: events=${events.length}, currentDate=${currentDate}`);
     let payload = await this.callJson(config, 'home.recommendation', HOME_RECOMMENDATION_SYSTEM_PROMPT,
       stringifyJsonCompat(promptPayload as Object, 2), (value: JsonMap): void => {
-        this.validateHomeRecommendationCoverage(value, events);
+        codec.validateAndDecode(value);
       });
     return this.normalizeHomeRecommendations(payload);
-  }
-
-  private validateHomeRecommendationCoverage(payload: JsonMap, events: HomeRecommendationPlannerEvent[]): void {
-    if (!Array.isArray(payload['recommendations'])) { throw new Error('关注规划缺少结果数组'); }
-    let expected = events.map((event: HomeRecommendationPlannerEvent): string => event.event_id);
-    let covered = new Set<string>();
-    for (let item of payload['recommendations'] as JsonMap[]) {
-      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item['title'] !== 'string' ||
-        !(item['title'] as string).trim() || !Array.isArray(item['source_event_ids'])) {
-        throw new Error('关注规划的标题或来源字段不完整');
-      }
-      let ids = item['source_event_ids'] as string[];
-      if (ids.length === 0 || ids.some((id: string): boolean => typeof id !== 'string' || expected.indexOf(id) < 0 || covered.has(id))) {
-        throw new Error('关注规划包含未知来源或重复分配的事项');
-      }
-      ids.forEach((id: string) => covered.add(id));
-    }
-    if (covered.size !== expected.length) { throw new Error('关注规划遗漏输入事项，请重试'); }
   }
 
   private async mergeCollectionGroups(tabId: string, title: string, groups: CollectionGroupState[], config: DataManagerModelConfig): Promise<CollectionGroupState[]> {
@@ -2090,7 +2075,9 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     let requestId = this.requestSequence;
     dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}, stream=true, readTimeout=${SYNC_MODEL_READ_TIMEOUT_MS}`);
     let profileRequest = kind.startsWith('profile.');
-    let temperatures: number[] = kind === 'enrich.batch' ? [0] : profileRequest ? [0, 0] : [0, 0.5, 1.0];
+    let homeRecommendationRequest = kind === 'home.recommendation';
+    let temperatures: number[] = homeRecommendationRequest ? new Array<number>(HOME_RECOMMENDATION_ATTEMPTS).fill(0) :
+      kind === 'enrich.batch' ? [0] : profileRequest ? [0, 0] : [0, 0.5, 1.0];
     try {
       for (let attempt = 0; attempt < temperatures.length; attempt++) {
         if (profileRequest && profileBudget) {
@@ -2146,8 +2133,15 @@ export class DataPipelineModelClient implements ProfileBlockModel {
           content = result.content;
           truncated = result.finishReason === 'length' || result.finishReason === 'max_tokens';
         } catch (e) {
-          this.streamActivities.finish(activityId, (e as Error).message.includes('MODEL_REPEATED_OUTPUT') ? 'repeated' : 'failed');
-          throw new Error((e as Error).message);
+          let message = (e as Error).message;
+          let canRetry = homeRecommendationRequest && attempt + 1 < temperatures.length &&
+            isRetryableHomeRecommendationRequestError(message);
+          this.streamActivities.finish(activityId, canRetry ? 'retrying' : message.includes('MODEL_REPEATED_OUTPUT') ? 'repeated' : 'failed');
+          if (!canRetry) { throw new Error(message); }
+          dataManagerError('Model request transport retry: id=' + requestId + ', kind=' + kind +
+            ', attempt=' + (attempt + 1) + '/' + temperatures.length + ', error=' + message);
+          if (onRetry) { onRetry(attempt + 2, temperatures.length); }
+          continue;
         } finally { this.syncWaitMs += Date.now() - requestStarted; }
         dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
         try {
@@ -2162,9 +2156,9 @@ export class DataPipelineModelClient implements ProfileBlockModel {
           this.streamActivities.finish(activityId, 'succeeded');
           return payload;
         } catch (e) {
-          this.streamActivities.finish(activityId, 'invalid');
           let err = e as Error;
-          let canRetry = !truncated && attempt + 1 < temperatures.length;
+          let canRetry = (!truncated || homeRecommendationRequest) && attempt + 1 < temperatures.length;
+          this.streamActivities.finish(activityId, canRetry && homeRecommendationRequest ? 'retrying' : 'invalid');
           dataManagerError(`Model request parse failed: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, responseChars=${content.length}, retry=${canRetry}, error=${err.message}`);
           // Chat output can contain personal details; diagnostics only need counts and the validation error.
           if (kind !== 'chat.memory' && !kind.startsWith('profile.')) {
@@ -2180,7 +2174,13 @@ export class DataPipelineModelClient implements ProfileBlockModel {
           if (onRetry) {
             onRetry(attempt + 2, temperatures.length);
           }
-          if (profileRequest) {
+          if (homeRecommendationRequest) {
+            let correction: CloudChatMessage = { role: 'user', content:
+              '上次回复未通过提醒分析校验：' + summarizeText(err.message, 400) + '\n' +
+              '请根据原始输入重新返回完整的 recommendations JSON 对象。每个输入 event_id（e1、e2 等）必须且只能归入一张卡片的 source_event_ids；' +
+              '相同事项可以合并，不同人物或不同事项不要强行合并，不能遗漏无日期事项。保持标题和说明简洁，不输出解释、Markdown或代码块。' };
+            messages = messages.slice(0, 2).concat([correction]);
+          } else if (profileRequest) {
             let correction: CloudChatMessage = { role: 'user',
               content: '上次结果未通过JSON或证据校验。请只返回合法JSON对象，检查逗号、引号、数组括号和输入的e编号；不要输出解释或Markdown。' };
             messages = messages.slice(0, 2).concat([correction]);
