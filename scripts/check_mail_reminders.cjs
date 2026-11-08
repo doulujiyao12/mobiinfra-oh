@@ -389,11 +389,63 @@ test('mail recovery: malformed batch and one persistently bad mail do not block 
   };
   await assert.rejects(MailService.refresh('/sandbox',config),/已完成6\/7封/);
   const saved=store.current();assert.equal(saved.items.filter(x=>x.analysisKey).length,6);
-  assert.ok(saved.items.find(x=>x.id===failedId).analysisError);assert.equal(aiCalls.length,7);
+  assert.ok(saved.items.find(x=>x.id===failedId).analysisError);assert.equal(aiCalls.length,8);
   assert.equal(JSON.parse(aiCalls[1].messages[1].content).messages.length,2,'later primary batch precedes retries');
   aiResponder=null;await MailService.refresh('/sandbox',config);
-  assert.equal(aiCalls.length,8);assert.equal(JSON.parse(aiCalls[7].messages[1].content).messages[0].id,failedId);
+  assert.equal(aiCalls.length,9);assert.equal(JSON.parse(aiCalls[8].messages[1].content).messages[0].id,failedId);
   assert.equal(store.current().items.find(x=>x.id===failedId).analysisError,'');assert.equal(store.current().error,'');
+});
+
+test('mail recovery: invalid JSON succeeds on the second corrective retry without surfacing an error',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];
+  const updates=[];
+  aiResponder=async(options,call)=>{
+    if(call===1)return {content:'private-invalid-model-output'};
+    assert.equal(options.messages.length,3);assert.equal(options.temperature,0);
+    assert.match(options.messages[2].content,/invalid_json/);
+    assert.ok(!JSON.stringify(options.messages).includes('private-invalid-model-output'));
+    if(call===2)return {content:'{"items":['};
+    return aiDecisions(options);
+  };
+  await MailService.refresh('/sandbox',config,()=>{},value=>updates.push(clone(value)));
+  assert.equal(aiCalls.length,3);assert.equal(store.current().error,'');assert.ok(store.current().items[0].analysisKey);
+  assert.ok(updates.some(x=>x.message.includes('第 1/2 次重试')));
+  assert.ok(updates.some(x=>x.message.includes('第 2/2 次重试')));
+  assert.equal(updates.at(-1).stage,'邮件读取与分析完成');
+  assert.equal(commands.filter(x=>x.includes(' LOGIN ')).length,1,'Retries do not reconnect or refetch the mailbox');
+  assert.ok(!diagnostics.join('\n').includes('private-invalid-model-output'));
+});
+
+test('mail recovery: persistent invalid JSON stops after exactly two retries and preserves raw mail',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];
+  aiReply={content:'not-json'};
+  await assert.rejects(MailService.refresh('/sandbox',config),/不是有效JSON/);
+  assert.equal(aiCalls.length,3);assert.equal(MailService.isBusy(),false);
+  assert.equal(store.current().items.length,1);assert.ok(store.current().items[0].body);
+  assert.equal(store.current().items[0].analysisKey,'');assert.ok(store.current().items[0].analysisError);
+  assert.ok(diagnostics.some(x=>x.includes('code=invalid_json')&&x.includes('attempt=3/3')));
+});
+
+test('mail recovery: second retries apply only to unresolved mail and respect the total deadline',async()=>{
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1),fixture(2)];
+  let missingId='';
+  aiResponder=async(options,call)=>{
+    const items=JSON.parse(options.messages[1].content).messages;
+    if(call===1){missingId=items[1].id;return aiDecisions(options,items.slice(0,1));}
+    assert.equal(items.length,1);assert.equal(items[0].id,missingId);
+    assert.equal(store.current().items.filter(x=>x.analysisKey).length,1,'Earlier successes remain checkpointed');
+    if(call===2)return {content:'bad-json'};
+    return aiDecisions(options);
+  };
+  await MailService.refresh('/sandbox',config);assert.equal(aiCalls.length,3);
+  assert.equal(store.current().items.filter(x=>x.analysisKey).length,2);
+  setup();await MailCredentialStore.save(store.accountKey(),'fixture-code');messages=[fixture(1)];
+  aiResponder=async(options,call)=>{now+=call===1?290000:10001;return {content:'bad-json'};};
+  try {
+    await assert.rejects(MailService.refresh('/sandbox',config),/筛选超时/);
+    assert.equal(aiCalls.length,2,'Expired global budget prevents a third model request');
+    assert.equal(aiCalls[1].readTimeout,10000);
+  } finally {now=new Date('2026-10-24T12:00:00+08:00').getTime();}
 });
 
 test('mail recovery: complete validated entries survive a provider length flag',async()=>{

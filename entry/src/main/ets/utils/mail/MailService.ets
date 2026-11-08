@@ -6,6 +6,9 @@ import { MailImapClient } from './MailImapClient';
 import { MailStore } from './MailStore';
 import { MailItem, MailSettings, MailSnapshot, emptyMailSnapshot, mailDay, MAIL_RETENTION_DAYS, validateMailSettings } from './MailTypes';
 
+// This service owns the whole budget: initial batch plus two per-mail retries.
+const MAIL_ANALYSIS_MAX_ATTEMPTS: number = 3;
+
 export class MailService {
   private static busy: boolean = false;
   static isBusy(): boolean { return MailService.busy; }
@@ -41,29 +44,36 @@ export class MailService {
     settings: MailSettings, config: DataManagerModelConfig, model: string, startedAt: number,
     report: DataManagerProgressCallback): Promise<void> {
     let retry: MailItem[] = [];
+    let failures: Map<string, MailFailureInfo> = new Map<string, MailFailureInfo>();
     let lastFailure: MailFailureInfo | null = null;
     const deadline = startedAt + 300000;
     let processed = 0;
     let retryProcessed = 0;
+    let retryTotal = 0;
     let stopped = false;
     saved.error = MailService.incompleteMessage(saved, null);
     MailService.checkpoint(store, saved, settings);
-    let analyze = async (batch: MailItem[], retrying: boolean): Promise<boolean> => {
+    let analyze = async (batch: MailItem[], attempt: number): Promise<boolean> => {
+      let retrying = attempt > 1;
       if (Date.now() >= deadline) {
         lastFailure = { code: 'timeout', message: '邮件筛选超时，已完成结果已保存。' };
         return false;
       }
       const value: DataManagerProgress = { stage: retrying ? '重试未完成邮件' : 'AI筛选邮件',
-        message: retrying ? '正在单独重试未完成邮件 ' + (retryProcessed + 1) + '/' + retry.length :
+        message: retrying ? '正在重试未完成邮件 ' + (retryProcessed + 1) + '/' + retryTotal +
+          '（第 ' + (attempt - 1) + '/' + (MAIL_ANALYSIS_MAX_ATTEMPTS - 1) + ' 次重试）' :
           '已检查 ' + processed + '/' + pending.length + ' 封，正在等待本批AI结果',
-        current: retrying ? retryProcessed : processed, total: retrying ? retry.length : pending.length,
-        percent: retrying ? 90 + 5 * retryProcessed / retry.length : 60 + 30 * processed / pending.length };
+        current: retrying ? retryProcessed : processed, total: retrying ? retryTotal : pending.length,
+        percent: retrying ? 90 + 5 * (attempt - 2 + retryProcessed / retryTotal) /
+          (MAIL_ANALYSIS_MAX_ATTEMPTS - 1) : 60 + 30 * processed / pending.length };
       report(value);
       let decisions: MailDecision[] = [];
       let failure: MailFailureInfo | null = null;
       let batchStarted = Date.now();
       try {
-        decisions = await MailAnalysis.analyze(batch, settings, config, Math.max(1, Math.min(90000, deadline - Date.now())));
+        let retryFailure = retrying ? failures.get(batch[0].id) || null : null;
+        decisions = await MailAnalysis.analyze(batch, settings, config,
+          Math.max(1, Math.min(90000, deadline - Date.now())), retryFailure);
       } catch (e) { failure = mailAnalysisFailure(e as Error); }
       decisions.forEach((decision: MailDecision): void => {
         let item = batch.find((value: MailItem): boolean => value.id === decision.id);
@@ -71,21 +81,24 @@ export class MailService {
         item.relevant = item.bodyError.length > 0 || decision.relevant;
         item.summary = decision.summary; item.reason = decision.reason;
         item.analysisKey = store.analysisKey(item, settings, model); item.analysisError = '';
+        failures.delete(item.id);
       });
       let missing = batch.filter((item: MailItem): boolean => item.analysisKey.length === 0);
       if (missing.length > 0) {
         if (failure === null) { failure = { code: 'invalid_count', message: '模型未完整返回本批邮件的筛选结果。' }; }
         lastFailure = failure;
         const failureMessage = failure.message;
-        missing.forEach((item: MailItem): void => { item.analysisError = failureMessage; });
-        if (!retrying && MailService.canRetryOutput(failure)) {
+        const batchFailure = failure;
+        missing.forEach((item: MailItem): void => { item.analysisError = failureMessage; failures.set(item.id, batchFailure); });
+        if (attempt < MAIL_ANALYSIS_MAX_ATTEMPTS && MailService.canRetryOutput(failure)) {
           missing.forEach((item: MailItem): void => { retry.push(item); });
         }
         AppLogger.warn('Mail', 'MAIL_ANALYSIS_INCOMPLETE code=' + failure.code + ' count=' + batch.length +
-          ' accepted=' + decisions.length + ' unresolved=' + missing.length + ' retry=' + retrying);
+          ' accepted=' + decisions.length + ' unresolved=' + missing.length + ' attempt=' + attempt +
+          '/' + MAIL_ANALYSIS_MAX_ATTEMPTS);
       }
       AppLogger.info('Mail', 'MAIL_ANALYSIS_BATCH count=' + batch.length + ' accepted=' + decisions.length +
-        ' retry=' + retrying + ' elapsedMs=' + (Date.now() - batchStarted));
+        ' attempt=' + attempt + '/' + MAIL_ANALYSIS_MAX_ATTEMPTS + ' elapsedMs=' + (Date.now() - batchStarted));
       saved.error = MailService.incompleteMessage(saved, lastFailure);
       MailService.checkpoint(store, saved, settings);
       return failure === null || MailService.canRetryOutput(failure);
@@ -93,12 +106,16 @@ export class MailService {
     // Finish the first pass before retrying: a bad early email cannot consume
     // the whole request budget before later batches have even been attempted.
     for (let index = 0; index < pending.length; index += 5) {
-      if (!await analyze(pending.slice(index, index + 5), false)) { stopped = true; break; }
+      if (!await analyze(pending.slice(index, index + 5), 1)) { stopped = true; break; }
       processed = Math.min(pending.length, index + 5);
     }
-    if (!stopped) {
-      for (const item of retry) {
-        if (!await analyze([item], true)) { break; }
+    for (let attempt = 2; !stopped && attempt <= MAIL_ANALYSIS_MAX_ATTEMPTS && retry.length > 0; attempt++) {
+      let round = retry;
+      retry = [];
+      retryTotal = round.length;
+      retryProcessed = 0;
+      for (const item of round) {
+        if (!await analyze([item], attempt)) { stopped = true; break; }
         retryProcessed++;
       }
     }
