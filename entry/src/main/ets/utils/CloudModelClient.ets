@@ -309,6 +309,8 @@ interface GalleryFieldAnalysisBundle {
   rawText: string;
 }
 
+const GUI_IMAGE_ANALYSIS_READ_TIMEOUT_MS: number = 20000;
+
 export class CloudModelClient {
   private activeRequests: http.HttpRequest[] = [];
   private readonly galleryChatOptions: CloudChatOptions = {
@@ -1395,7 +1397,7 @@ export class CloudModelClient {
   }
 
   async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig, maxTokens: number = 1024): Promise<string> {
-    // workflow 中的图片问答步骤可能比动作 JSON 更长，因此使用更大的 max_tokens 和较短超时。
+    // workflow 图片问答保留独立的输出预算，读取超时统一限制为 20 秒。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
     };
@@ -1408,7 +1410,7 @@ export class CloudModelClient {
       text: question
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      cloudDeciderApiKey(config), config.deciderModel, maxTokens, 60000);
+      cloudDeciderApiKey(config), config.deciderModel, maxTokens, GUI_IMAGE_ANALYSIS_READ_TIMEOUT_MS);
   }
 
   async chatImagesQuestion(question: string, imageBase64List: string[], config: CloudModelConfig): Promise<string> {
@@ -1445,7 +1447,7 @@ export class CloudModelClient {
       text: question
     });
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: content }],
-      cloudDeciderApiKey(config), config.deciderModel, 1024, 60000);
+      cloudDeciderApiKey(config), config.deciderModel, 1024, GUI_IMAGE_ANALYSIS_READ_TIMEOUT_MS);
   }
 
   async analyzeGalleryImage(imageBase64: string, ocrText: string, exifText: string, config: GalleryCloudModelConfig): Promise<string> {

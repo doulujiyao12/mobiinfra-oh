@@ -1,12 +1,15 @@
-// Keep the packaged default workflow schema description in sync with this fallback.
+// Today's workflow records the transcript first, then applies this compact check.
 export const WECHAT_TODAY_CHAT_CHECK_PROMPT: string =
-  '判断当前微信截图中的聊天记录是否属于今天，将结果写入 contains_today_chat。\n\n' +
-  '按以下顺序判断：\n\n' +
-  '1. 如果出现“昨天”“前天”“上周”、星期几或具体年月日，返回 false。\n' +
-  '   这一条优先级最高：即使同一页也出现“上午/下午＋时间”，仍返回 false。\n\n' +
-  '2. 如果没有出现上述日期标记，聊天记录只显示“上午/下午＋时间”，例如“上午 9:10”“下午 7:14”，返回 true。\n\n' +
-  '3. 如果没有显示具体日期，也返回 true。\n\n' +
+  '【今日聊天判断】判断当前微信截图中的聊天记录是否属于今天，将结果写入 contains_today_chat。' +
+  '判断范围：只看当前截图中微信自动显示的居中时间分隔标签；下列规则中的“出现”均只指这些标签。' +
+  '不要根据聊天气泡正文、会话名称、成员昵称、状态栏时间，或本提示词中的任务执行时间参考、规则文字和示例判断。' +
+  '按以下顺序判断：1. 如果出现“昨天”“前天”“上周”、星期几或具体年月日，返回 false。' +
+  '这一条优先级最高：即使同一页也出现“上午/下午＋时间”，仍返回 false。' +
+  '2. 如果没有出现上述日期标记，聊天记录只显示“上午/下午＋时间”，例如“上午 9:10”“下午 7:14”，返回 true。' +
+  '3. 如果没有显示具体日期，也返回 true。' +
   'contains_today_chat 必须使用布尔值 true 或 false。';
+
+export const WECHAT_TODAY_CHAT_DESCRIPTION: string = '判断当前聊天内容是否为今天的聊天内容。';
 
 // Keep the packaged default workflow questions in sync with this fallback prompt.
 export const WECHAT_SUMMARY_PROMPT: string =
@@ -23,3 +26,7 @@ export const WECHAT_SUMMARY_PROMPT: string =
   '私聊格式示例（会话名称：同事甲）：\n' +
   '- 位置：左侧｜发送人：同事甲｜聊天对象：我｜时间原文：昨天 上午09:00｜原文：请帮我发材料。\n' +
   '- 位置：右侧｜发送人：我｜聊天对象：同事甲｜时间原文：昨天 上午09:01｜原文：已经发出。';
+
+// Reuse the full transcript instructions instead of maintaining another copy.
+export const WECHAT_TODAY_SUMMARY_PROMPT: string =
+  '【聊天内容记录】\n' + WECHAT_SUMMARY_PROMPT + '\n\n' + WECHAT_TODAY_CHAT_CHECK_PROMPT;

@@ -6,7 +6,7 @@ import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
-import { WECHAT_SUMMARY_PROMPT, WECHAT_TODAY_CHAT_CHECK_PROMPT } from './WechatSummaryPrompt';
+import { WECHAT_SUMMARY_PROMPT, WECHAT_TODAY_CHAT_DESCRIPTION, WECHAT_TODAY_SUMMARY_PROMPT } from './WechatSummaryPrompt';
 import {
   WorkflowCondition,
   WorkflowDefaults,
@@ -1371,7 +1371,7 @@ export class WorkflowStorage {
     };
     let containsTodayChat: VlmJsonSchemaField = {
       type: 'boolean',
-      description: WECHAT_TODAY_CHAT_CHECK_PROMPT
+      description: WECHAT_TODAY_CHAT_DESCRIPTION
     };
     return {
       summary: summary,
@@ -1387,7 +1387,7 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
-        question: WECHAT_SUMMARY_PROMPT,
+        question: WECHAT_TODAY_SUMMARY_PROMPT,
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };

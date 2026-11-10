@@ -15,6 +15,15 @@ const prompt = exportsObject.WECHAT_SUMMARY_PROMPT;
 assert.equal(typeof prompt, 'string');
 const todayPrompt = exportsObject.WECHAT_TODAY_CHAT_CHECK_PROMPT;
 assert.equal(typeof todayPrompt, 'string');
+const todaySummaryPrompt = exportsObject.WECHAT_TODAY_SUMMARY_PROMPT;
+const todayDescription = exportsObject.WECHAT_TODAY_CHAT_DESCRIPTION;
+assert.equal(todaySummaryPrompt, '【聊天内容记录】\n' + prompt + '\n\n' + todayPrompt);
+assert.ok(!/[\r\n]/.test(todayPrompt), 'Today-check instructions must be one paragraph');
+assert.equal(todayDescription, '判断当前聊天内容是否为今天的聊天内容。');
+assert.ok(todayPrompt.includes('微信自动显示的居中时间分隔标签'));
+assert.ok(todayPrompt.includes('聊天气泡正文') && todayPrompt.includes('任务执行时间参考、规则文字和示例'));
+assert.ok(!prompt.includes('contains_today_chat'), 'Ordinary transcript tasks must not acquire today-only rules');
+assert.ok(todayPrompt.includes('这一条优先级最高：即使同一页也出现“上午/下午＋时间”，仍返回 false。'));
 function summaryQuestions(value) {
   if (Array.isArray(value)) return value.flatMap(summaryQuestions);
   if (!value || typeof value !== 'object') return [];
@@ -23,7 +32,8 @@ function summaryQuestions(value) {
 }
 for (const name of ['default_weixin_chat.json', 'default_weixin_today_chat.json']) {
   const workflow = JSON.parse(fs.readFileSync(path.join(root, 'entry/src/main/resources/rawfile/workflows/configs', name), 'utf8'));
-  assert.deepEqual(summaryQuestions(workflow), [prompt], name + ' differs from the shared prompt');
+  assert.deepEqual(summaryQuestions(workflow), [name === 'default_weixin_today_chat.json' ? todaySummaryPrompt : prompt],
+    name + ' differs from its shared prompt');
   if (name === 'default_weixin_today_chat.json') {
     const descriptions = [];
     function todayDescriptions(value) {
@@ -36,7 +46,7 @@ for (const name of ['default_weixin_chat.json', 'default_weixin_today_chat.json'
       Object.values(value).forEach(todayDescriptions);
     }
     todayDescriptions(workflow);
-    assert.deepEqual(descriptions, [todayPrompt], 'today schema and fallback must have identical instructions');
+    assert.deepEqual(descriptions, [todayDescription], 'today schema must contain only the short field description');
   }
 }
 const storagePath = path.join(root, 'entry/src/main/ets/utils/WorkflowStorage.ets');
@@ -45,11 +55,11 @@ const references = [];
 function visit(node, method = '') {
   if (ts.isMethodDeclaration(node) && node.name) method = node.name.getText(source);
   if (method === 'weixinTodaySummaryToolStep' && ts.isPropertyAssignment(node) && node.name.getText(source) === 'question') {
-    assert.equal(node.initializer.getText(source), 'WECHAT_SUMMARY_PROMPT'); references.push(method);
+    assert.equal(node.initializer.getText(source), 'WECHAT_TODAY_SUMMARY_PROMPT'); references.push(method);
   }
   if (method === 'weixinTodayJsonSchema' && ts.isVariableDeclaration(node) && node.name.getText(source) === 'containsTodayChat') {
     const description = node.initializer.properties.find(item => item.name?.getText(source) === 'description');
-    assert.equal(description.initializer.getText(source), 'WECHAT_TODAY_CHAT_CHECK_PROMPT');
+    assert.equal(description.initializer.getText(source), 'WECHAT_TODAY_CHAT_DESCRIPTION');
   }
   if (method === 'defaultWeixinWorkflow' && ts.isCallExpression(node) &&
       node.expression.getText(source) === 'WorkflowStorage.summaryToolStep') {
@@ -61,7 +71,7 @@ visit(source);
 assert.deepEqual(references.sort(), ['defaultWeixinWorkflow', 'weixinTodaySummaryToolStep']);
 assert.ok(source.statements.some(node => ts.isImportDeclaration(node) && node.moduleSpecifier.text === './WechatSummaryPrompt' &&
   node.importClause?.namedBindings?.elements?.some(item => item.name.text === 'WECHAT_SUMMARY_PROMPT')));
-console.log('PASS: two packaged defaults and fallback builders share the summary prompt; today-check schema descriptions also match.');
+console.log('PASS: ordinary summaries stay unchanged; compact today rules follow the shared transcript; packaged defaults, fallback builders and short schema descriptions agree.');
 
 // Run the actual storage/title/copy methods against in-memory task files.
 // This also checks that existing configs are corrected on reload, without
@@ -97,7 +107,7 @@ const updated = titles.updateTaskContextValue('/app', task.id, 'contact_name', '
 assert.equal(updated.title, '收集新的群聊的今天聊天记录 复制');
 assert.equal(updated.lastStatus, '成功'); assert.equal(updated.enabled, false);
 assert.equal(JSON.parse(savedConfig).metadata.description, raw.metadata.description);
-assert.deepEqual(summaryQuestions(JSON.parse(savedConfig)), [prompt]);
+assert.deepEqual(summaryQuestions(JSON.parse(savedConfig)), [todaySummaryPrompt]);
 const copied = titles.duplicateTask('/app', updated.id);
 assert.equal(copied.title, '收集新的群聊的今天聊天记录 复制 2');
 assert.equal(JSON.parse(copied.workflowJson).metadata.description, '收集指定微信用户的今天聊天记录 复制 2');
