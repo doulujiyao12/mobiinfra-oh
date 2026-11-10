@@ -316,6 +316,17 @@ async function main() {
   assert.equal((await CodexCredentialStore.load(second.id)).token, 't'.repeat(43));
   await CodexCredentialStore.forget(firstId);
   assert.equal((await CodexCredentialStore.load(second.id)).token, 't'.repeat(43), 'deleting a connection does not delete another computer');
+  const staleAlias = Buffer.from('clawmate.codex.connection.v1');
+  storedAssets.set(staleAlias.toString(), new Map([
+    [asset.Tag.ALIAS, staleAlias], [asset.Tag.SECRET, Buffer.from(JSON.stringify({ origin: second.origin, token: 'o'.repeat(43) }))]
+  ]));
+  cache.delete(path.join(root, 'entry/src/main/ets/pages/codex/CodexCredentialStore.ets'));
+  const upgradedStore = load('entry/src/main/ets/pages/codex/CodexCredentialStore.ets').CodexCredentialStore;
+  assert.equal((await upgradedStore.load(second.id)).token, 't'.repeat(43), 'upgrade reads the latest saved token');
+  const listedAfterUpgrade = await upgradedStore.list();
+  assert.equal(listedAfterUpgrade.filter(item => item.origin === second.origin).length, 1, 'legacy fallback cannot replace/duplicate the current connection');
+  assert.equal((await upgradedStore.load(second.id)).token, 't'.repeat(43), 'listing old assets never overwrites newer credentials');
+  storedAssets.delete(staleAlias.toString());
   const legacyAlias = Buffer.from('clawmate.codex.connection.v1');
   storedAssets.set(legacyAlias.toString(), new Map([
     [asset.Tag.ALIAS, legacyAlias], [asset.Tag.SECRET, Buffer.from(JSON.stringify({ origin: 'https://legacy.example.com', token: 'l'.repeat(43) }))],
