@@ -7368,7 +7368,8 @@ struct Index {
     if (this.activeTaskWorkflowCancellation === cancellation) { this.activeTaskWorkflowCancellation = null; }
   }
 
-  private async runPhoneWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation): Promise<void> {
+  private async runPhoneWorkflowTask(task: WorkflowTask, cancellation: WorkflowCancellation,
+    preparedSettings?: SelfHdcTaskSettings): Promise<void> {
     cancellation.throwIfCancelled();
     if (!this.ensureAiServiceLogin()) { return; }
     cancellation.throwIfCancelled();
@@ -7382,10 +7383,12 @@ struct Index {
         throw new Error('已有手机测试或 GUI 任务正在执行');
       }
       let context = getContext(this) as common.UIAbilityContext;
-      let settings = new SelfHdcTaskSettings();
+      let settings = preparedSettings === undefined ? new SelfHdcTaskSettings() : preparedSettings;
       let settingsError = '';
-      try { settings = await SelfHdcTaskSettings.refreshLocalIp(this.filesDir, 'phone-workflow'); }
-      catch (e) { settingsError = (e as Error).message; }
+      if (preparedSettings === undefined) {
+        try { settings = await SelfHdcTaskSettings.refreshLocalIp(this.filesDir, 'phone-workflow'); }
+        catch (e) { settingsError = (e as Error).message; }
+      }
       cancellation.throwIfCancelled();
       if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
         throw new Error('已有手机测试或 GUI 任务正在执行');
@@ -8372,8 +8375,8 @@ struct Index {
         onRunWorkflow: async (task: WorkflowTask, cancellation: WorkflowCancellation) => {
           await this.runWorkflowTask(task, cancellation);
         },
-        onRunPhoneWorkflow: async (task: WorkflowTask, cancellation: WorkflowCancellation) => {
-          await this.runPhoneWorkflowTask(task, cancellation);
+        onRunPhoneWorkflow: async (task: WorkflowTask, cancellation: WorkflowCancellation, settings?: SelfHdcTaskSettings) => {
+          await this.runPhoneWorkflowTask(task, cancellation, settings);
         },
         onSyncCollectedTasks: async (): Promise<void> => {
           await this.syncCollectedWorkflowTasks();

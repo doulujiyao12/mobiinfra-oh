@@ -420,6 +420,8 @@ export interface HomeRecommendationViewModel {
 }
 
 export interface HomeRecommendationState {
+  // First generation time; reusing/completing a card must not make it new again.
+  created_at?: string;
   id: string;
   tag: string;
   title: string;

@@ -935,6 +935,8 @@ export class WorkflowStorage {
     }
     let workflow = WorkflowStorage.validateWorkflowJson(WorkflowStorage.readTaskWorkflowJson(filesDir, currentTask), false);
     let context: WorkflowJsonMap = workflow.context ? workflow.context : {};
+    let previous = context[key];
+    if (previous !== undefined && stringifyJsonCompat(previous) === stringifyJsonCompat(value)) { return tasks; }
     context[key] = value;
     workflow.context = context;
     let rawJson = stringifyJsonCompat(workflow as Object, 2);

@@ -45,6 +45,12 @@ test('configured phone proceeds without a guide, even if Wi-Fi detection is unav
   assert.equal(refreshCalls, 1); assert.equal(dialogs.length, 0); assert.equal(routes.length, 0);
   assert.equal(policy.selfHdcSetupProblem(settings), '');
 });
+test('task launch can reuse the validated endpoint without a second network detection', async () => {
+  reset(); refreshed = { ...settings, ip: '192.168.1.9' };
+  const prepared = await guard.prepare({}, '/sandbox', 'workflow-start');
+  assert.equal(prepared.ip, '192.168.1.9'); assert.equal(refreshCalls, 1);
+  reset({ port: '' }); assert.equal(await guard.prepare({}, '/sandbox', 'workflow-start'), null);
+});
 test('missing IP or port blocks the operation and explains the missing field', async () => {
   for (const change of [{ ip: '' }, { port: '' }, { ip: '', port: '' }]) {
     reset(change); let executed = false;
@@ -115,7 +121,7 @@ test('task, chat, WeChat, gallery and debug operation entry points retain prereq
   const check = (file, reasons) => {
     const source = fs.readFileSync(path.join(root, base + file), 'utf8');
     for (const reason of reasons) { assert.ok(source.includes(reason), file + ' missing ' + reason); }
-    assert.ok(source.includes('await SelfHdcSetupGuard.ensure('), file);
+    assert.ok(/await SelfHdcSetupGuard\.(ensure|prepare)\(/.test(source), file);
   };
   check('pages/task/TaskPage.ets', ['workflow-start', 'workflow-batch-start']);
   check('pages/Index.ets', ['phone-chat-workflow', 'phone-chat-', 'phone-wechat-collection']);

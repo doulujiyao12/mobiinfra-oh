@@ -86,6 +86,14 @@ export function isCurrentOrFutureTodoDeadline(deadline: string, today: string): 
   return isIsoDate(deadline) && isIsoDate(today) && deadline >= today;
 }
 
+export function newestHomeRecommendations(items: HomeRecommendationState[]): HomeRecommendationState[] {
+  return items.slice().sort((left: HomeRecommendationState, right: HomeRecommendationState): number => {
+    let leftTime = Date.parse(left.created_at || '');
+    let rightTime = Date.parse(right.created_at || '');
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  });
+}
+
 export function pruneHomeRecommendationsDocument(document: HomeRecommendationsDocument, candidateEventIds: string[]): HomeRecommendationPruneResult {
   let candidates: Record<string, boolean> = new Object() as Record<string, boolean>;
   (candidateEventIds || []).forEach((id: string) => {
@@ -210,7 +218,9 @@ export class HomeRecommendationService {
   }
 
   loadDocument(): HomeRecommendationsDocument {
-    return this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
+    let document = this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
+    document.recommendations = newestHomeRecommendations(document.recommendations || []);
+    return document;
   }
 
   cachedBuildResult(day: string | undefined): HomeRecommendationBuildResult | null {
@@ -338,10 +348,10 @@ export class HomeRecommendationService {
       // Publish only a complete planning result. A failed/partial response must
       // not replace previous cards or certify the current input as processed.
       let planned = await this.modelClient.planHomeRecommendations(remainingContext.plannerEvents, remainingContext.today, modelConfig);
-      recommendations = recommendations.concat(this.normalizeRecommendations(planned, remainingContext, usedIds));
+      recommendations = this.normalizeRecommendations(planned, remainingContext, usedIds).concat(recommendations);
     }
     dataManagerInfo(`Home recommendations incremental: reused=${Object.keys(covered).length}, plannedEvents=${remainingContext.plannerEvents.length}, recommendations=${recommendations.length}`);
-    return recommendations;
+    return newestHomeRecommendations(recommendations);
   }
 
   private reusePreviousRecommendations(previous: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
@@ -361,6 +371,7 @@ export class HomeRecommendationService {
       }
       let domain = normalizeFreeText(item.domain) || this.firstEventDomain(eventIds, context.events);
       let recommendation: HomeRecommendationState = {
+        created_at: normalizeFreeText(item.created_at || ''),
         id: id,
         tag: normalizeFreeText(item.tag),
         title: this.recommendationTitle(item, eventIds, context.events),
@@ -394,6 +405,7 @@ export class HomeRecommendationService {
   private normalizeRecommendations(planned: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
     usedIds: Record<string, boolean>): HomeRecommendationState[] {
     let result: HomeRecommendationState[] = [];
+    let createdAt = nowIsoLocal();
     let allowed: Record<string, boolean> = new Object() as Record<string, boolean>;
     context.candidateEventIds.forEach((id: string) => allowed[id] = true);
     let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
@@ -410,6 +422,7 @@ export class HomeRecommendationService {
       let domains = normalizeDomains([normalizeFreeText(item.domain)]);
       let domain = domains.length > 0 ? domains[0] : this.firstEventDomain(eventIds, context.events);
       let recommendation: HomeRecommendationState = {
+        created_at: createdAt,
         id: this.nextRecommendationId(usedIds),
         tag: this.normalizeRecommendationTag(item.tag, eventIds, context.events),
         title: title,

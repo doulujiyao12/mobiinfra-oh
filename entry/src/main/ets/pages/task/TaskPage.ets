@@ -7,12 +7,12 @@ import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
+import { WorkflowFileManager } from '../../components/WorkflowFileManager';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { AiLoginGuard } from '../../components/AiLoginGuard';
 import {
   WorkflowCondition,
   WorkflowDefinition,
-  WorkflowFileStats,
   WorkflowJsonMap,
   WorkflowJsonValue,
   WorkflowManagedFile,
@@ -116,7 +116,7 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 @Component
 export struct TaskPage {
   private pageScroller: Scroller = new Scroller();
-  @Prop @Watch('onCollectionReminderChanged') active: boolean = false;
+  @Prop @Watch('onActiveChanged') active: boolean = false;
   @StorageProp(COLLECTION_REMINDER_REQUEST_KEY) @Watch('onCollectionReminderChanged')
   private reminderRequest: string = '';
   @StorageProp(COLLECTION_REMINDER_READY_KEY) @Watch('onCollectionReminderChanged')
@@ -125,7 +125,7 @@ export struct TaskPage {
   onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation) => Promise<void> =
     async (_task: WorkflowTask, _cancellation: WorkflowCancellation): Promise<void> => {};
-  onRunPhoneWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation) => Promise<void> =
+  onRunPhoneWorkflow: (task: WorkflowTask, cancellation: WorkflowCancellation, settings?: SelfHdcTaskSettings) => Promise<void> =
     async (_task: WorkflowTask, _cancellation: WorkflowCancellation): Promise<void> => {
     throw new Error('手机任务执行器未连接');
   };
@@ -171,16 +171,14 @@ export struct TaskPage {
   @State breakOperatorDraft: string = '==';
   @State breakRightDraft: string = '';
   @State runningTaskId: string = '';
+  @State private preparingTaskId: string = '';
   @Link @Watch('onConfigViewChanged') configViewOpen: boolean;
   @State private focusedConfigTaskId: string = '';
   @State batchRunning: boolean = false;
   @State private batchSyncing: boolean = false;
   @State private batchStopRequested: boolean = false;
   @State batchRunStatusText: string = '';
-  @State fileStatsText: string = '正在统计 workflow 文件...';
-  @State configManagedFiles: WorkflowManagedFile[] = [];
-  @State dailyLogManagedFiles: WorkflowManagedFile[] = [];
-  @State runManagedFiles: WorkflowManagedFile[] = [];
+  @State private fileStatsRevision: number = 0;
   @State fileViewerCategory: string = '';
   @State fileViewerOpen: boolean = false;
   @State fileViewerTitle: string = '';
@@ -224,6 +222,12 @@ export struct TaskPage {
     this.clearAllTaskContextSaveTimers();
   }
 
+  private onActiveChanged(): void {
+    // Refresh edits/deletions made in the separate file viewer when returning.
+    if (this.active && this.filesDir.length > 0 && !this.isTaskExecutionBusy()) { this.reloadTasks(); }
+    this.onCollectionReminderChanged();
+  }
+
   private onCollectionReminderChanged(): void {
     if (!this.active || !this.reminderWindowReady || this.filesDir.length === 0 || this.reminderRequest.length === 0 ||
       this.reminderHandling || this.batchPreparing || this.isTaskExecutionBusy() ||
@@ -264,28 +268,15 @@ export struct TaskPage {
     this.cardContextDrafts = {};
     this.tasks = WorkflowStorage.loadTasks(this.filesDir);
     this.refreshCardContextInputs();
-    this.refreshStatsText();
+    this.invalidateFileStats();
   }
 
   private refreshCardContextInputs(): void {
     this.cardContextRenderVersion = this.cardContextRenderVersion + 1;
   }
 
-  private refreshStatsText(): void {
-    this.configManagedFiles = WorkflowStorage.listConfigFiles(this.filesDir);
-    this.dailyLogManagedFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
-    this.runManagedFiles = WorkflowStorage.listRunFiles(this.filesDir);
-    let stats: WorkflowFileStats = WorkflowStorage.getStats(this.filesDir);
-    this.fileStatsText = '配置 ' + stats.configCount + ' 个，daily-log ' + stats.dailyLogCount +
-      ' 个，运行文件 ' + stats.runCount + ' 个，共 ' + WorkflowStorage.formatSize(stats.totalBytes);
-  }
-
-  private totalFileSize(files: WorkflowManagedFile[]): number {
-    let total = 0;
-    for (let i = 0; i < files.length; i++) {
-      total += files[i].size;
-    }
-    return total;
+  private invalidateFileStats(): void {
+    this.fileStatsRevision++;
   }
 
   private openFileViewer(category: string): void {
@@ -364,7 +355,8 @@ export struct TaskPage {
   }
 
   private isTaskExecutionBusy(): boolean {
-    return this.batchRunning || this.runningTaskId.length > 0 || this.phoneControlBusy || this.agentExecutionBusy;
+    return this.batchRunning || this.preparingTaskId.length > 0 || this.runningTaskId.length > 0 ||
+      this.phoneControlBusy || this.agentExecutionBusy;
   }
 
   private isWorkflowCancelledStatus(status: string, message: string): boolean {
@@ -528,8 +520,12 @@ export struct TaskPage {
   }
 
   private syncTaskContextDraft(task: WorkflowTask, value: string): void {
-    this.setTaskContextDraft(task.id, value);
     this.clearTaskContextSaveTimer(task.id);
+    if (value === this.taskContactNameOriginalText(task)) {
+      this.removeTaskContextDraft(task.id);
+      return;
+    }
+    this.setTaskContextDraft(task.id, value);
     if (this.isTaskExecutionBusy()) {
       return;
     }
@@ -547,7 +543,8 @@ export struct TaskPage {
     }
     try {
       this.tasks = WorkflowStorage.updateTaskContextValue(this.filesDir, taskId, 'contact_name', value);
-      this.refreshStatsText();
+      this.removeTaskContextDraft(taskId);
+      this.invalidateFileStats();
     } catch (e) {
       let err = e as Error;
       this.removeTaskContextDraft(taskId);
@@ -757,7 +754,7 @@ export struct TaskPage {
       this.selectedPath = '';
       this.taskScene = this.editorSceneId;
       showToastSafely('Workflow 已保存', 1500);
-      this.refreshStatsText();
+      this.invalidateFileStats();
     } catch (e) {
       let err = e as Error;
       showToastSafely('保存失败：' + err.message, 2500);
@@ -817,49 +814,44 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
-    if (!AiLoginGuard.ensure(this.getUIContext())) {
-      return;
+    if (!AiLoginGuard.ensure(this.getUIContext())) { return; }
+    if (this.isTaskExecutionBusy() || this.batchPreparing) {
+      showToastSafely('已有 workflow 正在执行', 1500); return;
     }
-    if (this.isTaskExecutionBusy()) {
-      showToastSafely('已有 workflow 正在执行', 1500);
-      return;
-    }
-    if (!AiLoginGuard.ensure(this.getUIContext())) {
-      return;
-    }
-    if (this.taskControlMode === 'phone' &&
-      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-start')) { return; }
-    if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
-      return;
-    }
-    // A second tap must not start another run while consent is being loaded or displayed.
-    if (this.isTaskExecutionBusy()) {
-      return;
-    }
-    let flushedContext = this.flushTaskContextDrafts();
-    this.cardContextDrafts = {};
-    if (!flushedContext) {
-      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
-    } else {
-      this.refreshCardContextInputs();
-    }
-    let currentTask = this.findTask(task.id);
-    if (!currentTask) {
-      showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
-      return;
-    }
-    if (!currentTask.enabled) {
-      showToastSafely('任务已停用，请先打开开关', 1500);
-      return;
-    }
-    this.runningTaskId = currentTask.id;
-    this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
+    this.preparingTaskId = task.id;
+    let startedAt = Date.now();
     try {
-      await this.runSelectedWorkflow(currentTask);
+      // Let the preparing state paint before disk/config validation or connection setup.
+      await new Promise<void>((resolve): void => { setTimeout(resolve, 16); });
+      let preparedSettings: SelfHdcTaskSettings | undefined = undefined;
+      if (this.taskControlMode === 'phone') {
+        let settings = await SelfHdcSetupGuard.prepare(this.getUIContext(), this.filesDir, 'workflow-start');
+        if (settings === null) { return; }
+        preparedSettings = settings;
+      } else if (!await this.onEnsureDesktopCompanion()) { return; }
+      if (this.batchRunning || this.phoneControlBusy || this.agentExecutionBusy) { return; }
+      this.flushTaskContextDrafts();
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      let currentTask = this.findTask(task.id);
+      if (!currentTask) {
+        showToastSafely('Workflow 已不存在，请刷新后重试', 1800); return;
+      }
+      if (!currentTask.enabled) {
+        showToastSafely('任务已停用，请先打开开关', 1500); return;
+      }
+      this.runningTaskId = currentTask.id;
+      this.preparingTaskId = '';
+      this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
+      AppLogger.info('Workflow.Launch', 'READY task=' + currentTask.id + ' preparationMs=' + (Date.now() - startedAt));
+      await this.runSelectedWorkflow(currentTask, new WorkflowCancellation(), preparedSettings);
+    } catch (e) {
+      AppLogger.errorCause('Workflow.Launch', 'Task launch failed', e as Error);
+      showToastSafely('任务无法启动：' + (e as Error).message, 2500);
     } finally {
+      this.preparingTaskId = '';
       this.runningTaskId = '';
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
-      this.refreshStatsText();
+      this.invalidateFileStats();
     }
   }
 
@@ -903,8 +895,12 @@ export struct TaskPage {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
-    if (this.taskControlMode === 'phone' &&
-      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-batch-start')) { return; }
+    let preparedSettings: SelfHdcTaskSettings | undefined = undefined;
+    if (this.taskControlMode === 'phone') {
+      let settings = await SelfHdcSetupGuard.prepare(this.getUIContext(), this.filesDir, 'workflow-batch-start');
+      if (settings === null) { return; }
+      preparedSettings = settings;
+    }
     if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
       return;
     }
@@ -940,7 +936,7 @@ export struct TaskPage {
         this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
           attemptedTasks++;
-          await this.runSelectedWorkflow(currentTask, cancellation);
+          await this.runSelectedWorkflow(currentTask, cancellation, i === 0 ? preparedSettings : undefined);
           this.tasks = WorkflowStorage.loadTasks(this.filesDir);
           if (cancellation.isCancelled() || this.isTaskCancelled(currentTask.id)) {
             stoppedByCancel = true;
@@ -988,15 +984,15 @@ export struct TaskPage {
       this.batchRunStatusText = '';
       AppStorage.setOrCreate('collectionReminderActiveBatch', false);
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
-      this.refreshStatsText();
+      this.invalidateFileStats();
     }
   }
 
   private async runSelectedWorkflow(task: WorkflowTask,
-    cancellation: WorkflowCancellation = new WorkflowCancellation()): Promise<void> {
+    cancellation: WorkflowCancellation = new WorkflowCancellation(), settings?: SelfHdcTaskSettings): Promise<void> {
     cancellation.throwIfCancelled();
     if (this.taskControlMode === 'phone') {
-      await this.onRunPhoneWorkflow(task, cancellation);
+      await this.onRunPhoneWorkflow(task, cancellation, settings);
     } else { await this.onRunWorkflow(task, cancellation); }
     let savedTask = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
     if (this.batchRunning && savedTask && (savedTask.lastStatus === 'failed' || savedTask.lastStatus === '失败')) {
@@ -1011,6 +1007,7 @@ export struct TaskPage {
 
   private copyWorkflowTask(task: WorkflowTask): void {
     try {
+      this.flushTaskContextDrafts();
       let copied = WorkflowStorage.duplicateTask(this.filesDir, task.id);
       this.reloadTasks();
       showToastSafely('已复制：' + copied.title, 1500);
@@ -1034,13 +1031,15 @@ export struct TaskPage {
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
+        this.clearTaskContextSaveTimer(task.id);
+        this.removeTaskContextDraft(task.id);
         this.tasks = WorkflowStorage.deleteTask(this.filesDir, task.id);
         if (this.editingTaskId === task.id) {
           this.editorOpen = false;
           this.editingTaskId = '';
           this.selectedPath = '';
         }
-        this.refreshStatsText();
+        this.invalidateFileStats();
         showToastSafely('Workflow 已删除', 1500);
       }
     }).catch(() => {});
@@ -1056,7 +1055,12 @@ export struct TaskPage {
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
+        this.clearAllTaskContextSaveTimers();
+        this.cardContextDrafts = {};
         let count = WorkflowStorage.deleteConfigs(this.filesDir);
+        this.editorOpen = false;
+        this.editingTaskId = '';
+        this.selectedPath = '';
         this.reloadTasks();
         showToastSafely('已删除配置项：' + count, 1500);
       }
@@ -1074,7 +1078,7 @@ export struct TaskPage {
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
         let count = WorkflowStorage.deleteDailyLogs(this.filesDir);
-        this.refreshStatsText();
+        this.invalidateFileStats();
         showToastSafely('已删除 daily-log 项：' + count, 1500);
       }
     }).catch(() => {});
@@ -1091,7 +1095,7 @@ export struct TaskPage {
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
         let count = WorkflowStorage.deleteRunFiles(this.filesDir);
-        this.refreshStatsText();
+        this.invalidateFileStats();
         showToastSafely('已删除运行文件项：' + count, 1500);
       }
     }).catch(() => {});
@@ -4115,7 +4119,7 @@ export struct TaskPage {
       }
       Scroll() {
         Row() {
-          Button(this.runningTaskId === task.id ? '执行中' : '运行')
+          Button(this.preparingTaskId === task.id ? '准备中' : this.runningTaskId === task.id ? '执行中' : '运行')
             .width(82)
             .height(36)
             .fontSize(12)
@@ -4297,90 +4301,13 @@ export struct TaskPage {
   }
 
   @Builder FileManagerPanel() {
-    Column() {
-      Row() {
-        Column() {
-          Text('Workflow 文件管理')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(AppTheme.text('#11182F'))
-            .width('100%')
-          Text(this.fileStatsText)
-            .fontSize(12)
-            .fontColor(AppTheme.text('#6F7584'))
-            .margin({ top: 7 })
-            .width('100%')
-            .maxLines(2)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        Button('刷新')
-          .width(64)
-          .height(34)
-          .fontSize(12)
-          .backgroundColor(AppTheme.background('#4E5666'))
-          .borderRadius(10)
-          .margin({ left: 10 })
-          .onClick(() => { this.reloadTasks(); })
-      }
-      .width('100%')
-
-      this.FileCategoryRow('config', '配置', 'Workflow JSON', '#276EF1', '#EEF4FF', this.configManagedFiles)
-      this.FileCategoryRow('daily', '日志', 'Daily Log', '#148F73', '#EAF8F3', this.dailyLogManagedFiles)
-      this.FileCategoryRow('run', '运行文件', 'Run outputs', '#C76800', '#FFF3E2', this.runManagedFiles)
-    }
-    .width('86%')
-    .padding(18)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(14)
-    .margin({ bottom: 18 })
-  }
-
-  @Builder FileCategoryRow(category: string, title: string, subtitle: string, color: string, bgColor: string,
-    files: WorkflowManagedFile[]) {
-    Row() {
-      Column() {
-        Text(title)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(subtitle + ' · ' + files.length + ' 个 · ' + WorkflowStorage.formatSize(this.totalFileSize(files)))
-          .fontSize(12)
-          .fontColor(AppTheme.text('#6F7584'))
-          .margin({ top: 6 })
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      Button('查看')
-        .width(74)
-        .height(34)
-        .fontSize(12)
-        .fontColor(AppTheme.text(Color.White))
-        .backgroundColor(AppTheme.filledBackground(color))
-        .borderRadius(10)
-        .margin({ left: 10 })
-        .onClick(() => { this.openFileViewer(category); })
-      Button('清理')
-        .width(66)
-        .height(34)
-        .fontSize(12)
-        .fontColor(AppTheme.text('#6F7584'))
-        .backgroundColor(AppTheme.background('#F3F5FA'))
-        .borderRadius(10)
-        .margin({ left: 8 })
-        .onClick(() => { this.deleteFileCategory(category); })
-    }
-    .width('100%')
-    .padding(14)
-    .backgroundColor(AppTheme.background(bgColor))
-    .borderRadius(14)
-    .margin({ top: 12 })
+    WorkflowFileManager({
+      filesDir: this.filesDir,
+      revision: this.fileStatsRevision,
+      busy: this.isTaskExecutionBusy(),
+      onOpen: (category: string): void => { this.openFileViewer(category); },
+      onDelete: (category: string): void => { this.deleteFileCategory(category); }
+    })
   }
 
   @Builder FileViewerPanel() {

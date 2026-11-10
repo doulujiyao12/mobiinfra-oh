@@ -9,6 +9,8 @@ import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
+import fs from '@ohos.file.fs';
+import { WorkflowFileCatalog } from '../../utils/WorkflowFileCatalog';
 
 @Entry
 @Component
@@ -28,6 +30,9 @@ struct WorkflowFileViewer {
   @State previewMode: boolean = true;
 
   private filesDir: string = '';
+  private catalog: WorkflowFileCatalog | null = null;
+  private contentRequest: number = 0;
+  @State private loading: boolean = false;
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -50,17 +55,28 @@ struct WorkflowFileViewer {
     }
   }
 
-  private loadFiles(): void {
+  aboutToDisappear(): void {
+    this.catalog?.cancel(); this.catalog = null; this.contentRequest++;
+  }
+
+  private async loadFiles(): Promise<void> {
     this.title = this.categoryTitle(this.category);
-    if (this.category === 'config') {
-      this.files = WorkflowStorage.listConfigFiles(this.filesDir);
-    } else if (this.category === 'run') {
-      this.files = WorkflowStorage.listRunFiles(this.filesDir);
-    } else {
-      this.files = WorkflowStorage.listDailyLogFiles(this.filesDir);
+    this.catalog?.cancel();
+    let catalog = new WorkflowFileCatalog();
+    this.catalog = catalog; this.loading = true;
+    try {
+      let files = await catalog.list(this.filesDir, this.category);
+      if (this.catalog !== catalog) { return; }
+      this.files = files;
+      this.pruneSelectedDeletePaths();
+      this.selectCurrentOrFirst();
+    } catch (e) {
+      if (this.catalog !== catalog) { return; }
+      if (this.selectedPath.length === 0) { this.fileText = '文件列表读取失败，请点击刷新重试'; }
+      showToastSafely('文件列表读取失败：' + (e as Error).message, 2200);
+    } finally {
+      if (this.catalog === catalog) { this.loading = false; this.catalog = null; }
     }
-    this.pruneSelectedDeletePaths();
-    this.selectCurrentOrFirst();
   }
 
   private switchCategory(category: string): void {
@@ -73,6 +89,9 @@ struct WorkflowFileViewer {
     this.manageMode = false;
     this.fileListExpanded = false;
     this.selectedDeletePaths = [];
+    this.files = [];
+    this.contentRequest++;
+    this.fileText = '正在加载...';
     this.loadFiles();
   }
 
@@ -90,6 +109,7 @@ struct WorkflowFileViewer {
     if (selected !== null) {
       this.openManagedFile(selected);
     } else {
+      this.contentRequest++;
       this.selectedPath = '';
       this.selectedName = '';
       this.fileText = this.emptyText(this.category);
@@ -97,15 +117,18 @@ struct WorkflowFileViewer {
     }
   }
 
-  private openManagedFile(file: WorkflowManagedFile): void {
+  private async openManagedFile(file: WorkflowManagedFile): Promise<void> {
+    let request = ++this.contentRequest;
     this.selectedPath = file.path;
     this.selectedName = file.name;
     this.previewMode = this.defaultPreviewMode(file);
+    this.fileText = '正在加载...';
     try {
-      this.fileText = WorkflowStorage.readText(file.path);
+      let text = await fs.readText(file.path);
+      if (request === this.contentRequest) { this.fileText = text; }
     } catch (e) {
       let err = e as Error;
-      this.fileText = '读取失败：' + (err.message || String(e));
+      if (request === this.contentRequest) { this.fileText = '读取失败：' + (err.message || String(e)); }
     }
   }
 
@@ -404,6 +427,7 @@ struct WorkflowFileViewer {
         .fontSize(12)
         .backgroundColor(AppTheme.background('#607D8B'))
         .borderRadius(12)
+        .enabled(!this.loading)
         .onClick(() => { this.loadFiles(); })
     }
     .width('100%')
@@ -429,7 +453,7 @@ struct WorkflowFileViewer {
 
       Column() {
         Row() {
-          Text('文件列表 · ' + this.files.length + ' 个')
+          Text(this.loading ? '正在读取文件…' : '文件列表 · ' + this.files.length + ' 个')
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
             .fontColor(AppTheme.text('#11182F'))

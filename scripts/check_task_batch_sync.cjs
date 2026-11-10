@@ -41,7 +41,7 @@ function batch(mode = 'phone', count = 3) {
   ], {
     WorkflowCancellation, WorkflowStorage: storage,
     AiLoginGuard: { ensure: () => state.login }, HuaweiPrivacyAccess: { ensure: async () => state.accepted },
-    SelfHdcSetupGuard: { ensure: async () => state.ready },
+    SelfHdcSetupGuard: { prepare: async () => state.ready ? { mode: 'phone', ip: '192.0.2.1', port: '12345' } : null },
     CollectionReminderService: { pendingIntent: () => ({}), claim: () => { state.claimed++; return true; }, clearRequest() {},
       recordSuccessfulCollection: async () => { state.history++; } },
     AppStorage: { setOrCreate: (key, value) => { state.storage[key] = value; } },
@@ -49,9 +49,9 @@ function batch(mode = 'phone', count = 3) {
     AppLogger: { info() {}, warnCause() {}, errorCause() {} }, showToastSafely: text => state.toasts.push(text)
   });
   Object.assign(page, { filesDir: '/app', taskControlMode: mode, tasks: storage.loadTasks(), batchRunning: false,
-    batchPreparing: false, batchSyncing: false, batchStopRequested: false, runningTaskId: '', active: true,
+    batchPreparing: false, batchSyncing: false, batchStopRequested: false, runningTaskId: '', preparingTaskId: '', active: true,
     reminderWindowReady: true, phoneControlBusy: false, agentExecutionBusy: false, batchCancellation: null,
-    getUIContext: () => ({}), flushTaskContextDrafts: () => false, refreshCardContextInputs() {}, refreshStatsText() {},
+    getUIContext: () => ({}), flushTaskContextDrafts: () => false, refreshCardContextInputs() {}, invalidateFileStats() {},
     onEnsureDesktopCompanion: async () => true,
     enabledTasks: () => page.tasks.filter(item => item.enabled), enabledTaskCount: () => page.tasks.filter(item => item.enabled).length,
     findTask: id => page.tasks.find(item => item.id === id) || null,
