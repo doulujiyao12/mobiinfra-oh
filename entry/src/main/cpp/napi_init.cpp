@@ -22,6 +22,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <iomanip>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -814,6 +815,131 @@ static void appLog(const char* fmt, ...) {
     appLog("[ERR] " fmt, ##__VA_ARGS__); \
 } while(0)
 
+// Protected by g_mutex, like the model itself. Session_Debug is chosen during
+// model loading; enabling the App Debug switch later cannot retrofit old sessions.
+static bool g_mtpProbeCallbacksPrepared = false;
+static std::atomic<uint64_t> g_nextMtpProbeId{0};
+
+struct MtpProbeConfig {
+    bool requested = false;
+    bool debug = false;
+    bool reuseKv = false;
+    int draftLength = 0;
+};
+
+static MtpProbeConfig mtpProbeConfig(Llm* model) {
+    MtpProbeConfig result;
+    rapidjson::Document config;
+    config.Parse(model->dump_config().c_str());
+    if (!config.IsObject()) return result;
+    result.requested = config.HasMember("speculative_type") && config["speculative_type"].IsString() &&
+        std::string(config["speculative_type"].GetString()) == "mtp";
+    result.debug = config.HasMember("enable_debug") && config["enable_debug"].IsBool() &&
+        config["enable_debug"].GetBool();
+    result.reuseKv = config.HasMember("reuse_kv") && config["reuse_kv"].IsBool() && config["reuse_kv"].GetBool();
+    if (config.HasMember("draft_predict_length") && config["draft_predict_length"].IsInt()) {
+        result.draftLength = config["draft_predict_length"].GetInt();
+    }
+    return result;
+}
+
+static void prepareMtpExecutionProbe(Llm* model) {
+    auto config = mtpProbeConfig(model);
+    if (!config.requested) return;
+    if (g_debugLoggingEnabled.load() && !config.debug) {
+        if (!model->set_config("{\"enable_debug\":true}")) {
+            LOGE("[MTP_DIAG] phase=model_load verdict=CALLBACK_SETUP_FAILED");
+            return;
+        }
+        config.debug = true;
+    }
+    g_mtpProbeCallbacksPrepared = config.debug;
+    LOGI("[MTP_DIAG] phase=model_load requested=mtp callbacks_prepared=%{public}d draft_length=%{public}d",
+         g_mtpProbeCallbacksPrepared ? 1 : 0, config.draftLength);
+}
+
+// Match exporter namespaces, not an arbitrary occurrence of "mtp" in a name.
+// Count completed operator callbacks, never reinterpret them as accepted tokens
+// or draft forward calls (a fused projection can produce multiple callbacks).
+static bool isMtpDraftOperator(const std::string& name) {
+    return name.compare(0, 4, "mtp/") == 0 || name.find("/mtp/") != std::string::npos ||
+        name.compare(0, 11, "mtp_layers.") == 0 || name.find("/mtp_layers.") != std::string::npos;
+}
+
+struct MtpProbeEvidence {
+    uint64_t id = 0;
+    std::string label;
+    std::atomic<uint64_t> callbacks{0};
+    std::atomic<uint64_t> draftCallbacks{0};
+
+    void observe(const MNN::OperatorInfo* info) {
+        if (!g_debugLoggingEnabled.load() || info == nullptr) return;
+        callbacks.fetch_add(1, std::memory_order_relaxed);
+        if (!isMtpDraftOperator(info->name())) return;
+        if (draftCallbacks.fetch_add(1, std::memory_order_relaxed) == 0) {
+            LOGI("[MTP_DIAG] id=%{public}llu request=%{public}s phase=draft_op_observed op=%{public}s",
+                 static_cast<unsigned long long>(id), label.c_str(), info->name().substr(0, 180).c_str());
+        }
+    }
+};
+
+// Each request owns its evidence and callback lifetime. Optional callbacks keep
+// the existing per-operator profiler working alongside this probe.
+class ScopedMtpExecutionProbe {
+public:
+    ScopedMtpExecutionProbe(Llm* model, const char* label,
+                           MNN::TensorCallBackWithInfo before = {}, MNN::TensorCallBackWithInfo after = {})
+        : model_(model) {
+        MtpProbeConfig config;
+        if (g_debugLoggingEnabled.load()) config = mtpProbeConfig(model);
+        if (config.requested) {
+            evidence_ = std::make_shared<MtpProbeEvidence>();
+            evidence_->id = g_nextMtpProbeId.fetch_add(1, std::memory_order_relaxed) + 1;
+            evidence_->label = label;
+            LOGI("[MTP_DIAG] id=%{public}llu request=%{public}s phase=request_begin callbacks_prepared=%{public}d "
+                 "draft_length=%{public}d reuse_kv=%{public}d",
+                 static_cast<unsigned long long>(evidence_->id), label,
+                 g_mtpProbeCallbacksPrepared ? 1 : 0, config.draftLength, config.reuseKv ? 1 : 0);
+        }
+        if ((!evidence_ || !g_mtpProbeCallbacksPrepared) && !before && !after) return;
+        auto evidence = evidence_;
+        model_->setDebugCallback(
+            [before](const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+                return before ? before(tensors, info) : true;
+            },
+            [evidence, after](const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+                if (evidence) evidence->observe(info);
+                return after ? after(tensors, info) : true;
+            });
+        installed_ = true;
+    }
+
+    ~ScopedMtpExecutionProbe() {
+        // Empty callbacks restore normal execution and release profiler captures
+        // even on an early return or exception. No callback captures this scope.
+        if (installed_) model_->setDebugCallback({}, {});
+        if (!evidence_ || !g_debugLoggingEnabled.load()) return;
+        const auto callbacks = evidence_->callbacks.load(std::memory_order_relaxed);
+        const auto draft = evidence_->draftCallbacks.load(std::memory_order_relaxed);
+        const char* verdict = draft > 0 ? "MTP_OPERATORS_OBSERVED" :
+            !g_mtpProbeCallbacksPrepared ? "RELOAD_MODEL_WITH_DEBUG" :
+            callbacks == 0 ? "CALLBACKS_NOT_OBSERVED" : "NO_MTP_OPERATORS_OBSERVED";
+        LOGI("[MTP_DIAG] id=%{public}llu request=%{public}s phase=request_end verdict=%{public}s "
+             "op_callbacks=%{public}llu draft_op_callbacks=%{public}llu status=%{public}d",
+             static_cast<unsigned long long>(evidence_->id), evidence_->label.c_str(), verdict,
+             static_cast<unsigned long long>(callbacks), static_cast<unsigned long long>(draft),
+             model_->getContext() ? static_cast<int>(model_->getContext()->status) : -1);
+    }
+
+    ScopedMtpExecutionProbe(const ScopedMtpExecutionProbe&) = delete;
+    ScopedMtpExecutionProbe& operator=(const ScopedMtpExecutionProbe&) = delete;
+
+private:
+    Llm* model_;
+    bool installed_ = false;
+    std::shared_ptr<MtpProbeEvidence> evidence_;
+};
+
 // Agent 模式状态：prefix 预填后记录 KV 位置，每一步擦掉 prefix 之后的历史再生成。
 static bool g_agent_mode = false;
 static size_t g_prefix_pos = 0;
@@ -1365,6 +1491,7 @@ static void LoadModelExecute(napi_env env, void* data) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
     g_currentModelConfigPath = asyncData->inputStr;
+    g_mtpProbeCallbacksPrepared = false;
     resetNpuRuntimeDiagnostics("config unavailable", false);
     g_fullNpu.reset();
     g_offlineNpu2State.reset();
@@ -1491,6 +1618,7 @@ static void LoadModelExecute(napi_env env, void* data) {
         backendSummary + ", npu_execution_mode=" + asyncData->npuMode, npuRequested);
     LOGI("%{public}s", configStatus.c_str());
 
+    prepareMtpExecutionProbe(g_llm.get());
     bool res = g_llm->load();
     if (res) {
         asyncData->success = true;
@@ -1498,6 +1626,7 @@ static void LoadModelExecute(napi_env env, void* data) {
         LOGI("Model loaded OK");
         LOGI("%{public}s", currentNpuStatusLine("model_load").c_str());
     } else {
+        g_mtpProbeCallbacksPrepared = false;
         g_llm.reset();
         asyncData->success = false;
         asyncData->outputStr = g_offlineNpu2State ? "error: offline NPU: " + g_offlineNpu2State->error : "error: load failed";
@@ -1584,6 +1713,7 @@ static void GenerateExecute(napi_env env, void* data) {
     dumpLlmRequest("Generate", asyncData->inputStr, g_llm->apply_chat_template(asyncData->inputStr));
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
+    ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "Generate");
     g_llm->response(asyncData->inputStr, &oss);
     if (offlineNpu2Failed(asyncData)) return;
     asyncData->outputStr = oss.str();
@@ -1734,6 +1864,7 @@ static void CompleteTextExecute(napi_env, void* data) {
             if (!g_llm) throw std::runtime_error("本地模型尚未加载");
             IsolatedModelScope scope(g_llm.get()); scope.prepare();
             OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
+            ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "CompleteText");
             auto* context = const_cast<LlmContext*>(g_llm->getContext());
             TsfnStreambuf buffer(request->tsfn, request->textRequestId, context, true); std::ostream stream(&buffer);
             g_llm->response(request->inputStr, &stream, nullptr, request->maxNewTokens);
@@ -1901,7 +2032,7 @@ static void ProfileGenerateExecute(napi_env env, void* data) {
     using Clock = std::chrono::high_resolution_clock;
     std::map<std::string, Clock::time_point> starts;
     std::map<std::string, OpProfileStat> stats;
-    g_llm->setDebugCallback(
+    ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "ProfileGenerate",
         [&](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo* info) {
             if (info == nullptr) {
                 return true;
@@ -1937,11 +2068,6 @@ static void ProfileGenerateExecute(napi_env env, void* data) {
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     g_llm->response(prompt, &response);
-
-    g_llm->setDebugCallback(
-        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; },
-        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; }
-    );
 
     if (offlineNpu2Failed(asyncData)) return;
     std::string responseStr = response.str();
@@ -2049,6 +2175,7 @@ static void ChatExecute(napi_env env, void* data) {
     std::string assistant_str;
     OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
     LlmContext* context = const_cast<LlmContext*>(g_llm->getContext());
+    ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "Chat");
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn, asyncData->chatRequestId, context);
         std::ostream tokenStream(&buf);
@@ -2284,6 +2411,7 @@ static void AgentPrefillExecute(napi_env env, void* data) {
     dumpLlmRequest("AgentPrefill", asyncData->inputStr, asyncData->inputStr);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
+    ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "AgentPrefill");
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
     if (offlineNpu2Failed(asyncData)) return;
     g_prefix_pos = g_llm->getCurrentHistory();
@@ -2360,6 +2488,7 @@ static void AgentStepExecute(napi_env env, void* data) {
     dumpLlmRequest("AgentStep", asyncData->inputStr, asyncData->inputStr);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     OfflineNpu2::prepareRequest(g_llm.get(), g_offlineNpu2State);
+    ScopedMtpExecutionProbe mtpProbe(g_llm.get(), "AgentStep");
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
         std::ostream tokenStream(&buf);
