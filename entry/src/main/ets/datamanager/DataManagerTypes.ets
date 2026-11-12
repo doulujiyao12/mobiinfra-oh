@@ -439,6 +439,22 @@ export interface HomeRecommendationsDocument {
   input_hash: string;
   total_events: number;
   recommendations: HomeRecommendationState[];
+  skipped?: HomeRecommendationSkipState[];
+}
+
+export interface HomeRecommendationSkip {
+  event_id: string;
+  reason: 'resolved' | 'low_value' | 'not_now';
+}
+
+export interface HomeRecommendationSkipState extends HomeRecommendationSkip {
+  source_input_hash: string;
+  reviewed_on: string;
+}
+
+export interface HomeRecommendationSelection {
+  recommendations: HomeRecommendationState[];
+  skipped: HomeRecommendationSkip[];
 }
 
 export interface HomeRecommendationPlannerEvent {

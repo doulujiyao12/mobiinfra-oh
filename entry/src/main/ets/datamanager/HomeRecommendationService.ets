@@ -9,6 +9,8 @@ import {
   DataManagerModelConfig,
   DataManagerProgressCallback,
   HomeRecommendationPlannerEvent,
+  HomeRecommendationSkip,
+  HomeRecommendationSkipState,
   HomeRecommendationsDocument,
   HomeRecommendationState,
   IndexedEvent,
@@ -42,8 +44,13 @@ interface HomeRecommendationPlanningContext {
   today: string;
 }
 
+interface HomeRecommendationBuildSelection {
+  recommendations: HomeRecommendationState[];
+  skipped: HomeRecommendationSkipState[];
+}
+
 const HOME_TODO_NO_DEADLINE_RECENT_DAYS: number = 7;
-const HOME_FOLLOW_UP_POLICY: string = 'home-follow-up-v2';
+const HOME_FOLLOW_UP_POLICY: string = 'home-follow-up-v3-value-selection';
 
 export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
   let parts: string[] = ['home_recommendation_source_v1'];
@@ -133,7 +140,8 @@ export function pruneHomeRecommendationsDocument(document: HomeRecommendationsDo
     generated_at: normalizeFreeText(document.generated_at),
     input_hash: normalizeFreeText(document.input_hash),
     total_events: candidateEventIds.length,
-    recommendations: recommendations
+    recommendations: recommendations,
+    skipped: (document.skipped || []).filter((item: HomeRecommendationSkipState): boolean => candidates[item.event_id] === true)
   };
   return {
     document: prunedDocument,
@@ -184,7 +192,10 @@ export class HomeRecommendationService {
     let previousHasInputHash = normalizeFreeText(previous.input_hash).length > 0;
     let previousEmptyButMissing = (previous.recommendations || []).length === 0 && (!previousGenerated || !previousHasInputHash);
     let shouldRebuildEmpty = forceWhenEmpty && context.candidateEventIds.length > 0 && previousEmptyButMissing;
-    if (previous.input_hash === inputHash && !shouldRebuildEmpty) {
+    // Do not certify a policy migration without a model selection. Keeping the
+    // prior policy also lets the next enabled sync perform the deferred review.
+    let selectionDisabled = !modelConfig.enabled && context.candidateEventIds.length > 0;
+    if (selectionDisabled || (previous.input_hash === inputHash && !shouldRebuildEmpty)) {
       if (pruneResult.prunedCount > 0) {
         this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), previous as Object);
       }
@@ -199,19 +210,20 @@ export class HomeRecommendationService {
     if (shouldRebuildEmpty) {
       dataManagerInfo(`Home recommendations empty, rebuild requested: events=${context.candidateEventIds.length}`);
     }
-    let recommendations = await this.buildIncrementalRecommendations(previous, context, modelConfig);
+    let selection = await this.buildIncrementalRecommendations(previous, context, modelConfig);
     let document: HomeRecommendationsDocument = {
       policy: HOME_FOLLOW_UP_POLICY,
       generated_at: nowIsoLocal(),
       input_hash: inputHash,
       total_events: context.candidateEventIds.length,
-      recommendations: recommendations
+      recommendations: selection.recommendations,
+      skipped: selection.skipped
     };
     this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), document as Object);
-    dataManagerInfo(`Home recommendations built: events=${context.candidateEventIds.length}, recommendations=${recommendations.length}`);
+    dataManagerInfo(`Home recommendations built: events=${context.candidateEventIds.length}, recommendations=${selection.recommendations.length}, skipped=${selection.skipped.length}`);
     return {
       totalEvents: context.candidateEventIds.length,
-      recommendationCount: recommendations.length,
+      recommendationCount: selection.recommendations.length,
       reused: false,
       prunedCount: pruneResult.prunedCount
     };
@@ -339,19 +351,49 @@ export class HomeRecommendationService {
   }
 
   private async buildIncrementalRecommendations(previous: HomeRecommendationsDocument, context: HomeRecommendationPlanningContext,
-    modelConfig: DataManagerModelConfig): Promise<HomeRecommendationState[]> {
+    modelConfig: DataManagerModelConfig): Promise<HomeRecommendationBuildSelection> {
     let usedIds: Record<string, boolean> = new Object() as Record<string, boolean>;
     let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
-    let recommendations = this.reusePreviousRecommendations(previous.recommendations || [], context, usedIds, covered);
+    // Upgrade only the Home selection, not historical event analysis/profile.
+    // Completed cards remain user decisions even across selection-policy updates.
+    let samePolicy = previous.policy === HOME_FOLLOW_UP_POLICY;
+    let priorCards = previous.recommendations || [];
+    priorCards.forEach((item: HomeRecommendationState) => { usedIds[item.id] = true; });
+    let reusableCards = priorCards.filter((item: HomeRecommendationState): boolean => samePolicy || item.completed === true);
+    let recommendations = this.reusePreviousRecommendations(reusableCards, context, usedIds, covered);
+    let skipped: HomeRecommendationSkipState[] = [];
+    if (samePolicy) {
+      (previous.skipped || []).forEach((item: HomeRecommendationSkipState) => {
+        let currentHash = this.recommendationSourceInputHash([item.event_id], context);
+        if (!isHomeRecommendationSourceReusable(item.source_input_hash, currentHash, [item.event_id],
+          context.candidateEventIds, Object.keys(covered))) { return; }
+        // Deferred items can become useful as their date approaches. Low-value
+        // and resolved decisions stay cached until their source evidence changes.
+        if (item.reason === 'not_now' && item.reviewed_on !== context.today) { return; }
+        if (item.reason !== 'resolved' && item.reason !== 'low_value' && item.reason !== 'not_now') { return; }
+        skipped.push(item);
+        covered[item.event_id] = true;
+      });
+    }
     let remainingContext = this.remainingPlanningContext(context, covered);
     if (modelConfig.enabled && remainingContext.plannerEvents.length > 0) {
       // Publish only a complete planning result. A failed/partial response must
       // not replace previous cards or certify the current input as processed.
       let planned = await this.modelClient.planHomeRecommendations(remainingContext.plannerEvents, remainingContext.today, modelConfig);
-      recommendations = this.normalizeRecommendations(planned, remainingContext, usedIds).concat(recommendations);
+      recommendations = this.normalizeRecommendations(planned.recommendations, remainingContext, usedIds, priorCards).concat(recommendations);
+      planned.skipped.forEach((item: HomeRecommendationSkip) => {
+        let decision: HomeRecommendationSkipState = {
+          event_id: item.event_id,
+          reason: item.reason,
+          source_input_hash: this.recommendationSourceInputHash([item.event_id], remainingContext),
+          reviewed_on: context.today
+        };
+        skipped.push(decision);
+        dataManagerInfo(`Home reminder omitted: event=${item.event_id}, reason=${item.reason}`);
+      });
     }
-    dataManagerInfo(`Home recommendations incremental: reused=${Object.keys(covered).length}, plannedEvents=${remainingContext.plannerEvents.length}, recommendations=${recommendations.length}`);
-    return newestHomeRecommendations(recommendations);
+    dataManagerInfo(`Home recommendations incremental: reused=${Object.keys(covered).length}, plannedEvents=${remainingContext.plannerEvents.length}, recommendations=${recommendations.length}, skipped=${skipped.length}`);
+    return { recommendations: newestHomeRecommendations(recommendations), skipped: skipped };
   }
 
   private reusePreviousRecommendations(previous: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
@@ -403,7 +445,7 @@ export class HomeRecommendationService {
   }
 
   private normalizeRecommendations(planned: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
-    usedIds: Record<string, boolean>): HomeRecommendationState[] {
+    usedIds: Record<string, boolean>, previous: HomeRecommendationState[] = []): HomeRecommendationState[] {
     let result: HomeRecommendationState[] = [];
     let createdAt = nowIsoLocal();
     let allowed: Record<string, boolean> = new Object() as Record<string, boolean>;
@@ -421,16 +463,20 @@ export class HomeRecommendationService {
       }
       let domains = normalizeDomains([normalizeFreeText(item.domain)]);
       let domain = domains.length > 0 ? domains[0] : this.firstEventDomain(eventIds, context.events);
+      let sourceHash = this.recommendationSourceInputHash(eventIds, context);
+      let original = previous.find((card: HomeRecommendationState): boolean =>
+        card.source_input_hash === sourceHash && card.source_event_ids.length === eventIds.length &&
+          eventIds.every((id: string): boolean => card.source_event_ids.indexOf(id) >= 0));
       let recommendation: HomeRecommendationState = {
-        created_at: createdAt,
-        id: this.nextRecommendationId(usedIds),
+        created_at: original ? original.created_at : createdAt,
+        id: original ? original.id : this.nextRecommendationId(usedIds),
         tag: this.normalizeRecommendationTag(item.tag, eventIds, context.events),
         title: title,
         desc: this.recommendationDesc(item, eventIds, context.events),
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: this.recommendationSourceInputHash(eventIds, context),
+        source_input_hash: sourceHash,
         completed: false
       };
       result.push(recommendation);

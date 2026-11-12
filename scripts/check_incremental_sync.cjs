@@ -2799,7 +2799,7 @@ test('analysis recovery: care, research and planning signals reach the planner w
   assert.deepEqual(indexed.map(e=>e.todo.type),['care','research','plan']);
   assert.ok(indexed.every(e=>!e.todo.deadline&&!e.todo.agent_task&&e.chat_attribution.subject==='self'));
   const {HomeRecommendationService}=load(base+'HomeRecommendationService');let received=[];
-  const planner={async planHomeRecommendations(input){received=clone(input);return input.map(e=>({title:e.todo_type,tag:'',desc:e.todo_text,domain:'other',source_event_ids:[e.event_id]}));}};
+  const planner={async planHomeRecommendations(input){received=clone(input);return {recommendations:input.map(e=>({title:e.todo_type,tag:'',desc:e.todo_text,domain:'other',source_event_ids:[e.event_id]})),skipped:[]};}};
   const service=new HomeRecommendationService(paths,storage,planner,{loadHomeTodoCandidateEvents:()=>Object.fromEntries(indexed.map(e=>[e.event_id,e]))});
   service.currentDateKey=()=> '2026-11-03';await service.build(config);
   assert.ok(received.every(e=>e.chat_attribution.subject==='self'));
@@ -2817,7 +2817,7 @@ test('analysis recovery: a same-day legacy recommendation cache cannot bypass th
   const document={generated_at:'2026-11-03T01:00:00',input_hash:'old',total_events:0,recommendations:[]};
   storage.writeJsonAtomic(paths.homeRecommendationsPath(),document);
   assert.equal(service.cachedBuildResult('2026-11-03'),null);
-  storage.writeJsonAtomic(paths.homeRecommendationsPath(),{...document,policy:'home-follow-up-v2'});
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),{...document,policy:'home-follow-up-v3-value-selection'});
   assert.equal(service.cachedBuildResult('2026-11-03').reused,true);
 });
 
@@ -3105,7 +3105,7 @@ test('reminder recovery: validation retries carry actionable feedback and finish
     assert.match(options.messages[2].content,/未知来源/);return reminderRecoveryResponse(['e1','e2']);
   };
   const result=await client.planHomeRecommendations(events,'2026-11-07',config);
-  assert.equal(calls,3);assert.deepEqual(clone(result.flatMap(r=>r.source_event_ids)),events.map(e=>e.event_id));
+  assert.equal(calls,3);assert.deepEqual(clone(result.recommendations.flatMap(r=>r.source_event_ids)),events.map(e=>e.event_id));
   assert.equal(client.modelActivities().filter(a=>a.phase==='retrying').length,2);
   assert.equal(client.modelActivities().filter(a=>a.phase==='succeeded').length,1);
   const {modelStreamActivityText}=load(base+'ModelStreamActivity');
@@ -3121,14 +3121,14 @@ test('reminder recovery: malformed JSON and truncated output are corrected with 
     if(calls===2)return {content:reminderRecoveryResponse(['e1']),finishReason:'length'};
     assert.match(options.messages[2].content,/截断/);return reminderRecoveryResponse(['e1','e2']);
   };
-  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).length,2);
+  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).recommendations.length,2);
   assert.equal(calls,3);
 });
 
 test('reminder recovery: transient request errors and validation failures share one three-attempt cap',async()=>{
   reset();let calls=0;const client=new DataPipelineModelClient();
   cloudHandler=async()=>{calls++;if(calls===1)throw Error('Cloud HTTP 503');if(calls===2)throw Error('operation timeout');return reminderRecoveryResponse(['e1','e2']);};
-  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).length,2);assert.equal(calls,3);
+  assert.equal((await client.planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config)).recommendations.length,2);assert.equal(calls,3);
   calls=0;cloudHandler=async()=>{calls++;if(calls===1)throw Error('operation timeout');return '{"recommendations":[]}';};
   await assert.rejects(new DataPipelineModelClient().planHomeRecommendations(reminderRecoveryEvents(),'2026-11-07',config),/遗漏/);
   assert.equal(calls,3,'No nested transport/validation retries');
@@ -3146,6 +3146,119 @@ test('reminder recovery: auth, cancellation and repetition errors do not restart
 test('reminder recovery: exhausted validation preserves previously saved cards',async()=>{
   await cases.find(([name])=>name==='analysis recovery: incomplete planning cannot silently discard a collected concern or replace prior cards')[1]();
   await cases.find(([name])=>name==='analysis recovery: care, research and planning signals reach the planner without deadlines or GUI commands')[1]();
+});
+
+test('reminder selection: every candidate is either selected or deliberately skipped, never silently lost',()=>{
+  const {HomeRecommendationRequestCodec}=load(base+'HomeRecommendationRequestCodec'),events=reminderRecoveryEvents();
+  const codec=new HomeRecommendationRequestCodec(events);
+  const result={recommendations:[{title:'确认计划',source_event_ids:['e1']}],skipped:[{event_id:'e2',reason:'low_value'}]};
+  codec.validateAndDecode(result);
+  assert.equal(result.recommendations[0].source_event_ids[0],events[0].event_id);
+  assert.equal(result.skipped[0].event_id,events[1].event_id);
+  const invalid={recommendations:[{title:'确认计划',source_event_ids:['e1']}],skipped:[{event_id:'e1',reason:'resolved'},{event_id:'e2',reason:'low_value'}]};
+  const before=clone(invalid);assert.throws(()=>codec.validateAndDecode(invalid),/重复分配/);assert.deepEqual(invalid,before);
+  for(const skipped of [[{event_id:'e2',reason:'guess_done'}],[{event_id:'e99',reason:'not_now'}],null,'e2']){
+    assert.throws(()=>codec.validateAndDecode({recommendations:[{title:'一',source_event_ids:['e1']}],skipped}));
+  }
+  assert.throws(()=>codec.validateAndDecode({recommendations:[],skipped:[{event_id:'e1',reason:'low_value'}]}),/缺少 e2/);
+  const empty={recommendations:[],skipped:[{event_id:'e1',reason:'low_value'},{event_id:'e2',reason:'resolved'}]};
+  codec.validateAndDecode(empty);assert.deepEqual(empty.skipped.map(e=>e.event_id),events.map(e=>e.event_id));
+});
+
+test('reminder selection: cloud selection preserves undated important actions and permits an intentional empty result',async()=>{
+  reset();const client=new DataPipelineModelClient(),events=reminderRecoveryEvents();let calls=0;
+  events[0].todo_text='先确认材料，再联系相关人员';events[1].todo_text='看过一次商品后的泛泛调研建议';
+  cloudHandler=async options=>{
+    calls++;const prompt=options.messages[0].content,input=JSON.parse(options.messages[1].content);
+    assert.match(prompt,/候选建议也可能过度推断/);assert.match(prompt,/明确日期不是必要条件/);
+    assert.match(prompt,/不能只凭“可能已做”/);assert.match(prompt,/不设固定条数上限/);
+    assert.ok(!prompt.includes('不要丢弃任何输入事件'));assert.equal(input.events[0].todo_deadline,'');
+    return JSON.stringify({recommendations:[{title:'确认后联系',desc:'先确认材料，再联系相关人员',source_event_ids:['e1']}],
+      skipped:[{event_id:'e2',reason:'low_value'}]});
+  };
+  const result=await client.planHomeRecommendations(events,'2026-11-07',config);
+  assert.equal(calls,1);assert.equal(result.recommendations.length,1);
+  assert.deepEqual(clone(result.skipped),[{event_id:events[1].event_id,reason:'low_value'}]);
+  cloudHandler=async()=>JSON.stringify({recommendations:[],skipped:[{event_id:'e1',reason:'resolved'},{event_id:'e2',reason:'low_value'}]});
+  const empty=await client.planHomeRecommendations(events,'2026-11-07',config);
+  assert.equal(empty.recommendations.length,0);assert.equal(empty.skipped.length,2);
+});
+
+function selectionServiceFixture(candidates,model=new DataPipelineModelClient()) {
+  const {HomeRecommendationService}=load(base+'HomeRecommendationService');
+  const service=new HomeRecommendationService(paths,storage,model,{loadHomeTodoCandidateEvents:()=>candidates});
+  service.currentDateKey=()=> '2026-11-07';return service;
+}
+function selectionEvent(id,type='other',text='有依据的未完成事项') {
+  return event(id,'2026-11-07',{todo:{type,deadline:'',text,agent_task:''}});
+}
+test('reminder selection: persisted skips survive restarts and only changed or new evidence is reconsidered',async()=>{
+  reset();const candidates={a:selectionEvent('a','research','一次浏览产生的泛泛建议')};let calls=0;
+  const selections=[];cloudHandler=async options=>{
+    calls++;const input=JSON.parse(options.messages[1].content);selections.push(clone(input.events));
+    return JSON.stringify({recommendations:[],skipped:input.events.map(e=>({event_id:e.event_id,reason:'low_value'}))});
+  };
+  let service=selectionServiceFixture(candidates);await service.build(config);assert.equal(calls,1);
+  assert.equal(service.loadDocument().skipped.length,1);
+  service=selectionServiceFixture(candidates);await service.build(config,undefined,true);assert.equal(calls,1);
+  candidates.b=selectionEvent('b');await service.build(config);assert.equal(calls,2);
+  assert.deepEqual(selections.at(-1).map(e=>e.todo_text),[candidates.b.todo.text]);
+  candidates.a.todo.text='现有资料出现新的明确问题';await service.build(config);assert.equal(calls,3);
+  assert.equal(selections.at(-1).length,1);assert.equal(selections.at(-1)[0].todo_text,candidates.a.todo.text);
+  delete candidates.b;await service.build(config);assert.equal(calls,3);assert.equal(service.loadDocument().skipped.length,1);
+  assert.ok(![...reads.keys()].some(file=>file.includes('/daily-log/')||file.endsWith('.state.json')),'Home decisions do not scan raw historical data');
+});
+
+test('reminder selection: deferred items are reconsidered on a new day without rerunning low-value decisions',async()=>{
+  reset();const candidates={a:selectionEvent('a'),b:selectionEvent('b')};let calls=0;
+  cloudHandler=async options=>{
+    calls++;const input=JSON.parse(options.messages[1].content);
+    if(calls===1)return JSON.stringify({recommendations:[],skipped:[{event_id:'e1',reason:'not_now'},{event_id:'e2',reason:'low_value'}]});
+    assert.equal(input.events.length,1);assert.equal(input.current_date,'2026-11-08');
+    return JSON.stringify({recommendations:[{title:'现在可以跟进',source_event_ids:['e1']}],skipped:[]});
+  };
+  const service=selectionServiceFixture(candidates);await service.build(config);await service.build(config);assert.equal(calls,1);
+  service.currentDateKey=()=> '2026-11-08';await service.build(config);assert.equal(calls,2);
+  assert.equal(service.loadDocument().recommendations.length,1);assert.equal(service.loadDocument().skipped.length,1);
+});
+
+test('reminder selection: upgrade reviews old visible cards once, preserving completion, IDs and first-generation time',async()=>{
+  reset();const candidates={a:selectionEvent('a'),b:selectionEvent('b'),c:selectionEvent('c')};
+  const {homeRecommendationSourceInputFingerprint}=load(base+'HomeRecommendationService');
+  const sourceHash=e=>storage.sha256Text(homeRecommendationSourceInputFingerprint([{event_id:e.event_id,date:e.event_date,
+    todo_type:e.todo.type,todo_deadline:e.todo.deadline,todo_text:e.todo.text,summary:e.summary,normalized_fact:e.normalized_fact,
+    sources:e.sources,domains:e.domains,keywords:e.keywords,image_paths:e.image_paths}]));
+  const cards=Object.values(candidates).map((e,i)=>({id:'todo-'+(i+1),title:'旧提醒 '+e.event_id,desc:'事实',tag:'待关注',domain:'other',meta:'',
+    created_at:'2026-11-07T01:00:00',source_event_ids:[e.event_id],source_input_hash:sourceHash(e),completed:e.event_id==='c'}));
+  const previous={policy:'home-follow-up-v2',generated_at:'2026-11-07T01:00:00',input_hash:'old',total_events:3,recommendations:cards};
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),previous);let calls=0;
+  cloudHandler=async options=>{
+    calls++;const input=JSON.parse(options.messages[1].content);assert.deepEqual(input.events.map(e=>e.event_id),['e1','e2']);
+    return JSON.stringify({recommendations:[{title:'值得保留的行动',source_event_ids:['e1']}],skipped:[{event_id:'e2',reason:'low_value'}]});
+  };
+  const service=selectionServiceFixture(candidates);await service.build({...config,enabled:false});
+  assert.deepEqual(clone(service.loadDocument()),previous,'Disabled analysis cannot drop cards or certify a migration');
+  await service.build(config);assert.equal(calls,1);const result=service.loadDocument();
+  assert.equal(result.recommendations.length,2);assert.equal(result.skipped[0].event_id,'b');
+  const kept=result.recommendations.find(c=>c.source_event_ids.includes('a')),completed=result.recommendations.find(c=>c.completed);
+  assert.equal(kept.id,'todo-1');assert.equal(kept.created_at,cards[0].created_at);
+  assert.equal(completed.id,'todo-3');assert.equal(completed.title,'旧提醒 c');
+  await service.build(config);assert.equal(calls,1);assert.equal(service.cachedBuildResult('2026-11-07').reused,true);
+});
+
+test('reminder selection: pruning cards preserves remaining skip decisions and invalid planning cannot replace the cache',async()=>{
+  reset();const {pruneHomeRecommendationsDocument}=load(base+'HomeRecommendationService');
+  const previous={policy:'home-follow-up-v3-value-selection',generated_at:'2026-11-07T01:00:00',input_hash:'old',total_events:2,
+    recommendations:[{id:'old',title:'已有卡片',source_event_ids:['expired']}],
+    skipped:[{event_id:'a',reason:'low_value',source_input_hash:'old',reviewed_on:'2026-11-07'}]};
+  const pruned=pruneHomeRecommendationsDocument(previous,['a']);assert.equal(pruned.document.skipped.length,1);
+  assert.equal(pruned.prunedCount,1);storage.writeJsonAtomic(paths.homeRecommendationsPath(),previous);
+  let calls=0;cloudHandler=async()=>{calls++;return JSON.stringify({recommendations:[],skipped:[]});};
+  const service=selectionServiceFixture({a:selectionEvent('a')});await assert.rejects(service.build(config),/遗漏/);
+  assert.equal(calls,3);assert.deepEqual(clone(service.loadDocument()),previous);
+  reset();const empty=selectionServiceFixture({});
+  await empty.build({...config,enabled:false});assert.equal(empty.cachedBuildResult('2026-11-07').reused,true,
+    'An empty input can still receive a receipt without enabling a model');
 });
 
 (async()=>{const selected=cases.filter(([name])=>!process.env.SYNC_TEST_FILTER||name.includes(process.env.SYNC_TEST_FILTER));for(const[name,run]of selected){await run();console.log('PASS '+name);}console.log(selected.length+' incremental sync checks passed');})()

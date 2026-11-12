@@ -26,6 +26,8 @@ import {
   DedupDecision,
   EntityMention,
   HomeRecommendationPlannerEvent,
+  HomeRecommendationSelection,
+  HomeRecommendationSkip,
   HomeRecommendationState,
   IndexedEvent,
   IndexedEventTodo,
@@ -591,18 +593,21 @@ const COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT: string =
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '你是用户的行动与关注规划助手。\n' +
-  '输入每条都有上游提取的行动、关心、研究或规划信号；todo_text是具体内容，todo_deadline是明确的截止日期（可能为空）。\n' +
+  '输入是上游提取的候选信号，不是必须展示的提醒；todo_text是候选建议，summary和normalized_fact是事实依据，todo_deadline是明确截止日期（可能为空）。候选建议也可能过度推断，须回到事实判断。\n' +
   'todo_type包括care关心跟进、research深入研究/比较调研、plan探索规划，以及buy购买、pay付款、pickup取货、order下单、renew续费、book预订、repair维修、appointment预约、attend参加、depart出发、check_in入住、reimburse报销、other其他行动。\n\n' +
-  '不要重新判断输入事件是不是 todo，也不要丢弃任何输入事件，你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并，并生成适合在应用首页展示给用户的推荐卡片文案。\n\n' +
+  '先判断现在提醒能给用户带来什么实际帮助，再生成卡片。保留：与用户有关且尚待处理的明确行动/约定；对用户或其在意的人仍有实际影响、值得关心跟进的状态；用户明确希望了解、比较或落实的具体研究/规划问题。明确日期不是必要条件，也不要求必须是正式承诺。\n' +
+  '排除：普通闲聊或一次浏览/消费衍生的泛泛建议，随口感叹、无具体目标的意向，无用户关联的他人独立安排，已经回答、办妥、取消或被后续内容替代且没有剩余问题的事项。不要把例行寒暄、即时反应、聊天中顺手完成的小动作升级为持续待办；但明确未完成的承诺、重要问题不能因此排除。\n' +
+  '关心他人须有具体需要或持续影响，不能把每个近况都变成问候；研究须有具体疑问或决策价值，不能把每个兴趣词都变成调研。不能只凭“可能已做”、时间经过、没有日期或一句“好的/收到”判定完成；resolved仅用于事实明确支持已解决。\n' +
+  '同一对象的同一目标合成一张卡片，保留必要前置条件及最新进展，不要把一个目标拆成许多琐碎建议；不同事项分别判断，不因一件已完成就放弃其他事项。重要事项宁可保留，不为凑数量生成，也不设固定条数上限。\n\n' +
   '返回严格 JSON：\n' +
-  '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。\n\n' +
-  'source_event_ids 必须来自输入事件，至少 1 个，每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中；每个推荐要能让用户知道接下来具体要做什么。\n' +
+  '{"recommendations":[{"tag":"简短标签","title":"简洁具体的标题","desc":"事实依据及有用的下一步","domain":"eat|wear|live|travel|work|other","source_event_ids":["e1"]}],"skipped":[{"event_id":"e2","reason":"low_value"}]}。\n\n' +
+  '每个输入event_id必须且只能归入一张卡片的source_event_ids，或一条skipped；不得遗漏、重复或编造编号。skipped.reason只用resolved（已有解决证据）、low_value（提醒价值不足）、not_now（有价值但当前尚不需要，后续可复查）。没有值得提醒的内容可返回recommendations空数组，但须在skipped说明每条输入；没有跳过项则skipped为空数组。\n' +
   '不要编造输入里没有的人名、地点、商品、金额或行动。\n\n' +
   'tag用于卡片左上角，如“值得关心”“值得研究”“可以规划”或“待购买”等；title围绕具体关注点写简洁标题；desc说明事实依据和用户可以考虑的下一步。建议不能写成必须执行的指令，也不能暗示用户已经承诺。无原文依据不加期限，不作医学诊断或推荐具体药物。\n\n' +
   'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。\n' +
   '根据chat_attribution及原文分清实际主体和行动人，聊天对象的任务不能改成用户自己的任务。关心他人时明确姓名和关系；关注用户自己时不加他人姓名前缀。不同主体、不同类型的事项不要合并。标题和说明避免无依据地写“你需要”。\n' +
   '对于“想去/打算/考虑”等尚未确认的意向，使用“待关注”等标签，标题和说明保留人物及意向语气，不得写成已经约定、必须参加或用户已经答应同行。\n' +
-  '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
+  '优先处理重要未完成行动及有实际影响的关注点，再考虑探索建议。不要输出 markdown。';
 
 export interface EventAnalysisFailureDetail {
   code: string;
@@ -1303,9 +1308,9 @@ export class DataPipelineModelClient implements ProfileBlockModel {
     return ordered;
   }
 
-  async planHomeRecommendations(events: HomeRecommendationPlannerEvent[], currentDate: string, config: DataManagerModelConfig): Promise<HomeRecommendationState[]> {
+  async planHomeRecommendations(events: HomeRecommendationPlannerEvent[], currentDate: string, config: DataManagerModelConfig): Promise<HomeRecommendationSelection> {
     if (!this.isEnabled(config) || events.length === 0) {
-      return [];
+      return { recommendations: [], skipped: [] };
     }
     let codec = new HomeRecommendationRequestCodec(events);
     let promptEvents: HomeRecommendationEventPromptPayload[] = events.map((event: HomeRecommendationPlannerEvent): HomeRecommendationEventPromptPayload => {
@@ -1315,9 +1320,9 @@ export class DataPipelineModelClient implements ProfileBlockModel {
         date: event.date,
         todo_type: event.todo_type,
         todo_deadline: event.todo_deadline,
-        todo_text: summarizeText(event.todo_text, 120),
-        summary: summarizeText(event.summary, 100),
-        normalized_fact: summarizeText(event.normalized_fact, 180),
+        todo_text: summarizeText(event.todo_text, 180),
+        summary: summarizeText(event.summary, 240),
+        normalized_fact: summarizeText(event.normalized_fact, 360),
         sources: event.sources.slice(0, 4),
         domains: event.domains.slice(0, 4),
         keywords: event.keywords.slice(0, 8),
@@ -1334,7 +1339,12 @@ export class DataPipelineModelClient implements ProfileBlockModel {
       stringifyJsonCompat(promptPayload as Object, 2), (value: JsonMap): void => {
         codec.validateAndDecode(value);
       });
-    return this.normalizeHomeRecommendations(payload);
+    let rawSkipped = (payload['skipped'] || []) as HomeRecommendationSkip[];
+    let skipped: HomeRecommendationSkip[] = rawSkipped.map((item: HomeRecommendationSkip): HomeRecommendationSkip => {
+      return { event_id: item.event_id, reason: item.reason };
+    });
+    dataManagerInfo(`Home recommendation selection: candidates=${events.length}, cards=${(payload['recommendations'] as JsonMap[]).length}, skipped=${skipped.length}`);
+    return { recommendations: this.normalizeHomeRecommendations(payload), skipped: skipped };
   }
 
   private async mergeCollectionGroups(tabId: string, title: string, groups: CollectionGroupState[], config: DataManagerModelConfig): Promise<CollectionGroupState[]> {

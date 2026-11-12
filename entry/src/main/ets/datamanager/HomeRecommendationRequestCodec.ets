@@ -63,12 +63,31 @@ export class HomeRecommendationRequestCodec {
       }
       decoded.push(originals);
     }
+    // A deliberate omission is different from an incomplete/truncated reply.
+    // Retain full decision coverage without forcing every candidate onto Home.
+    if (payload['skipped'] !== undefined && !Array.isArray(payload['skipped'])) {
+      throw new Error('关注筛选的 skipped 必须是数组');
+    }
+    let skipped = (payload['skipped'] || []) as JsonMap[];
+    let decodedSkipped: string[] = [];
+    for (let item of skipped) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item['event_id'] !== 'string' ||
+        (item['reason'] !== 'resolved' && item['reason'] !== 'low_value' && item['reason'] !== 'not_now')) {
+        throw new Error('关注筛选的 skipped 需要 event_id 和 reason（resolved、low_value 或 not_now）');
+      }
+      let alias = (item['event_id'] as string).trim();
+      if (!this.originals.has(alias)) { throw new Error('关注筛选包含未知来源编号；只能使用本次输入的 event_id'); }
+      if (covered.has(alias)) { throw new Error('关注筛选将 ' + alias + ' 重复分配；不能同时推荐和跳过同一事项'); }
+      covered.add(alias);
+      decodedSkipped.push(this.originals.get(alias) as string);
+    }
     let missing = Array.from(this.originals.keys()).filter((id: string): boolean => !covered.has(id));
     if (missing.length > 0) {
       throw new Error('关注规划遗漏输入事项：已覆盖 ' + covered.size + '/' + this.originals.size +
-        '，缺少 ' + missing.slice(0, 24).join('、') + (missing.length > 24 ? '等' : '') + '；请补齐且不要丢弃其他事项');
+        '，缺少 ' + missing.slice(0, 24).join('、') + (missing.length > 24 ? '等' : '') + '；每条输入须归入 recommendations 或说明原因放入 skipped');
     }
     // Do not partially mutate an invalid response before a corrective retry.
     items.forEach((item: JsonMap, index: number) => { item['source_event_ids'] = decoded[index]; });
+    skipped.forEach((item: JsonMap, index: number) => { item['event_id'] = decodedSkipped[index]; });
   }
 }
