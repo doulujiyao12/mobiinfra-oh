@@ -25,6 +25,7 @@ public:
     ~Vision();
     bool load(const std::string& config, std::string& error);
     bool run(const std::string& path, Features& features, std::string& error);
+    int deepstackCount() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

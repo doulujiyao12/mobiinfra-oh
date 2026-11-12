@@ -59,6 +59,7 @@ std::vector<uint8_t> resizeAxis(const std::vector<uint8_t>& src, int w, int h, i
 struct Vision::Impl {
     std::unique_ptr<Backend> backend;
     Log log; Cancel cancel; Graph graph; bool ready = false;
+    int deepstack = 3;
     std::vector<int32_t> indices;
     std::vector<float> weights, cosine, sine, mask;
     void trace(const std::string& s) { if (log) log("[OFFLINE_NPU2] " + s); }
@@ -67,12 +68,26 @@ Vision::Vision(std::unique_ptr<Backend> backend, Log log, Cancel cancel) : impl(
     impl->backend = std::move(backend); impl->log = std::move(log); impl->cancel = std::move(cancel);
 }
 Vision::~Vision() { if (impl->backend) impl->backend->release(); }
+int Vision::deepstackCount() const { return impl->deepstack; }
 bool Vision::load(const std::string& path, std::string& error) {
     auto& s = *impl; s.ready = false; error.clear();
     if (!s.backend) { error = "No NNRT vision backend"; return false; }
     rapidjson::Document d; auto content = text(path); d.Parse(content.c_str());
-    if (d.HasParseError() || !d.IsObject() || field(d,"format") != "kirin_offline_npu2_vision_v1" ||
+    if (d.HasParseError() || !d.IsObject() ||
+        (field(d,"format") != "kirin_offline_npu2_vision_v1" &&
+         field(d,"format") != "kirin_offline_npu2_vision_v2") ||
         !d.HasMember("graph") || !d["graph"].IsObject()) { error = "Invalid dedicated Offline NPU vision config"; return false; }
+    const bool v2 = field(d,"format") == "kirin_offline_npu2_vision_v2";
+    s.deepstack = 3;
+    if (v2) {
+        const auto type = field(d,"model_type");
+        if (!d.HasMember("deepstack_count") || !d["deepstack_count"].IsInt() ||
+            (type != "qwen3_vl" && type != "qwen3_5") ||
+            d["deepstack_count"].GetInt() != (type == "qwen3_vl" ? 3 : 0)) {
+            error = "Invalid model/DeepStack contract"; return false;
+        }
+        s.deepstack = d["deepstack_count"].GetInt();
+    }
     const auto root = path.substr(0, path.find_last_of('/')+1);
     const auto& g = d["graph"]; s.graph = {}; s.graph.name = "vision_full";
     auto file = field(g,"file"), constants = field(d,"vision_constants");
@@ -90,8 +105,8 @@ bool Vision::load(const std::string& path, std::string& error) {
         {"patches",DType::F32,{608,1536}}, {"position_indices",DType::I32,{608,4}},
         {"position_weights",DType::F32,{608,4}}, {"rope_cos",DType::F32,{1,1,608,64}},
         {"rope_sin",DType::F32,{1,1,608,64}}, {"attention_mask",DType::F32,{1,1,608,608}}};
-    const std::vector<Port> outputs = {{"image_embeddings",DType::F32,{1,152,2048}},
-                                      {"deepstack_features",DType::F32,{3,1,152,2048}}};
+    std::vector<Port> outputs = {{"image_embeddings",DType::F32,{1,152,2048}}};
+    if (s.deepstack) outputs.push_back({"deepstack_features",DType::F32,{3,1,152,2048}});
     auto contracts = [&](const char* key, const std::vector<Port>& ports) {
         if (!g.HasMember(key) || !g[key].IsArray() || g[key].Size()!=ports.size()) return false;
         for (size_t i=0; i<ports.size(); ++i) {
@@ -104,7 +119,7 @@ bool Vision::load(const std::string& path, std::string& error) {
         }
         return true;
     };
-    if (!contracts("inputs",inputs) || !contracts("output_info",outputs)) { error = "Unsupported vision graph contract/grid (requires 608x256, DeepStack 3x152x2048)"; return false; }
+    if (!contracts("inputs",inputs) || !contracts("output_info",outputs)) { error = "Unsupported vision graph contract/grid (requires 608x256 and matching DeepStack)"; return false; }
     s.graph.inputs=inputs; s.graph.outputs=outputs;
     if (g.HasMember("output_aliases") && g["output_aliases"].IsObject())
         for (auto it=g["output_aliases"].MemberBegin();it!=g["output_aliases"].MemberEnd();++it)
@@ -118,11 +133,11 @@ bool Vision::load(const std::string& path, std::string& error) {
     for (auto* v : {&s.weights,&s.cosine,&s.sine}) for (float x:*v)
         if (!std::isfinite(x)) { error="Nonfinite vision constants"; return false; }
     s.mask.assign(608*608,0);
-    BackendOptions options; options.maxResidentGraphs=1; options.residentModelBytes=size_t(512)<<20;
+    BackendOptions options; options.maxResidentGraphs=1; options.residentModelBytes=size_t(v2 ? 1024 : 512)<<20;
     options.persistentKvBytes=0; options.incrementalKv=false; s.backend->configure(options);
     if (!s.backend->probe(s.graph,error)) { s.backend->release(); return false; }
     s.ready=true;
-    s.trace("level=ready vision=single_external_weight_graph llm=cpu kv=cpu deepstack=3 grid=608x256");
+    s.trace("level=ready vision=single_external_weight_graph llm=cpu kv=cpu deepstack="+std::to_string(s.deepstack)+" grid=608x256");
     return true;
 }
 bool Vision::run(const std::string& path, Features& features, std::string& error) {
@@ -150,9 +165,12 @@ bool Vision::run(const std::string& path, Features& features, std::string& error
     if (!s.backend->run(s.graph,{floats(patches),{DType::I32,s.indices.data(),s.indices.size()},
             floats(s.weights),floats(s.cosine),floats(s.sine),floats(s.mask)},outputs,error)) return false;
     if (s.cancel && s.cancel()) { error="cancelled"; return false; }
-    if (outputs.size()!=2 || outputs[0].size()!=152*2048 || outputs[1].size()!=3*152*2048) { error="Invalid vision output sizes"; return false; }
+    if (outputs.size()!=size_t(s.deepstack ? 2 : 1) || outputs[0].size()!=152*2048 ||
+        (s.deepstack && outputs[1].size()!=3*152*2048)) { error="Invalid vision output sizes"; return false; }
     for (const auto& v:outputs) for (float x:v) if (!std::isfinite(x)) { error="Nonfinite vision output"; return false; }
-    features.image=std::move(outputs[0]); features.deepstack=std::move(outputs[1]);
+    features.image=std::move(outputs[0]);
+    features.deepstack.clear();
+    if (s.deepstack) features.deepstack=std::move(outputs[1]);
     s.trace("level=exec_ok graph=vision_full total_ms="+std::to_string(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count()));
     // Retain the only NPU graph across CPU prefill/decode and subsequent images.
     return true;

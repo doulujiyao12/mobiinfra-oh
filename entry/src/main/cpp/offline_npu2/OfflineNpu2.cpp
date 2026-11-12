@@ -1,5 +1,6 @@
 #include "OfflineNpu2.hpp"
 #include "llmconfig.hpp"
+#include "llm/npu_chunk_executor.hpp"
 #include "rapidjson/document.h"
 #include <MNN/expr/ExprCreator.hpp>
 #include <chrono>
@@ -11,6 +12,50 @@ using namespace MNN::Transformer;
 using namespace MNN::Express;
 namespace {
 constexpr int H=2048;
+// Reuse Omni's tokenizer, M-RoPE, DeepStack and speculative generators. Only
+// the image encoder is replaced; unlike the legacy Hybrid below this adapter
+// does not maintain a second copy of language-generation state.
+class FullVisionExecutor final : public INpuChunkExecutor {
+public:
+    FullVisionExecutor(std::unique_ptr<KirinFullNpu::Backend> backend, KirinFullNpu::Log log,
+                       KirinFullNpu::Cancel cancel, std::shared_ptr<State> state)
+        : mVision(new Vision(std::move(backend), log, std::move(cancel))),
+          mLog(std::move(log)), mState(std::move(state)) {}
+    bool loadChunk(int index, const std::string& path) override {
+        mReady = index == 0 && mVision && mVision->load(path, mState->error);
+        if (!mReady && mState->error.empty()) mState->error = "Invalid full vision executor load";
+        if (!mReady && mLog) mLog("[OFFLINE_NPU2] level=error " + mState->error);
+        return mReady;
+    }
+    bool runChunk(int, const std::vector<float>&, const std::vector<float>&,
+                  const std::vector<float>&, std::vector<std::vector<float>>&) override { return false; }
+    size_t chunkSequenceLength(int index) const override { return mReady && index == 0 ? 608 : 0; }
+    void unload() override { mReady = false; mVision.reset(); }
+    bool isFullVision() const override { return true; }
+    bool fullVisionInfo(int& height, int& width, int& hidden, int& deepstack) const override {
+        if (!mReady || !mVision) return false;
+        height = 608; width = 256; hidden = H; deepstack = mVision->deepstackCount();
+        return true;
+    }
+    bool runFullVision(const std::string& path, std::vector<std::vector<float>>& outputs) override {
+        Features features;
+        outputs.clear();
+        if (!mReady || !mVision || !mVision->run(path, features, mState->error)) {
+            if (mState->error.empty()) mState->error = "Full vision executor is not ready";
+            if (mLog) mLog("[OFFLINE_NPU2] level=error " + mState->error);
+            return false;
+        }
+        outputs.push_back(std::move(features.image));
+        if (mVision->deepstackCount()) outputs.push_back(std::move(features.deepstack));
+        return true;
+    }
+private:
+    std::unique_ptr<Vision> mVision;
+    KirinFullNpu::Log mLog;
+    std::shared_ptr<State> mState;
+    bool mReady = false;
+};
+
 class Hybrid final : public Llm {
 public:
     Hybrid(std::shared_ptr<LlmConfig> config, std::unique_ptr<Vision> visual,
@@ -139,6 +184,28 @@ std::unique_ptr<Llm> create(const std::string& path,std::unique_ptr<KirinFullNpu
     }
     try {
     auto config=std::make_shared<LlmConfig>(path);
+    if (d["offline_npu2"].HasMember("vision_executor")) {
+        const auto& executor = d["offline_npu2"]["vision_executor"];
+        const auto type = config->config_.value("model_type", std::string());
+        const bool qwen3vl = type == "qwen3_vl" && config->config_.value("layer_nums", 0) == 28 &&
+                            config->config_.value("has_deepstack", false);
+        const bool qwen35 = type == "qwen3_5" && config->config_.value("layer_nums", 0) == 24 &&
+                           !config->config_.value("has_deepstack", false);
+        if (!executor.IsString() || std::string(executor.GetString()) != "omni_full_vision_v1" ||
+            (!qwen3vl && !qwen35) || config->config_.value("hidden_size", 0) != H ||
+            !config->config_.value("is_mrope", false)) {
+            state->error = "Unsupported full vision / CPU language model contract"; return {};
+        }
+        std::unique_ptr<Llm> llm(Llm::createLLM(path));
+        if (!llm || !llm->set_config("{\"backend_type\":\"cpu\",\"prompt_cache\":false,\"visual_full_om\":true}")) {
+            state->error = "Cannot construct CPU Omni for offline full vision"; return {};
+        }
+        auto visual = std::make_shared<FullVisionExecutor>(std::move(backend), log, std::move(cancel), state);
+        if (!llm->setNpuChunkExecutor(visual, {config->base_dir_ + "vision/config.json"})) {
+            state->error = "MNN library lacks the full vision executor interface"; return {};
+        }
+        return llm;
+    }
     if(config->config_.value("model_type",std::string())!="qwen3_vl" ||
        config->config_.value("hidden_size",0)!=2048 || config->config_.value("layer_nums",0)!=28 ||
        !config->config_.value("has_deepstack",false) || !config->config_.value("is_mrope",false)) {

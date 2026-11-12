@@ -45,6 +45,14 @@ public:
 
     // Release all resources held by this executor.
     virtual void unload() = 0;
+
+    // Optional whole-image adapter. Existing chunk executors keep their original
+    // behavior. A full executor owns decoding/resize and a single compiled ViT,
+    // returning final image features plus optional projected DeepStack features.
+    // Implementations and the engine must be rebuilt with this matching header.
+    virtual bool isFullVision() const { return false; }
+    virtual bool fullVisionInfo(int& height, int& width, int& hidden, int& deepstack) const { return false; }
+    virtual bool runFullVision(const std::string& path, std::vector<std::vector<float>>& outputs) { return false; }
 };
 
 } // namespace Transformer
