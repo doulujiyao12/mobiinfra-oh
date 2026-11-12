@@ -13,6 +13,7 @@ import {
   cloudSettingValuesDiffer, cloudSettingsUseSeparateValues, sharedCloudSettingEditorValue, updateUnifiedCloudSetting
 } from '../../utils/CloudSettingsConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
+import { createLocalModelRecommendation, LocalModelRecommendation } from '../../utils/LocalModelRecommendation';
 import {
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
   CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT,
@@ -160,6 +161,7 @@ export struct SettingsCenterPage {
   @Prop hdcManualPairing: boolean = false;
   @Prop downloadedModels: DownloadedModelItem[] = [];
   @Prop selectedModelId: string = '';
+  @Prop localModelRecommendation: LocalModelRecommendation = createLocalModelRecommendation('', []);
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -224,6 +226,7 @@ export struct SettingsCenterPage {
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onDownloadModelScopeModel: () => Promise<void> = async () => {};
+  onUseRecommendedLocalModel: () => Promise<void> = async () => {};
   onPauseModelScopeDownload: () => void = () => {};
   onUpdateConfigThreadNum: () => void = () => {};
   onShowConfigJson: () => void = () => {};
@@ -1713,6 +1716,9 @@ export struct SettingsCenterPage {
   }
 
   @Builder ModelDownloadGroup() {
+    if (this.localModelRecommendation.visible) {
+      this.LocalModelRecommendationNotice()
+    }
     SettingInput({
       label: '',
       value: this.modelScopeMnnRepo,
@@ -1723,6 +1729,38 @@ export struct SettingsCenterPage {
     })
     SettingsActionRow({ contentBuilder: () => { this.ModelScopeActionRow() } })
     this.ModelDownloadProgressPanel()
+  }
+
+  @Builder LocalModelRecommendationNotice() {
+    Column({ space: 8 }) {
+      Text(this.localModelRecommendation.recommendedModelId.length > 0 ? '推荐模型已下载' : '有新的推荐模型可下载')
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.ui_text_primary'))
+        .width('100%')
+      Text(this.localModelRecommendation.recommendedRepo)
+        .fontSize(12)
+        .fontColor($r('app.color.ui_text_secondary'))
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .copyOption(CopyOptions.InApp)
+        .width('100%')
+      Row() {
+        SettingsActionButton({
+          label: this.localModelRecommendation.recommendedModelId.length > 0 ? '切换使用' : '下载推荐模型',
+          kind: SettingsActionKind.Primary,
+          actionEnabled: !this.downloading && !this.modelScopeDownloading,
+          onActionClick: async (): Promise<void> => { await this.onUseRecommendedLocalModel(); }
+        })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(14)
+    .margin({ bottom: 12 })
+    .borderRadius(16)
+    .backgroundColor(AppTheme.background('#EEF4FF'))
   }
 
   @Builder ModelScopeActionRow() {

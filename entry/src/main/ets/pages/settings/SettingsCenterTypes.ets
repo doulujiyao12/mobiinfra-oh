@@ -40,15 +40,7 @@ export interface SettingsConfirmConfig {
   confirmText: string;
 }
 
-export interface DownloadedModelItem {
-  id: string;
-  label: string;
-  path: string;
-  repo: string;
-  sizeText: string;
-  statusText: string;
-  ready: boolean;
-}
+export { DownloadedModelItem } from '../../utils/LocalModelRecommendation';
 
 export const SETTINGS_SECTION_NONE: number = -1;
 const SETTINGS_INPUT_SINGLE_LINE_LIMIT: number = 34;

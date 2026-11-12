@@ -8,6 +8,8 @@ const tree = ts.createSourceFile('Index.ts', source, ts.ScriptTarget.Latest, tru
 const component = tree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'Index');
 const names = ['modelLoadableStatus','modelManifestLoadableStatus','hasModelWeightFile','isModelWeightFile',
   'ensureLocalChatModelIsAvailable','confirmModelScopeDownloadForLocalChat','ensureLocalModelLoaded',
+  'loadSelectedLocalModel','remindLocalModelRecommendation','useRecommendedLocalModel','blockModelFileMutationIfBusy',
+  'buildDownloadedModelItem',
   'sendLocalChatMessage','submitLocalAgentTask','openSettingsFromTab','clearSettingsOrigin'];
 const methods = names.map(name => {
   const method = component.members.find(item => ts.isMethodDeclaration(item) && item.name.getText(tree) === name);
@@ -16,6 +18,18 @@ const methods = names.map(name => {
 const output = ts.transpileModule('export class Probe {\n' + methods + '\n}', {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true });
 assert.equal(output.diagnostics.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
+const modelConfigExports = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root,'entry/src/main/ets/config/ModelDownloadConfig.ets'),'utf8'),{
+  compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:modelConfigExports});
+const defaultRepo = modelConfigExports.DEFAULT_MODELSCOPE_MNN_REPO;
+const recommendationExports = {};
+const recommendationSource = fs.readFileSync(path.join(root,'entry/src/main/ets/utils/LocalModelRecommendation.ets'),'utf8');
+const recommendationOutput = ts.transpileModule(recommendationSource,{
+  compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS},reportDiagnostics:true});
+assert.equal(recommendationOutput.diagnostics.filter(item=>item.category===ts.DiagnosticCategory.Error).length,0);
+vm.runInNewContext(recommendationOutput.outputText,{exports:recommendationExports,
+  require:name=>{assert.equal(name,'../config/ModelDownloadConfig');return modelConfigExports;}});
+const {createLocalModelRecommendation,shouldRemindLocalModelRecommendation,normalizeLocalModelRepo}=recommendationExports;
 const COMPLETE = 'complete.marker', MANIFEST = 'manifest.json';
 const files = new Map(), calls = { dialogs: [], toasts: [], navigations: [], effects: [], loads: 0, reads: 0 };
 let dialog = async () => ({ index: 0 });
@@ -29,6 +43,7 @@ const filesystem = {
 };
 const exported = {};
 vm.runInNewContext(output.outputText, { exports: exported, fs: filesystem,
+  createLocalModelRecommendation,shouldRemindLocalModelRecommendation,normalizeLocalModelRepo,
   MODEL_DOWNLOAD_COMPLETE_FILE: COMPLETE, MODEL_DOWNLOAD_MANIFEST_FILE: MANIFEST,
   normalizeChatImageAttachments: items => items, LOCAL_CHAT_IMAGE_MAX_COUNT: 4,
   chatCanSendMessageWithImages: (text, images) => !!text.trim() || images.length > 0,
@@ -50,6 +65,7 @@ function probe(directory = '/app/modelscope/owner__repo') {
   calls.loads = calls.reads = 0; dialog = async () => ({ index: 0 });
   const app = new exported.Probe();
   Object.assign(app, { modelDir: directory, modelLoaded: false, downloading: false, modelScopeDownloading: false,
+    localModelLoadPromise:null,downloadedModels:[],selectedModelId:'legacy:model',localModelRecommendationIgnoredRepo:'',
     modelManifest: null, localModelDownloadPromptVisible: false, userInput: '保留这条消息', localPendingChatImageUris: [],
     settingsScrollTarget: 0,
     isThinking: false, localChatImagePreparing: false, localAgentCleaningUp: false, activeAgentRunner: null,
@@ -66,6 +82,7 @@ function probe(directory = '/app/modelscope/owner__repo') {
     ensureDesktopCompanionReminder: async () => { calls.effects.push('desktop'); return true; },
     reportLocalAgentStartupStatus: text => calls.toasts.push(text), reportLocalAgentCleanupStatus: text => calls.toasts.push(text),
     normalizedLocalNpuExecutionMode: () => 'cpu', prepareCustomOpp: () => true,
+    isLocalNativeBusy:()=>false,
     prepareAllCpuRuntimeConfig: file => file, sleep: async () => {}
   }); return app;
 }
@@ -149,6 +166,72 @@ test('legacy imported folders and completed downloads remain usable; empty confi
     app.modelLoaded = true; assert.equal(await app.ensureLocalModelLoaded(), true); assert.equal(calls.loads, 1);
     files.set(directory + '/config.json', { size: 0 });
     assert.equal(await app.ensureLocalChatModelIsAvailable(), false); assert.equal(app.modelLoaded, false);
+  }
+});
+
+function installedModel(repo=defaultRepo, extra={}) {
+  return {id:'modelscope:'+repo,label:repo,path:'/app/modelscope/'+repo.replace('/','__'),repo,
+    ready:true,statusText:'下载完成',sizeText:'1 GB',...extra};
+}
+function readyRecommendationProbe() {
+  const app=probe();add(app.modelDir+'/config.json');add(app.modelDir+'/llm.mnn');add(app.modelDir+'/'+COMPLETE);
+  const current=installedModel('user/custom-model',{path:app.modelDir});app.downloadedModels=[current];app.selectedModelId=current.id;
+  return app;
+}
+test('recommendation compares installed identity, including legacy manifests, instead of the edited download field', async()=>{
+  const current=installedModel(),old=installedModel('user/old-model');
+  assert.equal(createLocalModelRecommendation(current.id,[current]).visible,false);
+  assert.equal(createLocalModelRecommendation(old.id,[old]).visible,true);
+  assert.equal(createLocalModelRecommendation(old.id,[{...old,ready:false}]).visible,false);
+  assert.equal(createLocalModelRecommendation('legacy:model',[]).visible,false);
+  const unknown=installedModel('',{id:'legacy:model',label:'手动模型'});
+  const status=createLocalModelRecommendation(unknown.id,[unknown]);assert.equal(status.visible,true);assert.equal(status.currentRepo,'');
+  const app=readyRecommendationProbe();app.modelManifest={repo:defaultRepo};
+  app.formatSize=()=> '1 GB';app.calcPathSize=()=>128;
+  const imported=app.buildDownloadedModelItem('legacy:model','导入模型',app.modelDir,'');
+  assert.equal(imported.repo,defaultRepo);assert.equal(createLocalModelRecommendation(imported.id,[imported]).visible,false);
+  app.modelManifest=null;app.modelScopeMnnRepo=defaultRepo;
+  await app.ensureLocalModelLoaded();assert.equal(calls.dialogs.length,1,'Typing the default URL does not update downloaded files');
+  assert.ok(calls.dialogs[0].message.includes('user/custom-model'));assert.ok(calls.dialogs[0].message.includes(defaultRepo));
+});
+test('both notice buttons continue loading, suppression is scoped to the recommendation and leaves the settings banner visible',async()=>{
+  for(const choice of [0,1]) {
+    const app=readyRecommendationProbe();dialog=async()=>({index:choice});
+    assert.equal(await app.ensureLocalModelLoaded(),true);assert.equal(calls.loads,1);assert.equal(calls.dialogs.length,1);
+    assert.equal(app.localModelRecommendationIgnoredRepo,choice===1?defaultRepo:'');
+    assert.equal(createLocalModelRecommendation(app.selectedModelId,app.downloadedModels).visible,true);
+    app.modelLoaded=false;await app.ensureLocalModelLoaded();assert.equal(calls.dialogs.length,choice===1?1:2);
+  }
+  const status=createLocalModelRecommendation('modelscope:user/old',[installedModel('user/old')]);
+  assert.equal(shouldRemindLocalModelRecommendation(status,defaultRepo),false);
+  assert.equal(shouldRemindLocalModelRecommendation({...status,recommendedRepo:'owner/future-model'},defaultRepo),true);
+  assert.ok(source.includes("PersistentStorage.persistProp(LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY, '')"));
+  assert.ok(source.includes('@StorageLink(LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY)'));
+});
+test('concurrent load attempts share one notice and native load, and model mutations are blocked while waiting',async()=>{
+  const app=readyRecommendationProbe();let finish;dialog=()=>new Promise(resolve=>{finish=resolve;});
+  const first=app.ensureLocalModelLoaded(),second=app.ensureLocalModelLoaded();
+  assert.equal(calls.dialogs.length,1);assert.equal(calls.loads,0);
+  assert.equal(app.blockModelFileMutationIfBusy('切换模型'),true);
+  finish({index:0});assert.equal(await first,true);assert.equal(await second,true);assert.equal(calls.loads,1);
+  assert.equal(app.localModelLoadPromise,null);assert.equal(app.blockModelFileMutationIfBusy('切换模型'),false);
+});
+test('closing the recommendation does not block loading, while changing configuration during it cannot load stale files',async()=>{
+  let app=readyRecommendationProbe();dialog=async()=>{throw Error('dismissed');};
+  assert.equal(await app.ensureLocalModelLoaded(),true);assert.equal(calls.loads,1);assert.equal(app.localModelRecommendationIgnoredRepo,'');
+  app=readyRecommendationProbe();dialog=async()=>{app.modelDir='/app/changed';return {index:0};};
+  assert.equal(await app.ensureLocalModelLoaded(),false);assert.equal(calls.loads,0);assert.equal(app.localModelLoadPromise,null);
+});
+test('recommended-model action downloads the default explicitly or switches an already downloaded copy without downloading',async()=>{
+  for(const recommendedReady of [true,false]) {
+    const app=readyRecommendationProbe();let refreshes=0,downloads=0,switched='';
+    app.modelScopeMnnRepo='user/personal-url';app.downloadedModels.push(installedModel(defaultRepo,{ready:recommendedReady}));
+    app.refreshDownloadedModels=()=>{refreshes++;app.localModelRecommendation=createLocalModelRecommendation(app.selectedModelId,app.downloadedModels);};
+    app.switchDownloadedModel=id=>{switched=id;};app.downloadModelScopeModel=async()=>{downloads++;};
+    await app.useRecommendedLocalModel();assert.equal(refreshes,1);
+    assert.equal(downloads,recommendedReady?0:1);assert.equal(switched,recommendedReady?'modelscope:'+defaultRepo:'');
+    assert.equal(app.modelScopeMnnRepo,recommendedReady?'user/personal-url':defaultRepo);
+    app.localModelLoadPromise=Promise.resolve(true);await app.useRecommendedLocalModel();assert.equal(refreshes,1,'Do not mutate a loading model');
   }
 });
 

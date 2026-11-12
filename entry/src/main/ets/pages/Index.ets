@@ -244,6 +244,9 @@ import {
   DEFAULT_MODELSCOPE_MNN_REPO,
   LEGACY_DEFAULT_MODELSCOPE_MNN_REPOS
 } from '../config/ModelDownloadConfig';
+import { createLocalModelRecommendation, DownloadedModelItem, LocalModelRecommendation,
+  LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY, normalizeLocalModelRepo,
+  shouldRemindLocalModelRecommendation } from '../utils/LocalModelRecommendation';
 import {
   DESKTOP_COMPANION_APP_NAME,
   DESKTOP_COMPANION_DOWNLOAD_URL,
@@ -427,16 +430,6 @@ interface CloudChatContextPreparation {
   overBudgetAfterCompression: boolean;
 }
 
-interface DownloadedModelItem {
-  id: string;
-  label: string;
-  path: string;
-  repo: string;
-  sizeText: string;
-  statusText: string;
-  ready: boolean;
-}
-
 interface ChunkOmCacheFile {
   path: string;
   relativePath: string;
@@ -462,6 +455,7 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp(LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY, '');
 PersistentStorage.persistProp('localNpuExecutionMode', 'cpu');
 PersistentStorage.persistProp('localInferenceModeCpuDefaultMigrated', false);
 PersistentStorage.persistProp('modelScopeDefault.mnnRepo', '');
@@ -545,6 +539,7 @@ struct Index {
   @State localPendingChatImageUris: string[] = [];
   @State @Watch('onChatAppearanceChanged') localChatImagePreparing: boolean = false;
   private localModelDownloadPromptVisible: boolean = false;
+  private localModelLoadPromise: Promise<boolean> | null = null;
   @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
@@ -558,6 +553,8 @@ struct Index {
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State downloadedModels: DownloadedModelItem[] = [];
+  @State localModelRecommendation: LocalModelRecommendation = createLocalModelRecommendation('', []);
+  @StorageLink(LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY) localModelRecommendationIgnoredRepo: string = '';
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
   @StorageLink(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY)
@@ -933,10 +930,10 @@ struct Index {
   }
 
   private blockModelFileMutationIfBusy(action: string): boolean {
-    if (!this.isLocalNativeBusy()) {
+    if (this.localModelLoadPromise === null && !this.isLocalNativeBusy()) {
       return false;
     }
-    let message = '本地模型正在推理或收尾，暂不能' + action + '。请等待任务结束后再试。';
+    let message = '本地模型正在加载、推理或收尾，暂不能' + action + '。请等待结束后再试。';
     this.output = message;
     showToastSafely(message, 1800);
     return true;
@@ -4403,6 +4400,7 @@ struct Index {
     this.modelLoaded = false;
     this.chunkOmCacheOutput = '已切换模型，请点击“查看 chunk OM”重新扫描。';
     this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
+    this.localModelRecommendation = createLocalModelRecommendation(this.selectedModelId, this.downloadedModels);
   }
 
   private refreshDownloadedModels(): void {
@@ -4411,7 +4409,7 @@ struct Index {
       let name = LEGACY_MODEL_DIRS[i];
       let path = this.filesDir + '/' + name;
       if (this.modelDirectoryExists(path)) {
-        items.push(this.buildDownloadedModelItem(this.legacyModelId(name), name === 'model' ? '默认 model' : name, path, 'legacy'));
+        items.push(this.buildDownloadedModelItem(this.legacyModelId(name), name === 'model' ? '本地 model' : name, path, ''));
       }
     }
     try {
@@ -4446,6 +4444,7 @@ struct Index {
       this.selectedModelId = this.legacyModelId('model');
       this.syncModelDir();
     }
+    this.localModelRecommendation = createLocalModelRecommendation(this.selectedModelId, this.downloadedModels);
   }
 
   private modelDirectoryExists(path: string): boolean {
@@ -4463,11 +4462,13 @@ struct Index {
   private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
     let statusText = this.modelLoadableStatus(path);
     let ready = statusText === '下载完成' || statusText === '可加载';
+    let manifest = this.readModelDownloadManifest(path + '/' + MODEL_DOWNLOAD_MANIFEST_FILE);
+    let recordedRepo = manifest ? normalizeLocalModelRepo(manifest.repo) : '';
     return {
       id: id,
       label: label,
       path: path,
-      repo: repo,
+      repo: recordedRepo || normalizeLocalModelRepo(repo),
       sizeText: this.formatSize(this.calcPathSize(path)),
       statusText: statusText,
       ready: ready
@@ -5320,6 +5321,10 @@ struct Index {
 
   // ========== Step 3: Download all files ==========
   async downloadAll() {
+    if (this.localModelLoadPromise !== null) {
+      showToastSafely('本地模型正在加载，请稍后下载', 1800);
+      return;
+    }
     if (this.serverFiles.length === 0) {
       this.updateModelDownloadMessage('请先检查服务器连接');
       return;
@@ -5864,6 +5869,10 @@ struct Index {
   }
 
   async downloadModelScopeModel() {
+    if (this.localModelLoadPromise !== null) {
+      showToastSafely('本地模型正在加载，请稍后下载', 1800);
+      return;
+    }
     if (this.modelScopeDownloading || this.downloading) {
       this.updateModelDownloadMessage('已有模型下载任务正在进行，请等待完成或暂停后再试');
       return;
@@ -6920,6 +6929,7 @@ struct Index {
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
+    if (this.localModelLoadPromise !== null) { return await this.localModelLoadPromise; }
     // 本地 Agent 启动前自动加载模型，减少用户遗漏“加载大模型”按钮导致的失败。
     if (this.downloading || this.modelScopeDownloading) {
       this.reportLocalAgentStartupStatus('本地模型正在下载，请等待完成后再试。', true, true);
@@ -6937,6 +6947,39 @@ struct Index {
     if (this.modelLoaded) {
       this.reportLocalAgentStartupStatus('本地模型已加载，继续准备 Agent。');
       return true;
+    }
+    let loading = this.loadSelectedLocalModel(cfg, executionMode);
+    this.localModelLoadPromise = loading;
+    try { return await loading; }
+    finally { this.localModelLoadPromise = null; }
+  }
+
+  private async remindLocalModelRecommendation(): Promise<void> {
+    let status = createLocalModelRecommendation(this.selectedModelId, this.downloadedModels);
+    if (!shouldRemindLocalModelRecommendation(status, this.localModelRecommendationIgnoredRepo)) { return; }
+    try {
+      let result = await promptAction.showDialog({
+        title: '有新的推荐模型',
+        message: (status.currentRepo.length > 0 ? '当前模型与 App 推荐模型不同。' : '当前模型未标记来源，无法确认是否为推荐模型。') +
+          '\n\n当前：' + status.currentName + '\n推荐：' + status.recommendedRepo +
+          '\n\n可以继续使用当前模型，或到“我的 → 模型与智能体 → 本地模型下载”查看推荐模型。',
+        buttons: [
+          { text: '继续使用', color: AppTheme.dialogText('#4F68FF') },
+          { text: '不再提醒', color: AppTheme.dialogText('#666666') }
+        ]
+      });
+      if (result.index === 1) { this.localModelRecommendationIgnoredRepo = status.recommendedRepo; }
+    } catch (e) {
+      // Closing a recommendation notice does not prevent loading the user's model.
+    }
+  }
+
+  private async loadSelectedLocalModel(cfg: string, executionMode: LocalNpuExecutionMode): Promise<boolean> {
+    await this.remindLocalModelRecommendation();
+    if (cfg !== this.modelDir + '/config.json' || executionMode !== this.normalizedLocalNpuExecutionMode() ||
+      this.downloading || this.modelScopeDownloading) {
+      this.reportLocalAgentStartupStatus('模型配置已变更，请重新加载。', true, true);
+      return false;
     }
     if (!this.prepareCustomOpp()) {
       let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
@@ -6963,6 +7006,19 @@ struct Index {
       this.reportLocalAgentStartupStatus('自动加载模型失败: ' + message, true, true);
       return false;
     }
+  }
+
+  private async useRecommendedLocalModel(): Promise<void> {
+    if (this.downloading || this.modelScopeDownloading || this.blockModelFileMutationIfBusy('使用推荐模型')) { return; }
+    // Recheck the catalog: the recommended files may have changed since render.
+    this.refreshDownloadedModels();
+    let status = this.localModelRecommendation;
+    if (status.recommendedModelId.length > 0) {
+      this.switchDownloadedModel(status.recommendedModelId);
+      return;
+    }
+    this.modelScopeMnnRepo = status.recommendedRepo;
+    await this.downloadModelScopeModel();
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -8422,6 +8478,8 @@ struct Index {
         hdcManualPairing: this.hdcManualPairing,
         downloadedModels: this.downloadedModels,
         selectedModelId: this.selectedModelId,
+        localModelRecommendation: this.localModelRecommendation,
+        onUseRecommendedLocalModel: async (): Promise<void> => { await this.useRecommendedLocalModel(); },
         onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
         onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
         onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
