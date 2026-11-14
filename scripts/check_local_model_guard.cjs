@@ -240,7 +240,8 @@ const settingsSource = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages
 const settingsTree = ts.createSourceFile('SettingsCenterPage.ts', settingsSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const settingsClass = settingsTree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'SettingsCenterPage');
 const frameClass = settingsTree.statements.find(item => ts.isClassDeclaration(item) && item.name?.text === 'SettingsScrollFrame');
-const scrollMethods = ['resetDetailScroll', 'scheduleDetailScroll', 'onScrollTargetChanged', 'onSelectedSectionChanged', 'openSection', 'aboutToDisappear'];
+const scrollMethods = ['resetDetailScroll', 'scheduleDetailScroll', 'onScrollTargetChanged', 'onSelectedSectionChanged', 'openSection', 'aboutToDisappear',
+  'localModelDownloadBusy', 'recommendedModelIsSelected', 'recommendedModelButtonLabel', 'customModelDownloadPaused', 'downloadCustomLocalModel'];
 const settingsOutput = ts.transpileModule(frameClass.getText(settingsTree) + '\nexport class SettingsProbe {\n' + scrollMethods.map(name => {
   const method = settingsClass.members.find(item => ts.isMethodDeclaration(item) && item.name.getText(settingsTree) === name);
   assert.ok(method, name); return method.getText(settingsTree).replace(/\bprivate\s+/g, '');
@@ -249,6 +250,7 @@ assert.equal(settingsOutput.diagnostics.filter(item => item.category === ts.Diag
 const scrollExported = {};
 vm.runInNewContext(settingsOutput.outputText, { exports: scrollExported, FrameCallback: class {},
   SettingsSectionId: { ModelAgents: 2 }, SettingsScrollTarget: { None: 0, LocalModelDownload: 1 },
+  normalizeLocalModelRepo, showToastSafely: () => {},
   Edge: { Top: 'top', Bottom: 'bottom' }, isSettingsSectionSelected: id => id >= 0, normalizeSettingsSectionId: id => id });
 function scrollProbe(section = 2, target = 0) {
   const page = new scrollExported.SettingsProbe(), frames = [], edges = [];
@@ -283,6 +285,44 @@ test('normal settings entries still start at the top and clear any old local-mod
   assert.equal(app.settingsScrollTarget, 0); app.settingsScrollTarget = 1; app.clearSettingsOrigin();
   assert.equal(app.settingsScrollTarget, 0);
   assert.ok(settingsSource.includes('.onAppear((): void => { this.scheduleDetailScroll(); })'), 'New detail content schedules its first layout scroll');
+});
+
+test('custom model downloads validate the source, preserve the editor and cannot replace an active download', async () => {
+  const page = new scrollExported.SettingsProbe(), downloads = [];
+  Object.assign(page, { downloading: false, modelScopeDownloading: false, modelScopePauseRequested: true,
+    modelScopeMnnRepo: defaultRepo, customModelScopeMnnRepo: '', closeSensitiveInputs() {},
+    onDownloadModelScopeModel: async () => { downloads.push(page.modelScopeMnnRepo); } });
+  for (const invalid of ['', 'owner-only', 'owner/repo/extra']) {
+    page.customModelScopeMnnRepo = invalid; await page.downloadCustomLocalModel();
+    assert.equal(downloads.length, 0); assert.equal(page.modelScopeMnnRepo, defaultRepo);
+  }
+  page.customModelScopeMnnRepo = ' user/custom-model ';
+  assert.equal(page.customModelDownloadPaused(), false, 'The paused recommended source is not the custom source');
+  await page.downloadCustomLocalModel();
+  assert.deepEqual(downloads, ['user/custom-model']);
+  assert.equal(page.customModelScopeMnnRepo, ' user/custom-model ');
+  assert.equal(page.customModelDownloadPaused(), true);
+  page.downloading = true; page.customModelScopeMnnRepo = 'user/another-model';
+  await page.downloadCustomLocalModel(); assert.equal(downloads.length, 1);
+  assert.equal(page.modelScopeMnnRepo, 'user/custom-model');
+});
+
+test('custom model editor adopts the previous setting once without restoring cleared values or overwriting saved choices', () => {
+  const registration = tree.statements.find(item => ts.isExpressionStatement(item) &&
+    ts.isCallExpression(item.expression) && item.expression.expression.getText(tree) === 'PersistentStorage.persistProp' &&
+    item.expression.arguments[0]?.text === 'customModelScopeMnnRepo');
+  assert.ok(registration);
+  const code = ts.transpileModule(registration.getText(tree), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const [active, existing, expected] of [[defaultRepo, undefined, ''],
+    ['user/previous-model', undefined, 'user/previous-model'],
+    ['user/previous-model', '', ''], [defaultRepo, 'user/saved-model', 'user/saved-model']]) {
+    const values = new Map([['modelScopeMnnRepo', active]]);
+    if (existing !== undefined) values.set('customModelScopeMnnRepo', existing);
+    vm.runInNewContext(code, { DEFAULT_MODELSCOPE_MNN_REPO: defaultRepo, AppStorage: { get: key => values.get(key) },
+      PersistentStorage: { persistProp: (key, fallback) => { if (!values.has(key)) values.set(key, fallback); } } });
+    assert.equal(values.get('customModelScopeMnnRepo'), expected);
+  }
 });
 (async () => { for (const [name, run] of cases) { await run(); console.log('PASS ' + name); }
   console.log(cases.length + ' local model readiness checks passed; no downloads or inference');

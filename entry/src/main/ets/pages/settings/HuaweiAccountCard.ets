@@ -87,45 +87,30 @@ export struct HuaweiAccountCard {
   }
 
   @Builder AccountContent() {
-    if (this.sessionActive) {
-      Row() {
-        Stack({ alignContent: Alignment.Center }) {
-          Image($r('app.media.header_mine'))
-            .width(28)
-            .height(28)
-            .objectFit(ImageFit.Contain)
-        }
-        .width(42)
-        .height(42)
-        .borderRadius(14)
-        .backgroundColor(AppTheme.background('#F1F2FF'))
-
-        Text('华为账号')
-          .fontSize(16)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(AppTheme.text('#11182F'))
-          .margin({ left: 12 })
-
-        Blank()
-
+    Row({ space: 14 }) {
+      Image($r('app.media.settings_account')).width(52).height(52).padding(11).borderRadius(26)
+        .objectFit(ImageFit.Contain).backgroundColor($r('app.color.ui_surface_soft'))
+      Column({ space: 6 }) {
+        Text('华为账号').fontSize(20).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+          .width('100%')
+        Text(this.sessionActive ? '已登录' : '未登录').fontSize(13).fontColor($r('app.color.ui_text_secondary'))
+          .width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.sessionActive) {
         Button('退出登录')
-          .height(36)
-          .fontSize(13)
-          .fontColor(AppTheme.text('#5B5CE2'))
-          .backgroundColor(AppTheme.background('#F1F2FF'))
-          .borderRadius(18)
-          .padding({ left: 16, right: 16 })
+          .height(40).fontSize(14)
+          .fontColor($r('app.color.ui_accent_blue')).backgroundColor(Color.Transparent)
+          .padding({ left: 8, right: 0 })
           .onClick(() => { this.clearLocalSession(); })
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-    } else {
+    }.width('100%').alignItems(VerticalAlign.Center)
+    if (!this.sessionActive) {
       LoginWithHuaweiIDButton({
         params: this.loginButtonParams,
         controller: this.loginController
       })
         .width('100%')
-        .height(48)
+        .height(44).margin({ top: 18 })
     }
   }
 
@@ -133,12 +118,9 @@ export struct HuaweiAccountCard {
     Column() {
       this.AccountContent()
     }
-    .width('92%')
-    .padding(14)
+    .width('100%')
+    .padding(20)
     .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(20)
-    .border({ width: 1, color: AppTheme.border('#E9EDF5') })
-    .shadow({ radius: 12, color: AppTheme.shadow('#100F1E3A'), offsetX: 0, offsetY: 4 })
-    .margin({ top: 8 })
+    .borderRadius(22)
   }
 }

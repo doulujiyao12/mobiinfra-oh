@@ -32,6 +32,33 @@ import {
   settingUsesDefaultValue
 } from '../../utils/DefaultSettingVisibility';
 
+// Settings home rows share the same icon size, touch target and divider inset.
+@Component
+export struct SettingsNavigationRow {
+  @Prop title: string = '';
+  @Prop icon: Resource = $r('app.media.settings_model');
+  onOpen: () => void = (): void => {};
+  build() {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 14 }) {
+        // Preserve SVG fill="none"; base/dark resources provide the stroke color.
+        Image(this.icon).width(24).height(24).objectFit(ImageFit.Contain).flexShrink(0)
+        Text(this.title).fontSize(17).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text('›').fontSize(25).fontColor($r('app.color.ui_text_muted')).width(14).textAlign(TextAlign.End)
+      }.width('100%')
+    }.width('100%').constraintSize({ minHeight: 64 }).padding({ left: 18, right: 18, top: 16, bottom: 16 })
+      .backgroundColor(Color.Transparent).onClick(this.onOpen).accessibilityText(this.title)
+  }
+}
+
+@Component
+export struct SettingsListDivider {
+  build() {
+    Divider().strokeWidth(0.5).color($r('app.color.ui_border')).margin({ left: 56, right: 18 })
+  }
+}
+
 // 设置分组卡片负责统一分组标题、间距和卡片外观，业务内容通过 Builder 注入。
 @Component
 export struct SettingsGroupCard {

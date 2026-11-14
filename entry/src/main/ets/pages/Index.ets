@@ -455,6 +455,11 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+// Keep the custom download editor separate from the active/recommended source.
+// Existing custom settings become the initial value only on first registration.
+PersistentStorage.persistProp('customModelScopeMnnRepo',
+  AppStorage.get<string>('modelScopeMnnRepo') === DEFAULT_MODELSCOPE_MNN_REPO ? '' :
+    (AppStorage.get<string>('modelScopeMnnRepo') || ''));
 PersistentStorage.persistProp(LOCAL_MODEL_RECOMMENDATION_IGNORED_REPO_KEY, '');
 PersistentStorage.persistProp('localNpuExecutionMode', 'cpu');
 PersistentStorage.persistProp('localInferenceModeCpuDefaultMigrated', false);

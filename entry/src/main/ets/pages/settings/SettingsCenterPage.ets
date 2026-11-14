@@ -13,7 +13,8 @@ import {
   cloudSettingValuesDiffer, cloudSettingsUseSeparateValues, sharedCloudSettingEditorValue, updateUnifiedCloudSetting
 } from '../../utils/CloudSettingsConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
-import { createLocalModelRecommendation, LocalModelRecommendation } from '../../utils/LocalModelRecommendation';
+import { createLocalModelRecommendation, LocalModelRecommendation, normalizeLocalModelRepo } from '../../utils/LocalModelRecommendation';
+import { ModelSettingsField } from './ModelSettingsField';
 import {
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
   CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT,
@@ -109,6 +110,8 @@ import {
   SettingsActionButton,
   SettingsActionRow,
   SettingsGroupCard,
+  SettingsNavigationRow,
+  SettingsListDivider,
   SettingsOutputPanel,
   SettingToggle as SettingToggleControl
 } from './SettingsCenterControls';
@@ -163,6 +166,8 @@ export struct SettingsCenterPage {
   @Prop selectedModelId: string = '';
   @Prop localModelRecommendation: LocalModelRecommendation = createLocalModelRecommendation('', []);
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
+  @StorageLink('customModelScopeMnnRepo') private customModelScopeMnnRepo: string = '';
+  @State private modelCacheExpanded: boolean = false;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
@@ -408,20 +413,20 @@ export struct SettingsCenterPage {
     this.selectedSectionId = settingsParentSection(this.selectedSectionId);
   }
 
-  private sectionInitial(id: SettingsSectionId): string {
+  private sectionIcon(id: SettingsSectionId): Resource {
     if (id === SettingsSectionId.PersonalPrivacy) {
-      return 'P';
+      return $r('app.media.settings_privacy');
     }
     if (id === SettingsSectionId.DataCollection) {
-      return 'D';
+      return $r('app.media.settings_collection');
     }
     if (id === SettingsSectionId.ModelAgents) {
-      return 'M';
+      return $r('app.media.settings_model');
     }
     if (id === SettingsSectionId.TaskAutomation) {
-      return 'T';
+      return $r('app.media.settings_automation');
     }
-    return 'S';
+    return $r('app.media.settings_storage');
   }
 
   private activeSectionTitle(): string {
@@ -546,31 +551,30 @@ export struct SettingsCenterPage {
 
   @Builder DownloadedModelList() {
     Row() {
+      Text('已下载').fontSize(14).fontColor($r('app.color.ui_text_secondary')).layoutWeight(1)
       Button('刷新')
-        .height(32)
-        .width(72)
-        .fontSize(12)
-        .backgroundColor(AppTheme.background('#607D8B'))
-        .borderRadius(10)
+        .height(40).fontSize(14).padding({ left: 12, right: 0 })
+        .fontColor($r('app.color.ui_accent_blue')).backgroundColor(Color.Transparent)
+        .enabled(!this.localModelDownloadBusy())
         .onClick(() => { this.onRefreshDownloadedModels(); })
     }
     .width('100%')
-    .margin({ bottom: 8 })
+    .padding({ left: 16, right: 16, top: 4 })
 
     if (this.downloadedModels.length > 0) {
       Column() {
         ForEach(this.downloadedModels, (item: DownloadedModelItem) => {
-          Row() {
-            Column() {
+          Row({ space: 10 }) {
+            Column({ space: 5 }) {
               Text(item.label)
-                .fontSize(13)
-                .fontWeight(this.selectedModelId === item.id ? FontWeight.Bold : FontWeight.Regular)
-                .fontColor(AppTheme.text(this.selectedModelId === item.id ? '#4F68FF' : '#11182F'))
-                .maxLines(1)
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.ui_text_primary'))
+                .maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .width('100%')
               Text(item.statusText + ' · ' + item.sizeText)
-                .fontSize(11)
+                .fontSize(12)
                 .fontColor(AppTheme.text(item.ready ? '#2D9B73' : '#D26B31'))
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -578,35 +582,30 @@ export struct SettingsCenterPage {
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)
-            Button(this.selectedModelId === item.id ? (item.statusText === '下载完成' ? '已完成' : '当前') :
-              (item.ready ? '切换' : '未完成'))
-              .height(32)
+            Button(!item.ready ? '未完成' : (this.selectedModelId === item.id ? '使用中' : '使用'))
+              .height(36)
               .width(64)
-              .fontSize(12)
-              .backgroundColor(AppTheme.background(this.selectedModelId === item.id || !item.ready ? '#A9B0BE' : '#4F68FF'))
-              .borderRadius(10)
-              .enabled(this.selectedModelId !== item.id && item.ready)
+              .fontSize(14).fontColor($r('app.color.ui_accent_blue'))
+              .backgroundColor(AppTheme.background('#EEF4FF')).borderRadius(18)
+              .enabled(this.selectedModelId !== item.id && item.ready && !this.localModelDownloadBusy())
               .onClick(() => { this.onSwitchDownloadedModel(item.id); })
             Button('删除')
-              .height(32)
-              .width(56)
-              .fontSize(12)
-              .fontColor(AppTheme.text(Color.White))
-              .backgroundColor(AppTheme.filledBackground(settingsActionColor(SettingsActionKind.Danger)))
-              .borderRadius(10)
-              .margin({ left: 8 })
-              .enabled(!this.downloading && !this.modelScopeDownloading)
+              .height(44).width(44).padding(0).fontSize(14)
+              .fontColor(AppTheme.text(settingsActionColor(SettingsActionKind.Danger)))
+              .backgroundColor(Color.Transparent)
+              .enabled(!this.localModelDownloadBusy())
               .onClick(() => { this.confirmDeleteDownloadedModel(item); })
           }
           .width('100%')
-          .padding({ left: 10, right: 10, top: 9, bottom: 9 })
-          .backgroundColor(AppTheme.background(this.selectedModelId === item.id ? '#EEF4FF' : '#F7F9FC'))
-          .borderRadius(12)
-          .border({ width: 1, color: AppTheme.border(this.selectedModelId === item.id ? '#BFD3FF' : '#E6EAF2') })
-          .margin({ bottom: 8 })
+          .padding({ left: 16, right: 12, top: 12, bottom: 12 })
+          CollectionFormDivider()
         }, (item: DownloadedModelItem) => item.id + ':' + item.statusText + ':' + item.sizeText + ':' + String(item.ready))
       }
       .width('100%')
+    } else {
+      Text('尚未下载模型').fontSize(14).fontColor($r('app.color.ui_text_secondary'))
+        .width('100%').padding({ left: 16, right: 16, top: 10, bottom: 18 })
+      CollectionFormDivider()
     }
   }
 
@@ -806,163 +805,53 @@ export struct SettingsCenterPage {
 
   @Builder ModelDownloadProgressPanel() {
     if (this.modelDownloadProgressVisible) {
-      Column() {
+      Column({ space: 10 }) {
         Row() {
-          Text(this.modelDownloadProgressTitle.length > 0 ? this.modelDownloadProgressTitle : '模型下载进度')
-            .fontSize(12)
-            .fontColor(AppTheme.text('#6F7684'))
+          Text(this.modelScopeDownloading ? '正在下载' : (this.modelScopePauseRequested ? '已暂停' : '下载进度'))
+            .fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.ui_text_primary'))
             .layoutWeight(1)
           Text(Math.max(0, Math.min(100, this.modelDownloadProgressPercent)).toString() + '%')
-            .fontSize(12)
-            .fontColor(AppTheme.text('#4B8BFF'))
+            .fontSize(14).fontColor($r('app.color.ui_accent_blue'))
+          if (this.modelScopeDownloading) {
+            Button(this.modelScopePauseRequested ? '暂停中' : '暂停')
+              .height(36).fontSize(14).padding({ left: 14, right: 0 })
+              .fontColor($r('app.color.ui_accent_blue')).backgroundColor(Color.Transparent)
+              .enabled(!this.modelScopePauseRequested)
+              .onClick((): void => { this.onPauseModelScopeDownload(); })
+          }
         }
         .width('100%')
 
         Progress({ value: Math.max(0, Math.min(100, this.modelDownloadProgressPercent)), total: 100, type: ProgressType.Linear })
           .width('100%')
-          .height(8)
-          .color(AppTheme.text('#4B8BFF'))
-          .backgroundColor(AppTheme.background('#DCE8FF'))
+          .height(6)
+          .color($r('app.color.ui_accent_blue'))
+          .backgroundColor($r('app.color.ui_surface_soft'))
           .borderRadius(6)
-          .margin({ top: 8 })
-
-        Row() {
-          Blank()
-          Text(this.modelDownloadProgressText.length > 0 ? this.modelDownloadProgressText : '等待下载')
-            .fontSize(11)
-            .fontColor(AppTheme.text('#7B8290'))
-            .textAlign(TextAlign.End)
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-        .width('100%')
-        .margin({ top: 5 })
+        Text(this.modelDownloadProgressText.length > 0 ? this.modelDownloadProgressText : this.modelDownloadProgressTitle)
+          .fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+          .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .width('100%')
-      .padding(12)
-      .backgroundColor(AppTheme.background('#F4F8FF'))
-      .borderRadius(12)
-      .border({ width: 1, color: AppTheme.border('#D9E5FF') })
-      .margin({ top: 10 })
+      .padding(16).backgroundColor($r('app.color.ui_surface')).borderRadius(18)
+      .margin({ bottom: 24 })
     }
   }
 
   @Builder SettingsListItem(item: SettingsSectionItem) {
-    Row() {
-      Text(this.sectionInitial(item.id))
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text(Color.White))
-        .width(44)
-        .height(44)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(AppTheme.filledBackground('#4F68FF'))
-        .borderRadius(14)
-      Column() {
-        Text(item.title)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .width('100%')
-        Text(item.subtitle)
-          .fontSize(12)
-          .fontColor(AppTheme.text('#7B8290'))
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 4 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12, right: 10 })
-      Text('›')
-        .fontSize(28)
-        .fontColor(AppTheme.text('#8A93A3'))
-    }
-    .width('92%')
-    .padding(16)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(18)
-    .margin({ top: 12 })
-    .onClick(() => { this.openSection(item.id); })
+    SettingsNavigationRow({ title: item.title, icon: this.sectionIcon(item.id),
+      onOpen: (): void => { this.openSection(item.id); } })
   }
 
   @Builder DesktopCompanionEntry() {
-    Row() {
-      Text('PC')
-        .fontSize(14)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text(Color.White))
-        .width(44)
-        .height(44)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(AppTheme.filledBackground('#4F68FF'))
-        .borderRadius(14)
-      Column() {
-        Text('桌面端 App')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .width('100%')
-        Text('查看 ClawMate 桌面端下载链接')
-          .fontSize(12)
-          .fontColor(AppTheme.text('#7B8290'))
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 4 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12, right: 10 })
-      Text('›')
-        .fontSize(28)
-        .fontColor(AppTheme.text('#8A93A3'))
-    }
-    .width('92%')
-    .padding(16)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(18)
-    .margin({ top: 14 })
-    .onClick(() => { router.pushUrl({ url: 'pages/settings/DesktopCompanionPage' }); })
+    SettingsNavigationRow({ title: '桌面端 App', icon: $r('app.media.settings_desktop'),
+      onOpen: (): void => { router.pushUrl({ url: 'pages/settings/DesktopCompanionPage' }); } })
   }
 
   @Builder SelfHdcTestEntry() {
-    Row() {
-      Text('HDC')
-        .fontSize(12)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text(Color.White))
-        .width(44)
-        .height(44)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(AppTheme.filledBackground('#287D75'))
-        .borderRadius(14)
-      Column() {
-        Text('手机 HDC')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .width('100%')
-        Text(this.debugEnabled ? '连接设置 · 自控测试 · 手机任务日志' : '连接设置 · 自控测试')
-          .fontSize(12)
-          .fontColor(AppTheme.text('#7B8290'))
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 4 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12, right: 10 })
-      Text('›').fontSize(28).fontColor(AppTheme.text('#8A93A3'))
-    }
-    .width('92%')
-    .padding(16)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(18)
-    .margin({ top: 12 })
-    .onClick(() => { router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }); })
+    SettingsNavigationRow({ title: '手机 HDC', icon: $r('app.media.settings_phone'),
+      onOpen: (): void => { router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }); } })
   }
 
   private setDebugEnabled(enabled: boolean): void {
@@ -978,36 +867,38 @@ export struct SettingsCenterPage {
   }
 
   @Builder DebugSwitch() {
-    Row() {
-      Column() {
-        Text('开启 Debug').fontSize(16).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#11182F')).width('100%')
-        Text('开启后显示并记录聊天和手机 HDC 日志')
-          .fontSize(12).fontColor(AppTheme.text('#7B8290')).width('100%').maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 4 })
-      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ right: 12 })
+    Row({ space: 14 }) {
+      Image($r('app.media.settings_debug')).width(24).height(24).objectFit(ImageFit.Contain)
+      Text('开启 Debug').fontSize(17).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: this.debugSwitchValue })
         .selectedColor(AppTheme.background('#4F68FF'))
         .onChange((enabled: boolean): void => { this.setDebugEnabled(enabled); })
-    }.width('92%').padding(16).backgroundColor(AppTheme.background(Color.White)).borderRadius(18).margin({ top: 12 })
+    }.width('100%').constraintSize({ minHeight: 64 }).padding({ left: 18, right: 18, top: 12, bottom: 12 })
   }
 
   @Builder SettingsSectionList() {
-    Column() {
+    Column({ space: 20 }) {
       HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
-      this.DebugSwitch()
-      this.DesktopCompanionEntry()
-      this.SelfHdcTestEntry()
-      Text('设置与服务')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
-        .width('92%')
-        .margin({ top: 22, bottom: 2 })
-      ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
-        this.SettingsListItem(item)
-      }, (item: SettingsSectionItem) => String(item.id))
+      Column() {
+        ForEach(SETTINGS_SECTION_ITEMS.filter((item: SettingsSectionItem): boolean => item.id !== SettingsSectionId.StorageAbout),
+          (item: SettingsSectionItem, index: number) => {
+            if (index > 0) { SettingsListDivider() }
+            this.SettingsListItem(item)
+          }, (item: SettingsSectionItem): string => String(item.id))
+      }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(22).clip(true)
+      Column() {
+        this.SelfHdcTestEntry()
+        SettingsListDivider()
+        this.DesktopCompanionEntry()
+      }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(22).clip(true)
+      Column() {
+        this.DebugSwitch()
+        SettingsListDivider()
+        SettingsNavigationRow({ title: settingsSectionTitle(SettingsSectionId.StorageAbout), icon: this.sectionIcon(SettingsSectionId.StorageAbout),
+          onOpen: (): void => { this.openSection(SettingsSectionId.StorageAbout); } })
+      }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(22).clip(true)
     }
-    .width('100%')
+    .width('92%').constraintSize({ maxWidth: 720 })
     .padding({ top: APP_HEADER_CONTENT_GAP, bottom: 110 })
   }
 
@@ -1320,28 +1211,13 @@ export struct SettingsCenterPage {
 
   @Builder ModelAgentsSection() {
     Column() {
-      this.SectionTitle(SettingsSectionId.ModelAgents)
-      SettingsGroupCard({
-        title: '云端模型',
-        subtitle: '留空使用默认配置，填写后同时用于 Planner 和 Decider',
-        purpose: '提供云端对话、任务规划和手机截图决策能力。',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
+      CollectionFormGroup({ title: '云端模型',
         contentBuilder: () => { this.UnifiedCloudModelGroup() }
       })
-      SettingsGroupCard({
-        title: '本地模型',
-        subtitle: '已下载模型管理与加载路径切换',
-        purpose: '在手机上加载和运行端侧大模型，可选择 CPU 或 NPU 推理。',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
+      CollectionFormGroup({ title: '本地模型',
         contentBuilder: () => { this.LocalModelGroup() }
       })
-      SettingsGroupCard({
-        title: '本地模型下载',
-        subtitle: '从 ModelScope 仓库下载本地模型',
-        purpose: '下载端侧推理所需的模型文件，供本地模型加载。',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.ModelDownloadGroup() }
-      })
+      this.ModelDownloadGroup()
     }
     .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
     .margin({ top: 16, bottom: 110 })
@@ -1417,50 +1293,47 @@ export struct SettingsCenterPage {
   }
 
   @Builder UnifiedCloudModelGroup() {
-    SettingInput({
-      label: '云端模型 URL',
+    ModelSettingsField({
+      label: 'API 地址',
       value: sharedCloudSettingEditorValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
       placeholder: cloudSettingValuesDiffer(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl) ?
-        '已分别配置，填写后同时覆盖两者' : '留空使用默认 URL，可填服务地址或 chat/completions 地址',
+        '独立配置' : '默认',
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.updateUnifiedCloudField('url', value); }
     })
-    SettingInput({
-      label: '模型名',
+    CollectionFormDivider()
+    ModelSettingsField({
+      label: '模型名称',
       value: sharedCloudSettingEditorValue(this.cloudPlannerModel, this.cloudDeciderModel,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel),
       placeholder: cloudSettingValuesDiffer(this.cloudPlannerModel, this.cloudDeciderModel,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel) ?
-        '已分别配置，填写后同时覆盖两者' : '留空使用默认模型，或输入服务商提供的模型 ID',
+        '独立配置' : '默认',
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.updateUnifiedCloudField('model', value); }
     })
-    SensitiveSettingInput({
-      sensitiveId: 'unifiedCloudApiKey', activeSensitiveId: this.activeSensitiveInputId,
-      label: 'API Key',
-      configuredPreviewText: '*****',
+    CollectionFormDivider()
+    ModelSettingsField({
+      label: 'API Key', secret: true,
       value: sharedCloudSettingEditorValue(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey),
-      placeholder: '自定义服务的 API Key',
-      defaultPreviewText: cloudSettingValuesDiffer(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
-        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey) ? '已分别配置' : '默认',
-      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      placeholder: cloudSettingValuesDiffer(this.cloudPlannerApiKey, this.cloudDeciderApiKey,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey) ? '独立配置' : '默认',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.updateUnifiedCloudField('key', value); }
     })
-    Text('支持 DeepSeek、OpenRouter、OpenAI。自定义服务请填写模型 ID 和 API Key，截图操控需选择支持图片的模型。')
-      .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
-      .width('100%').margin({ top: 10 })
-    if (cloudSettingsUseSeparateValues(this.storedCloudSettings(), defaultChatCloudConfig())) {
-      Text('当前已分别配置 Planner / Decider，可进入更多设置查看；修改上方对应字段会同步覆盖两者。')
-        .fontSize(12).lineHeight(18).fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
-        .width('100%').margin({ top: 6 })
-    }
-    Button('更多设置  ›')
-      .width('100%').height(42).fontSize(14)
-      .fontColor(AppTheme.text('#5B68FF')).backgroundColor(AppTheme.background('#F0EEFC'))
-      .borderRadius(SETTINGS_CONTROL_RADIUS).margin({ top: 12 })
+    CollectionFormDivider()
+    Button({ type: ButtonType.Normal }) {
+      Row() {
+        Text('更多设置').fontSize(15).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
+        if (cloudSettingsUseSeparateValues(this.storedCloudSettings(), defaultChatCloudConfig())) {
+          Text('独立配置').fontSize(13).fontColor($r('app.color.ui_text_secondary')).margin({ right: 8 })
+        }
+        Text('›').fontSize(23).fontColor($r('app.color.ui_text_secondary'))
+      }.width('100%')
+    }.width('100%').height(52).padding({ left: 16, right: 16 }).backgroundColor(Color.Transparent)
       .onClick((): void => {
         this.closeSensitiveInputs();
         this.openSection(SettingsSectionId.CloudModelAdvanced);
@@ -1582,53 +1455,43 @@ export struct SettingsCenterPage {
 
   @Builder LocalModelGroup() {
     this.DownloadedModelList()
-    this.FieldLabel('本地推理运行方式')
-    Row({ space: 8 }) {
-      this.NpuExecutionModeButton('全 CPU', 'cpu')
-      this.NpuExecutionModeButton('在线 NPU', 'online')
-      this.NpuExecutionModeButton('离线NPU', 'offline_npu2')
+    Column({ space: 8 }) {
+      Text('推理方式').fontSize(14).fontColor($r('app.color.ui_text_secondary'))
+        .width('100%').margin({ bottom: 4 })
+      Row({ space: 8 }) {
+        this.NpuExecutionModeButton('CPU', 'cpu')
+        this.NpuExecutionModeButton('在线 NPU', 'online')
+      }.width('100%')
+      Row({ space: 8 }) {
+        this.NpuExecutionModeButton('离线 NPU', 'offline_npu2')
+        this.NpuExecutionModeButton('全图 NPU · 开发中', 'full_npu')
+      }.width('100%')
+    }.width('100%').padding(16)
+    CollectionFormDivider()
+    Button({ type: ButtonType.Normal }) {
+      Row() {
+        Text('模型缓存').fontSize(15).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
+        Text(this.modelCacheExpanded ? '⌃' : '⌄').fontSize(20).fontColor($r('app.color.ui_text_secondary'))
+      }.width('100%')
+    }.width('100%').height(52).padding({ left: 16, right: 16 }).backgroundColor(Color.Transparent)
+      .onClick((): void => { this.modelCacheExpanded = !this.modelCacheExpanded; })
+    if (this.modelCacheExpanded) {
+      Column() {
+        SettingsActionRow({ contentBuilder: () => { this.ChunkOmCacheActionRow() } })
+        SettingsOutputPanel({ title: '缓存文件', content: this.chunkOmCacheOutput })
+      }.width('100%').padding({ left: 16, right: 16, bottom: 16 })
     }
-    .width('100%')
-    .justifyContent(FlexAlign.SpaceBetween)
-    Row({ space: 8 }) {
-      this.NpuExecutionModeButton('全图 NPU', 'full_npu')
-    }
-    .width('100%')
-    .margin({ top: 8 })
-    Text(this.localNpuExecutionMode === 'cpu' ?
-      '全 CPU：LLM、VIT、视觉分块及其他本地模型模块统一使用 CPU，不会加载 HiAI/NPU 图。' :
-      (this.localNpuExecutionMode === 'offline_npu2' ?
-        '离线NPU：ViT 使用单张预编译 OMC，图与权重分离；LLM 和 KV 使用 CPU。需配套单图模型包。' :
-      (this.localNpuExecutionMode === 'full_npu' ?
-        '全图 NPU：开发中，暂未开放使用。' :
-        '在线 NPU：首次遇到新 shape 时由 HiAI 编图，之后复用 App 沙箱中的 chunk OM 缓存。')))
-      .fontSize(12)
-      .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
-      .width('100%')
-      .maxLines(3)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .margin({ top: 8, bottom: 4 })
-    this.FieldLabel('在线 NPU 编图缓存')
-    Text('在线 NPU 缓存按 chunk 与输入 shape 复用；离线NPU直接加载模型包中的单张 OMC 和外置权重。')
-      .fontSize(12)
-      .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
-      .width('100%')
-      .maxLines(2)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-    SettingsActionRow({ contentBuilder: () => { this.ChunkOmCacheActionRow() } })
-    SettingsOutputPanel({ title: '当前模型 chunk OM', content: this.chunkOmCacheOutput })
   }
 
   @Builder NpuExecutionModeButton(label: string, mode: string) {
     Button(label)
       .height(SETTINGS_BUTTON_HEIGHT)
-      .width('31%')
-      .fontSize(12)
+      .layoutWeight(1)
+      .fontSize(14)
       .fontColor(AppTheme.text(this.localNpuExecutionMode === mode ? Color.White : settingsActionColor(SettingsActionKind.Primary)))
-      .backgroundColor(AppTheme.background(this.localNpuExecutionMode === mode ?
-        settingsActionColor(SettingsActionKind.Primary) : SETTINGS_INPUT_BACKGROUND_COLOR))
+      .backgroundColor(this.localNpuExecutionMode === mode ?
+        AppTheme.filledBackground(settingsActionColor(SettingsActionKind.Primary)) : $r('app.color.ui_surface_soft'))
       .borderRadius(SETTINGS_CONTROL_RADIUS)
-      .border({ width: 1, color: AppTheme.border(settingsActionColor(SettingsActionKind.Primary)) })
       .onClick(() => {
         this.selectLocalNpuExecutionMode(mode);
       })
@@ -1636,12 +1499,12 @@ export struct SettingsCenterPage {
 
   @Builder ChunkOmCacheActionRow() {
     SettingsActionButton({
-      label: '查看 chunk OM',
-      kind: SettingsActionKind.Success,
+      label: '查看缓存',
+      kind: SettingsActionKind.Secondary,
       onActionClick: () => { this.onListChunkVisionOmFiles(); }
     })
     SettingsActionButton({
-      label: '删除 chunk OM',
+      label: '清理缓存',
       kind: SettingsActionKind.Danger,
       onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
     })
@@ -1716,63 +1579,87 @@ export struct SettingsCenterPage {
   }
 
   @Builder ModelDownloadGroup() {
-    if (this.localModelRecommendation.visible) {
-      this.LocalModelRecommendationNotice()
-    }
-    SettingInput({
-      label: '',
-      value: this.modelScopeMnnRepo,
-      placeholder: '输入 owner/repo',
-      inputEnabled: !this.downloading && !this.modelScopeDownloading,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.modelScopeMnnRepo = value; }
+    CollectionFormGroup({ title: this.localModelRecommendation.visible ?
+      (this.localModelRecommendation.recommendedModelId.length > 0 ? '推荐模型 · 可切换' : '推荐模型 · 有更新') : '推荐模型',
+      contentBuilder: (): void => { this.LocalModelRecommendationNotice(); }
     })
-    SettingsActionRow({ contentBuilder: () => { this.ModelScopeActionRow() } })
+    CollectionFormGroup({ title: '自定义模型',
+      contentBuilder: (): void => { this.CustomModelDownloadForm(); }
+    })
     this.ModelDownloadProgressPanel()
   }
 
-  @Builder LocalModelRecommendationNotice() {
-    Column({ space: 8 }) {
-      Text(this.localModelRecommendation.recommendedModelId.length > 0 ? '推荐模型已下载' : '有新的推荐模型可下载')
-        .fontSize(15)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.ui_text_primary'))
-        .width('100%')
-      Text(this.localModelRecommendation.recommendedRepo)
-        .fontSize(12)
-        .fontColor($r('app.color.ui_text_secondary'))
-        .maxLines(3)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .copyOption(CopyOptions.InApp)
-        .width('100%')
-      Row() {
-        SettingsActionButton({
-          label: this.localModelRecommendation.recommendedModelId.length > 0 ? '切换使用' : '下载推荐模型',
-          kind: SettingsActionKind.Primary,
-          actionEnabled: !this.downloading && !this.modelScopeDownloading,
-          onActionClick: async (): Promise<void> => { await this.onUseRecommendedLocalModel(); }
-        })
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-    .padding(14)
-    .margin({ bottom: 12 })
-    .borderRadius(16)
-    .backgroundColor(AppTheme.background('#EEF4FF'))
+  private localModelDownloadBusy(): boolean {
+    return this.downloading || this.modelScopeDownloading;
   }
 
-  @Builder ModelScopeActionRow() {
-    SettingsActionButton({
-      label: this.modelScopePauseRequested ? '继续下载' : '从 ModelScope 下载',
-      kind: SettingsActionKind.Primary,
-      actionEnabled: !this.downloading && !this.modelScopeDownloading,
-      onActionClick: async () => {
-        showToastSafely(this.modelScopePauseRequested ? '继续 ModelScope 下载' : '开始 ModelScope 下载');
-        await this.onDownloadModelScopeModel();
-      }
+  private recommendedModelIsSelected(): boolean {
+    return this.localModelRecommendation.recommendedModelId.length > 0 &&
+      this.selectedModelId === this.localModelRecommendation.recommendedModelId;
+  }
+
+  private recommendedModelButtonLabel(): string {
+    if (this.recommendedModelIsSelected()) { return '使用中'; }
+    if (this.localModelRecommendation.recommendedModelId.length > 0) { return '使用'; }
+    if (this.modelScopePauseRequested &&
+      normalizeLocalModelRepo(this.modelScopeMnnRepo) === this.localModelRecommendation.recommendedRepo) {
+      return '继续下载';
+    }
+    return '下载';
+  }
+
+  private customModelDownloadPaused(): boolean {
+    let repo = normalizeLocalModelRepo(this.customModelScopeMnnRepo);
+    return repo.length > 0 && this.modelScopePauseRequested && repo === normalizeLocalModelRepo(this.modelScopeMnnRepo);
+  }
+
+  private async downloadCustomLocalModel(): Promise<void> {
+    if (this.localModelDownloadBusy()) { return; }
+    let repo = normalizeLocalModelRepo(this.customModelScopeMnnRepo);
+    if (repo.length === 0) {
+      showToastSafely('请输入 ModelScope 模型仓库，格式为 owner/model-name');
+      return;
+    }
+    this.closeSensitiveInputs();
+    this.modelScopeMnnRepo = repo;
+    await this.onDownloadModelScopeModel();
+  }
+
+  @Builder LocalModelRecommendationNotice() {
+    Row({ space: 16 }) {
+      Column({ space: 6 }) {
+        Text(this.localModelRecommendation.recommendedRepo.split('/')[1] || this.localModelRecommendation.recommendedRepo)
+          .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        Text(this.localModelRecommendation.recommendedRepo.split('/')[0] + ' · ModelScope')
+          .fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Button(this.recommendedModelButtonLabel())
+        .height(36).width(84).padding({ left: 8, right: 8 }).fontSize(14)
+        .fontColor(this.recommendedModelIsSelected() ? $r('app.color.ui_accent_blue') : $r('app.color.ui_text_on_fill'))
+        .backgroundColor(this.recommendedModelIsSelected() ? AppTheme.background('#EEF4FF') : $r('app.color.ui_fill_blue'))
+        .borderRadius(18).enabled(!this.localModelDownloadBusy() && !this.recommendedModelIsSelected())
+        .onClick(async (): Promise<void> => {
+          this.closeSensitiveInputs();
+          await this.onUseRecommendedLocalModel();
+        })
+    }
+    .width('100%').padding(16)
+  }
+
+  @Builder CustomModelDownloadForm() {
+    ModelSettingsField({ label: '模型仓库', value: this.customModelScopeMnnRepo,
+      placeholder: 'owner/model-name', editable: !this.localModelDownloadBusy(),
+      onInputFocus: (): void => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string): void => { this.customModelScopeMnnRepo = value; }
     })
+    CollectionFormDivider()
+    Button(this.customModelDownloadPaused() ? '继续下载' : '下载模型')
+      .width('100%').height(50).fontSize(15).fontWeight(FontWeight.Medium)
+      .fontColor($r('app.color.ui_accent_blue')).backgroundColor(Color.Transparent)
+      .enabled(!this.localModelDownloadBusy())
+      .onClick(async (): Promise<void> => { await this.downloadCustomLocalModel(); })
   }
 
   @Builder ConfigOutputGroup() {
@@ -1973,7 +1860,7 @@ export struct SettingsCenterPage {
   }
 
   @Builder AboutSettingsGroup() {
-    Text('MobiInfer LLM Chat')
+    Text('ClawMate')
       .fontSize(13)
       .fontColor(AppTheme.text(SETTINGS_SECONDARY_TEXT_COLOR))
       .width('100%')
@@ -2020,7 +1907,7 @@ export struct SettingsCenterPage {
       })
     } else {
       FrostedPage({
-        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        pageBackgroundColor: '#F6F7F9',
         scrollers: [this.pageScroller],
         headerBuilder: (): void => { this.SettingsMainHeader(); },
         contentBuilder: (): void => { this.SettingsMainContent(); }
