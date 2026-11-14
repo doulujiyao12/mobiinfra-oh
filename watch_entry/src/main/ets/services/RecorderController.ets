@@ -5,7 +5,8 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { audio } from '@kit.AudioKit';
 import { media } from '@kit.MediaKit';
 import { preferences } from '@kit.ArkData';
-import { CaptureCommand, CaptureEvent, RecordingDeleteResult, RecordingInfo, RecordingMode, WatchState } from '../model/RecorderModels';
+import { CaptureCommand, CaptureEvent, RecordingDeleteResult, RecordingInfo, RecordingMode, RecordingSensitivity, WatchState } from '../model/RecorderModels';
+import { normalizeRecordingSensitivity } from '../core/AudioGate';
 import { backgroundTasks } from './BackgroundTasks';
 import { phoneSyncController } from './PhoneSyncController';
 type StateListener = (state: WatchState) => void;
@@ -47,6 +48,10 @@ class RecorderController {
     try {
       this.settings = preferences.getPreferencesSync(context, { name: 'recorder_settings' });
       this.state.mode = this.settings.getSync('mode', 'sound') === 'speech' ? 'speech' : 'sound';
+      const sound = this.settings.getSync('sound_sensitivity', 'normal');
+      const speech = this.settings.getSync('speech_sensitivity', 'normal');
+      this.state.soundSensitivity = normalizeRecordingSensitivity(typeof sound === 'string' ? sound : '');
+      this.state.speechSensitivity = normalizeRecordingSensitivity(typeof speech === 'string' ? speech : '');
     } catch (_) { this.state.notice = '已使用默认的声音模式'; }
     try {
       const instance: worker.ThreadWorker = new worker.ThreadWorker('watch_entry/ets/workers/RecorderWorker.ets', {
@@ -114,6 +119,8 @@ class RecorderController {
     snapshot.listeningMs = this.state.listeningMs;
     snapshot.saving = this.state.saving;
     snapshot.mode = this.state.mode;
+    snapshot.soundSensitivity = this.state.soundSensitivity;
+    snapshot.speechSensitivity = this.state.speechSensitivity;
     this.listener(snapshot);
   }
 
@@ -127,6 +134,7 @@ class RecorderController {
     command.reason = reason;
     command.name = name;
     command.mode = this.state.mode;
+    command.sensitivity = this.state.mode === 'speech' ? this.state.speechSensitivity : this.state.soundSensitivity;
     this.captureWorker?.postMessage(command);
   }
 
@@ -145,6 +153,23 @@ class RecorderController {
       await this.settings.flush();
     } catch (_) {
       this.state.error = '模式已切换，但未能记住选择；下次打开请检查模式';
+      this.emit();
+    }
+  }
+
+  async selectSensitivity(mode: RecordingMode, sensitivity: RecordingSensitivity): Promise<void> {
+    if (this.state.status !== 'ready' || (mode !== 'sound' && mode !== 'speech') ||
+      sensitivity !== normalizeRecordingSensitivity(sensitivity)) { return; }
+    if (mode === 'speech') { this.state.speechSensitivity = sensitivity; }
+    else { this.state.soundSensitivity = sensitivity; }
+    this.state.error = '';
+    this.emit();
+    try {
+      if (this.settings === undefined) { throw new Error('灵敏度设置不可用'); }
+      this.settings.putSync(mode === 'speech' ? 'speech_sensitivity' : 'sound_sensitivity', sensitivity);
+      await this.settings.flush();
+    } catch (_) {
+      this.state.error = '灵敏度已调整，但未能记住选择；下次打开请检查设置';
       this.emit();
     }
   }

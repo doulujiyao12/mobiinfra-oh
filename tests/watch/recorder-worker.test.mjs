@@ -41,7 +41,7 @@ test('Worker records exact samples despite short writes and finalizes a playable
   assert.equal(h.microphones[0].state, 4);
 });
 
-test('a callback crossing five minutes splits losslessly without recreating the microphone', async t => {
+test('a recording crossing five minutes remains one lossless WAV without recreating the microphone', async t => {
   const directory = fixture(t);
   const h = await createHarness(directory);
   t.after(h.dispose);
@@ -50,14 +50,13 @@ test('a callback crossing five minutes splits losslessly without recreating the 
   h.capture(pcm(6400, 3200));
   await h.post({ kind: 'stop' });
   const names = files(directory).sort();
-  assert.equal(names.length, 2);
+  assert.equal(names.length, 1);
   const first = fs.readFileSync(path.join(directory, 'recordings', names[0]));
-  const second = fs.readFileSync(path.join(directory, 'recordings', names[1]));
-  assert.equal(first.readUInt32LE(40), 16000 * 2 * 300);
-  assert.equal(second.readUInt32LE(40), 3200);
+  assert.equal(first.readUInt32LE(40), 16000 * 2 * 300 + 3200);
   assert.equal(first.readInt16LE(first.length - 2), -3200);
-  assert.equal(second.readInt16LE(44), 3200);
+  assert.equal(first.readInt16LE(44 + 16000 * 2 * 300), 3200);
   assert.equal(h.microphones.length, 1);
+  assert.equal(h.events.filter(event => event.kind === 'segment').length, 0);
 });
 
 test('abnormal process exit recovers a stale header from actual on-disk PCM', async t => {
@@ -134,7 +133,7 @@ test('low storage prevents capture and unsafe deletion cannot escape the recordi
   assert.equal(h.events.at(-1).kind, 'error');
 });
 
-test('default sound mode saves no silence, retains microphone between clips and uses real clip times', async t => {
+test('silence gates pause writing but keep a single recoverable file until the user stops', async t => {
   const directory = fixture(t);
   const h = await createHarness(directory);
   t.after(h.dispose);
@@ -146,19 +145,53 @@ test('default sound mode saves no silence, retains microphone between clips and 
   h.capture(pcm(32000));
   h.capture(pcm(32000 * 5, 0));
   assert.equal(files(directory).length, 1);
-  assert.ok(files(directory)[0].endsWith('.wav'));
+  assert.ok(files(directory)[0].endsWith('.part'));
+  await h.post({ kind: 'list' });
+  assert.equal(lastLibrary(h).records.length, 0, 'An unfinished session cannot be offered for sync');
   assert.equal(h.microphones[0].state, 2);
   h.capture(pcm(32000));
   await h.post({ kind: 'stop' });
   const records = lastLibrary(h).records;
-  assert.equal(records.length, 2);
-  assert.equal(records[0].createdAt, startAt + 10120);
-  assert.equal(records[1].createdAt, startAt + 4120);
-  assert.equal(records[0].durationMs + records[1].durationMs, 5760);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].createdAt, startAt + 4120);
+  assert.equal(records[0].durationMs, 5760);
   assert.equal(h.events.findLast(e => e.kind === 'stopped').listeningMs, 12000);
   assert.equal(h.microphones.length, 1);
   assert.equal(h.microphones[0].state, 4);
   assert.equal(h.state.detectorCalls, 0);
+});
+
+test('eight sound or speech intervals form one recording; a new user session creates another', async t => {
+  for (const rate of [16000, 48000]) {
+    for (const mode of ['sound', 'speech']) {
+      const directory = fixture(t);
+      const h = await createHarness(directory, { reject16k: rate === 48000,
+        speechClassifier: buffer => new Int16Array(buffer)[0] !== 0 });
+      t.after(h.dispose);
+      await h.post({ kind: 'start', mode });
+      for (let i = 0; i < 8; i++) {
+        h.capture(pcm(rate * 2, 3200));
+        h.capture(pcm(rate * 2 * 4, 0));
+        const names = files(directory);
+        assert.equal(names.length, 1);
+        assert.ok(names[0].endsWith('.part'));
+        const data = fs.readFileSync(path.join(directory, 'recordings', names[0]));
+        assert.equal(data.readUInt32LE(40), data.length - 44, 'Silence boundaries checkpoint the same WAV');
+        assert.equal(h.events.findLast(event => event.kind === 'activity').saving, false);
+      }
+      await h.post({ kind: 'stop' });
+      assert.equal(lastLibrary(h).records.length, 1);
+      const data = fs.readFileSync(lastLibrary(h).records[0].path);
+      let voiced = 0;
+      for (let offset = 44; offset < data.length; offset += 2) { if (data.readInt16LE(offset) !== 0) voiced++; }
+      assert.equal(voiced, rate * 8, 'Every interval retains its sound samples');
+      await h.post({ kind: 'start', mode });
+      h.capture(pcm(rate * 2, 3200));
+      await h.post({ kind: 'stop' });
+      assert.equal(lastLibrary(h).records.length, 2);
+      assert.equal(h.microphones.length, 2);
+    }
+  }
 });
 
 test('stop during silence creates no empty WAV and releases capture', async t => {

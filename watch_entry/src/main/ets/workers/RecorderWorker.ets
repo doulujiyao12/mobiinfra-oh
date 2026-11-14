@@ -3,8 +3,8 @@ import { audio } from '@kit.AudioKit';
 import { fileIo as fs, statfs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { createDetector, VoiceDetector } from 'libvoicevad.so';
-import { CaptureCommand, CaptureEvent, RecordingInfo, RecordingMode } from '../model/RecorderModels';
-import { AudioGate, GateSink } from '../core/AudioGate';
+import { CaptureCommand, CaptureEvent, RecordingInfo, RecordingMode, RecordingSensitivity } from '../model/RecorderModels';
+import { AudioGate, GateSink, detectionProfile, normalizeRecordingSensitivity } from '../core/AudioGate';
 import { alignedPcmBytes, createWavHeader, isOwnWavHeader, MAX_SESSION_SECONDS,
   parseRecordingName, triggeredFileName, SEGMENT_SECONDS, WAV_HEADER_BYTES } from '../core/Wav';
 
@@ -32,7 +32,7 @@ let mode: RecordingMode = 'sound';
 let gate: AudioGate | undefined = undefined;
 let voiceDetector: VoiceDetector | undefined = undefined;
 let listenedSamples: number = 0;
-let segmentTime: number = 0;
+let saving: boolean = false;
 
 function errorText(error: BusinessError): string {
   return `${error.message || '系统操作失败'}${error.code ? ` (${error.code})` : ''}`;
@@ -47,7 +47,7 @@ function send(kind: string, message: string = '', requestId: string = ''): void 
   event.segment = segmentIndex;
   event.inputRate = inputRate;
   event.listeningMs = listenedSamples / inputRate * 1000;
-  event.saving = file !== undefined;
+  event.saving = saving;
   port.postMessage(event);
 }
 
@@ -75,7 +75,6 @@ function checkpoint(): void {
 
 function openSegment(timestamp: number): void {
   segmentIndex++;
-  segmentTime = timestamp;
   activeName = triggeredFileName(timestamp, segmentIndex, inputRate, mode);
   const path: string = `${directory}/${activeName}.part`;
   if (fs.accessSync(path) || fs.accessSync(`${directory}/${activeName}`)) {
@@ -183,34 +182,27 @@ function requestStop(reason: string): void {
 }
 
 function writeAudio(buffer: ArrayBuffer): void {
-  let consumed: number = 0;
-  const segmentLimit: number = inputRate * 2 * SEGMENT_SECONDS;
-  while (consumed < buffer.byteLength) {
-    if (file === undefined) { throw new Error('录音片段尚未打开'); }
-    if (segmentBytes === segmentLimit) {
-      const nextTime: number = segmentTime + SEGMENT_SECONDS * 1000;
-      finishSegment();
-      openSegment(nextTime);
-      send('segment', '上一片段已保存，监听继续');
-    }
-    const length: number = Math.min(buffer.byteLength - consumed, segmentLimit - segmentBytes);
-    const chunk: ArrayBuffer = buffer.slice(consumed, consumed + length);
-    writeAt(file!.fd, chunk, WAV_HEADER_BYTES + segmentBytes);
-    segmentBytes += length;
-    sessionBytes += length;
-    consumed += length;
-  }
+  if (file === undefined) { throw new Error('录音文件尚未打开'); }
+  // A start/stop session owns one WAV. At 48 kHz the existing six-hour
+  // session limit remains below both the WAV and phone library size limits.
+  writeAt(file.fd, buffer, WAV_HEADER_BYTES + segmentBytes);
+  segmentBytes += buffer.byteLength;
+  sessionBytes += buffer.byteLength;
 }
 
 const gateSink: GateSink = {
   begin: (startSample: number): void => {
-    openSegment(sessionTime + startSample / inputRate * 1000);
+    // The gate may open repeatedly after silence. Resume the same file;
+    // detection boundaries are not user-visible recording boundaries.
+    if (file === undefined) { openSegment(sessionTime + startSample / inputRate * 1000); }
+    saving = true;
     send('activity');
   },
   write: (pcm: ArrayBuffer): void => { writeAudio(pcm); },
   end: (): void => {
-    finishSegment();
-    send('activity', '片段已保存，继续等待');
+    checkpoint();
+    saving = false;
+    send('activity');
   }
 };
 
@@ -264,25 +256,27 @@ async function createCapturer(): Promise<audio.AudioCapturer> {
   throw new Error('当前设备不支持录音');
 }
 
-async function startCapture(selectedMode: RecordingMode): Promise<void> {
+async function startCapture(selectedMode: RecordingMode, selectedSensitivity: RecordingSensitivity = 'normal'): Promise<void> {
   if (starting || running || closing) { throw new Error('录音状态正在切换'); }
   if (directory.length === 0) { throw new Error('存储尚未初始化'); }
   if (freeBytes() < SPACE_RESERVE * 2) { throw new Error('可用空间不足 64 MB，请先删除部分录音'); }
   starting = true;
   if (selectedMode !== 'sound' && selectedMode !== 'speech') { throw new Error('未知的录音模式'); }
   mode = selectedMode;
+  const sensitivity: RecordingSensitivity = normalizeRecordingSensitivity(selectedSensitivity);
   segmentIndex = 0;
   sessionBytes = 0;
   segmentBytes = 0;
+  saving = false;
   lastMeterAt = 0;
   listenedSamples = 0;
   try {
     capturer = await createCapturer();
-    if (mode === 'speech') { voiceDetector = createDetector(inputRate, 2); }
+    if (mode === 'speech') { voiceDetector = createDetector(inputRate, detectionProfile(sensitivity).speechAggressiveness); }
     gate = new AudioGate(inputRate, mode, (pcm: ArrayBuffer): boolean => {
       if (voiceDetector === undefined) { throw new Error('人声检测器不可用，请重新开始监听'); }
       return voiceDetector.process(pcm);
-    });
+    }, sensitivity);
     capturer.on('readData', consume);
     capturer.on('audioInterrupt', (event: audio.InterruptEvent) => {
       if (event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP ||
@@ -344,6 +338,7 @@ async function stopCapture(reason: string): Promise<void> {
   try { finishSegment(); } catch (error) {
     failure = `文件待恢复，请重新打开应用。${errorText(error as BusinessError)}`;
   }
+  saving = false;
   closing = false;
   starting = false;
   const notice: string = reason === '监听已结束' ?
@@ -363,7 +358,7 @@ async function dispatch(command: CaptureCommand): Promise<void> {
     publishLibrary();
     send('ready', recoveryWarning);
   } else if (command.kind === 'start') {
-    try { await startCapture(command.mode || 'sound'); } catch (error) {
+    try { await startCapture(command.mode || 'sound', command.sensitivity || 'normal'); } catch (error) {
       await stopCapture(`无法录音：${errorText(error as BusinessError)}`);
     }
   } else if (command.kind === 'stop') {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWavHeader, isOwnWavHeader, alignedPcmBytes, parseRecordingName,
-  recordingFileName, triggeredFileName, formatDuration, WAV_HEADER_BYTES, SEGMENT_SECONDS } from '../../watch_entry/src/main/ets/core/Wav.ts';
+  recordingFileName, triggeredFileName, formatDuration, WAV_HEADER_BYTES, SEGMENT_SECONDS, MAX_SESSION_SECONDS } from '../../watch_entry/src/main/ets/core/Wav.ts';
 
 test('16/48 kHz WAV is valid PCM and describes exactly five minutes', () => {
   for (const rate of [16000, 48000]) {
@@ -17,6 +17,16 @@ test('16/48 kHz WAV is valid PCM and describes exactly five minutes', () => {
     assert.equal(view.getUint32(40, true), bytes);
     assert.ok(isOwnWavHeader(header, rate));
     assert.ok(WAV_HEADER_BYTES + bytes < 100 * 1024 * 1024);
+  }
+});
+
+test('a whole six-hour session fits in one WAV and the phone library size limit at either sample rate', () => {
+  for (const rate of [16000, 48000]) {
+    const bytes = rate * 2 * MAX_SESSION_SECONDS;
+    const header = new DataView(createWavHeader(bytes, rate));
+    assert.equal(header.getUint32(40, true), bytes);
+    assert.equal(header.getUint32(4, true) + 8, bytes + WAV_HEADER_BYTES);
+    assert.ok(bytes + WAV_HEADER_BYTES <= 2 * 1024 * 1024 * 1024 - 1);
   }
 });
 

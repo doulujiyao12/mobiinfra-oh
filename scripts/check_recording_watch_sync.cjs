@@ -53,7 +53,7 @@ function store(existing = []) {
     async importWatch(value) { const entry = existing.find(r => r.watch?.recordingId === value.recording.id) || record(value.recording.id);
       saved.push(entry); return entry; } };
 }
-function pageMethods(names) {
+function pageMethods(names, overrides = {}) {
   const source = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/recording/RecordingPage.ets'), 'utf8');
   const tree = ts.createSourceFile('Page.ts', source.replace('struct RecordingPage', 'class RecordingPage'), ts.ScriptTarget.Latest, true);
   const component = tree.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'RecordingPage');
@@ -62,8 +62,9 @@ function pageMethods(names) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule('exports.Page = class {' + names.map(method).join('\n') + '}', {
     compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS } }).outputText,
-  { exports, ...selection, AppLogger: { info() {}, warn() {} }, AppTheme: { dialogText: text => text },
-    promptAction: { showDialog: async () => ({ index: 1 }) } });
+  { exports, ...selection, applyRecordingSummary: load(base + 'RecordingTypes').applyRecordingSummary,
+    AppLogger: { info() {}, warn() {} }, AppTheme: { dialogText: text => text },
+    promptAction: { showDialog: async () => ({ index: 1 }) }, ...overrides });
   return { Page: exports.Page, method };
 }
 
@@ -133,13 +134,134 @@ test('watch auto-processing performs both stages serially, independently of gene
   const { Page } = pageMethods(['processWatchRecordings']), page = new Page(), calls = [];
   Object.assign(page, { alive: true, queueEpoch: 1, autoSummary: false, showModels: false, recordTitle: value => value.title,
     analyze: async (restart, auto) => { calls.push(['transcribe', page.selected.id, auto]);
-      if (page.selected.id === 'bad') { page.error = 'ASR failed'; return; }
-      page.selected.analysis = { segments: [{ text: 'Transcript' }] }; page.selected.transcriptionComplete = true; },
-    summarize: async () => { calls.push(['summary', page.selected.id]); page.selected.summary = { complete: true }; } });
+      if (page.selected.id === 'bad') { page.error = 'ASR failed'; return null; }
+      page.selected.analysis = { segments: [{ text: 'Transcript' }] }; page.selected.transcriptionComplete = true; return page.selected; },
+    summarize: async () => { calls.push(['summary', page.selected.id]); page.selected.summary = { complete: true }; return page.selected; } });
   const failures = await page.processWatchRecordings([record('bad'), record('new'), record('text', 'text'), record('ready', 'done')], 1);
   assert.equal(failures.length, 1); assert.match(failures[0], /bad/);
   assert.deepEqual(calls, [['transcribe', 'bad', false], ['transcribe', 'new', false], ['summary', 'new'], ['summary', 'text']]);
   assert.equal(page.watchQueueRunning, false); assert.equal(page.queueRemaining, 0);
+});
+
+test('all eight watch recordings use SenseVoice and complete both stages regardless of the phone engine preference', async () => {
+  for (const system of [false, true]) {
+    const calls = [], saved = new Map();
+    const result = () => ({ modelId: 'test', duration: 10, speech: [{ start: 0, end: 10 }],
+      segments: [{ id: 0, speaker: 0, start: 0, end: 10, text: 'Transcript' }], speakers: [] });
+    class SystemAsr {
+      async run(job) { calls.push(['asr', job.audioPath]); return result(); }
+    }
+    const { Page } = pageMethods(['syncWatchDevice', 'completeWatchProcessing', 'processWatchRecordings',
+      'analyze', 'summarize', 'watchPanelClosed', 'useSystemAsr'],
+      { RecordingSystemAsrRunner: SystemAsr });
+    const page = new Page(), received = Array.from({ length: 8 }, (_, i) => ({ ...record('r' + i),
+      watch: { sourceId: 'watch-source', recordingId: 'w' + i } }));
+    let selected = null, showWatch = true;
+    // Deliberately detach UI objects from transfer objects: sharing the same
+    // object in old tests hid the stale-record dependency in the real queue.
+    Object.defineProperty(page, 'selected', { get: () => selected, set: value => { selected = clone(value); } });
+    Object.defineProperty(page, 'showWatch', { get: () => showWatch, set: value => {
+      const wasShown = showWatch; showWatch = value;
+      if (wasShown && !value) queueMicrotask(() => page.watchPanelClosed());
+    } });
+    Object.assign(page, { alive: true, busy: false, epoch: 0, queueEpoch: 0, watchQueueRunning: false,
+      autoSummary: false, watchAutoAnalyze: true, showModels: true, summarySource: 'cloud', pendingWatchProcessing: null,
+      languageIndex: 0, languages: ['auto'], separateSpeakers: false, transcriptionEngine: system ? 'system' : 'sensevoice',
+      watchDevice: { id: 'watch-device' }, watchSourceId: 'watch-source',
+      watchItems: received.map((r, i) => item('w' + i, '2026-11-14')), watchSelectedIds: received.map((r, i) => 'w' + i),
+      context: () => ({}), reload() {}, refreshSelected() {}, recordTitle: value => value.title,
+      message: error => { page.error = error.message; }, cancel: () => { throw Error('Unexpected queue cancellation'); },
+      models: { directory: '/models', readyForTranscription: () => true }, playback: { async stop() {} },
+      store: { hasAudio: () => true, audioPath: id => id, systemAsrPath: id => id,
+        save: value => saved.set(value.id, clone(value)), clearAnalysisDraft() {}, clearLiveDraft() {}, clearSystemAsrDraft() {} },
+      analyzer: { async run(job) { calls.push(['asr', job.audioPath]); return result(); } },
+      summaryService: { async generate(value) {
+        calls.push(['summary', value.id]); return { title: 'Summary', overview: 'Overview', keyPoints: [],
+          decisions: [], actionItems: [], openQuestions: [], complete: true };
+      } },
+      watchSync: { async sync(context, device, store, progress, onSaved) {
+        for (const value of received) onSaved(value);
+        return received.length;
+      } } });
+    await page.syncWatchDevice();
+    assert.deepEqual(calls, received.flatMap(value => [['asr', value.id], ['summary', value.id]]));
+    assert.equal(saved.size, 8);
+    for (const value of saved.values()) {
+      assert.equal(value.transcriptionComplete, true); assert.equal(value.summary.complete, true);
+      assert.equal(value.transcriptionEngine, 'sensevoice');
+    }
+    assert.equal(page.transcriptionEngine, system ? 'system' : 'sensevoice', 'Do not change the phone preference');
+    assert(received.every(value => value.analysis === null), 'Results must not depend on mutating transfer objects');
+    assert.equal(page.watchQueueRunning, false); assert.equal(page.queueRemaining, 0);
+    assert.equal(page.error, ''); assert.match(page.status, /8 条录音/);
+  }
+});
+
+test('watch manual transcription and resume choose SenseVoice while phone live transcription still uses its setting', () => {
+  const { Page } = pageMethods(['useSystemAsr', 'canResumeAnalysis']), page = new Page(), draftReads = [];
+  Object.assign(page, { transcriptionEngine: 'system', separateSpeakers: false,
+    selected: { ...record('watch'), watch: { sourceId: 'watch-source', recordingId: 'one' } },
+    store: { hasSystemAsrDraft: id => { draftReads.push(['system', id]); return true; },
+      hasAnalysisDraft: (id, separation) => { draftReads.push(['sensevoice', id, separation]); return true; } } });
+  assert.equal(page.useSystemAsr(), true, 'Phone live recording does not inherit the selected watch record');
+  assert.equal(page.useSystemAsr(record('phone')), true);
+  assert.equal(page.useSystemAsr(page.selected), false);
+  assert.equal(page.canResumeAnalysis(), true);
+  assert.deepEqual(draftReads, [['sensevoice', 'watch', false]]);
+});
+
+test('missing SenseVoice defers the whole received batch once and successful preparation resumes current saved records', async () => {
+  const { Page } = pageMethods(['completeWatchProcessing', 'resumePendingWatchProcessing', 'prepareModels']), page = new Page();
+  let ready = false, prepared = 0; const processed = [], records = [record('a'), record('b')];
+  Object.assign(page, { alive: true, busy: false, epoch: 0, queueEpoch: 3, separateSpeakers: false, error: '',
+    pendingWatchProcessing: null, modelDownloadUrl: 'https://models.invalid/',
+    store: { list: () => records.map(r => ({ ...r, title: 'Updated ' + r.id })) },
+    models: { readyForTranscription: () => ready, readyCount: () => ready ? 5 : 0,
+      setDownloadBaseUrl: url => url, prepare: async () => { prepared++; ready = true; } },
+    processWatchRecordings: async values => { processed.push(values.map(r => [r.id, r.title])); page.watchQueueRunning = false; return []; },
+    message: error => { page.error = error.message; } });
+  await page.completeWatchProcessing(records, 3, '');
+  assert.equal(processed.length, 0); assert.equal(prepared, 0, 'Downloading requires a user action');
+  assert.equal(page.showModels, true); assert.match(page.status, /SenseVoice/);
+  assert.deepEqual(clone(page.pendingWatchProcessing.recordIds), ['a', 'b']);
+  await page.prepareModels(false);
+  assert.equal(prepared, 1); assert.equal(page.pendingWatchProcessing, null); assert.equal(page.showModels, false);
+  assert.deepEqual(processed, [[['a', 'Updated a'], ['b', 'Updated b']]]);
+  await page.resumePendingWatchProcessing(); assert.equal(processed.length, 1, 'Repeated preparation cannot replay the batch');
+});
+
+test('a failed model download preserves deferred recordings, while cancellation prevents later automatic resume', async () => {
+  const { Page } = pageMethods(['completeWatchProcessing', 'resumePendingWatchProcessing', 'prepareModels', 'cancel']), page = new Page();
+  let ready = false, processed = 0;
+  const records = [record('a')];
+  Object.assign(page, { alive: true, busy: false, epoch: 0, queueEpoch: 1, separateSpeakers: false, error: '',
+    pendingWatchProcessing: null, modelDownloadUrl: 'https://models.invalid/', store: { list: () => records },
+    models: { readyForTranscription: () => ready, readyCount: () => 0, setDownloadBaseUrl: url => url,
+      prepare: async () => { throw Error('Download interrupted'); }, cancel() {} },
+    analyzer: { cancel() {} }, summaryService: { cancel() {} }, watchSync: { async cancel() {} },
+    processWatchRecordings: async () => { processed++; return []; }, message: error => { page.error = error.message; } });
+  await page.completeWatchProcessing(records, 1, '');
+  await page.prepareModels(false);
+  assert.match(page.error, /Download interrupted/); assert(page.pendingWatchProcessing); assert.equal(processed, 0);
+  page.cancel(); ready = true; await page.resumePendingWatchProcessing();
+  assert.equal(page.pendingWatchProcessing, null); assert.equal(processed, 0);
+});
+
+test('a missing transcription model cannot discard later recordings that only need a summary', async () => {
+  const { Page } = pageMethods(['processWatchRecordings']), page = new Page(), summaries = [];
+  Object.assign(page, { alive: true, queueEpoch: 1, showModels: false, recordTitle: value => value.title,
+    analyze: async () => { page.showModels = true; page.error = 'Missing model'; return null; },
+    summarize: async () => { summaries.push(page.selected.id); page.selected.summary = { complete: true }; return page.selected; } });
+  const failures = await page.processWatchRecordings([record('needs-model'), record('has-text', 'text')], 1);
+  assert.equal(failures.length, 1); assert.match(failures[0], /Missing model/);
+  assert.deepEqual(summaries, ['has-text']);
+});
+
+test('dismissing the watch sheet cancels an active transfer but cannot cancel its reserved processing queue', () => {
+  const { Page } = pageMethods(['watchPanelClosed']), page = new Page(); let cancelled = 0;
+  Object.assign(page, { jobKind: 'watch', watchQueueRunning: true, cancel: () => { cancelled++; } });
+  page.watchPanelClosed(); assert.equal(cancelled, 0);
+  page.watchQueueRunning = false; page.watchPanelClosed(); assert.equal(cancelled, 1);
 });
 
 test('stopping a queue prevents subsequent summaries and recordings', async () => {
@@ -162,10 +284,11 @@ test('cancelling while playback is stopping cannot start a late transcription re
 });
 
 test('partial transfer removes completed selections, retains retry choices and still analyzes received audio', async () => {
-  const { Page } = pageMethods(['syncWatchDevice']), page = new Page(); let processed = [];
+  const { Page } = pageMethods(['syncWatchDevice', 'completeWatchProcessing']), page = new Page(); let processed = [];
   Object.assign(page, { busy: false, alive: true, watchQueueRunning: false, epoch: 0, queueEpoch: 0, store: {},
     watchDevice: { id: 'watch-device' }, watchSourceId: 'watch-source', watchItems: [item('a', '2026-11-13'), item('b', '2026-11-13')],
-    watchSelectedIds: ['a', 'b'], watchAutoAnalyze: true, context: () => ({}), reload() {},
+    watchSelectedIds: ['a', 'b'], watchAutoAnalyze: true, pendingWatchProcessing: null,
+    models: { readyForTranscription: () => true }, context: () => ({}), reload() {},
     watchSync: { async sync(context, deviceId, store, progress, saved, selected) {
       assert.deepEqual(clone(selected.recordingIds), ['a', 'b']);
       saved({ ...record('local-a'), watch: { recordingId: 'a' } }); throw Error('Connection interrupted');

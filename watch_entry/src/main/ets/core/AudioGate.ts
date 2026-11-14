@@ -1,10 +1,47 @@
-import type { RecordingMode } from '../model/RecorderModels';
+import type { RecordingMode, RecordingSensitivity } from '../model/RecorderModels';
 
 export const FRAME_MS: number = 20;
 export const PRE_ROLL_MS: number = 1000;
 export const SILENCE_TAIL_MS: number = 2000;
 const ONSET_WINDOW: number = 10;
 const ONSET_POSITIVES: number = 6;
+
+export function normalizeRecordingSensitivity(value: string): RecordingSensitivity {
+  return value === 'sensitive' || value === 'strict' ? value : 'normal';
+}
+
+export class DetectionProfile {
+  speechAggressiveness: number = 2;
+  openMinDb: number = -42;
+  openMaxDb: number = -24;
+  openMarginDb: number = 10;
+  holdMinDb: number = -48;
+  holdMaxDb: number = -30;
+  holdMarginDb: number = 6;
+}
+
+/** Normal preserves the original detector; only classification thresholds change. */
+export function detectionProfile(sensitivity: RecordingSensitivity): DetectionProfile {
+  const profile: DetectionProfile = new DetectionProfile();
+  if (sensitivity === 'sensitive') {
+    profile.speechAggressiveness = 1;
+    profile.openMinDb = -48;
+    profile.openMaxDb = -30;
+    profile.openMarginDb = 6;
+    profile.holdMinDb = -54;
+    profile.holdMaxDb = -36;
+    profile.holdMarginDb = 3;
+  } else if (sensitivity === 'strict') {
+    profile.speechAggressiveness = 3;
+    profile.openMinDb = -36;
+    profile.openMaxDb = -18;
+    profile.openMarginDb = 14;
+    profile.holdMinDb = -42;
+    profile.holdMaxDb = -24;
+    profile.holdMarginDb = 10;
+  }
+  return profile;
+}
 
 export interface GateSink {
   begin(startSample: number): void;
@@ -17,6 +54,7 @@ export type SpeechClassifier = (pcm: ArrayBuffer) => boolean;
 /** Streaming gate: bounded RAM, exact 20 ms frames, no microphone lifecycle calls. */
 export class AudioGate {
   private mode: RecordingMode;
+  private profile: DetectionProfile;
   private classifier: SpeechClassifier;
   private frameSamples: number;
   private frame: Int16Array;
@@ -30,9 +68,11 @@ export class AudioGate {
   private noiseDb: number = -60;
   private db: number = -100;
 
-  constructor(sampleRate: number, mode: RecordingMode, classifier: SpeechClassifier) {
+  constructor(sampleRate: number, mode: RecordingMode, classifier: SpeechClassifier,
+    sensitivity: RecordingSensitivity = 'normal') {
     if (sampleRate !== 16000 && sampleRate !== 48000) { throw new Error('不支持的检测采样率'); }
     this.mode = mode;
+    this.profile = detectionProfile(sensitivity);
     this.classifier = classifier;
     this.frameSamples = sampleRate * FRAME_MS / 1000;
     this.frame = new Int16Array(this.frameSamples);
@@ -85,8 +125,10 @@ export class AudioGate {
     const mean: number = sum / samples.length;
     const power: number = Math.max(0, squares / samples.length - mean * mean);
     this.db = 10 * Math.log10(Math.max(power, 1e-10));
-    const openDb: number = Math.max(-42, Math.min(-24, this.noiseDb + 10));
-    const holdDb: number = Math.max(-48, Math.min(-30, this.noiseDb + 6));
+    const openDb: number = Math.max(this.profile.openMinDb,
+      Math.min(this.profile.openMaxDb, this.noiseDb + this.profile.openMarginDb));
+    const holdDb: number = Math.max(this.profile.holdMinDb,
+      Math.min(this.profile.holdMaxDb, this.noiseDb + this.profile.holdMarginDb));
     const pcm: ArrayBuffer = samples.buffer as ArrayBuffer;
     const detected: boolean = this.mode === 'speech' ? this.classifier(pcm) :
       this.db >= (this.active ? holdDb : openDb);

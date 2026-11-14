@@ -1,10 +1,15 @@
-import { WatchState, RecordingInfo, RecordingDeleteResult } from '../model/RecorderModels';
+import { WatchState, RecordingInfo, RecordingDeleteResult, RecordingMode, RecordingSensitivity } from '../model/RecorderModels';
 import { formatDuration } from '../core/Wav';
 import { RecordingLibraryDay, recordingLibraryDays, recordingLibraryDateLabel, recordingsForLibraryDate } from '../core/RecordingLibrary';
 import { recorderController } from '../services/RecorderController';
 import { WatchTheme } from '../theme/WatchTheme';
 import { SyncViewState } from '../sync/SyncProtocol';
 import { phoneSyncController } from '../services/PhoneSyncController';
+import { common } from '@kit.AbilityKit';
+import { watchPrivacyConsent } from '../services/WatchPrivacyConsent';
+import { WATCH_PRIVACY_APP_NAME, WATCH_PRIVACY_DEVELOPER, WATCH_PRIVACY_ACCEPTED_EVENT } from '../config/WatchPrivacyPolicy';
+import { WatchRoundDialog } from '../components/WatchRoundDialog';
+import { WatchPrivacyPolicyView } from '../components/WatchPrivacyPolicyView';
 
 @Entry
 @Component
@@ -17,10 +22,19 @@ struct Index {
   @State selectionMode: boolean = false;
   @State selectedNames: string[] = [];
   @State libraryMessage: string = '';
+  @State private deletionTargets: RecordingInfo[] = [];
+  @State private privacyAccepted: boolean = false;
+  @State private privacyBusy: boolean = false;
+  @State private privacyError: string = '';
+  @State private policyVisible: boolean = false;
+  private pageActive: boolean = false;
   private pageScroller: Scroller = new Scroller();
   private bars: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+  private sensitivities: RecordingSensitivity[] = ['sensitive', 'normal', 'strict'];
 
   aboutToAppear(): void {
+    this.pageActive = true;
+    this.privacyAccepted = watchPrivacyConsent.isAccepted();
     recorderController.subscribe((value: WatchState) => {
       this.snapshot = value;
       if (this.selectedNames.length > 0) {
@@ -30,9 +44,15 @@ struct Index {
     phoneSyncController.subscribe((value: SyncViewState) => { this.sync = value; });
   }
 
-  aboutToDisappear(): void { recorderController.unsubscribe(); phoneSyncController.unsubscribe(); }
+  aboutToDisappear(): void {
+    this.pageActive = false;
+    recorderController.unsubscribe(); phoneSyncController.unsubscribe();
+  }
 
   onBackPress(): boolean {
+    if (this.policyVisible) { this.policyVisible = false; return true; }
+    if (!this.privacyAccepted) { return this.privacyBusy; }
+    if (this.deletionTargets.length > 0) { this.deletionTargets = []; return true; }
     if (this.snapshot.status === 'deleting') { return true; }
     if (this.screen === 'dates') { this.screen = 'library'; return true; }
     if (this.screen === 'library' && this.selectionMode) { this.clearSelection(); return true; }
@@ -53,6 +73,14 @@ struct Index {
   private recording(): boolean { return this.snapshot.status === 'recording'; }
 
   private modeLabel(): string { return this.snapshot.mode === 'speech' ? '人声' : '环境声音'; }
+
+  private sensitivityFor(mode: RecordingMode): RecordingSensitivity {
+    return mode === 'speech' ? this.snapshot.speechSensitivity : this.snapshot.soundSensitivity;
+  }
+
+  private sensitivityLabel(sensitivity: RecordingSensitivity): string {
+    return sensitivity === 'sensitive' ? '灵敏' : (sensitivity === 'strict' ? '严格' : '正常');
+  }
 
   private recordModeLabel(mode: string): string {
     return mode === 'speech' ? '人声' : (mode === 'sound' ? '声音' : '手动');
@@ -119,18 +147,39 @@ struct Index {
 
   private confirmDeletion(records: RecordingInfo[]): void {
     if (records.length === 0 || this.snapshot.status !== 'ready') { return; }
-    const targets: RecordingInfo[] = records.slice();
-    this.getUIContext().showAlertDialog({
-      title: targets.length === 1 ? '删除这段录音？' : `删除 ${targets.length} 段录音？`,
-      message: '将删除手表上选中的录音，无法撤销。',
-      primaryButton: { value: '保留', action: () => {} },
-      secondaryButton: {
-        value: '删除', fontColor: WatchTheme.danger,
-        action: () => {
-          this.deleteFromLibrary(targets).catch(() => {});
-        }
-      }
-    });
+    this.deletionTargets = records.slice();
+  }
+
+  private deleteConfirmed(): void {
+    if (this.deletionTargets.length === 0 || this.snapshot.status !== 'ready') { return; }
+    const targets = this.deletionTargets.slice();
+    this.deletionTargets = [];
+    this.deleteFromLibrary(targets).catch(() => {});
+  }
+
+  private async agreePrivacy(): Promise<void> {
+    if (this.privacyBusy) { return; }
+    this.privacyBusy = true; this.privacyError = '';
+    try {
+      await watchPrivacyConsent.accept();
+      if (!this.pageActive) { return; }
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      context.eventHub.emit(WATCH_PRIVACY_ACCEPTED_EVENT);
+      this.privacyAccepted = true;
+    } catch (error) {
+      if (this.pageActive) { this.privacyError = (error as Error).message; }
+    } finally { if (this.pageActive) { this.privacyBusy = false; } }
+  }
+
+  private async declinePrivacy(): Promise<void> {
+    if (this.privacyBusy) { return; }
+    this.privacyBusy = true; this.privacyError = '';
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await context.terminateSelf();
+    } catch (_) {
+      if (this.pageActive) { this.privacyError = '暂时无法退出，可按返回键退出应用'; }
+    } finally { if (this.pageActive) { this.privacyBusy = false; } }
   }
 
   private async deleteFromLibrary(records: RecordingInfo[]): Promise<void> {
@@ -196,10 +245,10 @@ struct Index {
         else { recorderController.start().catch(() => {}); }
       })
       if (this.recording()) {
-        Text(`监听 ${formatDuration(this.snapshot.listeningMs)} · ${this.snapshot.segment} 个片段`)
+        Text(`监听 ${formatDuration(this.snapshot.listeningMs)}`)
           .fontSize(11).fontColor(WatchTheme.textMuted).margin({ top: 5 })
       } else {
-        Button(`模式 · ${this.modeLabel()}`)
+        Button(`${this.modeLabel()} · ${this.sensitivityLabel(this.sensitivityFor(this.snapshot.mode))}`)
           .width('92%').height(30).fontSize(12)
           .fontColor(WatchTheme.primaryLight).backgroundColor(WatchTheme.primarySurface).margin({ top: 4 })
           .enabled(this.snapshot.status === 'ready')
@@ -220,6 +269,9 @@ struct Index {
       Button('手机同步').width('80%').height(28).fontSize(12)
         .fontColor(WatchTheme.primaryLight).backgroundColor(WatchTheme.primarySurface)
         .onClick(() => { this.screen = 'sync'; })
+      Button('隐私政策').width('80%').height(26).fontSize(11).padding(0)
+        .fontColor(WatchTheme.textMuted).backgroundColor(Color.Transparent)
+        .onClick((): void => { this.policyVisible = true; })
     }.width('100%')
   }
 
@@ -246,21 +298,40 @@ struct Index {
   }
 
   @Builder
+  sensitivityOptions(mode: RecordingMode) {
+    Row({ space: 4 }) {
+      ForEach(this.sensitivities, (sensitivity: RecordingSensitivity) => {
+        Button(this.sensitivityLabel(sensitivity)).layoutWeight(1).height(32).padding(0).fontSize(13)
+          .fontColor(this.sensitivityFor(mode) === sensitivity ? WatchTheme.onPrimary : WatchTheme.textSecondary)
+          .backgroundColor(this.sensitivityFor(mode) === sensitivity ? WatchTheme.primary : WatchTheme.background)
+          .enabled(this.snapshot.status === 'ready')
+          .accessibilityText((mode === 'speech' ? '人声' : '环境声音') + '，' + this.sensitivityLabel(sensitivity) +
+            (this.sensitivityFor(mode) === sensitivity ? '，已选择' : ''))
+          .onClick((): void => { recorderController.selectSensitivity(mode, sensitivity).catch(() => {}); })
+      }, (sensitivity: RecordingSensitivity): string => sensitivity)
+    }.width('100%')
+  }
+
+  @Builder
   modePicker() {
     Column({ space: 10 }) {
       Text('录音模式').fontSize(20).fontWeight(FontWeight.Medium).fontColor(WatchTheme.text)
-      Button({ type: ButtonType.Normal }) {
-        Text(this.snapshot.mode === 'sound' ? '✓ 环境声音' : '环境声音').fontSize(15).fontColor(WatchTheme.text)
-      }.width('100%').height(44).borderRadius(22)
-      .backgroundColor(this.snapshot.mode === 'sound' ? WatchTheme.primarySurface : WatchTheme.surface)
-      .enabled(this.snapshot.status === 'ready')
-      .onClick(() => { recorderController.selectMode('sound').catch(() => {}); })
-      Button({ type: ButtonType.Normal }) {
-        Text(this.snapshot.mode === 'speech' ? '✓ 人声' : '人声').fontSize(15).fontColor(WatchTheme.text)
-      }.width('100%').height(44).borderRadius(22)
-      .backgroundColor(this.snapshot.mode === 'speech' ? WatchTheme.primarySurface : WatchTheme.surface)
-      .enabled(this.snapshot.status === 'ready')
-      .onClick(() => { recorderController.selectMode('speech').catch(() => {}); })
+      Column({ space: 6 }) {
+        Button(this.snapshot.mode === 'sound' ? '✓ 环境声音' : '环境声音').fontSize(15).fontColor(WatchTheme.text)
+          .width('100%').height(36).padding(0)
+          .backgroundColor(this.snapshot.mode === 'sound' ? WatchTheme.primarySurface : Color.Transparent)
+          .enabled(this.snapshot.status === 'ready')
+          .onClick(() => { recorderController.selectMode('sound').catch(() => {}); })
+        this.sensitivityOptions('sound')
+      }.width('100%').padding(8).borderRadius(22).backgroundColor(WatchTheme.surface)
+      Column({ space: 6 }) {
+        Button(this.snapshot.mode === 'speech' ? '✓ 人声' : '人声').fontSize(15).fontColor(WatchTheme.text)
+          .width('100%').height(36).padding(0)
+          .backgroundColor(this.snapshot.mode === 'speech' ? WatchTheme.primarySurface : Color.Transparent)
+          .enabled(this.snapshot.status === 'ready')
+          .onClick(() => { recorderController.selectMode('speech').catch(() => {}); })
+        this.sensitivityOptions('speech')
+      }.width('100%').padding(8).borderRadius(22).backgroundColor(WatchTheme.surface)
       if (this.snapshot.error.length > 0) {
         Text(this.snapshot.error).fontSize(11).fontColor(WatchTheme.error).textAlign(TextAlign.Center)
       }
@@ -401,7 +472,7 @@ struct Index {
     }.width('100%')
   }
 
-  build() {
+  @Builder private MainContent() {
     Scroll(this.pageScroller) {
       Column() {
         if (this.screen === 'library') { this.library(); }
@@ -416,5 +487,53 @@ struct Index {
     }
     .width('100%').height('100%').backgroundColor(WatchTheme.background)
     .scrollBar(BarState.Off)
+    .enabled(this.deletionTargets.length === 0)
+    .accessibilityLevel(this.deletionTargets.length === 0 ? 'auto' : 'no-hide-descendants')
+  }
+
+  @Builder private DeleteMessage() {
+    Text('将删除手表上选中的录音，无法撤销。').fontSize(13).lineHeight(18)
+      .fontColor(WatchTheme.textSecondary).width('100%').textAlign(TextAlign.Center)
+  }
+
+  @Builder private DeleteDialog() {
+    WatchRoundDialog({ title: this.deletionTargets.length === 1 ? '删除这段录音？' : `删除 ${this.deletionTargets.length} 段录音？`,
+      cancelLabel: '保留', confirmLabel: '删除', dangerous: true,
+      onCancel: (): void => { this.deletionTargets = []; }, onConfirm: (): void => { this.deleteConfirmed(); },
+      contentBuilder: (): void => { this.DeleteMessage(); } })
+  }
+
+  @Builder private PrivacyMessage() {
+    Text(WATCH_PRIVACY_APP_NAME + ' · 开发者：' + WATCH_PRIVACY_DEVELOPER)
+      .fontSize(13).fontColor(WatchTheme.text).width('100%')
+    Text('麦克风用于获取语音输入。录音由你主动开启，可保存在手表，并由你选择同步至已配对手机。')
+      .fontSize(13).lineHeight(18).fontColor(WatchTheme.textSecondary).width('100%')
+    if (this.privacyError) { Text(this.privacyError).fontSize(12).fontColor(WatchTheme.error).width('100%') }
+  }
+
+  @Builder private PrivacyPolicyAction() {
+    Button('完整隐私政策 ›').width('100%').height(32).fontSize(12).padding(0)
+      .fontColor(WatchTheme.primaryLight).backgroundColor(WatchTheme.primarySurface).enabled(!this.privacyBusy)
+      .onClick((): void => { this.policyVisible = true; })
+  }
+
+  @Builder private PrivacyDialog() {
+    WatchRoundDialog({ title: '隐私政策', cancelLabel: '不同意', confirmLabel: this.privacyBusy ? '请稍候' : '同意',
+      busy: this.privacyBusy, onCancel: (): void => { this.declinePrivacy(); },
+      onConfirm: (): void => { this.agreePrivacy(); }, contentBuilder: (): void => { this.PrivacyMessage(); },
+      showContentAction: true, contentActionBuilder: (): void => { this.PrivacyPolicyAction(); } })
+  }
+
+  build() {
+    Stack() {
+      if (this.policyVisible) {
+        WatchPrivacyPolicyView({ onBack: (): void => { this.policyVisible = false; } })
+      } else if (!this.privacyAccepted) {
+        this.PrivacyDialog()
+      } else {
+        this.MainContent()
+        if (this.deletionTargets.length > 0) { this.DeleteDialog() }
+      }
+    }.width('100%').height('100%').backgroundColor(WatchTheme.background)
   }
 }

@@ -186,6 +186,32 @@ test('actual companion client validates/saves WAV and recovers a lost ACK reply 
   assert.ok(fs.existsSync(saved.path));
 });
 
+test('whole-session offers larger than 100 MB are accepted up to the bounded phone library limit', async t => {
+  const dir = fixture(t), h = createSyncHarness(dir); t.after(h.dispose);
+  const id = triggeredFileName(1793520000000, 1, 48000, 'sound');
+  const phone = h.phoneClient({ filesDir: dir });
+  phone.sourceId = 'test-source';
+  phone.destination = () => '/verified/recording.wav';
+  phone.matches = async () => true; // Exercise offer/ACK validation without allocating gigabytes.
+  for (const bytes of [100 * 1024 * 1024 + 44, 48000 * 2 * 6 * 3600 + 44, 2 * 1024 * 1024 * 1024]) {
+    const sent = [];
+    phone.request = async (type) => {
+      sent.push(type);
+      if (type === 'GET_RECORDING') return { type: 'RECORDING_OFFER', recordingId: id,
+        transferId: 'transfer', sha256: 'a'.repeat(64), bytes, recording: { id, bytes } };
+      return { type: type === 'ACK_RECORDING' ? 'RECORDING_ACKED' : 'CANCELLED' };
+    };
+    if (bytes < 2 * 1024 * 1024 * 1024) {
+      const saved = await phone.download(id);
+      assert.equal(saved.recording.bytes, bytes);
+      assert.deepEqual(sent, ['GET_RECORDING', 'ACK_RECORDING']);
+    } else {
+      await assert.rejects(phone.download(id), /文件信息无效/);
+      assert(!sent.includes('ACK_RECORDING'));
+    }
+  }
+});
+
 test('corrupted file is never acknowledged; retry obtains a verified durable copy', async t => {
   const dir = fixture(t); const id = wav(dir);
   const phoneDir = path.join(dir, 'phone'); fs.mkdirSync(phoneDir);

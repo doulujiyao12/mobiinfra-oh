@@ -23,6 +23,7 @@ export struct RecordingSettingsView {
   @Prop hasRecord: boolean = false;
   @Prop hasAudio: boolean = false;
   @Prop canResume: boolean = false;
+  @Prop watchRecording: boolean = false;
   onEngineChange: (engine: string) => void = (_engine: string): void => {};
   onSpeakerChange: (enabled: boolean) => void = (_enabled: boolean): void => {};
   onSearchModeChange: (enabled: boolean) => void = (_enabled: boolean): void => {};
@@ -45,17 +46,24 @@ export struct RecordingSettingsView {
   @Builder private Transcription() {
     Column({ space: 0 }) {
       Column({ space: 12 }) {
-        Text('转写模型').fontSize(17).fontColor(AppTheme.text('#172033')).width('100%')
-        Row({ space: 8 }) {
-          Button('系统模型').fontSize(15).height(38).layoutWeight(1).padding(0)
-            .fontColor(this.systemModel() ? Color.White : AppTheme.text('#737D90'))
-            .backgroundColor(this.systemModel() ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
-            .onClick((): void => { this.onEngineChange('system'); })
-          Button('SenseVoice').fontSize(15).height(38).layoutWeight(1).padding(0)
-            .fontColor(!this.systemModel() ? Color.White : AppTheme.text('#737D90'))
-            .backgroundColor(!this.systemModel() ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
-            .onClick((): void => { this.onEngineChange('sensevoice'); })
-        }.width('100%')
+        if (this.watchRecording) {
+          Row() {
+            Text('转写模型').fontSize(17).fontColor(AppTheme.text('#172033')).layoutWeight(1)
+            Text('SenseVoice').fontSize(16).fontColor(AppTheme.text('#007AFF'))
+          }.width('100%')
+        } else {
+          Text('转写模型').fontSize(17).fontColor(AppTheme.text('#172033')).width('100%')
+          Row({ space: 8 }) {
+            Button('系统模型').fontSize(15).height(38).layoutWeight(1).padding(0)
+              .fontColor(this.systemModel() ? Color.White : AppTheme.text('#737D90'))
+              .backgroundColor(this.systemModel() ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
+              .onClick((): void => { this.onEngineChange('system'); })
+            Button('SenseVoice').fontSize(15).height(38).layoutWeight(1).padding(0)
+              .fontColor(!this.systemModel() ? Color.White : AppTheme.text('#737D90'))
+              .backgroundColor(!this.systemModel() ? AppTheme.filledBackground('#5260ED') : AppTheme.background('#EDEFF5'))
+              .onClick((): void => { this.onEngineChange('sensevoice'); })
+          }.width('100%')
+        }
       }.width('100%').padding(16)
       this.CellDivider()
       Row() {

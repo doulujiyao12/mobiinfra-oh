@@ -1,6 +1,8 @@
 // Pure binary/filename logic is also exercised on the host by tests/audio-core.test.mjs.
 export const WAV_HEADER_BYTES: number = 44;
 export const OUTPUT_SAMPLE_RATE: number = 16000;
+// Legacy cm_ filenames used fixed five-minute parts. Retain this only to read
+// their original timestamps; new sessions no longer rotate files at this size.
 export const SEGMENT_SECONDS: number = 300;
 export const MAX_SESSION_SECONDS: number = 6 * 60 * 60;
 
@@ -57,7 +59,8 @@ export class RecordingName {
 }
 
 export function parseRecordingName(name: string): RecordingName | undefined {
-  // Version 2 timestamps describe the actual start of each detected clip.
+  // Version 2 timestamps describe the first saved audio: a legacy detected
+  // clip or a new whole recording session. Both retain the same filename format.
   const detected: RegExpMatchArray | null = name.match(/^cm2_(\d{13})_(\d{4,6})_(16000|48000)_(sound|speech)\.wav(\.part)?$/);
   if (detected !== null) {
     const result: RecordingName = new RecordingName();

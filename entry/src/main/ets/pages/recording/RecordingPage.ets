@@ -46,6 +46,7 @@ const RECORDING_DOCK_INSET: number = 72;
 // Keep the title's fade inside the breathing space above the first controls.
 const RECORDING_TITLE_FADE_HEIGHT: number = 8;
 interface VoiceReference { recordId: string; modelId: string; name: string; embedding: number[]; }
+interface PendingWatchProcessing { recordIds: string[]; queue: number; transferError: string; }
 
 @Entry
 @Component
@@ -133,6 +134,7 @@ struct RecordingPage {
   private watchSync: RecordingWatchSync = new RecordingWatchSync();
   private jobKind: string = '';
   private queueEpoch: number = 0;
+  private pendingWatchProcessing: PendingWatchProcessing | null = null;
   private recordingStartedAt: number = 0;
   private startingRecording: boolean = false;
   private timer: number = -1;
@@ -192,6 +194,7 @@ struct RecordingPage {
     this.stopRecordingSearch(false);
     if (this.externalInteraction) { return; }
     if (this.recording) { return; }
+    this.pendingWatchProcessing = null;
     if (this.busy || this.watchQueueRunning) { this.cancel(); }
     this.playback.stop().catch((): void => {}); this.playing = -2;
   }
@@ -458,6 +461,7 @@ struct RecordingPage {
       this.externalInteraction = false; this.preparingModels = false;
       if (this.alive && epoch === this.epoch) { this.busy = false; this.status = ''; this.modelCount = this.models.readyCount(); }
     }
+    if (this.alive && epoch === this.epoch && !this.error) { await this.resumePendingWatchProcessing(); }
   }
   private saveModelSource(): void {
     if (this.busy || this.models === null) { return; }
@@ -466,18 +470,21 @@ struct RecordingPage {
       this.modelSourceSaved = true; this.error = '';
     } catch (e) { this.message(e as Error); }
   }
-  private async analyze(restart: boolean = false, summarizeAfter: boolean = this.autoSummary): Promise<void> {
-    if (this.busy || this.selected === null || this.models === null || this.store === null) { return; }
-    if (!this.store.hasAudio(this.selected.id)) { this.error = '音频已删除，无法重新转写；已有文字和摘要仍可查看'; return; }
-    const systemAsr = this.useSystemAsr();
-    if (!systemAsr && !this.models.readyForTranscription(this.separateSpeakers)) { this.showModels = true; return; }
+  private async analyze(restart: boolean = false, summarizeAfter: boolean = this.autoSummary): Promise<RecordingRecord | null> {
+    if (this.busy || this.selected === null || this.models === null || this.store === null) { return null; }
+    if (!this.store.hasAudio(this.selected.id)) { this.error = '音频已删除，无法重新转写；已有文字和摘要仍可查看'; return null; }
+    const systemAsr = this.useSystemAsr(this.selected);
+    if (!systemAsr && !this.models.readyForTranscription(this.separateSpeakers)) {
+      this.showModels = true; this.error = '请先下载 SenseVoice 语音模型，录音已保存'; return null;
+    }
     let record = this.selected; let epoch = ++this.epoch;
+    let completed: RecordingRecord | null = null;
     const systemRunner: RecordingSystemAsrRunner | null = systemAsr ? new RecordingSystemAsrRunner() : null;
     this.systemAsr = systemRunner;
     this.busy = true; this.jobKind = 'analysis'; this.progress = 0; this.error = ''; this.status = '正在准备转写';
     try {
       await this.playback.stop();
-      if (!this.alive || epoch !== this.epoch) { return; }
+      if (!this.alive || epoch !== this.epoch) { return null; }
       this.playing = -2;
       const job: RecordingJob = { audioPath: this.store.audioPath(record.id), modelDir: this.models.directory,
         language: this.languages[this.languageIndex], restart: restart, diarization: this.separateSpeakers };
@@ -491,7 +498,7 @@ struct RecordingPage {
         }
         result = await systemRunner.run(job, this.store.systemAsrPath(record.id), report);
       } else { result = await this.analyzer.run(job, report); }
-      if (!this.alive || epoch !== this.epoch) { return; }
+      if (!this.alive || epoch !== this.epoch) { return null; }
       record.analysis = result; record.transcriptionComplete = true; record.summary = undefined; record.localSummaryDraft = undefined;
       record.transcriptionEngine = systemAsr ? 'system' : 'sensevoice';
       record.duration = result.duration; this.store.save(record);
@@ -500,6 +507,7 @@ struct RecordingPage {
       this.store.clearSystemAsrDraft(record.id);
       this.selected = record; this.filterSpeaker = -2; this.visibleSegments = 60; this.reload();
       this.status = result.speech.length === 0 ? '未检测到人声，原录音已保留' : '转写已保存';
+      completed = record;
     } catch (e) {
       if (this.alive && epoch === this.epoch) {
         if (systemRunner !== null && (record.analysis === null || record.transcriptionComplete === false)) {
@@ -511,11 +519,13 @@ struct RecordingPage {
     }
     finally { if (this.systemAsr === systemRunner) { this.systemAsr = null; } if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
     if (epoch === this.epoch && summarizeAfter && !this.error && record.analysis !== null &&
-      record.analysis.segments.some((segment: RecordingSegment): boolean => segment.text.trim().length > 0)) { await this.summarize(); }
+      record.analysis.segments.some((segment: RecordingSegment): boolean => segment.text.trim().length > 0)) { return await this.summarize(); }
+    return epoch === this.epoch ? completed : null;
   }
-  private async summarize(restart: boolean = false): Promise<void> {
-    if (this.busy || this.selected === null || this.store === null) { return; }
+  private async summarize(restart: boolean = false): Promise<RecordingRecord | null> {
+    if (this.busy || this.selected === null || this.store === null) { return null; }
     let record = this.selected; let epoch = ++this.epoch;
+    let completed: RecordingRecord | null = null;
     this.busy = true; this.jobKind = 'summary'; this.error = ''; this.progress = 0;
     try {
       let summary = await this.summaryService.generate(record, (text: string): void => {
@@ -527,9 +537,10 @@ struct RecordingPage {
           this.progress = Math.round(completed * 100 / Math.max(1, total));
           if (record.summary?.source === 'local') { this.detailTab = 'summary'; }
         } });
-      if (!this.alive || epoch !== this.epoch) { return; }
+      if (!this.alive || epoch !== this.epoch) { return null; }
       applyRecordingSummary(record, summary); this.store.save(record); this.selected = record; this.refreshSelected(); this.reload();
       this.detailTab = 'summary'; this.progress = 100; this.status = '摘要已保存';
+      completed = record;
     } catch (e) {
       if (epoch === this.epoch) {
         let message = (e as Error).message || String(e);
@@ -546,6 +557,7 @@ struct RecordingPage {
       }
     }
     finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
+    return epoch === this.epoch ? completed : null;
   }
   private cancel(): void {
     if (this.jobKind === 'live-finalizing' && this.live !== null) {
@@ -557,6 +569,7 @@ struct RecordingPage {
     }
     if (this.preparingModels) { this.models?.cancel(); this.status = '正在停止模型准备'; return; }
     let transcribing = this.jobKind === 'analysis';
+    this.pendingWatchProcessing = null;
     this.epoch++; this.queueEpoch++; this.queueRemaining = 0; this.watchQueueRunning = false;
     this.analyzer.cancel(); this.systemAsr?.cancel(); this.summaryService.cancel(); this.watchSync.cancel().catch((): void => {});
     this.live?.cancel();
@@ -565,10 +578,14 @@ struct RecordingPage {
       '转写已暂停，已完成的进度已保存，稍后可继续' : '已停止，录音和已有结果已保留';
   }
   private canResumeAnalysis(): boolean {
-    return this.selected !== null && this.store !== null && (this.useSystemAsr() ?
+    return this.selected !== null && this.store !== null && (this.useSystemAsr(this.selected) ?
       this.store.hasSystemAsrDraft(this.selected.id) : this.store.hasAnalysisDraft(this.selected.id, this.separateSpeakers));
   }
-  private useSystemAsr(): boolean { return this.transcriptionEngine === 'system' && !this.separateSpeakers; }
+  private useSystemAsr(record: RecordingRecord | null = null): boolean {
+    // Watch files use SenseVoice independently of the preference for phone
+    // recording/live transcription. Do not overwrite the user's phone setting.
+    return record?.watch === undefined && this.transcriptionEngine === 'system' && !this.separateSpeakers;
+  }
   private selectTranscriptionEngine(engine: string): void {
     if (this.busy || this.recording) { return; }
     this.transcriptionEngine = engine;
@@ -793,6 +810,7 @@ struct RecordingPage {
   }
   private async syncWatchDevice(): Promise<void> {
     if (this.busy || this.watchQueueRunning || this.store === null || this.watchDevice === null) { return; }
+    if (this.pendingWatchProcessing !== null) { this.showModels = true; return; }
     const selection: RecordingWatchSelection = { sourceId: this.watchSourceId,
       recordingIds: selectWatchRecordings(this.watchItems, this.watchSelectedIds, [], true) };
     if (!selection.sourceId || selection.recordingIds.length === 0) { return; }
@@ -828,22 +846,56 @@ struct RecordingPage {
     }
     finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
     if (queue !== this.queueEpoch || !this.alive || !this.watchAutoAnalyze || received.length === 0) { return; }
+    // Reserve the queue before dismissing the transfer sheet. Its deferred
+    // disappearance callback must not cancel the next transcription stage.
+    this.watchQueueRunning = true;
     this.showWatch = false;
+    await this.completeWatchProcessing(received, queue, transferError);
+  }
+  private async completeWatchProcessing(received: RecordingRecord[], queue: number, transferError: string): Promise<void> {
+    if (queue !== this.queueEpoch || !this.alive || received.length === 0) { return; }
+    const needsTranscription = received.some((record: RecordingRecord): boolean =>
+      watchRecordingProcessingStage(record) === 'transcribe');
+    if (needsTranscription && (this.models === null || !this.models.readyForTranscription(this.separateSpeakers))) {
+      this.pendingWatchProcessing = { recordIds: received.map((record: RecordingRecord): string => record.id),
+        queue: queue, transferError: transferError };
+      this.watchQueueRunning = false; this.queueRemaining = 0;
+      this.status = '已接收 ' + received.length + ' 条录音，下载 SenseVoice 后自动继续转写与摘要';
+      this.error = transferError; this.showModels = true;
+      AppLogger.info('WatchRecording', 'queue waiting for SenseVoice received=' + received.length);
+      return;
+    }
+    this.pendingWatchProcessing = null;
+    this.watchQueueRunning = true; this.showModels = false;
     const failures = await this.processWatchRecordings(received, queue);
     if (this.alive && queue === this.queueEpoch) {
       this.error = [transferError, failures.length > 0 ? failures.length + ' 条录音未处理完成，原录音及已有结果已保留：' + failures.slice(0, 2).join('；') : '']
         .filter((text: string): boolean => text.length > 0).join('\n');
-      if (!this.error && !this.showModels) { this.status = '已同步 ' + received.length + ' 条录音，转写与摘要处理完成'; }
+      if (!this.error) { this.status = '已同步 ' + received.length + ' 条录音，转写与摘要处理完成'; }
     }
+  }
+  private async resumePendingWatchProcessing(): Promise<void> {
+    const pending = this.pendingWatchProcessing;
+    if (pending === null || !this.alive || pending.queue !== this.queueEpoch || this.busy ||
+      this.store === null || this.models === null || !this.models.readyForTranscription(this.separateSpeakers)) { return; }
+    // Read current saved records: users may have renamed or removed audio while
+    // the download sheet was open. Never restore an old transferred snapshot.
+    const ids = new Set<string>(pending.recordIds);
+    const received = this.store.list().filter((record: RecordingRecord): boolean => ids.has(record.id));
+    this.pendingWatchProcessing = null;
+    if (received.length === 0) { this.status = '录音列表已更新'; return; }
+    AppLogger.info('WatchRecording', 'queue resuming after SenseVoice preparation received=' + received.length);
+    await this.completeWatchProcessing(received, pending.queue, pending.transferError);
   }
   private async processWatchRecordings(received: RecordingRecord[], queue: number): Promise<string[]> {
     const pending = received.filter((record: RecordingRecord): boolean => watchRecordingProcessingStage(record) !== 'done');
     const failures: string[] = [];
     this.watchQueueRunning = true;
+    AppLogger.info('WatchRecording', 'queue start received=' + received.length + ' pending=' + pending.length);
     try {
       for (let index = 0; index < pending.length; index++) {
         if (queue !== this.queueEpoch || !this.alive) { break; }
-        const record = pending[index];
+        let record = pending[index];
         this.queueRemaining = pending.length - index; this.selected = record; this.detailTab = 'text';
         this.filterSpeaker = -2; this.visibleSegments = 60; this.error = '';
         this.status = '正在处理手表录音 ' + (index + 1) + '/' + pending.length;
@@ -851,19 +903,44 @@ struct RecordingPage {
         try {
           // The watch queue owns both stages. Do not let the general auto-summary
           // preference skip this queue's requested summary, or run it twice.
-          if (watchRecordingProcessingStage(record) === 'transcribe') { await this.analyze(false, false); }
+          if (watchRecordingProcessingStage(record) === 'transcribe') {
+            const transcribed = await this.analyze(false, false);
+            if (queue !== this.queueEpoch || !this.alive) { break; }
+            if (transcribed === null) { throw new Error(this.error || '转写未完成，录音已保留'); }
+            // @State can wrap/replace the selected record. Advance from the
+            // operation's saved result, never the stale pre-transfer reference.
+            record = transcribed; this.selected = record;
+            AppLogger.info('WatchRecording', 'transcribed id=' + record.id + ' item=' + (index + 1) + '/' + pending.length);
+          }
           if (queue !== this.queueEpoch || !this.alive) { break; }
-          if (this.showModels) { this.status = '请先准备转写模型，录音已保存'; break; }
-          if (!this.error && watchRecordingProcessingStage(record) === 'summarize') { await this.summarize(); }
+          if (!this.error && watchRecordingProcessingStage(record) === 'summarize') {
+            const summarized = await this.summarize();
+            if (queue !== this.queueEpoch || !this.alive) { break; }
+            if (summarized === null) { throw new Error(this.error || '摘要未完成，转写已保留'); }
+            record = summarized;
+            AppLogger.info('WatchRecording', 'summarized id=' + record.id + ' item=' + (index + 1) + '/' + pending.length);
+          }
+          if (!this.error && watchRecordingProcessingStage(record) !== 'done') {
+            throw new Error('录音尚未处理完成，已有结果已保留');
+          }
         } catch (e) { this.error = (e as Error).message; }
         if (queue !== this.queueEpoch || !this.alive) { break; }
         if (this.error) {
           failures.push(this.recordTitle(record) + '：' + this.error);
           AppLogger.warn('WatchRecording', 'process failed id=' + record.id + ' error=' + this.error);
+        } else {
+          AppLogger.info('WatchRecording', 'process complete id=' + record.id + ' item=' + (index + 1) + '/' + pending.length);
         }
       }
-    } finally { if (queue === this.queueEpoch) { this.queueRemaining = 0; this.watchQueueRunning = false; } }
+    } finally {
+      AppLogger.info('WatchRecording', 'queue finish failed=' + failures.length + ' cancelled=' + (queue !== this.queueEpoch || !this.alive));
+      if (queue === this.queueEpoch) { this.queueRemaining = 0; this.watchQueueRunning = false; }
+    }
     return failures;
+  }
+  private watchPanelClosed(): void {
+    this.showWatch = false;
+    if (!this.watchQueueRunning && (this.jobKind === 'watch' || this.jobKind === 'watch-list')) { this.cancel(); }
   }
   private clockTime(date: Date): string {
     return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
@@ -894,7 +971,11 @@ struct RecordingPage {
   @Builder private ModelsPanel() {
     Scroll() {
       Column({ space: 20 }) {
-        Text('离线语音模型').fontSize(22).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
+        Text('SenseVoice 语音模型').fontSize(22).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
+        if (this.pendingWatchProcessing !== null) {
+          Text('手表录音已保存，下载后自动继续转写与摘要。')
+            .fontSize(15).lineHeight(23).fontColor(AppTheme.text('#007AFF')).width('100%')
+        }
         Text('支持普通话、英语、日语、韩语和粤语')
           .fontSize(15).lineHeight(23).fontColor(AppTheme.text('#737D90')).width('100%')
         Row({ space: 14 }) {
@@ -1301,6 +1382,7 @@ struct RecordingPage {
       RecordingSettingsView({ busy: this.busy, separateSpeakers: this.separateSpeakers,
         speakerSwitchOn: this.speakerSwitchOn, confirmingSpeakers: this.confirmingSpeakerSeparation,
         modelsReady: this.modelCount === RECORDING_MODELS.length, hasRecord: this.selected !== null,
+        watchRecording: this.selected?.watch !== undefined,
         hasAudio: this.audioAvailable(), canResume: this.canResumeAnalysis(),
         onEngineChange: (engine: string): void => { this.selectTranscriptionEngine(engine); },
         onSpeakerChange: (value: boolean): void => { this.setSpeakerSeparation(value).catch((e: Error): void => { this.message(e); }); },
@@ -1523,10 +1605,7 @@ struct RecordingPage {
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showModels = false; } })
       Row().width(0).height(0)
         .bindSheet(this.showWatch, this.WatchPanel(), { height: SheetSize.LARGE, showClose: true,
-          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => {
-            this.showWatch = false;
-            if (this.jobKind === 'watch' || this.jobKind === 'watch-list') { this.cancel(); }
-          } })
+          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.watchPanelClosed(); } })
       Row().width(0).height(0)
         .bindSheet(this.showSpeakers, this.SpeakersPanel(), { height: SheetSize.LARGE, showClose: true,
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showSpeakers = false; this.save(); } })

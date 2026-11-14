@@ -85,3 +85,34 @@ test('speech mode obeys VAD rather than loudness, with exact full frames at eith
     assert.equal(calls, 260);
   }
 });
+
+test('sound sensitivity changes the trigger for quiet audio at either supported rate', () => {
+  for (const rate of [16000, 48000]) {
+    for (const [amplitude, expected] of [[200, ['sensitive']], [400, ['sensitive', 'normal']],
+      [800, ['sensitive', 'normal', 'strict']]]) {
+      for (const sensitivity of ['sensitive', 'normal', 'strict']) {
+        const output = sink();
+        const gate = new AudioGate(rate, 'sound', () => { throw Error('sound must not invoke VAD'); }, sensitivity);
+        gate.consume(samples(200, rate, amplitude), output);
+        assert.equal(gate.isSaving(), expected.includes(sensitivity), `${rate} / ${amplitude} / ${sensitivity}`);
+        if (gate.isSaving()) {
+          gate.consume(samples(1980, rate), output);
+          assert.equal(gate.isSaving(), true, 'sensitivity must not shorten the two-second tail');
+          gate.consume(samples(20, rate), output);
+          assert.equal(gate.isSaving(), false);
+        }
+      }
+    }
+  }
+});
+
+test('all sensitivity levels preserve the onset window and discard short isolated sounds', () => {
+  for (const sensitivity of ['sensitive', 'normal', 'strict']) {
+    const output = sink(), gate = new AudioGate(16000, 'sound', () => false, sensitivity);
+    gate.consume(samples(100, 16000, 5000), output);
+    gate.consume(samples(2000), output);
+    assert.equal(output.clips.length, 0, sensitivity);
+    gate.consume(samples(120, 16000, 5000), output);
+    assert.equal(gate.isSaving(), true, sensitivity);
+  }
+});

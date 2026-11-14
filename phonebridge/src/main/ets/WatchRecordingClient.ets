@@ -4,6 +4,10 @@ import { fileIo as fs, hash } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 
+// Match the phone recording library's bounded WAV limit. One watch recording
+// can now span a whole session rather than a five-minute file.
+const MAX_RECORDING_BYTES: number = 2 * 1024 * 1024 * 1024 - 1;
+
 const PROTOCOL: string = 'clawmate.recordings';
 export function watchConnectionMessage(error: BusinessError): string {
   if (error.code === 1008500004) { return '当前手机应用尚未开通 Wear Engine 服务，请在华为开发者平台开通后重试。'; }
@@ -243,7 +247,7 @@ export class WatchRecordingClient {
       offer = await this.request('GET_RECORDING', body);
       if (offer.type !== 'RECORDING_OFFER' || offer.recordingId !== recordingId ||
         !/^[a-f0-9]{64}$/.test(offer.sha256) || !Number.isSafeInteger(offer.bytes) || offer.bytes <= 44 ||
-        offer.bytes > 100 * 1024 * 1024 || offer.recording.id !== recordingId || offer.recording.bytes !== offer.bytes) {
+        offer.bytes > MAX_RECORDING_BYTES || offer.recording.id !== recordingId || offer.recording.bytes !== offer.bytes) {
         throw new Error('手表文件信息无效');
       }
       let destination: string = this.destination(recordingId);

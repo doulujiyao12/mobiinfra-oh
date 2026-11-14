@@ -1,4 +1,5 @@
 export type RecordingMode = 'sound' | 'speech';
+export type RecordingSensitivity = 'sensitive' | 'normal' | 'strict';
 
 export class RecordingInfo {
   name: string = '';
@@ -19,6 +20,7 @@ export class CaptureCommand {
   name: string = '';
   reason: string = '';
   mode: RecordingMode = 'sound';
+  sensitivity: RecordingSensitivity = 'normal';
 }
 
 export class CaptureEvent {
@@ -61,4 +63,6 @@ export class WatchState {
   listeningMs: number = 0;
   saving: boolean = false;
   mode: RecordingMode = 'sound';
+  soundSensitivity: RecordingSensitivity = 'normal';
+  speechSensitivity: RecordingSensitivity = 'normal';
 }
