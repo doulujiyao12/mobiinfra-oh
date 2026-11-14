@@ -55,7 +55,7 @@ struct PersonInfoPage {
       Row() {
         Button('‹', { type: ButtonType.Circle }).width(40).height(40).fontSize(30)
           .fontColor(AppTheme.text('#172033')).backgroundColor(Color.Transparent).onClick((): void => { this.goBack(); })
-          .accessibilityText('返回个人信息')
+          .accessibilityText('返回人物资料')
       }.width(64)
       Text(this.person.label).fontSize(19).fontWeight(FontWeight.Medium).textAlign(TextAlign.Center).layoutWeight(1)
         .fontColor(AppTheme.text('#172033'))
