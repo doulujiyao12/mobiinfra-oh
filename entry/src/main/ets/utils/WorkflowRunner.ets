@@ -8,6 +8,7 @@ import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
+import { recoverWorkflowStructuredFields } from './WorkflowStructuredRecovery';
 import { WorkflowStorage } from './WorkflowStorage';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser } from './AgentActionParser';
@@ -29,7 +30,7 @@ import {
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
 export const DEFAULT_MAX_GUI_STEPS: number = 20;
 export const DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT: number = 2;
-const SUMMARY_JOB_RETRY_LIMIT: number = 1;
+const VLM_QA_MAX_ATTEMPTS: number = 2;
 
 export function resolveGuiTaskMaxSteps(step: WorkflowStep): number {
   let raw = step.max_steps;
@@ -134,6 +135,12 @@ interface ToolOutput {
   structured_output?: WorkflowJsonMap;
   deferred?: boolean;
   deferred_error?: string;
+}
+
+interface VlmQaResponse {
+  response: string;
+  structured_output?: WorkflowJsonMap;
+  recovered_fields?: string[];
 }
 
 interface SummaryJobResult {
@@ -542,7 +549,7 @@ export class WorkflowRunner {
     if (status === 'success') {
       AgentExecutionController.finishExecution('Workflow 完成');
     } else {
-      AgentExecutionController.finishExecution('Workflow ' + status);
+      AgentExecutionController.finishExecution('Workflow ' + status + '：' + message);
     }
     this.debug('run finished status=' + status + ', returnedToApp=' + String(returnedToApp) +
       ', durationMs=' + this.elapsedMs(this.runStartedAt.getTime()));
@@ -673,7 +680,8 @@ export class WorkflowRunner {
         let actualId = actualPrefix.length === 0 ? localId : actualPrefix + '.' + localId;
         let stopped = await this.executeOneStep(steps[i], actualId, aliases);
         if (stopped) {
-          throw new Error('workflow stopped at step ' + actualId);
+          let error = this.stepResults[actualId]?.error || '';
+          throw new Error('workflow stopped at step ' + actualId + (error.length > 0 ? ': ' + error : ''));
         }
       }
       return aliases;
@@ -1219,7 +1227,7 @@ export class WorkflowRunner {
     let promptBody = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
     let prompt = mode === 'summary' ? summaryDateContext.withDatePrompt(promptBody, 'VLM 图片问答问题') :
       this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
-    if (requiresStructuredOutput) {
+    if (inputs.json_schema !== undefined && inputs.json_schema !== null) {
       prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
         ArkJSON.stringify(inputs.json_schema);
     }
@@ -1239,7 +1247,9 @@ export class WorkflowRunner {
     this.log('VLM QA request started: ' + actualId);
     // Summary is the only visual evidence extraction stage. Preserve full page
     // transcripts (including speakers and replies) instead of truncating at 1024.
-    let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), mode === 'summary' ? 4096 : 1024);
+    let result = await this.requestVlmQa(actualId, prompt, imageBase64, mode === 'summary' ? 4096 : 1024,
+      inputs.json_schema, true);
+    let response = result.response;
     this.ensureNotCancelled();
     this.log('VLM QA response:\n' + response);
     let output: ToolOutput = {
@@ -1249,9 +1259,8 @@ export class WorkflowRunner {
       question: question,
       response: response
     };
-    let structuredOutput: WorkflowJsonMap | undefined = undefined;
-    if (requiresStructuredOutput) {
-      structuredOutput = this.normalizeStructuredOutput(this.extractJsonMap(response), inputs.json_schema);
+    let structuredOutput = result.structured_output;
+    if (structuredOutput !== undefined) {
       output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
@@ -1261,6 +1270,88 @@ export class WorkflowRunner {
       output.daily_log_path = dailyLogPath;
     }
     return output as Object as WorkflowJsonMap;
+  }
+
+  // Only inference and response validation are retried. Device actions and log commits
+  // stay outside this boundary, so a retry reads the same evidence without duplicating work.
+  private async requestVlmQa(actualId: string, prompt: string, imageBase64: string, maxTokens: number,
+    schema?: Object, showProgress: boolean = false): Promise<VlmQaResponse> {
+    let lastError = '';
+    for (let attempt = 1; attempt <= VLM_QA_MAX_ATTEMPTS; attempt++) {
+      this.ensureNotCancelled();
+      if (showProgress) {
+        AgentExecutionController.updateFloatText('Step ' + actualId + ': ' +
+          (attempt === 1 ? '正在读取截图' : '读取失败，正在重试') +
+          '（' + attempt + '/' + VLM_QA_MAX_ATTEMPTS + '）');
+      }
+      let response = '';
+      try {
+        response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), maxTokens);
+        this.ensureNotCancelled();
+        let result = this.validateVlmQaResponse(response, schema);
+        if (result.recovered_fields !== undefined && result.recovered_fields.length > 0) {
+          this.saveVlmQaResponse(actualId, 'vlm-attempt-' + attempt + '-recovered-response.txt', response);
+          this.log('VLM QA recovered misplaced fields (' + actualId + '): ' + result.recovered_fields.join(', '));
+        }
+        return result;
+      } catch (e) {
+        this.ensureNotCancelled();
+        let error = e as Error;
+        lastError = error.message || String(e);
+        this.saveVlmQaResponse(actualId, 'vlm-attempt-' + attempt + '-response.txt', response);
+        this.log('VLM QA attempt failed (' + actualId + ') ' + attempt + '/' + VLM_QA_MAX_ATTEMPTS + ': ' + lastError);
+      }
+    }
+    throw new Error('截图读取失败（已尝试 ' + VLM_QA_MAX_ATTEMPTS + ' 次）：' + lastError +
+      '；截图与已完成的采集内容已保留');
+  }
+
+  private validateVlmQaResponse(response: string, schema?: Object): VlmQaResponse {
+    if (response.trim().length === 0) {
+      throw new Error('模型返回了空内容');
+    }
+    let parsed: WorkflowJsonMap | null = null;
+    try {
+      let value = ArkJSON.parse(response.trim()) as WorkflowJsonValue;
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        parsed = value as WorkflowJsonMap;
+      }
+    } catch (e) {
+      // Structured replies may use the existing fence/JSON repair path. Plain
+      // transcripts can quote JSON messages; embedded examples are not API errors.
+      if (schema !== undefined && schema !== null) {
+        parsed = this.valueToJsonMap(response);
+      }
+    }
+    // chatMessages deliberately returns this error envelope for legacy Agent callers.
+    // It is a failed request, never a transcript or a valid workflow decision.
+    if (parsed !== null && parsed['action'] === 'error') {
+      throw new Error(this.getMapString(parsed, 'reason') || '模型请求失败');
+    }
+    let result: VlmQaResponse = { response: response };
+    if (schema !== undefined && schema !== null) {
+      if (parsed === null) {
+        throw new Error('模型未返回可解析的 JSON 对象');
+      }
+      let fields = schema as WorkflowJsonMap;
+      let source = this.findStructuredOutputSource(parsed, Object.keys(fields));
+      let recovered = recoverWorkflowStructuredFields(source, fields);
+      result.structured_output = this.normalizeStructuredOutput(recovered.output, schema);
+      result.recovered_fields = recovered.fields;
+    }
+    return result;
+  }
+
+  private saveVlmQaResponse(actualId: string, fileName: string, response: string): void {
+    if (response.length === 0) {
+      return;
+    }
+    let path = this.runArtifactPath(actualId, fileName);
+    try {
+      WorkflowStorage.writeText(path, response);
+    } catch (e) {
+      this.log('VLM QA response could not be saved (' + actualId + '): ' + (e as Error).message);
+    }
   }
 
   private createSummaryJob(actualId: string, prompt: string, imageBase64: string, dateContext: WorkflowDateContext): PendingSummaryJob {
@@ -1275,15 +1366,13 @@ export class WorkflowRunner {
 
   private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
-      this.ensureNotCancelled();
-      let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), 4096);
-      this.ensureNotCancelled();
-      return this.normalizeSummaryJobResult({
+      let result = await this.requestVlmQa(actualId, prompt, imageBase64, 4096);
+      return {
         ok: true,
         actual_id: actualId,
-        response: response,
+        response: result.response,
         error: ''
-      });
+      };
     } catch (e) {
       let err = e as Error;
       return {
@@ -1293,29 +1382,6 @@ export class WorkflowRunner {
         error: err.message || String(e)
       };
     }
-  }
-
-  private normalizeSummaryJobResult(result: SummaryJobResult): SummaryJobResult {
-    if (result.ok && result.response.trim().length === 0) {
-      return {
-        ok: false,
-        actual_id: result.actual_id,
-        response: '',
-        error: 'empty VLM summary response'
-      };
-    }
-    return result;
-  }
-
-  private async resolveSummaryJob(job: PendingSummaryJob): Promise<SummaryJobResult> {
-    let result = await job.promise;
-    let retries = 0;
-    while (!result.ok && retries < SUMMARY_JOB_RETRY_LIMIT && !this.isCancellationRequested()) {
-      retries++;
-      this.log('VLM QA deferred retry (' + job.actual_id + ') #' + String(retries) + ': ' + result.error);
-      result = await this.startSummaryJob(job.actual_id, job.prompt, job.image);
-    }
-    return result;
   }
 
   private async flushPendingSummaryJobs(): Promise<void> {
@@ -1328,7 +1394,7 @@ export class WorkflowRunner {
     this.pendingSummaryJobs = [];
     let failures: string[] = [];
     for (let i = 0; i < jobs.length; i++) {
-      let result = await this.resolveSummaryJob(jobs[i]);
+      let result = await jobs[i].promise;
       if (this.isCancellationRequested()) {
         this.log('用户取消 workflow，停止等待后台 summary 写入');
         break;
@@ -1777,11 +1843,21 @@ export class WorkflowRunner {
     let usedKeys: Record<string, string> = {};
     for (let i = 0; i < schemaKeys.length; i++) {
       let schemaKey = schemaKeys[i];
+      let equivalentKeys = sourceKeys.filter((key: string): boolean =>
+        this.normalizeFieldName(key) === this.normalizeFieldName(schemaKey));
+      if (equivalentKeys.length > 1) {
+        throw new Error('模型结果包含重复或冲突的字段别名：' + schemaKey);
+      }
       let sourceKey = this.findEquivalentKey(sourceKeys, schemaKey);
       if (sourceKey.length === 0) {
-        continue;
+        throw new Error('模型结果缺少必要字段：' + schemaKey);
       }
-      normalized[schemaKey] = this.normalizeStructuredFieldValue(source[sourceKey], schemaMap[schemaKey]);
+      let value = this.normalizeStructuredFieldValue(source[sourceKey], schemaMap[schemaKey]);
+      let fieldType = this.schemaFieldType(schemaMap[schemaKey]);
+      if (!this.isStructuredFieldValue(value, fieldType)) {
+        throw new Error('模型结果字段类型不正确：' + schemaKey + '（需要 ' + fieldType + '）');
+      }
+      normalized[schemaKey] = value;
       usedKeys[sourceKey] = '1';
     }
 
@@ -1888,6 +1964,26 @@ export class WorkflowRunner {
     let fieldMap = schemaField as WorkflowJsonMap;
     let typeValue = fieldMap['type'];
     return typeof typeValue === 'string' ? typeValue.trim().toLowerCase() : '';
+  }
+
+  private isStructuredFieldValue(value: WorkflowJsonValue, fieldType: string): boolean {
+    if (fieldType === 'boolean') {
+      return typeof value === 'boolean';
+    }
+    if (fieldType === 'string') {
+      return typeof value === 'string';
+    }
+    if (fieldType === 'number' || fieldType === 'integer') {
+      return typeof value === 'number' && Number.isFinite(value) &&
+        (fieldType !== 'integer' || Number.isInteger(value));
+    }
+    if (fieldType === 'array') {
+      return Array.isArray(value);
+    }
+    if (fieldType === 'object') {
+      return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    return true;
   }
 
   private summaryFromJsonText(raw: string): string {
