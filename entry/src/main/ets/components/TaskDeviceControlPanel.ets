@@ -1,4 +1,3 @@
-import { AppTheme } from '../utils/AppTheme';
 import { common } from '@kit.AbilityKit';
 import { showToastSafely } from '../utils/PromptSafe';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
@@ -26,19 +25,29 @@ export struct TaskDeviceControlPanel {
     this.onModeChanged(mode);
   }
 
+  @Builder ModeOption(label: string, value: string) {
+    Button({ type: ButtonType.Normal }) {
+      Text(label).fontSize(14)
+        .fontWeight(this.mode === value ? FontWeight.Medium : FontWeight.Regular)
+        .fontColor(this.mode === value ? $r('app.color.ui_text_primary') : $r('app.color.ui_text_secondary'))
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .layoutWeight(1).height(36).padding({ left: 8, right: 8 }).borderRadius(10)
+    .backgroundColor(this.mode === value ? $r('app.color.ui_surface') : Color.Transparent)
+    .enabled(!this.busy).accessibilityText(label + (this.mode === value ? '，已选择' : ''))
+    .onClick((): void => { this.select(value); })
+  }
+
   build() {
-    Column({ space: 10 }) {
-      Text('任务控制方式').fontSize(15).fontWeight(FontWeight.Bold).width('100%')
-      Row({ space: 10 }) {
-        Button('电脑控制').layoutWeight(1).height(40).fontSize(14)
-          .backgroundColor(AppTheme.background(this.mode === 'pc' ? '#276EF1' : '#EEF1FF'))
-          .fontColor(AppTheme.text(this.mode === 'pc' ? Color.White : '#276EF1')).enabled(!this.busy)
-          .onClick(() => { this.select('pc'); })
-        Button('手机自己控制').layoutWeight(1).height(40).fontSize(14)
-          .backgroundColor(AppTheme.background(this.mode === 'phone' ? '#276EF1' : '#EEF1FF'))
-          .fontColor(AppTheme.text(this.mode === 'phone' ? Color.White : '#276EF1')).enabled(!this.busy)
-          .onClick(() => { this.select('phone'); })
+    Column({ space: 12 }) {
+      Row({ space: 14 }) {
+        Image($r('app.media.settings_phone')).width(24).height(24).objectFit(ImageFit.Contain)
+        Text('控制方式').fontSize(17).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
       }.width('100%')
-    }.width('86%').padding(14).backgroundColor(AppTheme.background(Color.White)).borderRadius(14).margin({ bottom: 16 })
+      Row({ space: 4 }) {
+        this.ModeOption('手机自己控制', 'phone')
+        this.ModeOption('电脑控制', 'pc')
+      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.ui_surface_soft'))
+    }.width('100%').padding({ left: 18, right: 18, top: 16, bottom: 16 })
   }
 }

@@ -72,62 +72,51 @@ export struct CollectionReminderPanel {
   }
 
   build() {
-    Column({ space: 6 }) {
-      Row({ space: 10 }) {
-        Text('采集提醒')
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(AppTheme.text('#11182F'))
-          .layoutWeight(1)
-          .maxLines(1)
-        Button(collectionReminderTimeText(this.reminder.hour, this.reminder.minute))
-          .height(34)
-          .padding({ left: 12, right: 12 })
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(AppTheme.text('#276EF1'))
-          .backgroundColor(AppTheme.background('#EAF2FF'))
-          .borderRadius(10)
-          .enabled(!this.saving)
-          .onClick((): void => { this.pickTime(); })
-        Toggle({ type: ToggleType.Switch, isOn: this.reminder.enabled })
-          .selectedColor('#276EF1')
-          .enabled(!this.saving)
-          .onChange((enabled: boolean): void => {
-            this.changeEnabled(enabled).catch((e: Error): void => {
-              AppLogger.errorCause('CollectionReminder', 'Toggle failed', e);
-            });
-          })
-      }
-      .width('100%')
-      Row({ space: 8 }) {
-        Text(this.description())
-          .fontSize(12)
-          .fontColor(AppTheme.text(this.reminder.errorText.length > 0 ? '#B42318' : '#6F7584'))
-          .layoutWeight(1)
-          .maxLines(3)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.reminder.errorText.length > 0 ||
-          (this.reminder.enabled && this.reminder.registeredStamp.length === 0)) {
-          Button('重试')
-            .height(30)
-            .fontSize(12)
-            .fontColor(AppTheme.text('#276EF1'))
-            .backgroundColor(AppTheme.background('#EAF2FF'))
-            .enabled(!this.saving)
-            .onClick((): void => {
-              this.changeEnabled(true).catch((e: Error): void => {
-                AppLogger.errorCause('CollectionReminder', 'Retry failed', e);
-              });
-            })
+    Row({ space: 12 }) {
+      Image($r('app.media.settings_automation')).width(24).height(24)
+        .objectFit(ImageFit.Contain).margin({ top: 6 })
+      Column({ space: 4 }) {
+        Row({ space: 8 }) {
+          Text('采集提醒').fontSize(17).fontColor($r('app.color.ui_text_primary'))
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Button('每天 ' + collectionReminderTimeText(this.reminder.hour, this.reminder.minute))
+            .height(36).padding({ left: 10, right: 10 }).fontSize(13)
+            .fontColor($r('app.color.ui_accent_blue'))
+            .backgroundColor($r('app.color.ui_surface_soft')).borderRadius(18)
+            .flexShrink(0).enabled(!this.saving)
+            .accessibilityText('修改提醒时间，每天 ' + collectionReminderTimeText(this.reminder.hour, this.reminder.minute))
+            .onClick((): void => { this.pickTime(); })
+        }.width('100%')
+        if (this.reminder.enabled || this.saving || this.reminder.errorText.length > 0) {
+          Row({ space: 8 }) {
+            Text(this.description()).fontSize(12)
+              .fontColor(AppTheme.text(this.reminder.errorText.length > 0 ? '#B42318' : '#6F7584'))
+              .layoutWeight(1).maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.reminder.errorText.length > 0 ||
+              (this.reminder.enabled && this.reminder.registeredStamp.length === 0)) {
+              Button('重试').height(30).fontSize(12).padding({ left: 10, right: 10 })
+                .fontColor($r('app.color.ui_accent_blue'))
+                .backgroundColor($r('app.color.ui_surface_soft')).flexShrink(0)
+                .enabled(!this.saving)
+                .onClick((): void => {
+                  this.changeEnabled(true).catch((e: Error): void => {
+                    AppLogger.errorCause('CollectionReminder', 'Retry failed', e);
+                  });
+                })
+            }
+          }.width('100%')
         }
-      }
-      .width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch, isOn: this.reminder.enabled })
+        .selectedColor($r('app.color.ui_accent_blue')).width(44).height(28).flexShrink(0)
+        .margin({ top: 4 }).accessibilityText('采集提醒').enabled(!this.saving)
+        .onChange((enabled: boolean): void => {
+          this.changeEnabled(enabled).catch((e: Error): void => {
+            AppLogger.errorCause('CollectionReminder', 'Toggle failed', e);
+          });
+        })
     }
-    .width('86%')
-    .padding(14)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(14)
-    .margin({ top: 2, bottom: 14 })
+    .width('100%').alignItems(VerticalAlign.Top)
+    .padding({ left: 18, right: 18, top: 12, bottom: 14 })
   }
 }

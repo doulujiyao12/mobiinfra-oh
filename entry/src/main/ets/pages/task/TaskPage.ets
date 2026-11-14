@@ -344,16 +344,6 @@ export struct TaskPage {
     return count;
   }
 
-  private enabledTaskCountForScene(sceneId: number): number {
-    let count = 0;
-    for (let i = 0; i < this.tasks.length; i++) {
-      if (this.tasks[i].sceneId === sceneId && this.tasks[i].enabled) {
-        count++;
-      }
-    }
-    return count;
-  }
-
   private isTaskExecutionBusy(): boolean {
     return this.batchRunning || this.preparingTaskId.length > 0 || this.runningTaskId.length > 0 ||
       this.phoneControlBusy || this.agentExecutionBusy;
@@ -621,7 +611,7 @@ export struct TaskPage {
     if (count === 0) {
       return '暂无开启任务';
     }
-    return '一键执行已开启任务（' + count + '）';
+    return '回顾你的一天';
   }
 
   private batchRunButtonEnabled(): boolean {
@@ -3828,94 +3818,42 @@ export struct TaskPage {
     }
   }
 
-  @Builder TaskExecutionHeaderPanel() {
-    Column() {
-      Row() {
-        Column() {
-          Text('任务执行')
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(AppTheme.text('#11182F'))
-            .maxLines(1)
-          Text('已开启 ' + this.enabledTaskCount() + ' / 全部 ' + this.tasks.length)
-            .fontSize(12)
-            .fontColor(AppTheme.text('#6F7584'))
-            .margin({ top: 7 })
-            .maxLines(1)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        Button('配置任务')
-          .width(92)
-          .height(36)
-          .fontSize(12)
-          .fontColor(AppTheme.text(Color.White))
-          .backgroundColor(AppTheme.filledBackground('#276EF1'))
-          .borderRadius(10)
-          .enabled(!this.isTaskExecutionBusy())
-          .onClick(() => { this.openConfigView(); })
-      }
-      .width('100%')
-    }
-    .width('86%')
-    .padding(18)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(14)
-    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
-    .margin({ top: 12, bottom: 18 })
-  }
-
-  @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
+  @Builder SimpleTaskRow(task: WorkflowTask) {
     Row() {
       // A separate tap region keeps switch interaction independent of navigation.
       Row() {
-        Text(task.icon)
-          .fontSize(12)
-          .fontColor(AppTheme.text(task.enabled ? scene.color : '#8E95A3'))
-          .fontWeight(FontWeight.Bold)
-          .width(40)
-          .height(40)
-          .textAlign(TextAlign.Center)
-          .backgroundColor(AppTheme.background(task.enabled ? '#F1F5FF' : '#F4F5F8'))
-          .borderRadius(12)
         Column() {
           Text(task.title)
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(AppTheme.text('#11182F'))
+            .fontSize(16)
+            .fontColor($r('app.color.ui_text_primary'))
             .width('100%')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
-            .fontSize(11)
-            .fontColor(AppTheme.text(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3'))
-            .margin({ top: 5 })
-            .maxLines(1)
+          if (this.runningTaskId === task.id || this.preparingTaskId === task.id) {
+            Text(this.runningTaskId === task.id ? '正在执行' : '正在准备…')
+              .fontSize(12).fontColor($r('app.color.ui_accent_blue')).margin({ top: 6 })
+          }
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        .margin({ left: 12 })
       }
       .layoutWeight(1)
-      .constraintSize({ minHeight: 66 })
-      .padding({ left: 14, right: 12, top: 12, bottom: 12 })
+      .constraintSize({ minHeight: 64 })
+      .padding({ left: 18, right: 12, top: 14, bottom: 14 })
       .accessibilityGroup(true)
       .accessibilityText('配置任务：' + task.title)
       .onClick((): void => { this.openConfigView(task.id); })
       Toggle({ type: ToggleType.Switch, isOn: task.enabled })
-        .selectedColor(AppTheme.background(scene.color))
+        .selectedColor($r('app.color.ui_accent_blue'))
         .width(44)
-        .height(26)
+        .height(28)
+        .flexShrink(0)
+        .accessibilityText(task.title)
         .enabled(!this.isTaskExecutionBusy())
         .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
     }
     .width('100%')
-    .constraintSize({ minHeight: 66 })
-    .padding({ right: 14 })
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(12)
-    .border({ width: 1, color: AppTheme.border(this.runningTaskId === task.id ? scene.color : '#E8EDF5') })
-    .margin({ top: 10 })
+    .padding({ right: 18 })
   }
 
   @Builder TaskExecutionSceneSection(scene: WorkflowSceneConfig) {
@@ -3923,27 +3861,30 @@ export struct TaskPage {
       Column() {
         Row() {
           Text(scene.label)
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(AppTheme.text('#11182F'))
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.ui_text_secondary'))
             .layoutWeight(1)
             .maxLines(1)
-          Text(this.enabledTaskCountForScene(scene.sceneId) + '/' + this.tasksForScene(scene.sceneId).length + ' 开启')
-            .fontSize(11)
-            .fontColor(AppTheme.text(scene.color))
-            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-            .backgroundColor(AppTheme.background('#F8F9FE'))
-            .borderRadius(8)
+          Text(String(this.tasksForScene(scene.sceneId).length))
+            .fontSize(13)
+            .fontColor($r('app.color.ui_text_muted'))
             .maxLines(1)
         }
         .width('100%')
-        ForEach(this.tasksForScene(scene.sceneId), (task: WorkflowTask) => {
-          this.SimpleTaskRow(task, scene)
-        }, (task: WorkflowTask) => this.taskRowRenderKey(task))
+        .padding({ left: 18, right: 18, bottom: 8 })
+        Column() {
+          ForEach(this.tasksForScene(scene.sceneId), (task: WorkflowTask, index: number) => {
+            if (index > 0) {
+              Divider().strokeWidth(0.5).color($r('app.color.ui_border')).margin({ left: 18, right: 18 })
+            }
+            this.SimpleTaskRow(task)
+          }, (task: WorkflowTask, index: number) => this.taskRowRenderKey(task) + '_' + index)
+        }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(22).clip(true)
       }
-      .width('86%')
+      .width('92%').constraintSize({ maxWidth: 720 })
       .alignItems(HorizontalAlign.Start)
-      .margin({ bottom: 18 })
+      .margin({ bottom: 22 })
     }
   }
 
@@ -3962,10 +3903,10 @@ export struct TaskPage {
           .margin({ top: 14 })
           .onClick(() => { this.openConfigView(); })
       }
-      .width('86%')
+      .width('92%').constraintSize({ maxWidth: 720 })
       .padding(22)
       .backgroundColor(AppTheme.background(Color.White))
-      .borderRadius(14)
+      .borderRadius(22)
       .margin({ bottom: 18 })
     } else {
       ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
@@ -3975,224 +3916,127 @@ export struct TaskPage {
   }
 
   @Builder BatchRunPanel() {
-    Column() {
-      if (this.batchRunStatusText.length > 0) {
-        Text(this.batchRunStatusText)
-          .fontSize(12)
-          .fontColor(AppTheme.text('#4E5666'))
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ bottom: 10 })
-      }
-      if (!this.batchRunning && this.reminderRequest.length > 0) {
-        Text('采集提醒已就绪，完成设置后点击下方开始')
-          .fontSize(12)
-          .fontColor(AppTheme.text('#276EF1'))
-          .margin({ bottom: 10 })
-      }
-      Button(this.batchPreparing && !this.batchRunning ? '正在准备…' : this.batchRunButtonText())
-        .width('100%')
-        .height(46)
-        .fontSize(15)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text(Color.White))
-        .backgroundColor(AppTheme.filledBackground(this.batchSyncing ? '#276EF1' : this.batchRunning ? '#B42318' :
-          (this.batchRunButtonEnabled() ? '#276EF1' : '#A9B7E9')))
-        .borderRadius(12)
+    Column({ space: 10 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text('采集任务').fontSize(20).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.ui_text_primary'))
+          Text('已开启 ' + this.enabledTaskCount() + ' / ' + this.tasks.length)
+            .fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button({ type: ButtonType.Capsule }) {
+          Text(this.batchPreparing && !this.batchRunning ? '正在准备…' : this.batchRunButtonText())
+            .fontSize(14).fontWeight(FontWeight.Medium).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .fontColor(this.batchRunning ? $r('app.color.ui_text_on_fill') : $r('app.color.ui_surface'))
+        }
+        .width(156).height(44).padding({ left: 12, right: 12 }).flexShrink(0)
+        .backgroundColor(this.batchRunning ? AppTheme.filledBackground('#B42318') : $r('app.color.ui_text_primary'))
+        .opacity(this.batchRunButtonEnabled() ? 1 : 0.45)
         .enabled(this.batchRunButtonEnabled())
+        .accessibilityText(this.batchRunning || this.batchSyncing ? this.batchRunButtonText() :
+          '回顾你的一天，执行已开启的 ' + this.enabledTaskCount() + ' 项采集任务')
         .onClick(async (): Promise<void> => {
           if (this.batchRunning) { this.stopEnabledTasks(); return; }
           try { await this.runEnabledTasks(this.reminderRequest); } catch (e) {
             showToastSafely('批量任务无法执行：' + (e as Error).message, 2200);
           }
         })
+      }.width('100%')
+      if (this.batchRunStatusText.length > 0) {
+        Text(this.batchRunStatusText).fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+          .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      if (!this.batchRunning && this.reminderRequest.length > 0) {
+        Text('点击“回顾你的一天”开始采集').fontSize(12).fontColor($r('app.color.ui_accent_blue'))
+          .width('100%')
+      }
     }
-    .width('86%')
-    .padding(14)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(14)
-    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
-    .margin({ top: 2, bottom: 18 })
+    .width('92%').constraintSize({ maxWidth: 720 }).padding({ left: 4, right: 4 })
+    .margin({ top: 24, bottom: 20 })
   }
 
   @Builder TaskContextPanel(task: WorkflowTask) {
-    Column() {
-      Row() {
-        Text('上下文变量')
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .layoutWeight(1)
-          .maxLines(1)
-        Text('contact_name')
-          .fontSize(11)
-          .fontColor(AppTheme.text('#276EF1'))
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor(AppTheme.background('#EAF2FF'))
-          .borderRadius(8)
-          .maxLines(1)
-      }
-      .width('100%')
+    Column({ space: 8 }) {
+      Text('联系人').fontSize(13).fontColor($r('app.color.ui_text_secondary')).width('100%')
       TextInput({ placeholder: '请输入联系人名称', text: this.taskContactNameDraftForTask(task) })
         .placeholderColor($r('app.color.ui_text_placeholder'))
         .caretColor($r('app.color.ui_accent_blue'))
         .width('100%')
-        .height(40)
-        .fontSize(13)
-        .fontColor(AppTheme.text('#222B3D'))
-        .backgroundColor(AppTheme.background(Color.White))
-        .borderRadius(10)
-        .border({ width: 1, color: AppTheme.border('#E3E8F1') })
-        .padding({ left: 10, right: 10 })
-        .margin({ top: 10 })
+        .height(44)
+        .fontSize(15)
+        .fontColor($r('app.color.ui_text_primary'))
+        .backgroundColor($r('app.color.ui_surface_soft'))
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
         .enabled(!this.isTaskExecutionBusy())
         .onChange((val: string) => { this.syncTaskContextDraft(task, val); })
     }
     .width('100%')
-    .padding(12)
-    .backgroundColor(AppTheme.background('#F8FAFD'))
-    .borderRadius(12)
-    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
-    .margin({ top: 14 })
+  }
+
+  private taskActionMenu(task: WorkflowTask): MenuElement[] {
+    return [
+      { value: '编辑 JSON', action: (): void => { this.openEditEditor(task.id, 'json'); } },
+      { value: '复制任务', action: (): void => { this.copyWorkflowTask(task); } },
+      { value: '删除任务', action: (): void => { this.deleteWorkflowTask(task); } }
+    ];
   }
 
   @Builder TaskCard(task: WorkflowTask) {
-    Column() {
-      Row() {
-        Text(task.icon)
-          .fontSize(13)
-          .fontColor(AppTheme.text(task.iconColor))
-          .fontWeight(FontWeight.Bold)
-          .width(54)
-          .height(54)
-          .textAlign(TextAlign.Center)
-          .backgroundColor(AppTheme.background(task.enabled ? '#F1F5FF' : '#F4F5F8'))
-          .borderRadius(14)
-        Column() {
-          Row() {
-            Text(task.title)
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(AppTheme.text('#11182F'))
-              .layoutWeight(1)
-              .maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Row().width(7).height(7).backgroundColor(AppTheme.background(task.enabled ? '#148F73' : '#A8AFBC')).borderRadius(4).margin({ left: 8, right: 5 })
-            Text(task.enabled ? task.lastStatus : '已暂停')
-              .fontSize(11)
-              .fontColor(AppTheme.text(task.enabled ? '#66707E' : '#8E95A3'))
-              .maxLines(1)
-          }
-          .width('100%')
-          Text('最近运行：' + task.lastRun)
-            .fontSize(12)
-            .fontColor(AppTheme.text('#7B8290'))
-            .margin({ top: 7 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text('来源模块：' + task.source)
-            .fontSize(12)
-            .fontColor(AppTheme.text('#7B8290'))
-            .margin({ top: 4 })
-            .maxLines(1)
-          Text(task.lastMessage)
-            .fontSize(11)
-            .fontColor(AppTheme.text('#9AA2B1'))
-            .margin({ top: 4 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        .margin({ left: 14, right: 8 })
+    Column({ space: 12 }) {
+      Row({ space: 16 }) {
+        Text(task.title).fontSize(17).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
+          .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
         Toggle({ type: ToggleType.Switch, isOn: task.enabled })
-          .selectedColor(AppTheme.background('#276EF1'))
-          .width(44)
-          .height(26)
-          .enabled(!this.isTaskExecutionBusy())
-          .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
+          .selectedColor($r('app.color.ui_accent_blue')).width(44).height(28).flexShrink(0)
+          .accessibilityText(task.title).enabled(!this.isTaskExecutionBusy())
+          .onChange((value: boolean): void => { this.setTaskEnabled(task, value); })
+      }.width('100%')
+      Text((task.enabled ? task.lastStatus : '已暂停') + ' · ' + task.lastRun)
+        .fontSize(12).fontColor($r('app.color.ui_text_secondary')).width('100%')
+        .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (task.lastMessage.length > 0) {
+        Text(task.lastMessage).fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+          .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      .width('100%')
       if (this.taskHasContext(task)) {
         this.TaskContextPanel(task)
       }
-      Scroll() {
-        Row() {
-          Button(this.preparingTaskId === task.id ? '准备中' : this.runningTaskId === task.id ? '执行中' : '运行')
-            .width(82)
-            .height(36)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background(this.isTaskExecutionBusy() && this.runningTaskId !== task.id ? '#A9B7E9' :
-              this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1'))
-            .borderRadius(10)
-            .margin({ right: 8 })
-            .enabled(!this.isTaskExecutionBusy())
-            .onClick(() => { this.runTask(task); })
-          Button('图编辑')
-            .width(86)
-            .height(36)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background('#EAF8F3'))
-            .fontColor(AppTheme.text('#148F73'))
-            .borderRadius(10)
-            .margin({ right: 8 })
-            .onClick(() => { this.openEditEditor(task.id, 'graph'); })
-          Button('JSON')
-            .width(82)
-            .height(36)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background('#EEF4FF'))
-            .fontColor(AppTheme.text('#276EF1'))
-            .borderRadius(10)
-            .margin({ right: 8 })
-            .onClick(() => { this.openEditEditor(task.id, 'json'); })
-          Button('复制')
-            .width(82)
-            .height(36)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background('#EEF4FF'))
-            .fontColor(AppTheme.text('#276EF1'))
-            .borderRadius(10)
-            .margin({ right: 8 })
-            .onClick(() => { this.copyWorkflowTask(task); })
-          Button('删除')
-            .width(82)
-            .height(36)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background('#FFF0ED'))
-            .fontColor(AppTheme.text('#B42318'))
-            .borderRadius(10)
-            .onClick(() => { this.deleteWorkflowTask(task); })
-        }
-      }
-      .width('100%')
-      .height(44)
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .margin({ top: 14 })
+      Row({ space: 10 }) {
+        Button(this.preparingTaskId === task.id ? '准备中' : this.runningTaskId === task.id ? '执行中' : '运行')
+          .layoutWeight(1).height(40).fontSize(14).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.ui_text_on_fill')).backgroundColor(AppTheme.filledBackground('#276EF1'))
+          .borderRadius(20).enabled(!this.isTaskExecutionBusy())
+          .onClick((): void => { this.runTask(task); })
+        Button('编辑任务').layoutWeight(1).height(40).fontSize(14)
+          .fontColor($r('app.color.ui_text_primary')).backgroundColor($r('app.color.ui_surface_soft'))
+          .borderRadius(20).enabled(!this.isTaskExecutionBusy())
+          .onClick((): void => { this.openEditEditor(task.id, 'graph'); })
+        Button('···').width(44).height(44).padding(0).fontSize(24)
+          .fontColor($r('app.color.ui_text_secondary')).backgroundColor(Color.Transparent)
+          .enabled(!this.isTaskExecutionBusy()).accessibilityText('更多任务操作')
+          .bindMenu(this.taskActionMenu(task))
+      }.width('100%')
     }
-    .width('86%')
-    .padding(18)
-    .backgroundColor(AppTheme.background(Color.White))
-    .borderRadius(14)
-    .border({ width: this.focusedConfigTaskId === task.id ? 1.5 : 1,
-      color: AppTheme.border(this.focusedConfigTaskId === task.id ? '#276EF1' : '#E3E8F1') })
-    .shadow({ radius: 10, color: AppTheme.shadow('#0D000000'), offsetX: 0, offsetY: 5 })
+    .width('92%').constraintSize({ maxWidth: 720 }).padding(18)
+    .backgroundColor($r('app.color.ui_surface')).borderRadius(22)
+    .border({ width: this.focusedConfigTaskId === task.id ? 1 : 0, color: $r('app.color.ui_accent_blue') })
     .margin({ bottom: 16 })
     .onAreaChange((_oldArea: Area, newArea: Area): void => { this.scrollToConfigTask(task.id, newArea); })
   }
 
   @Builder TaskSceneTab(scene: WorkflowSceneConfig) {
     Text(scene.label)
-      .fontSize(13)
-      .fontWeight(this.taskScene === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(AppTheme.text(this.taskScene === scene.sceneId ? Color.White : '#6D7481'))
+      .fontSize(14)
+      .fontWeight(this.taskScene === scene.sceneId ? FontWeight.Medium : FontWeight.Regular)
+      .fontColor(this.taskScene === scene.sceneId ? $r('app.color.ui_accent_blue') : $r('app.color.ui_text_secondary'))
       .height(38)
       .padding({ left: 16, right: 16 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(AppTheme.background(this.taskScene === scene.sceneId ? scene.color : Color.White))
-      .borderRadius(10)
+      .backgroundColor(this.taskScene === scene.sceneId ? $r('app.color.ui_surface_soft') : Color.Transparent)
+      .borderRadius(19)
       .margin({ left: scene.sceneId === 0 ? 0 : 10 })
       .onClick(() => {
         this.cancelConfigTaskScroll();
@@ -4202,75 +4046,19 @@ export struct TaskPage {
   }
 
   @Builder CreatePanel() {
-    Column() {
-      Row() {
-        Column() {
-          Row() {
-            Text('新建任务')
-              .fontSize(20)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(AppTheme.text('#11182F'))
-            Text('图形编排')
-              .fontSize(11)
-              .fontColor(AppTheme.text('#148F73'))
-              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .backgroundColor(AppTheme.background('#EAF8F3'))
-              .borderRadius(8)
-              .margin({ left: 10 })
-          }
-          Text('选择场景后用节点连接定义 workflow')
-            .fontSize(12)
-            .fontColor(AppTheme.text('#6F7584'))
-            .margin({ top: 7 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        Column() {
-          Button('图新建')
-            .width(76)
-            .height(34)
-            .fontSize(12)
-            .backgroundColor(AppTheme.background('#276EF1'))
-            .borderRadius(10)
-            .onClick(() => { this.openCreateEditor('graph'); })
-          Button('JSON')
-            .width(76)
-            .height(30)
-            .fontSize(11)
-            .backgroundColor(AppTheme.background('#EEF4FF'))
-            .fontColor(AppTheme.text('#276EF1'))
-            .borderRadius(9)
-            .margin({ top: 8 })
-            .onClick(() => { this.openCreateEditor('json'); })
-        }
-      }
-      .width('100%')
-      Scroll() {
-        Row() {
-          ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
-            Text(scene.label)
-              .fontSize(11)
-              .fontColor(AppTheme.text(scene.color))
-              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .backgroundColor(AppTheme.background('#F8F9FE'))
-              .borderRadius(8)
-              .margin({ left: scene.sceneId === 0 ? 0 : 8 })
-          }, (scene: WorkflowSceneConfig) => scene.tabId)
-        }
-      }
-      .width('100%')
-      .height(28)
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .margin({ top: 14 })
-    }
-    .width('86%')
-    .padding(20)
-    .backgroundColor(AppTheme.background('#F8FAFD'))
-    .borderRadius(14)
-    .border({ width: 1, color: AppTheme.border('#E3E8F1') })
+    Row({ space: 12 }) {
+      Image($r('app.media.settings_automation')).width(24).height(24).objectFit(ImageFit.Contain)
+      Text('新建任务').fontSize(17).fontColor($r('app.color.ui_text_primary')).layoutWeight(1)
+      Button('新建').height(40).fontSize(14).padding({ left: 18, right: 18 })
+        .fontColor($r('app.color.ui_text_on_fill')).backgroundColor(AppTheme.filledBackground('#276EF1'))
+        .enabled(!this.isTaskExecutionBusy())
+        .onClick((): void => { this.openCreateEditor('graph'); })
+      Button('···').width(40).height(40).padding(0).fontSize(24)
+        .fontColor($r('app.color.ui_text_secondary')).backgroundColor(Color.Transparent)
+        .accessibilityText('更多新建方式').enabled(!this.isTaskExecutionBusy())
+        .bindMenu([{ value: '通过 JSON 新建', action: (): void => { this.openCreateEditor('json'); } }])
+    }.width('92%').constraintSize({ maxWidth: 720 }).padding(18)
+      .backgroundColor($r('app.color.ui_surface')).borderRadius(22)
   }
 
   @Builder TaskSceneList() {
@@ -4280,15 +4068,15 @@ export struct TaskPage {
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .fontColor(AppTheme.text('#11182F'))
-        Text('点击上方新建任务，使用图编辑或 JSON 创建 workflow。')
+        Text('点击上方“新建”添加任务')
           .fontSize(12)
           .fontColor(AppTheme.text('#7B8290'))
           .margin({ top: 8 })
       }
-      .width('86%')
+      .width('92%').constraintSize({ maxWidth: 720 })
       .padding(22)
       .backgroundColor(AppTheme.background(Color.White))
-      .borderRadius(14)
+      .borderRadius(22)
       .margin({ bottom: 18 })
     } else {
       ForEach(this.sceneTasks(), (task: WorkflowTask) => {
@@ -4417,8 +4205,11 @@ export struct TaskPage {
       title: this.configViewOpen ? '配置任务' : '自定义任务',
       showBackButton: this.configViewOpen,
       onBackClick: (): void => { this.closeConfigView(); },
-      actionLabel: this.configViewOpen ? '刷新' : '',
-      onActionClick: (): void => { this.reloadTasks(); }
+      actionLabel: this.configViewOpen ? '刷新' : '配置',
+      onActionClick: (): void => {
+        if (this.configViewOpen) { this.reloadTasks(); }
+        else if (!this.isTaskExecutionBusy()) { this.openConfigView(); }
+      }
     })
   }
 
@@ -4448,13 +4239,16 @@ export struct TaskPage {
           this.TaskSceneList()
           this.FileManagerPanel()
         } else {
-          this.TaskExecutionHeaderPanel()
-          TaskDeviceControlPanel({ mode: this.taskControlMode,
-            busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
-            onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
-          CollectionReminderPanel()
-          this.TaskExecutionList()
+          Column() {
+            TaskDeviceControlPanel({ mode: this.taskControlMode,
+              busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
+              onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
+            Divider().strokeWidth(0.5).color($r('app.color.ui_border')).margin({ left: 56, right: 18 })
+            CollectionReminderPanel()
+          }.width('92%').constraintSize({ maxWidth: 720 })
+            .backgroundColor($r('app.color.ui_surface')).borderRadius(22).clip(true)
           this.BatchRunPanel()
+          this.TaskExecutionList()
         }
         Blank().height(110)
       }
