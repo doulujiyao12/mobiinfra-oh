@@ -26,6 +26,8 @@ host.resolveModuleNames = (names, containing) => names.map(name => {
     found = path.join(root,'entry/oh_modules/sherpa_onnx/src/main/cpp/types/libsherpa_onnx/Index.d.ts');
   } else if (name === 'libentry.so') {
     found = path.join(root,'entry/src/main/cpp/types/libentry/Index.d.ts');
+  } else if (name === '@clawmate/watch-bridge') {
+    found = path.join(root,'phonebridge/Index.ets');
   } else {
     found = [sdk+'/kits/'+name+'.d.ts',hms+'/kits/'+name+'.d.ts',sdk+'/api/'+name+'.d.ts',hms+'/api/'+name+'.d.ts',hms+'/api/'+name+'.d.ets'].find(fs.existsSync);
   }
@@ -39,6 +41,7 @@ files.push(path.join(root,'entry/src/main/ets/workers/RecordingAnalysisWorker.et
   path.join(root,'entry/src/main/ets/pages/recording/RecordingSummaryView.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingSettingsView.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingCalendarView.ets'),
+  path.join(root,'entry/src/main/ets/pages/recording/WatchRecordingPickerView.ets'),
   path.join(root,'entry/src/main/ets/utils/LocalTextInference.ets'),
   path.join(root,'entry/src/main/ets/utils/AppBackgroundTasks.ets'));
 const authored = new Set(files.map(f=>path.resolve(f).replaceAll('\\','/')));

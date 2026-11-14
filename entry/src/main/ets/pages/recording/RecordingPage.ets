@@ -5,6 +5,10 @@ import { RecordingAnalysisRunner } from '../../utils/recording/RecordingAnalysis
 import { RecordingSummaryService } from '../../utils/recording/RecordingSummaryService';
 import { LocalTextInference } from '../../utils/LocalTextInference';
 import { RecordingWatchSync, RecordingWatchDevice } from '../../utils/recording/RecordingWatchSync';
+import { RecordingWatchItem, RecordingWatchSelection, selectWatchRecordings,
+  watchRecordingProcessingStage } from '../../utils/recording/RecordingWatchSelection';
+import { WatchRecordingPickerView } from './WatchRecordingPickerView';
+import { AppLogger } from '../../utils/AppLogger';
 import { RecordingSummaryView } from './RecordingSummaryView';
 import { RecordingSettingsView } from './RecordingSettingsView';
 import { RecordingCalendarView } from './RecordingCalendarView';
@@ -16,7 +20,7 @@ import { RecordingCalendarScope, RecordingCalendarWeek, recordingCalendarMonth, 
   filterRecordingCalendar, recordingCardClock, recordingCardPreview } from '../../utils/recording/RecordingCalendar';
 import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
-import { AppHeader } from '../../components/AppHeader';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { picker } from '@kit.CoreFileKit';
 import { RecordingStore } from '../../utils/recording/RecordingStore';
 import { DEFAULT_RECORDING_MODEL_URL, RecordingModelProgress, RecordingModels, RECORDING_MODELS } from '../../utils/recording/RecordingModels';
@@ -39,6 +43,8 @@ import { RecordingAnalysis, RecordingJob, RecordingRecord, RecordingSegment, Rec
 initializeRecordingPreferences();
 const SPEAKER_COLORS: string[] = ['#007AFF', '#AF52DE', '#229B78', '#DD8D24', '#DD5E83'];
 const RECORDING_DOCK_INSET: number = 72;
+// Keep the title's fade inside the breathing space above the first controls.
+const RECORDING_TITLE_FADE_HEIGHT: number = 8;
 interface VoiceReference { recordId: string; modelId: string; name: string; embedding: number[]; }
 
 @Entry
@@ -116,6 +122,11 @@ struct RecordingPage {
   @State private watchScanning: boolean = false;
   @State private watchStatus: string = '接收手表上的录音，在手机上转写。';
   @State private watchAutoAnalyze: boolean = true;
+  @State private watchDevice: RecordingWatchDevice | null = null;
+  @State private watchItems: RecordingWatchItem[] = [];
+  @State private watchSourceId: string = '';
+  @State private watchSelectedIds: string[] = [];
+  @State private watchQueueRunning: boolean = false;
   @State private queueRemaining: number = 0;
   private analyzer: RecordingAnalysisRunner = new RecordingAnalysisRunner();
   private summaryService: RecordingSummaryService = new RecordingSummaryService();
@@ -181,7 +192,7 @@ struct RecordingPage {
     this.stopRecordingSearch(false);
     if (this.externalInteraction) { return; }
     if (this.recording) { return; }
-    if (this.busy) { this.cancel(); }
+    if (this.busy || this.watchQueueRunning) { this.cancel(); }
     this.playback.stop().catch((): void => {}); this.playing = -2;
   }
   private reload(): void {
@@ -285,7 +296,7 @@ struct RecordingPage {
   }
   private message(error: Error): void { if (this.alive) { this.error = error.message || '操作未完成，请重试'; } }
   private async importAudio(): Promise<void> {
-    if (this.busy || this.store === null) { return; }
+    if (this.busy || this.watchQueueRunning || this.store === null) { return; }
     this.busy = true; this.error = ''; let epoch = ++this.epoch;
     try {
       let options = new picker.DocumentSelectOptions(); options.maxSelectNumber = 1;
@@ -302,7 +313,7 @@ struct RecordingPage {
     finally { this.externalInteraction = false; if (this.alive && epoch === this.epoch) { this.busy = false; this.status = ''; } }
   }
   private async startRecording(): Promise<void> {
-    if (this.busy || this.store === null) { return; }
+    if (this.busy || this.watchQueueRunning || this.store === null) { return; }
     let source = recordingAudioSource(this.audioSource);
     this.captureStopPending = false;
     this.busy = true; this.startingRecording = true; this.jobKind = 'capture';
@@ -455,17 +466,19 @@ struct RecordingPage {
       this.modelSourceSaved = true; this.error = '';
     } catch (e) { this.message(e as Error); }
   }
-  private async analyze(restart: boolean = false): Promise<void> {
+  private async analyze(restart: boolean = false, summarizeAfter: boolean = this.autoSummary): Promise<void> {
     if (this.busy || this.selected === null || this.models === null || this.store === null) { return; }
     if (!this.store.hasAudio(this.selected.id)) { this.error = '音频已删除，无法重新转写；已有文字和摘要仍可查看'; return; }
     const systemAsr = this.useSystemAsr();
     if (!systemAsr && !this.models.readyForTranscription(this.separateSpeakers)) { this.showModels = true; return; }
-    await this.playback.stop(); this.playing = -2;
     let record = this.selected; let epoch = ++this.epoch;
     const systemRunner: RecordingSystemAsrRunner | null = systemAsr ? new RecordingSystemAsrRunner() : null;
     this.systemAsr = systemRunner;
     this.busy = true; this.jobKind = 'analysis'; this.progress = 0; this.error = ''; this.status = '正在准备转写';
     try {
+      await this.playback.stop();
+      if (!this.alive || epoch !== this.epoch) { return; }
+      this.playing = -2;
       const job: RecordingJob = { audioPath: this.store.audioPath(record.id), modelDir: this.models.directory,
         language: this.languages[this.languageIndex], restart: restart, diarization: this.separateSpeakers };
       const report = (value: RecordingWorkerMessage): void => {
@@ -497,7 +510,7 @@ struct RecordingPage {
       }
     }
     finally { if (this.systemAsr === systemRunner) { this.systemAsr = null; } if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
-    if (epoch === this.epoch && this.autoSummary && !this.error && record.analysis !== null &&
+    if (epoch === this.epoch && summarizeAfter && !this.error && record.analysis !== null &&
       record.analysis.segments.some((segment: RecordingSegment): boolean => segment.text.trim().length > 0)) { await this.summarize(); }
   }
   private async summarize(restart: boolean = false): Promise<void> {
@@ -544,7 +557,7 @@ struct RecordingPage {
     }
     if (this.preparingModels) { this.models?.cancel(); this.status = '正在停止模型准备'; return; }
     let transcribing = this.jobKind === 'analysis';
-    this.epoch++; this.queueEpoch++; this.queueRemaining = 0;
+    this.epoch++; this.queueEpoch++; this.queueRemaining = 0; this.watchQueueRunning = false;
     this.analyzer.cancel(); this.systemAsr?.cancel(); this.summaryService.cancel(); this.watchSync.cancel().catch((): void => {});
     this.live?.cancel();
     if (this.models !== null) { this.models.cancel(); }
@@ -628,7 +641,7 @@ struct RecordingPage {
     }
   }
   private beginRename(record: RecordingRecord): void {
-    if (this.busy) { return; }
+    if (this.busy || this.watchQueueRunning) { return; }
     this.recordingListScroller.closeAllSwipeActions();
     this.renameTarget = record; this.editTitle = this.recordTitle(record); this.showRename = true;
   }
@@ -643,7 +656,7 @@ struct RecordingPage {
     } catch (e) { record.title = oldTitle; record.titleEdited = oldEdited; this.message(e as Error); }
   }
   private async remove(record: RecordingRecord | null = this.selected): Promise<void> {
-    if (this.busy || record === null || this.store === null) { return; }
+    if (this.busy || this.watchQueueRunning || record === null || this.store === null) { return; }
     this.recordingListScroller.closeAllSwipeActions();
     let result = await promptAction.showDialog({ title: '删除这条录音？',
       message: this.recordTitle(record) + '\n录音、转写和摘要将一起删除。' + (record.watch ? '手表原录音会保留。' : ''),
@@ -656,16 +669,24 @@ struct RecordingPage {
     if (this.reference?.recordId === record.id) { this.reference = null; this.comparison = ''; }
   }
   private audioAvailable(): boolean { return this.selected !== null && this.store?.hasAudio(this.selected.id) === true; }
-  private async removeAudio(): Promise<void> {
-    const record = this.selected;
-    if (this.busy || record === null || this.store === null || !this.audioAvailable()) { return; }
+  private async removeAudio(record: RecordingRecord | null = this.selected): Promise<void> {
+    if (this.busy || this.watchQueueRunning || record === null || this.store === null || !this.store.hasAudio(record.id)) { return; }
+    this.recordingListScroller.closeAllSwipeActions();
     const result = await promptAction.showDialog({ title: '仅删除音频文件？',
       message: '保留这条记录的标题、转写文字、摘要和已有声纹。删除后无法播放或重新转写。' +
         (record.analysis === null || record.transcriptionComplete === false ? '\n这条录音尚未完成转写，删除后无法再从音频恢复文字。' : '') + (record.watch ? '\n手表原录音会保留。' : ''),
       buttons: [{ text: '取消', color: AppTheme.dialogText('#8E8E93') }, { text: '仅删除音频', color: AppTheme.dialogText('#FF3B30') }] });
-    if (result.index !== 1 || this.busy || !this.alive || this.selected?.id !== record.id || this.store === null) { return; }
-    await this.playback.stop(); this.playing = -2;
-    this.store.removeAudio(record); this.selected = record; this.refreshSelected(); this.reload(); this.status = '音频已删除，文字和摘要已保留';
+    if (result.index !== 1 || this.busy || this.watchQueueRunning || !this.alive || this.store === null) { return; }
+    const current = this.store.list().find((item: RecordingRecord): boolean => item.id === record.id);
+    if (current === undefined) { return; }
+    const epoch = ++this.epoch; this.busy = true; this.jobKind = 'delete-audio';
+    try {
+      await this.playback.stop();
+      if (!this.alive || epoch !== this.epoch) { return; }
+      this.playing = -2; this.store.removeAudio(current);
+      if (this.selected?.id === current.id) { this.selected = current; this.refreshSelected(); }
+      this.reload(); this.status = '音频已删除，文字和摘要已保留';
+    } finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
   }
   private analysis(): RecordingAnalysis | null { return this.selected?.analysis || null; }
   private segments(): RecordingSegment[] {
@@ -676,7 +697,7 @@ struct RecordingPage {
   }
   private color(id: number): ResourceColor { return AppTheme.text(id < 0 ? '#8E8E93' : SPEAKER_COLORS[id % SPEAKER_COLORS.length]); }
   private async play(segment: RecordingSegment | null): Promise<void> {
-    if (this.selected === null || this.store === null || this.busy) { return; }
+    if (this.selected === null || this.store === null || this.busy || this.watchQueueRunning) { return; }
     if (!this.audioAvailable()) { this.error = '音频已删除，已有文字和摘要仍可查看'; return; }
     let id = segment === null ? -1 : segment.id;
     if (this.playing === id) { await this.playback.stop(); this.playing = -2; return; }
@@ -705,6 +726,10 @@ struct RecordingPage {
   private context(): common.UIAbilityContext { return this.getUIContext().getHostContext() as common.UIAbilityContext; }
   onBackPress(): boolean { this.goBack(); return true; }
   private goBack(): void {
+    if (this.showWatch) {
+      if (this.busy) { this.cancel(); }
+      this.showWatch = false; return;
+    }
     if (this.showRecordingSettings) {
       if (this.busy) { this.cancel(); return; }
       this.showRecordingSettings = false; return;
@@ -715,7 +740,7 @@ struct RecordingPage {
         .then((result): void => { if (result.index === 1) { this.stopRecording().catch((e: Error): void => { this.message(e); }); } });
       return;
     }
-    if (this.busy) { this.cancel(); return; }
+    if (this.busy || this.watchQueueRunning) { this.cancel(); return; }
     if (this.recordingSearchBusy) { this.stopRecordingSearch(true); return; }
     if (this.selected !== null) {
       this.save(); this.selected = null; this.playback.stop().catch((): void => {}); this.playing = -2; this.status = ''; return;
@@ -724,44 +749,121 @@ struct RecordingPage {
     router.back();
   }
   private openRecordingSettings(): void {
-    if (this.busy || this.recording) { return; }
+    if (this.busy || this.watchQueueRunning || this.recording) { return; }
     this.stopRecordingSearch(false);
     this.speakerSwitchOn = this.separateSpeakers;
     this.showRecordingSettings = true;
     this.recordingSettingsScroller.scrollTo({ xOffset: 0, yOffset: 0 });
   }
+  private openWatchPanel(): void {
+    if (this.busy || this.watchQueueRunning || this.recording) { return; }
+    this.showWatch = true;
+    if (this.watchDevice !== null) { this.loadWatchDevice(this.watchDevice); }
+    else { this.scanWatches(); }
+  }
   private async scanWatches(): Promise<void> {
-    if (this.watchScanning || this.busy) { return; }
+    if (this.watchScanning || this.busy || this.watchQueueRunning) { return; }
     this.watchScanning = true; this.watchStatus = '正在查找已配对的手表';
     try {
-      this.watchDevices = await this.watchSync.discover(this.context());
-      this.watchStatus = this.watchDevices.length > 0 ? '选择手表，接收其中的录音。' : '请先在运动健康中配对手表，并保持连接。';
+      const devices = await this.watchSync.discover(this.context());
+      if (!this.alive || !this.showWatch) { return; }
+      this.watchDevices = devices;
+      this.watchStatus = this.watchDevices.length > 0 ? '选择一块手表' : '请先在运动健康中配对手表，并保持连接。';
     } catch (e) { this.watchStatus = (e as Error).message; }
     finally { this.watchScanning = false; }
   }
-  private async syncWatchDevice(device: RecordingWatchDevice): Promise<void> {
-    if (this.busy || this.store === null) { return; }
-    let epoch = ++this.epoch; let queue = ++this.queueEpoch; let received: RecordingRecord[] = [];
-    this.busy = true; this.jobKind = 'watch'; this.error = ''; this.progress = 0;
+  private async loadWatchDevice(device: RecordingWatchDevice): Promise<void> {
+    if (this.busy || this.watchQueueRunning || this.store === null) { return; }
+    const epoch = ++this.epoch;
+    const previousSource = this.watchSourceId, previousSelection = this.watchSelectedIds.slice();
+    this.watchDevice = device; this.watchSourceId = ''; this.watchItems = []; this.watchSelectedIds = [];
+    this.busy = true; this.jobKind = 'watch-list'; this.error = ''; this.watchStatus = '正在连接手表';
     try {
-      let count = await this.watchSync.sync(this.context(), device.id, this.store, (text: string): void => {
+      const catalog = await this.watchSync.catalog(this.context(), device.id, this.store, (text: string): void => {
+        if (this.alive && epoch === this.epoch) { this.watchStatus = text; }
+      });
+      if (!this.alive || epoch !== this.epoch) { return; }
+      this.watchItems = catalog.items; this.watchSourceId = catalog.sourceId;
+      this.watchSelectedIds = selectWatchRecordings(catalog.items, previousSource === catalog.sourceId ? previousSelection : [], [], true);
+      this.watchStatus = catalog.items.length > 0 ? '' : '手表中还没有已完成的录音';
+      AppLogger.info('WatchRecording', 'catalog items=' + catalog.items.length);
+    } catch (e) {
+      if (this.alive && epoch === this.epoch) { this.watchStatus = (e as Error).message; }
+    } finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
+  }
+  private async syncWatchDevice(): Promise<void> {
+    if (this.busy || this.watchQueueRunning || this.store === null || this.watchDevice === null) { return; }
+    const selection: RecordingWatchSelection = { sourceId: this.watchSourceId,
+      recordingIds: selectWatchRecordings(this.watchItems, this.watchSelectedIds, [], true) };
+    if (!selection.sourceId || selection.recordingIds.length === 0) { return; }
+    let epoch = ++this.epoch; let queue = ++this.queueEpoch; let received: RecordingRecord[] = [];
+    let transferError = '';
+    this.busy = true; this.jobKind = 'watch'; this.error = ''; this.progress = 0;
+    AppLogger.info('WatchRecording', 'sync selected=' + selection.recordingIds.length + ' autoAnalyze=' + this.watchAutoAnalyze);
+    try {
+      let count = await this.watchSync.sync(this.context(), this.watchDevice.id, this.store, (text: string): void => {
         if (this.alive && epoch === this.epoch) { this.status = text; this.watchStatus = text; }
-      }, (record: RecordingRecord): void => { received.push(record); if (this.alive) { this.reload(); } });
+      }, (record: RecordingRecord): void => {
+        received.push(record);
+        if (this.alive && epoch === this.epoch) {
+          this.progress = Math.round(received.length * 100 / selection.recordingIds.length);
+          this.watchSelectedIds = this.watchSelectedIds.filter((id: string): boolean => id !== record.watch?.recordingId);
+          this.watchItems = this.watchItems.map((item: RecordingWatchItem): RecordingWatchItem => {
+            if (item.id !== record.watch?.recordingId) { return item; }
+            return { id: item.id, createdAt: item.createdAt, durationMs: item.durationMs, bytes: item.bytes,
+              title: record.title, localState: 'saved' };
+          });
+          this.reload();
+        }
+      }, selection);
       if (epoch !== this.epoch) { return; }
-      this.watchStatus = count > 0 ? '已保存 ' + count + ' 条录音，手表原文件也会保留。' : '手表中还没有已完成的录音。';
+      this.watchStatus = '已同步 ' + count + ' 条录音';
       this.status = this.watchStatus;
-    } catch (e) { if (epoch === this.epoch) { this.error = (e as Error).message; this.watchStatus = this.error; } }
+    } catch (e) {
+      if (epoch === this.epoch) {
+        transferError = '已接收 ' + received.length + '/' + selection.recordingIds.length + ' 条；' + (e as Error).message;
+        this.error = transferError; this.watchStatus = transferError;
+        AppLogger.warn('WatchRecording', 'sync failed received=' + received.length + ' error=' + (e as Error).message);
+      }
+    }
     finally { if (epoch === this.epoch) { this.busy = false; this.jobKind = ''; } }
     if (queue !== this.queueEpoch || !this.alive || !this.watchAutoAnalyze || received.length === 0) { return; }
     this.showWatch = false;
-    let pending = received.filter((record: RecordingRecord): boolean => record.analysis === null);
-    for (let index = 0; index < pending.length; index++) {
-      if (queue !== this.queueEpoch || !this.alive) { break; }
-      this.queueRemaining = pending.length - index; this.selected = pending[index]; this.detailTab = 'text';
-      await this.analyze();
-      if (this.error || this.showModels) { break; }
+    const failures = await this.processWatchRecordings(received, queue);
+    if (this.alive && queue === this.queueEpoch) {
+      this.error = [transferError, failures.length > 0 ? failures.length + ' 条录音未处理完成，原录音及已有结果已保留：' + failures.slice(0, 2).join('；') : '']
+        .filter((text: string): boolean => text.length > 0).join('\n');
+      if (!this.error && !this.showModels) { this.status = '已同步 ' + received.length + ' 条录音，转写与摘要处理完成'; }
     }
-    this.queueRemaining = 0;
+  }
+  private async processWatchRecordings(received: RecordingRecord[], queue: number): Promise<string[]> {
+    const pending = received.filter((record: RecordingRecord): boolean => watchRecordingProcessingStage(record) !== 'done');
+    const failures: string[] = [];
+    this.watchQueueRunning = true;
+    try {
+      for (let index = 0; index < pending.length; index++) {
+        if (queue !== this.queueEpoch || !this.alive) { break; }
+        const record = pending[index];
+        this.queueRemaining = pending.length - index; this.selected = record; this.detailTab = 'text';
+        this.filterSpeaker = -2; this.visibleSegments = 60; this.error = '';
+        this.status = '正在处理手表录音 ' + (index + 1) + '/' + pending.length;
+        AppLogger.info('WatchRecording', 'process id=' + record.id + ' stage=' + watchRecordingProcessingStage(record));
+        try {
+          // The watch queue owns both stages. Do not let the general auto-summary
+          // preference skip this queue's requested summary, or run it twice.
+          if (watchRecordingProcessingStage(record) === 'transcribe') { await this.analyze(false, false); }
+          if (queue !== this.queueEpoch || !this.alive) { break; }
+          if (this.showModels) { this.status = '请先准备转写模型，录音已保存'; break; }
+          if (!this.error && watchRecordingProcessingStage(record) === 'summarize') { await this.summarize(); }
+        } catch (e) { this.error = (e as Error).message; }
+        if (queue !== this.queueEpoch || !this.alive) { break; }
+        if (this.error) {
+          failures.push(this.recordTitle(record) + '：' + this.error);
+          AppLogger.warn('WatchRecording', 'process failed id=' + record.id + ' error=' + this.error);
+        }
+      }
+    } finally { if (queue === this.queueEpoch) { this.queueRemaining = 0; this.watchQueueRunning = false; } }
+    return failures;
   }
   private clockTime(date: Date): string {
     return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
@@ -867,9 +969,9 @@ struct RecordingPage {
 
   @Builder private HomeHeader() {
     Row({ space: 12 }) {
-      Text('声音来源').fontSize(17).fontColor(AppTheme.text('#172033'))
-      Blank()
+      Text('声音来源').fontSize(17).fontColor(AppTheme.text('#172033')).flexShrink(0)
       Text(recordingAudioSourceLabel(this.audioSource)).fontSize(16).fontColor(AppTheme.text('#007AFF'))
+        .layoutWeight(1).textAlign(TextAlign.End).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Text('›').fontSize(24).fontColor(AppTheme.text('#8E8E93'))
     }.width('100%').padding(18).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
       .enabled(!this.busy).onClick((): void => { this.showAudioSources = true; })
@@ -878,7 +980,7 @@ struct RecordingPage {
       Text('连接手表').fontSize(17).fontColor(AppTheme.text('#172033')).layoutWeight(1)
       Text('›').fontSize(24).fontColor(AppTheme.text('#8E8E93'))
     }.padding(18).width('100%').borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
-      .enabled(!this.busy).onClick((): void => { this.showWatch = true; this.scanWatches(); })
+      .enabled(!this.busy && !this.watchQueueRunning).onClick((): void => { this.openWatchPanel(); })
     Row() {
       Text('所有录音').fontSize(20).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
       Blank()
@@ -909,11 +1011,21 @@ struct RecordingPage {
       Button({ type: ButtonType.Normal }) {
         Column({ space: 5 }) {
           Image($r('app.media.recording_delete')).width(21).height(21)
-          Text('删除').fontSize(14).fontColor(Color.White).maxLines(1)
+          Text('仅删音频').fontSize(14).fontColor(Color.White).maxLines(1)
         }.width('100%').justifyContent(FlexAlign.Center)
-      }.width(70).height(68).padding(0).borderRadius(14)
+      }.width(84).height(68).padding(0).borderRadius(14)
+        .backgroundColor(AppTheme.filledBackground('#CA8425')).fontColor(Color.White)
+        .enabled(!this.busy && !this.watchQueueRunning && this.store?.hasAudio(record.id) === true)
+        .accessibilityText('仅删除录音文件，保留转写和摘要')
+        .onClick((): void => { this.removeAudio(record).catch((e: Error): void => { this.message(e); }); })
+      Button({ type: ButtonType.Normal }) {
+        Column({ space: 5 }) {
+          Image($r('app.media.recording_delete')).width(21).height(21)
+          Text('全部删除').fontSize(14).fontColor(Color.White).maxLines(1)
+        }.width('100%').justifyContent(FlexAlign.Center)
+      }.width(78).height(68).padding(0).borderRadius(14)
         .backgroundColor('#FF3B30').fontColor(Color.White).enabled(!this.busy)
-        .accessibilityText('删除录音')
+        .accessibilityText('删除录音、转写和摘要')
         .onClick((): void => { this.remove(record).catch((e: Error): void => { this.message(e); }); })
     }.height(68).padding({ left: 10, right: 2 }).alignItems(VerticalAlign.Center)
   }
@@ -967,7 +1079,7 @@ struct RecordingPage {
             .onClick((): void => { this.changeRecordingSearch(''); })
         }
       }.width('100%')
-    }.width('100%').padding({ left: 22, right: 22, top: 8, bottom: 10 }).enabled(!this.busy)
+    }.width('100%').padding({ left: 22, right: 22, bottom: 10 }).enabled(!this.busy)
   }
   @Builder private SearchFeedback() {
     Column({ space: 12 }) {
@@ -1077,9 +1189,6 @@ struct RecordingPage {
         Row({ space: 10 }) {
           Text(this.recordDate(this.selected, false)).fontSize(13).fontColor(AppTheme.text('#737D90'))
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-          Button('设置').fontSize(14).height(32).padding({ left: 8, right: 8 })
-            .fontColor(AppTheme.text('#5260ED')).backgroundColor(Color.Transparent).enabled(!this.busy)
-            .accessibilityText('录音设置').onClick((): void => { this.openRecordingSettings(); })
         }.width('100%')
         Row({ space: 12 }) {
           Button({ type: ButtonType.Circle }) {
@@ -1139,7 +1248,7 @@ struct RecordingPage {
             } else { this.Transcript() }
           }.width('100%').alignItems(HorizontalAlign.Start)
         }
-      }.width('100%').alignItems(HorizontalAlign.Start)
+      }.width('100%').alignItems(HorizontalAlign.Start).enabled(!this.watchQueueRunning)
     }
   }
   @Builder private Transcript() {
@@ -1215,31 +1324,60 @@ struct RecordingPage {
     }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
   }
   @Builder private WatchPanel() {
-    Scroll() {
-      Column({ space: 22 }) {
-        Image($r('app.media.recording_watch')).width(42).height(42)
-        Text('连接手表').fontSize(22).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
-        Text(this.watchStatus).fontSize(17).lineHeight(28).fontColor(AppTheme.text('#737D90')).width('100%')
-        if (this.watchScanning || this.jobKind === 'watch') { LoadingProgress().width(32).height(32) }
-        ForEach(this.watchDevices, (device: RecordingWatchDevice) => {
-          Row() {
-            Text(device.name).fontSize(18).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-            Text('接收录音 ›').fontSize(16).fontColor(AppTheme.text('#5260ED'))
-          }.width('100%').padding({ top: 18, bottom: 18 }).enabled(!this.busy)
-            .onClick((): void => { this.syncWatchDevice(device); })
-          Divider().color(AppTheme.border('#EDF0F5'))
-        }, (device: RecordingWatchDevice): string => device.id)
-        Row() {
-          Text('接收后自动转写').fontSize(17).fontColor(AppTheme.text('#172033')).layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.watchAutoAnalyze }).enabled(!this.busy)
-            .onChange((value: boolean): void => { this.watchAutoAnalyze = value; })
+    Column({ space: 14 }) {
+      Row({ space: 10 }) {
+        if (this.watchDevice !== null) {
+          Button('‹').fontSize(28).width(36).height(40).padding(0)
+            .fontColor(AppTheme.text('#172033')).backgroundColor(Color.Transparent).accessibilityText('返回手表列表')
+            .onClick((): void => {
+              if (this.busy) { this.cancel(); }
+              this.watchDevice = null; this.watchSourceId = ''; this.watchItems = []; this.watchSelectedIds = [];
+              this.watchStatus = '选择一块手表';
+            })
+        }
+        Text(this.watchDevice?.name || '连接手表').fontSize(21).fontWeight(FontWeight.Bold)
+          .fontColor(AppTheme.text('#172033')).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Button(this.busy ? '停止' : '刷新').fontSize(14).height(40).padding({ left: 8, right: 0 })
+          .fontColor(AppTheme.text('#007AFF')).backgroundColor(Color.Transparent).enabled(!this.watchScanning)
+          .onClick((): void => {
+            if (this.busy) { this.cancel(); }
+            else if (this.watchDevice !== null) { this.loadWatchDevice(this.watchDevice); }
+            else { this.scanWatches(); }
+          })
+      }.width('100%').padding({ right: 26 })
+      if (this.watchStatus || this.watchScanning || this.busy) {
+        Row({ space: 8 }) {
+          if (this.watchScanning || this.busy) { LoadingProgress().width(18).height(18).color(AppTheme.text('#007AFF')) }
+          Text(this.watchStatus).fontSize(14).lineHeight(21).fontColor(AppTheme.text('#737D90'))
+            .layoutWeight(1).maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%')
-        Text('手表需先在运动健康中配对并安装 ClawMate。接收会核对文件完整性；重复同步保留已有转写，手表原录音不会删除。')
-          .fontSize(15).lineHeight(25).fontColor(AppTheme.text('#8E8E93')).width('100%')
-        Text(this.jobKind === 'watch' ? '停止接收' : '重新查找手表').fontSize(17).fontColor(AppTheme.text('#5260ED')).padding(12)
-          .onClick((): void => { if (this.jobKind === 'watch') { this.cancel(); } else { this.scanWatches(); } })
-      }.padding(26).width('100%').alignItems(HorizontalAlign.Start)
-    }.width('100%').height('100%').scrollBar(BarState.Off)
+      }
+      if (this.jobKind === 'watch') { Progress({ value: this.progress, total: 100, type: ProgressType.Linear }).width('100%') }
+      if (this.watchDevice !== null && this.watchSourceId.length > 0) {
+        WatchRecordingPickerView({ items: this.watchItems, selectedIds: this.watchSelectedIds,
+          busy: this.busy, autoAnalyze: this.watchAutoAnalyze,
+          onSelectionChange: (ids: string[]): void => { this.watchSelectedIds = ids; },
+          onAutoAnalyzeChange: (value: boolean): void => { this.watchAutoAnalyze = value; },
+          onSync: (): void => { this.syncWatchDevice().catch((e: Error): void => { this.message(e); }); }
+        }).layoutWeight(1)
+      } else if (this.watchDevice === null) {
+        List({ space: 10 }) {
+          ForEach(this.watchDevices, (device: RecordingWatchDevice) => {
+            ListItem() {
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 12 }) {
+                  Image($r('app.media.recording_watch')).width(30).height(30)
+                  Text(device.name).fontSize(17).fontWeight(FontWeight.Medium)
+                    .fontColor(AppTheme.text('#172033')).layoutWeight(1)
+                  Text('›').fontSize(23).fontColor(AppTheme.text('#8E8E93'))
+                }.width('100%')
+              }.width('100%').padding(18).borderRadius(18).backgroundColor(AppTheme.background('#F4F5FA'))
+                .enabled(!this.busy && !this.watchScanning).onClick((): void => { this.loadWatchDevice(device); })
+            }
+          }, (device: RecordingWatchDevice): string => device.id)
+        }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+      } else { Blank() }
+    }.padding({ left: 22, right: 22, top: 28, bottom: 18 }).width('100%').height('100%').alignItems(HorizontalAlign.Start)
   }
   @Builder private SpeakersPanel() {
     Scroll() {
@@ -1280,7 +1418,7 @@ struct RecordingPage {
     }.padding(26).width('100%')
   }
   @Builder private Feedback() {
-    if (this.busy && !this.recording) {
+    if ((this.busy || this.watchQueueRunning) && !this.recording) {
       Column({ space: 14 }) {
         Row({ space: 14 }) {
           LoadingProgress().width(24).height(24)
@@ -1298,7 +1436,7 @@ struct RecordingPage {
       }.width('100%').padding(20).borderRadius(20).backgroundColor(AppTheme.background('#FFFFFF'))
     }
     if (this.error.length > 0) { Text(this.error).fontSize(16).lineHeight(26).fontColor(AppTheme.text('#D74D47')).width('100%') }
-    if (this.status.length > 0 && !this.busy) { Text(this.status).fontSize(15).lineHeight(24).fontColor(AppTheme.text('#737D90')).width('100%') }
+    if (this.status.length > 0 && !this.busy && !this.watchQueueRunning) { Text(this.status).fontSize(15).lineHeight(24).fontColor(AppTheme.text('#737D90')).width('100%') }
   }
   @Builder private Content() {
     Stack({ alignContent: Alignment.Bottom }) {
@@ -1346,7 +1484,7 @@ struct RecordingPage {
               bottom: this.recordingDockVisible() ? RECORDING_DOCK_INSET + 12 : 28 })
           }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
         }
-      }.width('100%').height('100%')
+      }.width('100%').height('100%').padding({ top: APP_HEADER_CONTENT_GAP })
       if (this.recordingDockVisible()) { this.RecordingDock() }
     }.width('100%').height('100%')
   }
@@ -1373,8 +1511,9 @@ struct RecordingPage {
   }
   build() {
     Stack() {
-      FrostedPage({ pageBackgroundColor: '#F6F7FA', scrollers: this.showRecordingSettings ?
-        [this.recordingSettingsScroller] : [this.scroller, this.recordingListScroller],
+      FrostedPage({ pageBackgroundColor: '#F6F7FA', titleFadeHeight: RECORDING_TITLE_FADE_HEIGHT,
+        scrollers: this.showRecordingSettings ? [this.recordingSettingsScroller] :
+          (this.selected === null && !this.recording ? [this.recordingListScroller] : [this.scroller]),
         headerBuilder: (): void => { this.PageHeader(); }, contentBuilder: (): void => { this.Content(); } })
       Row().width(0).height(0)
         .bindSheet(this.showAudioSources, this.AudioSourcesPanel(), { height: 460, showClose: true,
@@ -1384,7 +1523,10 @@ struct RecordingPage {
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showModels = false; } })
       Row().width(0).height(0)
         .bindSheet(this.showWatch, this.WatchPanel(), { height: SheetSize.LARGE, showClose: true,
-          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showWatch = false; } })
+          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => {
+            this.showWatch = false;
+            if (this.jobKind === 'watch' || this.jobKind === 'watch-list') { this.cancel(); }
+          } })
       Row().width(0).height(0)
         .bindSheet(this.showSpeakers, this.SpeakersPanel(), { height: SheetSize.LARGE, showClose: true,
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showSpeakers = false; this.save(); } })
