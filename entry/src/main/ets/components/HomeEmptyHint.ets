@@ -3,7 +3,7 @@ import { AppTheme } from '../utils/AppTheme';
 @Component
 export struct HomeEmptyHint {
   @Prop messageText: string = '';
-  @Prop illustration: Resource = $r('app.media.home_explorer_mascot');
+  @Prop illustration: Resource = $r('app.media.clawmate_secretary');
   @Prop accentTone: string = '#5968FF';
   @Prop loading: boolean = false;
   @Prop linkLabel: string = '去派任务';
@@ -16,7 +16,7 @@ export struct HomeEmptyHint {
           LoadingProgress().width(28).height(28).color(AppTheme.text(this.accentTone))
         } else {
           Image(this.illustration).width(76).height(76).objectFit(ImageFit.Contain)
-            .accessibilityText('背着小背包、朝手机出发的卡通猫伙伴')
+            .accessibilityText('ClawMate 专属秘书')
         }
       }.width(76).height(76)
       Column({ space: 2 }) {

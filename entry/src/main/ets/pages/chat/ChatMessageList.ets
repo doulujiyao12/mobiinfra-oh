@@ -204,9 +204,9 @@ struct ChatMessageAvatarView {
       if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
         // Leave trace clicks with ChatMessageAvatarBadge so one tap expands/collapses the trace.
         Stack() {
-          Image($r('app.media.chat_assistant_avatar'))
+          Image($r('app.media.clawmate_secretary'))
             .width(digitalAvatarFrameWidth('message')).height(digitalAvatarFrameWidth('message'))
-            .objectFit(ImageFit.Contain).accessibilityText('ClawMate 卡通猫助手，点击查看任务过程')
+            .objectFit(ImageFit.Contain).accessibilityText('ClawMate 秘书，点击查看任务过程')
         }.width(digitalAvatarContainerWidth('message', true)).height(digitalAvatarContainerWidth('message', true))
       } else {
         DigitalAvatarView({

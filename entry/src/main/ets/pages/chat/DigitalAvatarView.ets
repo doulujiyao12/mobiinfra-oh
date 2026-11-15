@@ -61,7 +61,7 @@ export struct DigitalAvatarView {
   }
 
   private foregroundImageSource(): string | Resource {
-    return this.useAssistantMascot ? $r('app.media.chat_assistant_avatar') : this.avatarForegroundUri;
+    return this.useAssistantMascot ? $r('app.media.clawmate_secretary') : this.avatarForegroundUri;
   }
 
   private avatarLogContext(): string {
@@ -407,9 +407,9 @@ export struct DigitalAvatarView {
         .animation({ duration: 760, curve: Curve.EaseInOut });
 
       if (this.useAssistantMascot) {
-        Image($r('app.media.home_explorer_mascot'))
+        Image($r('app.media.clawmate_secretary'))
           .width(this.frameWidth()).height(this.frameWidth()).objectFit(ImageFit.Contain)
-          .accessibilityText('ClawMate 卡通猫助手')
+          .accessibilityText('ClawMate 秘书')
           .translate({ x: 0, y: this.tapTranslateY })
           .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
           .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
@@ -467,7 +467,7 @@ export struct DigitalAvatarView {
         .width(this.frameWidth())
         .height(this.frameHeight())
         .objectFit(ImageFit.Contain)
-        .accessibilityText(this.useAssistantMascot ? 'ClawMate 卡通猫助手' : '个人生成形象')
+        .accessibilityText(this.useAssistantMascot ? 'ClawMate 秘书' : '个人生成形象')
         .translate({ x: 0, y: this.tapTranslateY })
         .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
         .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut })
