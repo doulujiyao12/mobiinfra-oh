@@ -9,6 +9,7 @@ import { IndexService, IndexSourceSelection } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups, readableCollectionGroupTitle } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { HomeCodexContext, HomeCodexRequest, HomeCodexContextService } from './HomeCodexContext';
+import { collectionProfileNote } from './CollectionProfileNote';
 import { dataManagerInfo } from './DataManagerLog';
 import { SyncMetrics } from './SyncMetrics';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
@@ -130,6 +131,7 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
     avatarActionLabel: avatar.avatarActionLabel,
     avatarVersionId: avatar.avatarVersionId,
     updatedLabel: '暂无画像',
+    secretaryNote: '',
     completeness: 0,
     totalEvents: 0,
     domains: defaultHomeDomains(),
@@ -998,6 +1000,7 @@ export class DataManagerFacade {
       // Text-profile publication and avatar generation have independent clocks.
       // Mail-only syncs also must not advance the displayed profile timestamp.
       updatedLabel: this.formatHomeUpdatedLabel(profile.generated_at),
+      secretaryNote: collectionProfileNote(profile),
       completeness: completeness,
       totalEvents: profile.event_count,
       calendarEnabled: new CalendarMemoryStore(this.paths.filesDir).settings().enabled,

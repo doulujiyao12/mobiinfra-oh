@@ -246,11 +246,11 @@ export struct HomePage {
         this.Greeting()
         if (!this.lifted && !this.bubble) {
           Button({ type: ButtonType.Normal }) {
-            Row({ space: 5 }) {
-              SymbolGlyph($r('sys.symbol.clock_arrow_2_circlepath')).fontSize(15).fontColor([$r('app.color.ui_text_muted')])
-              Text('回顾你的一天').fontSize(13).fontColor($r('app.color.ui_text_secondary'))
+            Row({ space: 6 }) {
+              SymbolGlyph($r('sys.symbol.clock_arrow_2_circlepath')).fontSize(18).fontColor([$r('app.color.ui_accent_purple')])
+              Text('回顾你的一天').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
             }
-          }.height(36).padding({ left: 0, right: 8 }).backgroundColor(Color.Transparent)
+          }.height(44).padding({ left: 0, right: 8 }).backgroundColor(Color.Transparent)
             .onClick((): void => { this.onDailyReview(); })
         }
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
@@ -261,12 +261,12 @@ export struct HomePage {
           onGreet: (): void => { this.greet(); }
         }).width('100%').layoutWeight(1)
         Button({ type: ButtonType.Normal }) {
-          Row({ space: 4 }) {
-            Text('帮你解闷').fontSize(13).fontColor($r('app.color.ui_text_secondary'))
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([$r('app.color.ui_accent_purple')])
+          Row({ space: 6 }) {
+            Text('帮你解闷').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14).fontColor([$r('app.color.ui_accent_purple')])
               .rotate({ angle: this.topicsExpanded ? 180 : 0 }).animation({ duration: 180, curve: Curve.EaseInOut })
           }
-        }.width('100%').height(40).padding(0).backgroundColor(Color.Transparent)
+        }.width('100%').height(44).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText(this.topicsExpanded ? '收起聊天话题' : '展开聊天话题').onClick((): void => { this.toggleTopics(); })
       }.width(this.compactHeader ? 100 : (this.boardColumns > 2 ? 164 : 135)).height('100%')
     }.width(this.boardColumns > 2 ? 430 : '100%').constraintSize({ maxWidth: this.boardColumns > 2 ? 430 : 398 })
@@ -536,7 +536,7 @@ export struct HomePage {
     Navigation() {
       this.Content()
     }.mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
-      .title({ builder: (): void => { this.Header(); }, height: this.compactHeader ? 124 : (this.boardColumns > 2 ? 208 : 190) }, {
+      .title({ builder: (): void => { this.Header(); }, height: this.compactHeader ? 132 : (this.boardColumns > 2 ? 208 : 190) }, {
         barStyle: BarStyle.STANDARD, backgroundColor: $r('app.color.ui_page_white'),
         paddingStart: LengthMetrics.vp(0), paddingEnd: LengthMetrics.vp(0)
       })

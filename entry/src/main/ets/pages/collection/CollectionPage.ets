@@ -1,5 +1,5 @@
-import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
-import { CollectionFormGroup, CollectionFormDivider, CollectionFormInput, CollectionFormAction,
+import { JSON as ArkJSON } from '@kit.ArkTS';
+import { CollectionFormDivider, CollectionFormInput, CollectionFormAction,
   CollectionSourceRow } from '../../components/CollectionFormControls';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
@@ -39,16 +39,22 @@ import {
 } from '../../utils/wechat/WechatAutoSummaryTypes';
 
 const COLLECTION_GROUPS_PER_PAGE: number = 5;
-const COLLECTION_SECTION_GAP: number = 18;
+
+interface CollectionGroupRouteParams {
+  tabIndex: number;
+  groupId: string;
+}
 
 // 足迹汇总页：按场景展示采集数据、图库分析和聊天提取的信息。
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
   @StorageProp(DEBUG_ENABLED_STORAGE_KEY) private debugEnabled: boolean = false;
-  @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   private pageScroller: Scroller = new Scroller();
+  private scenes: WorkflowSceneConfig[] = memorySceneConfigs();
   @Link collectionModule: number;
+  @Prop secretaryNote: string = '';
+  @Prop navigationBottomInset: number = 0;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
   @Prop calendarSourceSyncReady: boolean = false;
@@ -72,6 +78,8 @@ export struct CollectionPage {
   @Prop wechatAutoSummaryCanStop: boolean = false;
   @Prop wechatAutoSummaryStatus: string = '';
   @State private groupPageIndex: number = 0;
+  @State private allScenesExpanded: boolean = false;
+  @State private scenePreviewCount: number = 3;
   @StorageLink('wechatAutoSummaryCollectionMode') wechatMode: string = WECHAT_AUTO_SUMMARY_MODE_RECENT;
   @StorageLink('wechatAutoSummaryCollectionDaysInput') wechatDaysInput: string = '';
   @StorageLink('wechatAutoSummaryCollectionMaxContactsInput') wechatMaxContactsInput: string = '';
@@ -121,16 +129,17 @@ export struct CollectionPage {
     return collectionViewModelByTabIndex(this.viewModels, this.collectionModule);
   }
 
-  private getCollectionTitle(): string {
-    return this.currentView().title;
+  private visibleScenes(): WorkflowSceneConfig[] {
+    if (this.allScenesExpanded || this.scenePreviewCount >= this.scenes.length) { return this.scenes; }
+    const visible = this.scenes.slice(0, this.scenePreviewCount);
+    const selected = this.scenes.find((scene: WorkflowSceneConfig): boolean => this.isActiveCollectionScene(scene));
+    if (selected && !visible.includes(selected)) { visible[visible.length - 1] = selected; }
+    return visible;
   }
 
-  private getCollectionCount(): string {
-    return this.currentView().countLabel;
-  }
-
-  private getCollectionSyncTime(): string {
-    return this.currentView().lastUpdatedLabel;
+  private syncLabel(): string {
+    const label = this.currentView().lastUpdatedLabel;
+    return label === '暂无同步' ? label : '最近同步 ' + label;
   }
 
   private groupCount(): number {
@@ -199,15 +208,6 @@ export struct CollectionPage {
     return this.wechatInputOrDefault(this.wechatMaxContactsInput, this.wechatAutoSummaryDefaultMaxContacts);
   }
 
-  private wechatCurrentSummaryText(): string {
-    let days = normalizeWechatAutoSummaryDays(this.wechatDaysText());
-    if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
-      return '本次采集：近 ' + days + ' 天，指定联系人模式';
-    }
-    return '本次采集：近 ' + days + ' 天，最近 ' +
-      normalizeWechatAutoSummaryMaxContacts(this.wechatMaxContactsText()) + ' 个联系人';
-  }
-
   private buildWechatRequest(): WechatAutoSummaryRequest {
     let mode = normalizeWechatAutoSummaryMode(this.wechatMode);
     let targetContact = mode === WECHAT_AUTO_SUMMARY_MODE_TARGET ? this.wechatTargetContactInput.trim() : '';
@@ -238,10 +238,10 @@ export struct CollectionPage {
   }
 
   @Builder WechatModeButton(label: string, mode: string) {
-    Button(label, { type: ButtonType.Normal }).height(36).layoutWeight(1).fontSize(14)
+    Button(label, { type: ButtonType.Normal }).height(44).layoutWeight(1).fontSize(14)
       .fontWeight(this.wechatMode === mode ? FontWeight.Medium : FontWeight.Normal)
-      .fontColor(AppTheme.text('#172033'))
-      .backgroundColor(this.wechatMode === mode ? AppTheme.background(Color.White) : Color.Transparent)
+      .fontColor($r('app.color.ui_text_primary'))
+      .backgroundColor(this.wechatMode === mode ? $r('app.color.ui_surface') : Color.Transparent)
       .borderRadius(9).onClick((): void => {
         if (this.wechatAutoSummaryRunning) { return; }
         this.wechatMode = mode; this.saveWechatForm();
@@ -249,11 +249,12 @@ export struct CollectionPage {
   }
 
   @Builder WechatFields() {
-    Row({ space: 3 }) {
-      this.WechatModeButton('最近联系人', WECHAT_AUTO_SUMMARY_MODE_RECENT)
-      this.WechatModeButton('指定联系人', WECHAT_AUTO_SUMMARY_MODE_TARGET)
-    }.width('100%').padding(3).backgroundColor(AppTheme.background('#F2F2F7')).borderRadius(12)
-      .margin({ bottom: 8 })
+    Column() {
+      Row({ space: 3 }) {
+        this.WechatModeButton('最近联系人', WECHAT_AUTO_SUMMARY_MODE_RECENT)
+        this.WechatModeButton('指定联系人', WECHAT_AUTO_SUMMARY_MODE_TARGET)
+      }.width('100%').padding(3).backgroundColor($r('app.color.ui_surface_soft')).borderRadius(12)
+    }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
     CollectionFormInput({ label: '时间范围（天）', value: this.wechatDaysInput,
       placeholder: '默认 ' + this.wechatAutoSummaryDefaultDays, inputType: InputType.Number,
       onChangeValue: (value: string): void => { this.wechatDaysInput = value; this.saveWechatForm(); } })
@@ -280,407 +281,277 @@ export struct CollectionPage {
       .enabled(!this.wechatAutoSummaryRunning || this.wechatAutoSummaryCanStop)
   }
 
-  @Builder WechatAutoSummaryCard() {
-    if (this.wechatAutoSummaryEnabled === 'true') {
-      Column() {
-        CollectionFormGroup({ title: '微信快速采集', footer: '沿用任务页控制方式，采集结果可同步到个人记忆。',
-          contentBuilder: (): void => { this.WechatCaptureContent(); } })
-        if (this.wechatFormError.length > 0 || this.wechatAutoSummaryStatus.length > 0) {
-          Text(this.wechatFormError || this.wechatAutoSummaryStatus).fontSize(12).lineHeight(20)
-            .fontColor(AppTheme.text(this.wechatFormError || this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#747C8A'))
-            .width('100%').padding({ left: 16, right: 16 }).margin({ bottom: 16 })
-        }
-      }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: COLLECTION_SECTION_GAP })
-    }
+  @Builder SectionHeading(title: string) {
+    Text(title).fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.ui_text_primary'))
+      .maxLines(2).layoutWeight(1)
   }
 
-  @Builder CollectTab(scene: WorkflowSceneConfig) {
-    // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
-    Column() {
-      Text(scene.label)
-        .fontSize(14)
-        .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Medium)
-        .fontColor(AppTheme.text(this.isActiveCollectionScene(scene) ? '#6657E8' : '#4E5668'))
-        .height(34)
-        .textAlign(TextAlign.Center)
-        .maxLines(1)
-      Row()
-        .width(this.isActiveCollectionScene(scene) ? 26 : 0)
-        .height(3)
-        .backgroundColor(AppTheme.background('#7669FF'))
-        .borderRadius(2)
-    }
-      .justifyContent(FlexAlign.End)
-      .height(42)
-      .padding({ left: 14, right: 14 })
-      .margin({ left: scene.sceneId === 0 ? 8 : 0 })
-      .onClick(() => {
-        this.collectionModule = scene.sceneId;
-        this.groupPageIndex = 0;
+  @Builder SecretaryHeader() {
+    Row() {
+      Image($r('app.media.collection_secretary')).width(92).height(98).objectFit(ImageFit.Contain)
+        .flexShrink(0).accessibilityLevel('no')
+      Shape() {
+        Path().commands('M 15 0 C 13 7 8 12 0 13 C 4 17 10 19 15 18 Z')
+          .fill($r('app.color.ui_surface')).strokeWidth(0)
+      }.viewPort({ x: 0, y: 0, width: '15px', height: '20px' }).width(15).height(20)
+        .margin({ right: -1 }).flexShrink(0).accessibilityLevel('no')
+      Column({ space: 5 }) {
+        Text('小 C 手记').fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_accent_purple'))
+        Text(this.secretaryNote || '我还在了解你。等有了足够的记录，再和你说说我的发现。')
+          .fontSize(16).lineHeight(24).fontColor($r('app.color.ui_text_primary')).width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start).padding({ left: 15, right: 15, top: 12, bottom: 12 })
+        .backgroundColor($r('app.color.ui_surface'))
+        .borderRadius(22)
+    }.width('100%')
+  }
+
+  @Builder SceneChoice(scene: WorkflowSceneConfig) {
+    Button(scene.label, { type: ButtonType.Capsule }).fontSize(15)
+      .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Medium)
+      .fontColor(this.isActiveCollectionScene(scene) ? $r('app.color.ui_text_on_fill') : $r('app.color.ui_text_secondary'))
+      .backgroundColor(this.isActiveCollectionScene(scene) ? $r('app.color.ui_surface_emphasized') : $r('app.color.ui_surface_soft'))
+      .constraintSize({ minHeight: 40 }).padding({ left: 13, right: 13 }).margin({ right: 6, bottom: 6 })
+      .accessibilityText(scene.label + (this.isActiveCollectionScene(scene) ? '，已选中' : ''))
+      .onClick((): void => {
+        if (!this.isActiveCollectionScene(scene)) {
+          this.collectionModule = scene.sceneId;
+          this.groupPageIndex = 0;
+        }
       })
   }
 
-  @Builder GroupThumbnail(group: CollectionGroupViewModel) {
-    if (group.thumbnailUri.length > 0) {
-      Image(group.thumbnailUri)
-        .width(60)
-        .height(60)
-        .objectFit(ImageFit.Cover)
-        .backgroundColor(AppTheme.background('#F0F3F8'))
-        .borderRadius(14)
-        .border({ width: 1, color: AppTheme.border('#E7EBF2') })
-    } else {
-      Column() {
-        Text('暂无图片')
-          .fontSize(10)
-          .fontColor(AppTheme.text('#8A92A3'))
-          .maxLines(1)
-      }
-      .justifyContent(FlexAlign.Center)
-      .width(60)
-      .height(60)
-      .backgroundColor(AppTheme.background('#F0F3F8'))
-      .borderRadius(14)
-      .border({ width: 1, color: AppTheme.border('#E7EBF2') })
-    }
-  }
-
-  @Builder TimelineMarker() {
-    Stack({ alignContent: Alignment.Center }) {
-      Divider()
-        .vertical(true)
-        .height(86)
-        .strokeWidth(1)
-        .color(AppTheme.border('#D9DDEA'))
-      Row()
-        .width(10)
-        .height(10)
-        .borderRadius(5)
-        .backgroundColor(AppTheme.background('#8173FF'))
-        .border({ width: 2, color: AppTheme.border(Color.White) })
-        .shadow({ radius: 4, color: AppTheme.shadow('#307669FF'), offsetX: 0, offsetY: 1 })
-    }
-    .width(20)
-    .height(86)
-  }
-
-  @Builder GroupRow(group: CollectionGroupViewModel) {
-    Row() {
-      this.TimelineMarker()
-      this.GroupThumbnail(group)
-      Column() {
-        Text(group.title)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#161C2D'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.groupSubtitle(group))
-          .fontSize(12)
-          .fontColor(AppTheme.text('#7A8292'))
-          .margin({ top: 6 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .justifyContent(FlexAlign.Center)
-      .layoutWeight(1)
-      .height(72)
-      .margin({ left: 13, right: 8 })
-      Row() {
-        Text(group.meta)
-          .fontSize(14)
-          .fontColor(AppTheme.text('#242A38'))
-          .maxLines(1)
-        Text('›')
-          .fontSize(25)
-          .fontColor(AppTheme.text('#A2A8B5'))
-          .margin({ left: 9 })
-      }
-      .alignItems(VerticalAlign.Center)
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .height(86)
-    .onClick(() => {
-      router.pushUrl({
-        url: 'pages/collection/CollectionGroupDetailPage',
-        params: {
-          tabIndex: this.collectionModule,
-          groupId: group.id
-        }
-      });
-    })
-  }
-
-  @Builder CollectionRows() {
-    if (this.groupCount() === 0) {
-      Column() {
-        Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#151A28'))
-        Text('点击同步，整理采集数据及近 7 天未处理的聊天信息')
-          .fontSize(12).fontColor(AppTheme.text('#7C8494')).textAlign(TextAlign.Center).margin({ top: 6 })
-      }.width('100%').height(92).justifyContent(FlexAlign.Center)
-    } else {
-      Column() {
-        ForEach(this.currentPageGroups(), (group: CollectionGroupViewModel, index: number) => {
-          this.GroupRow(group)
-          if (index < this.currentPageGroups().length - 1) {
-            Divider()
-              .strokeWidth(1)
-              .color(AppTheme.border('#E8EBF1'))
-              .margin({ left: 94 })
-          }
-        }, (group: CollectionGroupViewModel) => group.id)
-      }
-      .width('100%')
-    }
-  }
-
-  @Builder GroupPagination() {
-    if (this.shouldShowGroupPagination()) {
-      Row() {
-        Button('上一页')
-          .fontSize(12)
-          .fontColor(AppTheme.text(this.currentGroupPageIndex() > 0 ? '#8066FF' : '#A7ADBA'))
-          .height(32)
-          .padding({ left: 14, right: 14 })
-          .backgroundColor(AppTheme.background(Color.Transparent))
-          .enabled(this.currentGroupPageIndex() > 0)
-          .onClick(() => {
-            this.setGroupPage(this.currentGroupPageIndex() - 1);
-          })
-        Text(`${this.currentGroupPageIndex() + 1}/${this.groupPageCount()}`)
-          .fontSize(13)
-          .fontColor(AppTheme.text('#6D7481'))
-          .textAlign(TextAlign.Center)
-          .layoutWeight(1)
-          .maxLines(1)
-        Button('下一页')
-          .fontSize(12)
-          .fontColor(AppTheme.text(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#8066FF' : '#A7ADBA'))
-          .height(32)
-          .padding({ left: 14, right: 14 })
-          .backgroundColor(AppTheme.background(Color.Transparent))
-          .enabled(this.currentGroupPageIndex() < this.groupPageCount() - 1)
-          .onClick(() => {
-            this.setGroupPage(this.currentGroupPageIndex() + 1);
-          })
-      }
-      .width('100%')
-      .margin({ top: 10 })
-    }
-  }
-
-  @Builder GroupRangeLabel() {
-    Text(`共${this.groupCount()}组`)
-      .fontSize(13)
-      .fontColor(AppTheme.text('#7F8592'))
-      .maxLines(1)
-  }
-
   @Builder CollectionOverview() {
-    Stack({ alignContent: Alignment.Center }) {
-      Row() {
-        Column() {
-          Text('足迹概览')
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(AppTheme.text('#535C70'))
-            .maxLines(1)
-          Row() {
-            Text(this.getCollectionCount())
-              .fontSize(32)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(AppTheme.text('#6C5CE7'))
-              .maxLines(1)
-            Divider()
-              .vertical(true)
-              .height(32)
-              .color(AppTheme.border('#DCE0EA'))
-              .margin({ left: 15, right: 15 })
-            Text(this.groupCount().toString() + ' 个主题')
-              .fontSize(15)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(AppTheme.text('#232939'))
-              .maxLines(1)
-          }
-          .alignItems(VerticalAlign.Center)
-          .margin({ top: 8 })
-          Row() {
-            Row()
-              .width(7)
-              .height(7)
-              .borderRadius(4)
-              .backgroundColor(AppTheme.background('#39C2B3'))
-              .margin({ right: 8 })
-            Text('最近同步 ' + this.getCollectionSyncTime())
-              .fontSize(12)
-              .fontColor(AppTheme.text('#727A8B'))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .margin({ top: 9 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        Column({ space: 1 }) {
-          Stack({ alignContent: Alignment.Center }) {
+    Column({ space: 8 }) {
+      Row({ space: 12 }) {
+        this.SectionHeading('按领域查看')
+        Button({ type: ButtonType.Capsule }) {
+          Row({ space: 7 }) {
             if (this.refreshing) {
-              LoadingProgress()
-                .width(22)
-                .height(22)
-                .color(AppTheme.text('#7669FF'))
+              LoadingProgress().width(16).height(16).color($r('app.color.ui_accent_blue'))
             } else {
-              Text('⟳')
-                .width(32)
-                .height(28)
-                .fontSize(26)
-                .lineHeight(28)
-                .fontColor(AppTheme.text('#7669FF'))
-                .textAlign(TextAlign.Center)
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(16)
+                .fontColor([$r('app.color.ui_accent_blue')])
             }
+            Text(this.refreshing ? '同步中' : '同步').fontSize(15).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.ui_accent_blue'))
           }
-          .width(32)
-          .height(28)
-
-          Text(this.refreshing ? '整理中' : '同步')
-            .width('100%')
-            .height(18)
-            .fontSize(12)
-            .lineHeight(18)
-            .fontColor(AppTheme.text('#5F6575'))
-            .textAlign(TextAlign.Center)
+        }.constraintSize({ minHeight: 44 }).padding({ left: 12, right: 4 }).flexShrink(0)
+          .backgroundColor(Color.Transparent).enabled(!this.refreshing)
+          .accessibilityText(this.refreshing ? '正在同步记录' : '同步记录')
+          .onClick((): void => {
+            if (this.refreshing) { return; }
+            dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
+            this.onRefresh();
+          })
+      }.width('100%')
+      Column() {
+        this.ScenePicker()
+        CollectionFormDivider()
+        if (this.collectionModule === PERSONAL_INFO_MEMORY_SCENE_ID) {
+          PersonalInfoSection()
         }
-        .alignItems(HorizontalAlign.Center)
-        .justifyContent(FlexAlign.Center)
-        .width(64)
-        .height(64)
-        .backgroundColor(AppTheme.background('#DFFFFFFF'))
-        .borderRadius(32)
-        .border({ width: 1, color: AppTheme.border('#C9D3DDF2') })
-        .shadow({ radius: 10, color: AppTheme.shadow('#141E2A58'), offsetX: 0, offsetY: 4 })
-        .onClick(() => {
-          dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
-          if (this.refreshing) {
-            return;
-          }
-          this.onRefresh();
-        })
-      }
-      .width('100%')
-      .padding({ left: 22, right: 20 })
-    }
-    .width('92%')
-    .constraintSize({ maxWidth: 720 })
-    .height(128)
-    .backgroundColor(AppTheme.background('#F2F6FF'))
-    .backgroundImage(this.darkMode ? '' : $r('app.media.home_overview_background_compact'), ImageRepeat.NoRepeat)
-    .backgroundImageSize(ImageSize.Cover)
-    .borderRadius(24)
-    .border({ width: 1, color: AppTheme.border('#B8FFFFFF') })
-    .clip(true)
-    .shadow({ radius: 16, color: AppTheme.shadow('#120D2A63'), offsetX: 0, offsetY: 6 })
-    .margin({ top: 16 })
+        if (this.collectionModule !== PERSONAL_INFO_MEMORY_SCENE_ID || this.groupCount() > 0) {
+          this.RecordsSection()
+        }
+      }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(20).clip(true)
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
-  @Builder PageHeader() {
-    AppHeader({ title: '你的足迹' })
+  @Builder ScenePicker() {
+    Column({ space: 2 }) {
+      Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+        ForEach(this.visibleScenes(), (scene: WorkflowSceneConfig) => {
+          this.SceneChoice(scene)
+        }, (scene: WorkflowSceneConfig): string => scene.tabId)
+        if (this.scenePreviewCount < this.scenes.length) {
+          Button({ type: ButtonType.Capsule }) {
+            Row({ space: 4 }) {
+              Text(this.allScenesExpanded ? '收起' : '全部领域').fontSize(14).fontColor($r('app.color.ui_accent_blue'))
+              SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14).fontColor([$r('app.color.ui_accent_blue')])
+                .rotate({ angle: this.allScenesExpanded ? 180 : 0 })
+            }
+          }.constraintSize({ minHeight: 40 }).padding({ left: 6, right: 8 }).margin({ bottom: 6 })
+            .backgroundColor(Color.Transparent).accessibilityText(this.allScenesExpanded ? '收起领域列表' : '展开全部领域')
+            .onClick((): void => { this.allScenesExpanded = !this.allScenesExpanded; })
+        }
+      }.width('100%').onAreaChange((_old: Area, area: Area): void => {
+        // Reserve room for the longer personal-info label and the disclosure.
+        const count = Math.min(this.scenes.length, Math.max(2, Math.floor((Number(area.width) - 116) / 64)));
+        if (this.scenePreviewCount !== count) { this.scenePreviewCount = count; }
+      })
+      Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+        Text(this.currentView().countLabel + '记录 · ' + this.groupCount() + ' 个主题')
+          .fontSize(13).fontColor($r('app.color.ui_text_secondary')).margin({ right: 10 })
+        Text(this.syncLabel()).fontSize(13).fontColor($r('app.color.ui_text_muted'))
+      }.width('100%')
+    }.width('100%').padding({ left: 14, right: 14, top: 14, bottom: 12 }).alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder AnalysisShortcut(title: string, image: Resource, start: string, end: string, route: string) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 9 }) {
+        Image(image).width(34).height(34).padding(6).objectFit(ImageFit.Contain)
+          .linearGradient({ angle: 135, colors: [[start, 0], [end, 1]] }).borderRadius(10)
+          .flexShrink(0).accessibilityLevel('no')
+        Text(title).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+          .flexShrink(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.width('100%').justifyContent(FlexAlign.Center)
+    }.layoutWeight(1).constraintSize({ minHeight: 64 }).padding({ left: 6, right: 6, top: 8, bottom: 8 })
+      .borderRadius(0).backgroundColor(Color.Transparent).accessibilityText(title)
+      .onClick((): void => { router.pushUrl({ url: route }); })
+  }
+
+  @Builder AnalysisShortcuts() {
+    Row() {
+      this.AnalysisShortcut('图库分析', $r('app.media.source_gallery'), '#329AA2', '#28618A', 'pages/gallery/GalleryPage')
+      Divider().vertical(true).height(26).strokeWidth(0.5).color($r('app.color.ui_border'))
+      this.AnalysisShortcut('录音分析', $r('app.media.source_recording_white'), '#D96B56', '#AC425F', 'pages/recording/RecordingPage')
+    }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(18).clip(true)
+  }
+
+  @Builder TopicTile(group: CollectionGroupViewModel) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 6 }) {
+        Row({ space: 6 }) {
+          if (group.thumbnailUri) {
+            Image(group.thumbnailUri).width(24).height(24).objectFit(ImageFit.Cover).borderRadius(6)
+              .accessibilityLevel('no')
+          } else {
+            SymbolGlyph($r('sys.symbol.rectangle_stack')).fontSize(16).fontColor([$r('app.color.ui_accent_blue')])
+              .accessibilityLevel('no')
+          }
+          Text(group.meta).fontSize(12).fontColor($r('app.color.ui_text_secondary')).layoutWeight(1)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(11).fontColor([$r('app.color.ui_text_muted')])
+        }.width('100%')
+        Text(group.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (group.source || group.time) {
+          Text(this.groupSubtitle(group)).fontSize(12).fontColor($r('app.color.ui_text_secondary'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+      }.width('100%').alignItems(HorizontalAlign.Start)
+    }.width('100%').constraintSize({ minHeight: 90 }).padding(12)
+      .borderRadius(13).backgroundColor($r('app.color.ui_surface_soft'))
+      .accessibilityText([group.title, this.groupSubtitle(group), group.meta].join('，'))
+      .onClick((): void => {
+        const params: CollectionGroupRouteParams = { tabIndex: this.collectionModule, groupId: group.id };
+        router.pushUrl({ url: 'pages/collection/CollectionGroupDetailPage', params: params });
+      })
+  }
+
+  @Builder PageArrow(offset: number, label: string, symbol: Resource) {
+    Button({ type: ButtonType.Circle }) {
+      SymbolGlyph(symbol).fontSize(15).fontColor([$r('app.color.ui_text_secondary')])
+    }.width(44).height(44).padding(0).backgroundColor(Color.Transparent)
+      .enabled(this.currentGroupPageIndex() + offset >= 0 && this.currentGroupPageIndex() + offset < this.groupPageCount())
+      .accessibilityText(label).onClick((): void => { this.setGroupPage(this.currentGroupPageIndex() + offset); })
+  }
+
+  @Builder RecordsSection() {
+    Column({ space: 6 }) {
+      Row() {
+        Text('从记录中整理').fontSize(14).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.ui_text_secondary')).layoutWeight(1)
+        if (this.shouldShowGroupPagination()) {
+          this.PageArrow(-1, '上一页', $r('sys.symbol.chevron_left'))
+          Text(`${this.currentGroupPageIndex() + 1} / ${this.groupPageCount()}`)
+            .fontSize(13).fontColor($r('app.color.ui_text_secondary')).maxLines(1)
+          this.PageArrow(1, '下一页', $r('sys.symbol.chevron_right'))
+        }
+      }.width('100%').constraintSize({ minHeight: 24 })
+      if (this.groupCount() === 0) {
+        Text('这个领域还没有记录').fontSize(15).fontColor($r('app.color.ui_text_secondary'))
+          .width('100%').padding({ top: 8, bottom: 12 })
+      } else {
+        GridRow({ columns: 2, gutter: 8,
+          breakpoints: { value: ['310vp'], reference: BreakpointsReference.ComponentSize } }) {
+          ForEach(this.currentPageGroups(), (group: CollectionGroupViewModel) => {
+            GridCol({ span: { xs: 2, sm: this.groupCount() > 1 ? 1 : 2 } }) {
+              this.TopicTile(group)
+            }
+          }, (group: CollectionGroupViewModel): string =>
+            ArkJSON.stringify([group.id, group.title, group.source, group.time, group.meta, group.thumbnailUri]))
+        }.width('100%')
+      }
+    }.width('100%').padding({ left: 14, right: 14, top: 10, bottom: 14 })
   }
 
   @Builder CollectionSourceEntries() {
-    CollectionSourceRow({ title: '新增采集源', detail: '管理已接入的数据来源', icon: $r('app.media.source_add'),
-      tint: '#8E8E93', onOpen: (): void => { this.onOpenDataCollectionSettings(); } })
-    CollectionFormDivider()
-    CollectionSourceRow({ title: '图库分析', detail: '理解照片与截图中的内容', icon: $r('app.media.source_gallery'),
-      tint: '#AF52DE', onOpen: (): void => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); } })
-    CollectionFormDivider()
-    CollectionSourceRow({ title: '录音分析', detail: '多语种转写、说话人分段与声纹比较', icon: $r('app.media.source_recording_white'),
-      tint: '#007AFF', onOpen: (): void => { router.pushUrl({ url: 'pages/recording/RecordingPage' }); } })
-    CollectionFormDivider()
-    CollectionSourceRow({ title: '日历分析', detail: '日程同步与一周安排', icon: $r('app.media.source_calendar'),
-      showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
-      syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
-      tint: '#FF9500', onOpen: (): void => { this.onOpenCalendarAnalysis(); } })
-    CollectionFormDivider()
-    CollectionSourceRow({ title: '邮箱分析', detail: '邮箱设置与近三天邮件筛选', icon: $r('app.media.source_mail'),
-      showSync: true, syncEnabled: this.mailSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
-      syncing: this.sourceSyncPending === 'mail', onSync: this.onQuickSyncMail,
-      onOpen: (): void => { this.onOpenMailAnalysis(); } })
+    Column({ space: 8 }) {
+      Row() {
+        this.SectionHeading('数据来源')
+        Button('管理').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_accent_blue'))
+          .height(44).padding({ left: 12, right: 4 }).backgroundColor(Color.Transparent)
+          .accessibilityText('管理和新增采集源').onClick(this.onOpenDataCollectionSettings)
+      }.width('100%')
+      Column() {
+        CollectionSourceRow({ title: '日历分析', icon: $r('app.media.source_calendar'),
+          showSync: true, syncEnabled: this.calendarSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
+          syncing: this.sourceSyncPending === 'calendar', onSync: this.onQuickSyncCalendar,
+          tint: '#FF9500', onOpen: (): void => { this.onOpenCalendarAnalysis(); } })
+        CollectionFormDivider()
+        CollectionSourceRow({ title: '邮箱分析', icon: $r('app.media.source_mail'),
+          showSync: true, syncEnabled: this.mailSourceSyncReady && !this.refreshing && !this.sourceSyncPending,
+          syncing: this.sourceSyncPending === 'mail', onSync: this.onQuickSyncMail,
+          onOpen: (): void => { this.onOpenMailAnalysis(); } })
+      }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(18).clip(true)
+    }.width('100%')
+  }
+
+  @Builder WechatAutoSummaryCard() {
+    Column({ space: 8 }) {
+      Row() { this.SectionHeading('微信快速采集') }.width('100%').constraintSize({ minHeight: 36 })
+      Column() {
+        this.WechatCaptureContent()
+      }.width('100%').padding({ top: 12 }).backgroundColor($r('app.color.ui_surface')).borderRadius(18).clip(true)
+      if (this.wechatFormError || this.wechatAutoSummaryStatus) {
+        Text(this.wechatFormError || this.wechatAutoSummaryStatus).fontSize(13).lineHeight(20)
+          .fontColor(this.wechatFormError || this.wechatAutoSummaryStatus.startsWith('采集失败') ?
+            $r('app.color.ui_accent_red') : $r('app.color.ui_text_secondary')).width('100%')
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder PageHeader() {
+    AppHeader({ title: '汇总' })
   }
 
   @Builder PageContent() {
     Scroll(this.pageScroller) {
-      Column() {
-        Scroll() {
-          Row() {
-            ForEach(memorySceneConfigs(), (scene: WorkflowSceneConfig) => {
-              this.CollectTab(scene)
-            }, (scene: WorkflowSceneConfig) => scene.tabId)
-          }.padding({ left: 16, right: 16 })
-        }
-        .width('100%')
-        .height(44)
-        .scrollable(ScrollDirection.Horizontal)
-        .scrollBar(BarState.Off)
-        .margin({ top: 8, bottom: 0 })
-
-        this.CollectionOverview()
-
-        if (this.collectionModule === PERSONAL_INFO_MEMORY_SCENE_ID) {
-          Column() { PersonalInfoSection() }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: 20 })
-        }
-
-        if (this.collectionModule !== PERSONAL_INFO_MEMORY_SCENE_ID || this.groupCount() > 0) {
-          Column() {
-            Row() {
-              Text(this.collectionModule === PERSONAL_INFO_MEMORY_SCENE_ID ? '从记录中整理' : this.getCollectionTitle())
-                .fontSize(20)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(AppTheme.text('#151A28'))
-                .layoutWeight(1)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              this.GroupRangeLabel()
-            }
-            .width('100%')
-            .margin({ bottom: 4 })
-            this.CollectionRows()
-            this.GroupPagination()
+      Column({ space: 16 }) {
+        GridRow({ columns: 12, gutter: { x: 20, y: 14 },
+          breakpoints: { value: ['620vp'], reference: BreakpointsReference.ComponentSize } }) {
+          GridCol({ span: { xs: 12, sm: 7 } }) { this.SecretaryHeader() }
+          GridCol({ span: { xs: 12, sm: 5 } }) { this.AnalysisShortcuts() }
+        }.width('100%').alignItems(ItemAlign.Center)
+        GridRow({ columns: 12, gutter: { x: 20, y: 24 },
+          breakpoints: { value: ['620vp'], reference: BreakpointsReference.ComponentSize } }) {
+          GridCol({ span: { xs: 12, sm: 7 } }) {
+            this.CollectionOverview()
           }
-          .width('92%')
-          .constraintSize({ maxWidth: 720 })
-          .margin({ top: 24 })
-        }
-
-        this.WechatAutoSummaryCard()
-
-        Column() {
-          CollectionFormGroup({ title: '采集与分析',
-            contentBuilder: (): void => { this.CollectionSourceEntries(); } })
-        }.width('92%').constraintSize({ maxWidth: 720 }).margin({ top: COLLECTION_SECTION_GAP })
-        if (this.debugEnabled) {
-          Text('完整检查记忆数据')
-            .fontSize(13)
-            .fontColor(AppTheme.text('#727A8B'))
-            .padding(16)
-            .enabled(!this.refreshing)
-            .onClick(() => { this.onFullCheck(); })
-        }
-        Blank().height(110)
-      }
-      .width('100%')
-      .padding({ top: APP_HEADER_CONTENT_GAP })
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(AppTheme.background('#F7FAFE'))
-    .clip(false)
+          GridCol({ span: { xs: 12, sm: 5 } }) {
+            Column({ space: 20 }) {
+              this.CollectionSourceEntries()
+              if (this.wechatAutoSummaryEnabled === 'true') {
+                this.WechatAutoSummaryCard()
+              }
+              if (this.debugEnabled) {
+                Button('完整检查记忆数据').fontSize(14).fontColor($r('app.color.ui_text_secondary'))
+                  .height(44).backgroundColor(Color.Transparent).enabled(!this.refreshing).onClick(this.onFullCheck)
+              }
+            }.width('100%')
+          }
+        }.width('100%').alignItems(ItemAlign.Start)
+      }.width('92%').constraintSize({ maxWidth: 940 })
+        .padding({ top: APP_HEADER_CONTENT_GAP, bottom: this.navigationBottomInset + 24 })
+    }.width('100%').height('100%').align(Alignment.Top)
+      .backgroundColor($r('app.color.ui_page_background')).clip(false)
   }
 
   build() {
     FrostedPage({
-      pageBackgroundColor: '#F7FAFE',
+      pageBackgroundColor: '#F6F8FC',
       scrollers: [this.pageScroller],
       headerBuilder: (): void => { this.PageHeader(); },
       contentBuilder: (): void => { this.PageContent(); }

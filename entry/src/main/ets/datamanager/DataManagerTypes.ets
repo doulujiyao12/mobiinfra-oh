@@ -474,6 +474,7 @@ export interface HomeRecommendationPlannerEvent {
 }
 
 export interface HomeProfileViewModel extends AvatarHomeViewModel {
+  secretaryNote: string;
   calendarEnabled?: boolean;
   calendarError?: string;
   mailReminder?: HomeRecommendationViewModel;

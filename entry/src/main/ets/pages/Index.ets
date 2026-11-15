@@ -2038,6 +2038,7 @@ struct Index {
       avatarActionLabel: avatar.avatarActionLabel,
       avatarVersionId: avatar.avatarVersionId,
       updatedLabel: this.homeProfile.updatedLabel,
+      secretaryNote: this.homeProfile.secretaryNote,
       completeness: this.homeProfile.completeness,
       totalEvents: this.homeProfile.totalEvents,
       calendarEnabled: this.homeProfile.calendarEnabled,
@@ -8383,6 +8384,8 @@ struct Index {
     TabContent() {
       CollectionPage({
         collectionModule: $collectionModule,
+        secretaryNote: this.homeProfile.secretaryNote,
+        navigationBottomInset: this.mainTabBottomInset(),
         viewModels: this.collectionViews,
         refreshing: this.dataManagerRefreshing,
         calendarSourceSyncReady: this.calendarSourceSyncReady,

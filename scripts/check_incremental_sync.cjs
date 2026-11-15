@@ -874,7 +874,7 @@ test('sync reminder and recent-sync label use persisted successful activity inst
 });
 
 test('home profile time follows the published text, independently of avatar generation and mail sync',()=>{
-  reset();const facade=Object.create(DataManagerFacade.prototype),profile={generated_at:'2026-11-03T01:14:44',event_count:2};
+  reset();const facade=Object.create(DataManagerFacade.prototype),profile={generated_at:'2026-11-03T01:14:44',event_count:2,domains:{}};
   facade.paths=paths;facade.storage=storage;facade.indexService={loadProfileState:()=>profile};
   facade.homeRecommendationService={pruneInactiveRecommendationsForToday(){}};
   facade.avatarService={homeView:()=>({avatarUpdatedLabel:'2026-09-06T20:00:11',avatarStatus:'stale'})};
@@ -892,6 +892,24 @@ test('home profile time follows the published text, independently of avatar gene
     const next=facade.loadHomeViewModel();assert.equal(next.updatedLabel,'text:2026-11-03T10:30:00');
     assert.equal(next.avatarUpdatedLabel,first.avatarUpdatedLabel);
   } finally {calendar.settings=previous.settings;calendar.snapshot=previous.snapshot;}
+});
+
+test('collection secretary keeps qualified claims from distinct domains inside one short note',()=>{
+  const {collectionProfileNote}=load(base+'CollectionProfileNote');
+  const domain=(id,statement,count=2,confidence='high')=>({domain:id,event_count:count,generation:'model',
+    claims:[{statement,evidence_count:count,confidence,end_date:'2026-11-10'}]});
+  const domains={travel:domain('travel','用户可能更愿意坐地铁。',3),work:domain('work','用户体验是你关注的方向。'),
+    food:domain('food','不应显示的推测',5,'low'),old:{...domain('old','过期资料',8),generation:'stale'}};
+  domains.travel.claims.push({...domains.travel.claims[0],statement:'同领域的另一条结论'});
+  assert.equal(collectionProfileNote({domains}),'我留意到，你可能更愿意坐地铁。用户体验是你关注的方向。');
+  assert.equal(collectionProfileNote({domains:{}}),'');
+  assert.equal(collectionProfileNote({domains:{alone:domain('alone','单条记录',1)}}),'');
+  const verbose=domain('work','关注端侧推理'.repeat(18)+'但尚在调研');
+  verbose.short_summary='端侧推理';
+  const note=collectionProfileNote({domains:{work:verbose}});
+  assert.ok(note.length<=50 && note.includes('端侧推理') && !note.includes('…'));
+  const atLimit=domain('work','甲'.repeat(43)+'乙');
+  assert.equal(collectionProfileNote({domains:{work:atLimit}}).length,50);
 });
 
 test('a recent source sync never marks earlier unsynced gallery records as ingested',()=>{
