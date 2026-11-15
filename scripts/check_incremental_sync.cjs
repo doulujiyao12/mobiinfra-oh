@@ -36,7 +36,7 @@ const mocks = {
   'AvatarService.ets': {AvatarService:class {}},
   'GalleryMemorySync.ets': {GalleryMemorySync:{imageRefsForSourceRefs:()=>[],dailyLogRelativePaths:()=>[]}},
   'ChatMemorySync.ets': {ChatMemorySync:{dailyLogRelativePaths:()=>[]}},
-  'CloudModelClient.ets': {CloudModelClient:class {
+  'CloudModelClient.ets': {cloudPlannerApiKey:config=>config.plannerApiKey,CloudModelClient:class {
     async chatCompletionText(options){const value=await cloudHandler(options);return typeof value==='string'?value:value.content;}
     async chatCompletion(options){const value=await cloudHandler(options);return typeof value==='string'?{content:value,finishReason:'stop'}:value;}
     async chatCompletionStream(options,callbacks={}){
@@ -336,6 +336,10 @@ test('production declarations check changed business modules with strict types a
     'utils/TextEncodingCompat':'export declare function decodeUtf8Compat(b:Uint8Array):string;export declare function encodeUtf8Compat(s:string):Uint8Array;',
     'utils/DebugSettings':'export declare class DebugSettings {static isEnabled():boolean;}',
     'utils/CloudModelClient':`export interface CloudChatMessage {role:string;content:string;}
+      export interface CloudModelConfig {plannerBaseUrl:string;plannerModel:string;plannerApiKey?:string;apiKey:string;deciderBaseUrl:string;deciderModel:string;deciderApiKey?:string;}
+      export declare function cloudPlannerApiKey(config:CloudModelConfig):string;
+      export interface CloudChatToolDefinition {type:string;function:{name:string;description:string;parameters:Object;strict?:boolean};}
+      export interface CloudToolCall {id:string;type:string;function:{name:string;arguments:string};}
       export interface CloudChatCompletionOptions {baseUrl:string;apiKey:string;model?:string;messages:CloudChatMessage[];temperature?:number;readTimeout?:number;maxTokens?:number;logResponseContent?:boolean;separateReasoning?:boolean;chatTemplateKwargs?:Object;}
       export interface CloudChatStreamProgress {phase:string;responseCode:number;receivedBytes:number;contentChars:number;reasoningChars:number;contentDelta:string;reasoningDelta:string;finishReason:string;}
       export declare class CloudModelClient {chatCompletionText(options:Object):Promise<string>;chatCompletion(options:Object):Promise<{content:string;finishReason:string}>;
@@ -2064,7 +2068,7 @@ test('chat context: local cache changes when same-batch evidence changes, not on
 test('chat context: comfort names the actual person and chat keeps that identity',()=>{
   const e=chatFixture('wx',{summary:'小王很疲惫',normalized_fact:'小王：我最近压力很大；我：想帮帮你'});
   const result=comfort.parseHomeComfortConcerns(concernResponse(),'x',[e]);assert.equal(result[0].title,'小王：最近压力大');
-  assert.equal(result[0].subjectName,'小王');const messages=comfort.buildHomeComfortChatMessages(result[0],[],[e],'2026-10-31');
+  assert.equal(result[0].subjectName,'小王');const messages=comfort.buildHomeComfortChatMessages(result[0],[],null,'2026-10-31');
   assert.ok(messages[0].content.includes('情绪、经历或任务'));assert.ok(messages[0].content.includes('"subject_name": "小王"'));
 });
 test('comfort titles: self uses plain content while only other-person titles receive a name prefix',()=>{
@@ -2094,7 +2098,7 @@ function comfortPageFixture(events,day='2026-11-02') {
   const file=path.join(root,'entry/src/main/ets/pages/Index.ets');
   const tree=ts.createSourceFile('Index.ts',fs.readFileSync(file,'utf8').replace(/\bstruct Index\b/,'class Index'),ts.ScriptTarget.Latest,true);
   const component=tree.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='Index');
-  const names=['recentHomeComfortChatEvents','refreshHomeComfortConcerns','initializeStartupServices'];
+  const names=['recentHomeComfortChatEvents','refreshHomeComfortConcerns','initializeStartupServices','sendHomeComfortMessage'];
   const methods=component.members.filter(n=>ts.isMethodDeclaration(n)&&names.includes(n.name.getText(tree)));
   assert.equal(methods.length,names.length);
   const {HomeComfortConcernStore}=load('entry/src/main/ets/pages/home/HomeComfortConcernStore');
@@ -2102,11 +2106,12 @@ function comfortPageFixture(events,day='2026-11-02') {
   const exported={},state={toasts:[],clears:0,calls:0,readError:false,modelError:false,reply:concernResponse(),queries:[]};
   vm.runInNewContext(ts.transpileModule('exports.Page=class Page {'+methods.map(n=>n.getText(tree)).join('\n')+'}',
     {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:exported,Date,Promise,
-    ...comfort,HomeComfortConcernStore:Cache,HOME_COMFORT_CHAT_SCENE_ID:3,HOME_COMFORT_CHAT_WINDOW_DAYS:7,
+    ...comfort,MemorySemanticSearch:load(base+'MemorySemanticSearch').MemorySemanticSearch,
+    HomeComfortConcernStore:Cache,HOME_COMFORT_CHAT_SCENE_ID:3,HOME_COMFORT_CHAT_WINDOW_DAYS:7,
     currentLocalDateKey:()=>day,formatLocalDateKey:d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),
     offsetLocalDate:(d,n)=>{const next=new Date(d);next.setDate(next.getDate()+n);return next;},
     showToastSafely:(text,duration)=>state.toasts.push({text,duration}),AiServiceAccess:{isAllowed:()=>true},
-    AppLogger:{info(){},warnCause(){},errorCause(){}},dataManagerWarn(){}});
+    AppLogger:{info(){},warn(){},warnCause(){},errorCause(){}},dataManagerWarn(){}});
   const page=new exported.Page();Object.assign(page,{filesDir:'/app',homeComfortConcerns:[],homeComfortConcernsLoading:false,
     homeComfortConcernError:'',homeComfortConcernBatch:0,homeComfortChatStore:{clear:()=>state.clears++},ensureAiServiceLogin:()=>true,
     getConfiguredCloudConfig:()=>({}),isConfiguredCloudPlannerReady:()=>true,
@@ -2114,6 +2119,41 @@ function comfortPageFixture(events,day='2026-11-02') {
     cloudClient:{chatPlanner:async()=>{state.calls++;if(state.modelError)throw Error('injected network failure');return state.reply;}}});
   return {page,state};
 }
+test('comfort replies search the personal index for this turn, preserve attribution, and still chat without evidence',async()=>{
+  const topic={title:'周末安排',summary:'聊聊最近的周末',category:'日常',evidence:[]};
+  const old=event('old','2025-05-03',{sources:['日历'],summary:'小王报名摄影课',normalized_fact:'小王报名摄影课',
+    calendar:{},chat_attribution:{subject:'other',subject_name:'小王',action_owner:'other',action_owner_name:'小王',status:'pending'}});
+  const unrelated=event('other','2026-11-02',{summary:'完全无关的晚饭',normalized_fact:'完全无关的晚饭'});
+  const history=[{role:'user',content:'我和小王在聊摄影。'},{role:'assistant',content:'听起来挺有意思。'},
+    {role:'user',content:'他上次报了什么课？'}];
+  const {page,state}=comfortPageFixture([unrelated]);
+  let lookups=0,replyContext,requests=[],plan={queries:[{keywords:['摄影课']}]},rank={selected_ids:['candidate-1']};
+  page.dataManagerFacade.hasBuiltIndexes=()=>true;
+  page.dataManagerFacade.queryIndexedEventsBounded=options=>{
+    lookups++;assert.equal(options.startDate,'');assert.equal(options.endDate,'');assert.equal(options.workflowSceneIds.length,0);
+    assert(options.keywords.includes('摄影课'));return {events:[old,unrelated],events_truncated:false};
+  };
+  page.cloudClient.chatCompletion=async options=>{
+    requests.push(options);return {finishReason:'stop',content:JSON.stringify(requests.length===1?plan:rank)};
+  };
+  page.cloudClient.chatPlannerMessages=async messages=>{
+    replyContext=JSON.parse(messages[0].content.split('背景上下文：\n')[1]);
+    assert.equal(messages.at(-1).content,history.at(-1).content);return '聊聊吧。';
+  };
+  const send=()=>page.sendHomeComfortMessage(topic,history);
+  assert.equal(await send(),'聊聊吧。');assert.equal(state.queries.length,0);
+  const query=JSON.parse(requests[0].messages[1].content);assert.equal(query.current_message,history.at(-1).content);
+  assert.match(query.conversation_background,/小王在聊摄影/);
+  assert.equal(replyContext.personal_memory.status,'matched');assert.equal(replyContext.personal_memory.records.length,1);
+  assert.match(replyContext.personal_memory.records[0],/2025-05-03.*行动人：小王.*日历计划.*摄影课/);
+  assert.doesNotMatch(JSON.stringify(replyContext),/完全无关的晚饭/);
+  requests=[];rank={selected_ids:['invented']};await send();
+  assert.deepEqual(replyContext.personal_memory,{status:'unavailable',records:[]});
+  requests=[];plan={queries:[],broad_domains:[]};history.at(-1).content='哈哈';await send();
+  assert.equal(requests.length,1);assert.equal(lookups,2);assert.deepEqual(replyContext.personal_memory,{status:'no_match',records:[]});
+  page.dataManagerFacade.hasBuiltIndexes=()=>false;requests=[];await send();assert.equal(requests.length,0);
+  assert.deepEqual(replyContext.personal_memory,{status:'unavailable',records:[]});
+});
 test('comfort cache: restart restores named third-party cards and unchanged inputs do not call the model again',async()=>{
   reset();const e=chatFixture('wx',{summary:'小王很疲惫',normalized_fact:'小王说最近压力很大'});
   const first=comfortPageFixture([e]);await first.page.refreshHomeComfortConcerns(false);
@@ -2163,7 +2203,7 @@ test('comfort topics: neutral interests and plans can start a conversation witho
   const [topic]=comfort.parseHomeComfortConcerns(concernResponse({subject:'self',subject_name:'',title:'最近拍到了什么',
     summary:'你最近开始学习摄影，可以聊聊拍照体验',opening:'最近最想尝试拍什么？'}),'interest',[e]);
   assert.equal(topic.title,'最近拍到了什么');
-  const messages=comfort.buildHomeComfortChatMessages(topic,[{role:'user',content:'想聊摄影',id:'m',createdAt:1}],[e],'2026-11-03');
+  const messages=comfort.buildHomeComfortChatMessages(topic,[{role:'user',content:'想聊摄影',id:'m',createdAt:1}],null,'2026-11-03');
   assert.ok(messages[0].content.includes('不必把普通话题解释成情绪问题'));
 });
 

@@ -123,6 +123,7 @@ import {
   HomeComfortConcern,
   HomeComfortReadError,
   buildHomeComfortChatMessages,
+  homeComfortSearchBackground,
   buildHomeComfortConcernPrompt,
   homeComfortInputIdentity,
   parseHomeComfortConcerns,
@@ -7113,7 +7114,7 @@ struct Index {
       showToastSafely(error.message, 2500);
       throw error;
     }
-    // 解闷上下文独立于“猜你喜欢”：只读取今天及之前 6 天内的聊天场景索引。
+    // 生成话题只取近七天的聊天；打开话题后的对话按本轮问题检索个人记忆。
     let today = new Date();
     let options: QueryOptions = {
       keywords: [],
@@ -7241,11 +7242,25 @@ struct Index {
     if (!this.isConfiguredCloudPlannerReady(cloudConfig)) {
       throw new Error('请先在“我的”中配置 Planner 服务');
     }
-    let recentEvents = this.recentHomeComfortChatEvents();
-    let messages = buildHomeComfortChatMessages(concern, history, recentEvents, currentLocalDateKey());
-    if (messages.length <= 1) {
+    const latest = history[history.length - 1];
+    if (!latest || latest.role !== 'user' || !latest.content.trim()) {
       throw new Error('请先输入想聊的内容');
     }
+    const facade = this.dataManagerFacade;
+    let memory: MemorySearchResult | null = null;
+    try {
+      if (facade !== null && facade.hasBuiltIndexes()) {
+        const search = new MemorySemanticSearch((options: QueryOptions): QueryResult =>
+          facade.queryIndexedEventsBounded(options), this.cloudClient, cloudConfig, (): void => {
+            if (!AiServiceAccess.isAllowed()) { throw new Error(AI_LOGIN_REQUIRED_MESSAGE); }
+          });
+        memory = await search.searchConversation(latest.content, homeComfortSearchBackground(concern, history));
+      }
+    } catch (e) {
+      AppLogger.warn('HomeComfort', 'Personal memory lookup unavailable for this turn');
+    }
+    if (!AiServiceAccess.isAllowed()) { throw new Error(AI_LOGIN_REQUIRED_MESSAGE); }
+    let messages = buildHomeComfortChatMessages(concern, history, memory, currentLocalDateKey());
     let response = await this.cloudClient.chatPlannerMessages(messages, cloudConfig);
     let reply = parseHomeComfortReply(response);
     AppLogger.info('HomeComfort', 'chat reply generated chars=' + reply.length.toString() +
