@@ -33,6 +33,8 @@ const kit = { calendarManager: {
   EventFilter: { filterById: ids => ids }
 } };
 const external = {
+  // IndexService also imports the phone's workflow evidence reader. Calendar fixtures never call its filesystem API.
+  '@ohos.file.fs': {},
   '@kit.ArkTS': { JSON },
   '@kit.AbilityKit': { abilityAccessCtrl: {
     GrantStatus: { PERMISSION_GRANTED: 0 }, createAtManager: () => ({
