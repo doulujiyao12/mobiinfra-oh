@@ -415,6 +415,7 @@ export interface HomeRecommendationViewModel {
   thumbnailUri: string;
   sourceEventIds: string[];
   detail: string;
+  relatedFacts?: string[];
   agentTask: string;
   completed: boolean;
 }

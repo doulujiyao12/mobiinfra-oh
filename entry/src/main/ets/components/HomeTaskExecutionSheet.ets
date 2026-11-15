@@ -1,31 +1,55 @@
-import { AppTheme } from '../utils/AppTheme';
-import { AppLogger } from '../utils/AppLogger';
+import { CodexCredentialStore } from '../pages/codex/CodexCredentialStore';
+import { SecretaryRoute, secretaryRouteLabel } from '../pages/home/HomeSecretary';
 import {
   HomeTaskSuggestion, homeTaskSupportsQwen, homeTaskQwenDescription, homeTaskQwenUnavailableReason,
-  HOME_TASK_DESCRIPTION_LIMIT, homeTaskShortDraft, homeTaskQwenDescriptionLimit
+  HOME_TASK_DESCRIPTION_LIMIT, homeTaskQwenDescriptionLimit
 } from '../pages/home/HomeTaskSuggestion';
 
 @Component
 export struct HomeTaskExecutionSheet {
   @Prop suggestion: HomeTaskSuggestion = { id: '', title: '', task: '', reason: '', category: 'life', evidence: [] };
-  @Prop codexBusy: boolean = false;
-  onExecute: (method: string, draft: string) => Promise<boolean> =
-    async (_method: string, _draft: string): Promise<boolean> => false;
-  @State private method: string = 'phone';
+  @Prop recommended: SecretaryRoute = 'phone';
+  onExecute: (method: SecretaryRoute, draft: string) => void = (): void => {};
+  @State private method: SecretaryRoute = 'phone';
   @State private phoneDraft: string = '';
   @State private qwenDraft: string = '';
   @State private codexDraft: string = '';
-  @State private submitting: boolean = false;
+  @State private codexChecking: boolean = true;
+  @State private codexIssue: string = '';
+  private userSelected: boolean = false;
+  private confirmed: boolean = false;
   @State private errorText: string = '';
 
   aboutToAppear(): void {
-    this.phoneDraft = homeTaskShortDraft(this.suggestion.task, this.suggestion.title);
-    this.qwenDraft = homeTaskSupportsQwen(this.suggestion) ? homeTaskQwenDescription(this.suggestion) : '';
-    this.codexDraft = this.suggestion.title + (this.suggestion.reason ? '\n' + this.suggestion.reason : '');
+    this.method = this.recommended;
+    this.phoneDraft = this.suggestion.task || this.suggestion.title;
+    if (homeTaskSupportsQwen(this.suggestion)) {
+      try { this.qwenDraft = homeTaskQwenDescription(this.suggestion); }
+      catch (e) { this.qwenDraft = this.suggestion.qwenTask || this.phoneDraft; }
+    }
+    this.checkComputer();
   }
 
-  private selectMethod(method: string): void {
-    if (this.submitting) { return; }
+  private async checkComputer(): Promise<void> {
+    try {
+      if ((await CodexCredentialStore.list()).length === 0) { this.codexIssue = '使用 Codex 前，请先在「Codex」页连接电脑。'; }
+    } catch (e) { this.codexIssue = (e as Error).message || '暂时无法读取电脑连接'; }
+    finally {
+      this.codexChecking = false;
+      if (!this.userSelected && !this.confirmed) { this.method = this.availableRecommendation(); }
+    }
+  }
+
+  private availableRecommendation(): SecretaryRoute {
+    if (this.recommended === 'codex' && this.codexIssue) {
+      return homeTaskSupportsQwen(this.suggestion) ? 'qwen' : 'phone';
+    }
+    return this.recommended;
+  }
+
+  private selectMethod(method: SecretaryRoute): void {
+    if (this.confirmed) { return; }
+    this.userSelected = true;
     this.method = method;
     this.errorText = '';
   }
@@ -36,77 +60,70 @@ export struct HomeTaskExecutionSheet {
 
   private draft(): string { return this.method === 'codex' ? this.codexDraft : this.method === 'phone' ? this.phoneDraft : this.qwenDraft; }
 
-  private async execute(): Promise<void> {
-    if (this.submitting) { return; }
-    this.submitting = true;
-    this.errorText = '';
-    try {
-      let success = await this.onExecute(this.method, this.draft());
-      if (!success) {
-        this.errorText = this.method === 'qwen' ? '千问交接未完成。请确认已安装并登录千问、手机控制连接可用，再根据提示重试。' :
-          '任务尚未完成，请根据提示检查后重试';
-      }
-    } catch (e) {
-      this.errorText = (e as Error).message;
-      AppLogger.warnCause('HomeSuggestion', 'Execution choice rejected', e as Error);
-    }
-    finally { this.submitting = false; }
+  private unavailableReason(): string {
+    if (this.method === 'qwen') { return homeTaskQwenUnavailableReason(this.suggestion); }
+    if (this.method === 'codex') { return this.codexChecking ? '正在检查电脑连接…' : this.codexIssue; }
+    return '';
   }
 
-  @Builder MethodButton(method: string, label: string, available: boolean) {
-    Button(label)
-      .layoutWeight(1)
-      .height(44)
-      .fontSize(14)
-      .fontWeight(FontWeight.Medium)
-      .fontColor(this.method === method ? Color.White : AppTheme.text(available ? '#4F46C8' : '#969DAA'))
-      .backgroundColor(AppTheme.background(this.method === method ? '#6658DC' : '#F0EEFC'))
-      .borderRadius(14)
-      .enabled(available && !this.submitting)
+  private execute(): void {
+    if (this.confirmed || this.unavailableReason() || (this.method !== 'codex' && !this.draft().trim())) { return; }
+    this.confirmed = true;
+    try {
+      this.onExecute(this.method, this.draft());
+    } catch (e) {
+      this.confirmed = false;
+      this.errorText = (e as Error).message;
+    }
+  }
+
+  @Builder MethodButton(method: SecretaryRoute) {
+    Button(secretaryRouteLabel(method)).layoutWeight(1).height(40).fontSize(15).fontWeight(FontWeight.Medium)
+      .fontColor(this.method === method ? $r('app.color.ui_accent_purple') : $r('app.color.ui_text_secondary'))
+      .backgroundColor(this.method === method ? $r('app.color.ui_surface') : Color.Transparent)
+      .accessibilityText(secretaryRouteLabel(method) + (this.method === method ? '，已选中' : ''))
       .onClick((): void => { this.selectMethod(method); })
   }
 
   build() {
     Column({ space: 14 }) {
       Text(this.suggestion.title)
-        .fontSize(18).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033'))
+        .fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.ui_text_primary'))
         .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-      Row({ space: 10 }) {
-        this.MethodButton('phone', '操控手机完成', true)
-        this.MethodButton('qwen', '千问协同完成', homeTaskSupportsQwen(this.suggestion))
-      }.width('100%')
-      Row({ space: 10 }) { this.MethodButton('codex', 'Codex 调研与制作', !this.codexBusy) }.width('100%')
-      Text(this.method === 'codex' ? '先补充相关画像信息，再交给电脑上的 Codex 调研、规划或制作文件。' :
-        this.method === 'phone' ? '由手机 Agent 在目标应用中操作。' : '手机 Agent 只负责打开千问并发送需求，后续由千问处理。')
-        .fontSize(12).fontColor(AppTheme.text('#6E7687')).width('100%').lineHeight(18)
-      if (this.method === 'qwen' && !homeTaskSupportsQwen(this.suggestion)) {
-        Text(homeTaskQwenUnavailableReason(this.suggestion))
-          .fontSize(12).fontColor(AppTheme.text('#8A758F')).width('100%').lineHeight(18)
+      Text('执行方式 · 小 C 推荐' + secretaryRouteLabel(this.availableRecommendation())).fontSize(14)
+        .fontColor($r('app.color.ui_text_secondary'))
+      Row({ space: 3 }) {
+        this.MethodButton('phone')
+        this.MethodButton('qwen')
+        this.MethodButton('codex')
+      }.width('100%').padding(4).borderRadius(24).backgroundColor($r('app.color.ui_surface_soft'))
+      Text(this.unavailableReason() || (this.method === 'codex' ? '在已连接的电脑上结合相关记录调研、规划或制作文件。' :
+        this.method === 'phone' ? '由小 C 操作手机上的目标应用。' : '在手机上的千问新对话中发送需求，需已安装并登录千问。'))
+        .fontSize(14).fontColor($r('app.color.ui_text_secondary')).width('100%').lineHeight(21)
+      if (!this.unavailableReason()) {
+        TextArea({ text: this.draft(),
+          placeholder: this.method === 'codex' ? '补充交付要求（可选）' : this.descriptionLimit() > HOME_TASK_DESCRIPTION_LIMIT ?
+            '可补充出行时间、地点和人数（最多300字）' : '写下一件希望完成的事（最多60字）' })
+          .width('100%').height(88).fontSize(15).fontColor($r('app.color.ui_text_primary'))
+          .placeholderColor($r('app.color.ui_text_placeholder')).caretColor($r('app.color.ui_accent_blue'))
+          .backgroundColor($r('app.color.ui_surface_soft')).borderRadius(14).padding(12)
+          .maxLength(Math.max(this.descriptionLimit(), this.draft().length))
+          .onChange((text: string): void => {
+            if (this.method === 'codex') { this.codexDraft = text; }
+            else if (this.method === 'phone') { this.phoneDraft = text; }
+            else { this.qwenDraft = text; }
+            this.errorText = '';
+          })
       }
-      TextArea({ text: this.draft(),
-        placeholder: this.method === 'codex' ? '希望 Codex 帮你调研、规划或制作什么？' : this.descriptionLimit() > HOME_TASK_DESCRIPTION_LIMIT ?
-          '可补充已知的时间、地点、交通、人数和出行目的（最多300字）' : '一句话，只做一件事（最多60字）' })
-        .width('100%').height(this.descriptionLimit() > HOME_TASK_DESCRIPTION_LIMIT ? 150 : 90)
-        .fontSize(14).fontColor(AppTheme.text('#202839'))
-        .placeholderColor($r('app.color.ui_text_placeholder')).caretColor($r('app.color.ui_accent_blue'))
-        .backgroundColor(AppTheme.inputBackground()).borderRadius(14).padding(12).maxLength(this.descriptionLimit())
-        .enabled(!this.submitting)
-        .onChange((text: string): void => {
-          if (this.method === 'codex') { this.codexDraft = text; }
-          else if (this.method === 'phone') { this.phoneDraft = text; } else { this.qwenDraft = text; }
-          this.errorText = '';
-        })
       if (this.errorText.length > 0) {
-        Text(this.errorText).fontSize(12).fontColor(AppTheme.text('#B42318')).width('100%').maxLines(3)
+        Text(this.errorText).fontSize(14).fontColor($r('app.color.ui_text_primary')).width('100%')
       }
-      Button(this.submitting ? '正在下发…' : this.method === 'codex' ? '交给 Codex' : (this.method === 'phone' ? '开始手机执行' : '交给千问'))
-        .width('100%').height(46).fontSize(16).fontWeight(FontWeight.Medium).fontColor(Color.White)
-        .backgroundColor(AppTheme.filledBackground('#6658DC')).borderRadius(15)
-        .enabled(!this.submitting && !(this.method === 'codex' && this.codexBusy) && this.draft().trim().length > 0)
+      Button(this.method === 'phone' ? '在手机上执行' : '交给 ' + secretaryRouteLabel(this.method))
+        .width('100%').height(46).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_on_fill'))
+        .backgroundColor($r('app.color.ui_surface_emphasized'))
+        .enabled(!this.unavailableReason() && (this.method === 'codex' || this.draft().trim().length > 0))
         .onClick((): void => { this.execute(); })
     }
     .width('100%').alignItems(HorizontalAlign.Start)
-    .padding({ left: 20, right: 20, top: 8, bottom: 24 })
-    .backgroundColor(AppTheme.background('#FFFFFF'))
   }
 }

@@ -117,6 +117,7 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 export struct TaskPage {
   private pageScroller: Scroller = new Scroller();
   @Prop @Watch('onActiveChanged') active: boolean = false;
+  @Link @Watch('consumeHomeReview') homeReviewRequested: boolean;
   @StorageProp(COLLECTION_REMINDER_REQUEST_KEY) @Watch('onCollectionReminderChanged')
   private reminderRequest: string = '';
   @StorageProp(COLLECTION_REMINDER_READY_KEY) @Watch('onCollectionReminderChanged')
@@ -210,6 +211,7 @@ export struct TaskPage {
     } catch (e) {
     }
     this.reloadTasks();
+    this.consumeHomeReview();
     this.onCollectionReminderChanged();
   }
 
@@ -225,7 +227,17 @@ export struct TaskPage {
   private onActiveChanged(): void {
     // Refresh edits/deletions made in the separate file viewer when returning.
     if (this.active && this.filesDir.length > 0 && !this.isTaskExecutionBusy()) { this.reloadTasks(); }
+    this.consumeHomeReview();
     this.onCollectionReminderChanged();
+  }
+
+  private consumeHomeReview(): void {
+    if (!this.homeReviewRequested || !this.active || !this.filesDir) { return; }
+    this.homeReviewRequested = false;
+    // A tap on Home uses the same manual batch entry and guards as the task-page button.
+    this.runEnabledTasks(this.reminderRequest).catch((e: Error): void => {
+      showToastSafely('回顾无法开始：' + e.message, 2200);
+    });
   }
 
   private onCollectionReminderChanged(): void {

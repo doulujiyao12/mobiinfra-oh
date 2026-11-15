@@ -13,9 +13,13 @@ import {
 
 const HOME_COMFORT_CASUAL_CHAT_ID: string = 'comfort-casual-chat';
 
+export interface SecretaryChatInvitation { sequence: number; concernId: string; }
+
 @Component
 export struct HomeComfortSection {
   @ObjectLink @Watch('onChatSessionsChanged') chatStore: HomeComfortChatStore;
+  @Prop @Watch('openInvitation') invitation: SecretaryChatInvitation = { sequence: 0, concernId: '' };
+  @Prop expanded: boolean = false;
   @Prop concerns: HomeComfortConcern[] = [];
   @Prop loading: boolean = false;
   @Prop errorMessage: string = '';
@@ -110,9 +114,9 @@ export struct HomeComfortSection {
   private casualChatConcern(): HomeComfortConcern {
     return {
       id: HOME_COMFORT_CASUAL_CHAT_ID,
-      title: '和我随便聊聊，我会读心术',
+      title: '和小C随便聊聊',
       summary: '想聊什么都可以，我陪你。',
-      opening: '嗨，今天想聊点什么？烦心事、无聊小事都可以，我陪你聊，也能帮你一起想办法。',
+      opening: '我在呢。今天有什么想跟我说的吗？',
       category: 'life',
       evidence: []
     };
@@ -163,6 +167,12 @@ export struct HomeComfortSection {
 
   private openCasualChat(): void {
     this.openConcern(this.casualChatConcern());
+  }
+
+  private openInvitation(): void {
+    if (!this.invitation.sequence) { return; }
+    const concern = this.concerns.find((item: HomeComfortConcern): boolean => item.id === this.invitation.concernId);
+    if (concern) { this.openConcern(concern); } else { this.openCasualChat(); }
   }
 
   private closeChat(): void {
@@ -249,83 +259,48 @@ export struct HomeComfortSection {
   }
 
   @Builder ConcernRow(item: HomeComfortConcern) {
-    Row() {
-      Stack({ alignContent: Alignment.Center }) {
-        this.CategoryIcon(this.concernIconIndex(item.category), 44)
-      }
-      .width(50)
-      .height(50)
-      .borderRadius(17)
-      .backgroundColor(AppTheme.background(Color.White))
-      .clip(true)
-
-      Text(item.title)
-        .fontSize(15)
-        .lineHeight(21)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(AppTheme.text('#252A3A'))
-        .layoutWeight(1)
-        .margin({ left: 12, right: 8 })
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-
-      Text('›')
-        .fontSize(24)
-        .fontColor(AppTheme.text('#9AA0AE'))
-    }
-    .alignItems(VerticalAlign.Center)
-    .width('100%')
-    .constraintSize({ minHeight: 76 })
-    .padding({ left: 5, right: 5, top: 12, bottom: 12 })
-    .onClick(() => {
-      this.openConcern(item);
-    })
+    Row({ space: 9 }) {
+      this.CategoryIcon(this.concernIconIndex(item.category), 32)
+      Text(item.title).fontSize(15).lineHeight(21).fontColor($r('app.color.ui_text_primary'))
+        .layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([$r('app.color.ui_text_muted')])
+    }.width('100%').constraintSize({ minHeight: 46 }).padding({ top: 4, bottom: 4 })
+      .accessibilityGroup(true).accessibilityText('和小C聊聊，' + item.title)
+      .onClick((): void => { this.openConcern(item); })
   }
 
-  @Builder EmptyState() {
-    if (this.loading) {
-      Row() {
-        LoadingProgress()
-          .width(28)
-          .height(28)
-          .color(AppTheme.text('#8B6BD6'))
-        Text('正在找找有趣的话题')
-          .fontSize(13)
-          .fontColor(AppTheme.text('#6F7684'))
-          .margin({ left: 12 })
+  @Builder Topics() {
+    Column({ space: 4 }) {
+      Row({ space: 8 }) {
+        Text('想聊点什么？').fontSize(17).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+        if (this.concerns.length > 0) { AiGeneratedBadge({ compact: true }) }
+        Blank()
+        Button({ type: ButtonType.Normal }) {
+          if (this.loading) {
+            LoadingProgress().width(16).height(16).color($r('app.color.ui_accent_purple'))
+          } else {
+            Text('换个话题').fontSize(13).fontColor($r('app.color.ui_accent_purple'))
+          }
+        }.height(40).padding({ left: 5, right: 5 }).backgroundColor(Color.Transparent)
+          .enabled(!this.loading).accessibilityText('刷新聊天话题').onClick((): void => { this.refreshConcerns(); })
+      }.width('100%')
+      ForEach(this.concerns, (item: HomeComfortConcern) => {
+        this.ConcernRow(item)
+      }, (item: HomeComfortConcern): string => item.id)
+      if (this.errorMessage && !this.loading) {
+        Text(this.errorMessage).fontSize(13).fontColor($r('app.color.ui_text_secondary'))
       }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-      .height(82)
-      .margin({ top: 10 })
-      .backgroundColor(AppTheme.background(Color.White))
-      .borderRadius(18)
-      .border({ width: 1, color: AppTheme.border('#ECEEF5') })
-    } else {
-      Row() {
-        this.CategoryIcon(9, 48)
-        Text('和我随便聊聊，我会读心术')
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#2E2840'))
-          .layoutWeight(1)
-          .margin({ left: 12 })
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text('›')
-          .fontSize(24)
-          .fontColor(AppTheme.text('#7658C2'))
-      }
-      .alignItems(VerticalAlign.Center)
-      .width('100%')
-      .padding({ left: 8, right: 8, top: 13, bottom: 13 })
-      .margin({ top: 10 })
-      .backgroundColor(AppTheme.background('#FBF9FF'))
-      .borderRadius(20)
-      .onClick(() => {
-        this.openCasualChat();
-      })
-    }
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 6 }) {
+          SymbolGlyph($r('sys.symbol.message')).fontSize(16).fontColor([$r('app.color.ui_accent_purple')])
+          Text('随便聊聊').fontSize(14).fontColor($r('app.color.ui_accent_purple'))
+        }
+      }.height(40).padding({ left: 3, right: 8 }).backgroundColor(Color.Transparent)
+        .onClick((): void => { this.openCasualChat(); })
+    }.width('100%').padding({ left: 14, right: 12, top: 6, bottom: 6 })
+      .alignItems(HorizontalAlign.Start).backgroundColor($r('app.color.ui_soft_purple'))
+      .borderRadius({ topLeft: 20, topRight: 5, bottomLeft: 20, bottomRight: 20 })
+      .margin({ bottom: 8 })
   }
 
   @Builder ChatMessageBubble(item: HomeComfortChatMessage) {
@@ -349,17 +324,9 @@ export struct HomeComfortSection {
       .width('100%')
     } else {
       Row() {
-        Stack({ alignContent: Alignment.Center }) {
-          Text('心')
-            .fontSize(12)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(AppTheme.text('#7B5CC4'))
-        }
-        .width(34)
-        .height(34)
-        .backgroundColor(AppTheme.background('#EEE8FF'))
-        .borderRadius(12)
-        .alignSelf(ItemAlign.Start)
+        Image($r('app.media.clawmate_secretary')).width(34).height(34).objectFit(ImageFit.Cover)
+          .backgroundColor($r('app.color.ui_soft_purple')).borderRadius(17).alignSelf(ItemAlign.Start)
+          .draggable(false).accessibilityText('小C')
 
         Column() {
           Text(item.content)
@@ -396,7 +363,7 @@ export struct HomeComfortSection {
         .onClick(() => {
           this.closeChat();
         })
-        Text('陪你聊聊')
+        Text('和小C聊聊')
           .fontSize(19)
           .fontWeight(FontWeight.Bold)
           .fontColor(AppTheme.text('#171B2B'))
@@ -547,55 +514,11 @@ export struct HomeComfortSection {
   }
 
   build() {
+    // Keep the chat cover and invitation watcher mounted when the inline topics are folded.
     Column() {
-      Row() {
-        Text('帮你解闷')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(AppTheme.text('#11182F'))
-          .layoutWeight(1)
-        AiGeneratedBadge({ compact: true })
-          .margin({ right: 10 })
-        Button(this.loading ? '梳理中' : '重新看看')
-          .height(32)
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(AppTheme.text(this.loading ? '#A0A4B0' : '#7557BC'))
-          .padding({ left: 13, right: 13 })
-          .backgroundColor(AppTheme.background(this.loading ? '#F0F1F5' : '#F1ECFF'))
-          .borderRadius(16)
-          .enabled(!this.loading)
-          .onClick(() => {
-            this.refreshConcerns();
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      if (this.concerns.length === 0) {
-        this.EmptyState()
-      } else {
-        Column() {
-          ForEach(this.concerns, (item: HomeComfortConcern, index: number) => {
-            this.ConcernRow(item)
-            if (index < this.concerns.length - 1) {
-              Divider()
-                .strokeWidth(1)
-                .color(AppTheme.border('#EAE6F2'))
-                .margin({ left: 68, right: 6 })
-            }
-          }, (item: HomeComfortConcern) => item.id)
-        }
-        .width('100%')
-        .padding({ left: 4, right: 4 })
-        .margin({ top: 8 })
-        .backgroundColor(AppTheme.background('#FCFBFF'))
-        .borderRadius(22)
-      }
+      if (this.expanded) { this.Topics() }
     }
-    .alignItems(HorizontalAlign.Start)
-    .width('92%')
-    .margin({ top: 30 })
+    .width('92%').constraintSize({ maxWidth: 840 })
     .bindContentCover($$this.chatOpen, this.ChatCover(), {
       modalTransition: ModalTransition.DEFAULT,
       enableSafeArea: true,

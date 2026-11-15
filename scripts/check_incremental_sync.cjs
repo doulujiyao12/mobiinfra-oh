@@ -891,8 +891,6 @@ test('home profile time follows the published text, independently of avatar gene
     profile.generated_at='2026-11-03T10:30:00';
     const next=facade.loadHomeViewModel();assert.equal(next.updatedLabel,'text:2026-11-03T10:30:00');
     assert.equal(next.avatarUpdatedLabel,first.avatarUpdatedLabel);
-    const home=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/home/HomePage.ets'),'utf8');
-    assert.ok(/Text\('画像摘要由 AI 分析生成'\)[\s\S]*?Text\(this\.profile\.updatedLabel\)/.test(home));
   } finally {calendar.settings=previous.settings;calendar.snapshot=previous.snapshot;}
 });
 

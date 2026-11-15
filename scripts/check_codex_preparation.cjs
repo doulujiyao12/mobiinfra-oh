@@ -283,24 +283,54 @@ function methodProbe(file,name,methods,globals){
     {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,console,...globals});
   return new exports.Probe();
 }
-test('Guess execution sheet maintains separate Codex and phone drafts and limits',async()=>{
+test('execution picker preselects the recommendation, preserves drafts and confirms only the chosen executor once',()=>{
   const suggestion={title:'研究主题',task:'打开浏览器搜索研究主题',reason:'了解最新研究',category:'learning',evidence:[]};
   const helpers=load(base+'pages/home/HomeTaskSuggestion');const calls=[];
   const page=methodProbe('components/HomeTaskExecutionSheet.ets','HomeTaskExecutionSheet',
-    ['aboutToAppear','descriptionLimit','draft','execute','selectMethod'],{...helpers,AppLogger:{warnCause(){}}});
-  Object.assign(page,{suggestion,method:'phone',submitting:false,onExecute:async(method,draft)=>{calls.push([method,draft]);return true;}});
-  page.aboutToAppear();const original=page.phoneDraft;page.selectMethod('codex');assert.equal(page.descriptionLimit(),1000);
-  page.codexDraft='制作一份详细的研究PPT';await page.execute();assert.deepEqual(calls[0],['codex','制作一份详细的研究PPT']);
+    ['aboutToAppear','descriptionLimit','draft','execute','selectMethod','unavailableReason'],helpers);
+  Object.assign(page,{suggestion,recommended:'qwen',codexChecking:false,codexIssue:'',checkComputer(){},onExecute:(...args)=>calls.push(args)});
+  page.aboutToAppear();const original=page.phoneDraft;assert.equal(page.method,'qwen');assert.equal(calls.length,0);
+  page.selectMethod('codex');assert.equal(page.descriptionLimit(),1000);
+  page.codexDraft='制作一份详细的研究PPT';
   page.selectMethod('phone');assert.equal(page.descriptionLimit(),60);assert.equal(page.draft(),original);
+  page.selectMethod('codex');page.execute();page.execute();assert.deepEqual(calls,[['codex','制作一份详细的研究PPT']]);
 });
-test('Guess execution route delegates with the edited goal and original evidence before any GUI dispatch',async()=>{
-  const handoff=load(base+'pages/home/HomeCodexHandoff');let props,captured;
-  const page=methodProbe('pages/home/HomePage.ets','HomePage',['TaskExecutionSheetContent'],{
-    HomeTaskExecutionSheet:value=>props=value,...handoff,buildHomeTaskExecutionRequest:()=>{throw Error('GUI route must not run');}});
-  const item={id:'guess',title:'研究主题',task:'打开浏览器',reason:'想了解',category:'learning',evidence:[{title:'资料',summary:'相关线索',eventId:'e1'}]};
-  Object.assign(page,{executionCandidate:item,executionSheetOpen:true,codexBusy:false,agentTaskSubmitting:false,delegateToCodex:async request=>captured=request});
-  page.TaskExecutionSheetContent();assert(await props.onExecute('codex','做研究汇报PPT'));
-  assert.equal(captured.userGoal,'做研究汇报PPT');assert.equal(captured.evidence[0].eventId,'e1');assert.equal(page.executionSheetOpen,false);
+test('no paired Codex computer gives an available default; a late check respects a manual choice',async()=>{
+  const helpers=load(base+'pages/home/HomeTaskSuggestion');
+  let finish;
+  const page=methodProbe('components/HomeTaskExecutionSheet.ets','HomeTaskExecutionSheet',
+    ['checkComputer','availableRecommendation','selectMethod','unavailableReason','execute','draft'],
+    {...helpers,CodexCredentialStore:{list:()=>new Promise(resolve=>{finish=resolve;})}});
+  Object.assign(page,{suggestion:{title:'查看聊天记录',task:'打开微信查看聊天记录',category:'life'},recommended:'codex',method:'codex',codexChecking:true,codexIssue:'',
+    codexDraft:'',onExecute:()=>assert.fail('unavailable executor')});
+  page.execute();const pending=page.checkComputer();finish([]);await pending;
+  assert.equal(page.method,'phone');assert.equal(page.availableRecommendation(),'phone');
+  page.selectMethod('qwen');assert(page.unavailableReason());page.execute();
+  page.selectMethod('codex');assert.match(page.unavailableReason(),/连接电脑/);page.execute();
+  page.codexIssue='';page.suggestion={title:'搜索通勤背包',task:'在淘宝搜索通勤背包',category:'shopping'};
+  const again=page.checkComputer();page.selectMethod('phone');finish([]);await again;
+  assert.equal(page.availableRecommendation(),'qwen');assert.equal(page.method,'phone');
+});
+test('secretary routes research with original evidence, public queries to Qwen and device work to phone',()=>{
+  const {homeSuggestionNote,planHomeNote,recommendedHomeRoute}=load(base+'pages/home/HomeSecretary');
+  const item={id:'guess',title:'调研选题',task:'制作研究汇报PPT',reason:'想了解',category:'learning',evidence:[{title:'资料',summary:'相关线索',eventId:'e1'}]};
+  const note=homeSuggestionNote(item);assert.equal(recommendedHomeRoute(note),'codex');
+  const research=planHomeNote(note,'codex','');
+  assert.equal(research.route,'codex');assert.equal(research.context.evidence[0].eventId,'e1');
+  assert.equal(research.context.userGoal,undefined);
+  const news=homeSuggestionNote({...item,title:'了解天文新闻',task:'了解最新天文新闻',qwenTask:'介绍最新天文新闻'});
+  assert.equal(recommendedHomeRoute(news),'qwen');
+  const publicQuery=planHomeNote(news,'qwen','介绍最新天文新闻');
+  assert.equal(publicQuery.route,'qwen');assert.match(publicQuery.task,/介绍最新天文新闻/);
+  assert(!publicQuery.task.includes('相关线索'));
+  const privateNote=homeSuggestionNote({...item,title:'查看聊天记录',task:'打开微信查看聊天记录'});
+  assert.equal(recommendedHomeRoute(privateNote),'phone');
+  const privateTask=planHomeNote(privateNote,'phone',privateNote.suggestion.task);
+  assert.equal(privateTask.route,'phone');assert.match(privateTask.task,/微信/);
+  assert.throws(()=>planHomeNote(privateNote,'qwen','查看聊天记录'));
+  const override=planHomeNote(news,'codex','制作带来源的简报');
+  assert.equal(override.context.userGoal,'制作带来源的简报');assert.equal(override.context.evidence[0].eventId,'e1');
+  assert.throws(()=>planHomeNote(news,'phone','先打开应用；然后搜索。'),/一句话/);
 });
 test('preparation Agent can retrieve real index events without consulting the profile',async()=>{
   let reads=0;const event={event_id:'indexed-calendar',event_date:'2026-11-07',sources:['calendar'],

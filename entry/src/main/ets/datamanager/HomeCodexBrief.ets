@@ -213,7 +213,8 @@ export function buildHomeCodexBrief(request: HomeCodexRequest, events: IndexedEv
     if (notes.some((note: string): boolean => note.indexOf('不完整') >= 0)) { prompt += '原始采集不完整。\n'; }
   }
   let message = '交给 Codex：' + codexUtf8Excerpt(request.title, 400) +
-    '\n请根据原文和截图主动调研、规划并交付可用成果。' +
+    (request.userGoal?.trim() ? '\n' + codexUtf8Excerpt(request.userGoal.trim(), 500) :
+      '\n请根据原文和截图主动调研、规划并交付可用成果。') +
     (request.description ? '\n' + codexUtf8Excerpt(request.description, 500) : '') +
     '\n已整理 ' + messageCount + ' 条相关原文' + (limited ? '，并合并重复内容。' : '。');
   // Carry only sources actually present in the bounded brief. A merely loaded

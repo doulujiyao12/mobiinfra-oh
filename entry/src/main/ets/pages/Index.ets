@@ -104,6 +104,8 @@ import {
 } from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
+import { HomeNote, SecretaryJob, SecretaryJobState, SecretaryAssignment } from './home/HomeSecretary';
+import { HomeSecretaryDesk } from './home/HomeSecretaryDesk';
 import { PhoneHdcWorkflowBridge } from '../utils/selfhdc/PhoneHdcWorkflowBridge';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
@@ -706,6 +708,8 @@ struct Index {
   @State homeTaskSuggestionError: string = '';
   @State homeComfortConcerns: HomeComfortConcern[] = [];
   @State homeComfortChatStore: HomeComfortChatStore = new HomeComfortChatStore();
+  @State private secretaryDesk: HomeSecretaryDesk = new HomeSecretaryDesk();
+  @State private homeReviewRequested: boolean = false;
   @State homeComfortConcernsLoading: boolean = false;
   @State homeComfortConcernError: string = '';
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
@@ -3319,6 +3323,7 @@ struct Index {
     }
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    this.secretaryDesk.restore(this.filesDir);
     AppStorage.setOrCreate(STARTUP_SOURCE_SYNC_ENABLED_KEY, new StartupSourceSync(this.filesDir).isEnabled());
     try {
       WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
@@ -6114,22 +6119,22 @@ struct Index {
     }
   }
 
-  private async handHomeItemToCodex(request: HomeCodexRequest): Promise<void> {
-    if (this.blockChatSessionMutationIfBusy('交给 Codex') || !this.ensureAiServiceLogin()) { return; }
+  private async handHomeItemToCodex(request: HomeCodexRequest,
+    onSession: (id: string) => void): Promise<CodexChatResult> {
     if (this.dataManagerFacade === null) { throw new Error('个人记忆尚未就绪，请稍后再试'); }
     this.cloudThinking = true;
     this.cloudChatCancelRequested = false;
     let sessionId = '';
     try {
       let context = await this.dataManagerFacade.prepareHomeCodexContext(request);
-      if (this.cloudChatCancelRequested) { return; }
+      if (this.cloudChatCancelRequested) { throw new Error('已取消本次委托'); }
       let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), CHAT_MODE_CLOUD_AGENT);
       if (state.activeSession === null) { throw new Error('无法创建 Codex 聊天'); }
       sessionId = state.activeSessionId;
       this.applyChatSessionViewState(ChatSessionController.renameSession(this.filesDir, state, sessionId, context.title));
       this.chatSessionDrawerOpen = false;
       this.cloudCodexSessionId = sessionId;
-      this.currentTab = MainTabIndex.Chat;
+      onSession(sessionId);
       let attachments = await prepareHomeCodexAttachments(this.filesDir, sessionId, context.imageRefs);
       let imageNote = attachments.paths.length > 0 ? '\n已附 ' + attachments.paths.length + ' 张相关来源截图，可结合原文核对。' : '\n本次没有可用截图。';
       if (attachments.notices.length > 0) { imageNote += '\n部分截图不可用或超出本次上限。'; }
@@ -6139,20 +6144,22 @@ struct Index {
       if (this.cloudChatCancelRequested) {
         throw new Error('已取消本次委托，资料已保留在此聊天。');
       }
-      let preview = request.title + '\n' + request.description.slice(0, 180) +
+      let preview = request.title + '\n' + (request.userGoal || request.description).slice(0, 180) +
         '\n\n已整理关联文字和可用截图，完整资料可在此聊天查看。' +
         (attachments.notices.length > 0 ? '\n部分截图不可用或超过本次上限，缺失说明已保留。' : '');
       let result = await this.runCodexTaskForChatSession(sessionId, { task: prompt, continueRunId: '' }, attachments.paths, preview,
-        context.suppliedEventIds || []);
+        context.suppliedEventIds || [], true);
       if (!result.runId) {
         this.appendChatMessageToExactSession(sessionId, createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
           CHAT_MESSAGE_KIND_CHAT, result.status === 'rejected' ? '已取消本次 Codex 委托，资料已保留在此聊天。' :
             'Codex 委托未开始：' + result.error, Date.now()));
       }
+      return result;
     } catch (e) {
       if (!sessionId) { throw new Error((e as Error).message || '准备 Codex 上下文失败'); }
       this.appendChatMessageToExactSession(sessionId, createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
         CHAT_MESSAGE_KIND_CHAT, (e as Error).message || 'Codex 委托未开始，请稍后重试。', Date.now()));
+      throw new Error((e as Error).message || '委托未开始');
     } finally {
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
@@ -6161,7 +6168,8 @@ struct Index {
   }
 
   private async runCodexTaskForChatSession(sessionId: string, request: CodexChatRequest,
-    imagePaths: string[], taskPreview: string = '', suppliedEventIds: string[] = []): Promise<CodexChatResult> {
+    imagePaths: string[], taskPreview: string = '', suppliedEventIds: string[] = [],
+    secretary: boolean = false): Promise<CodexChatResult> {
     const service = CodexChatService.get(this.filesDir);
     const execution: CodexChatExecution = {
       sessionId: sessionId, imagePaths: imagePaths,
@@ -6194,7 +6202,7 @@ struct Index {
         } finally { if (this.codexPreparation === preparation) { this.codexPreparation = null; } }
       },
       selectTarget: async (task: string, imageCount: number): Promise<CodexChatTarget | null> => {
-        return await pickCodexChatTarget(this.getUIContext(), taskPreview || task, imageCount);
+        return await pickCodexChatTarget(this.getUIContext(), taskPreview || task, imageCount, secretary);
       },
       isCancelled: (): boolean => this.cloudChatCancelRequested,
       onCreated: (run: CodexChatRun): void => {
@@ -7244,14 +7252,75 @@ struct Index {
     return reply;
   }
 
-  private async runHomeRecommendationAgentTask(taskText: string, keepTargetAppAfterFinish: boolean): Promise<void> {
-    let options: CloudAgentTaskSubmitOptions = {
-      switchToChat: false,
-      returnToHostAppOnFinish: !keepTargetAppAfterFinish
-    };
-    let result = await this.submitDirectCloudAgentTask(taskText, options);
-    if (!result.success) {
-      throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
+  private openSecretaryJob(job: SecretaryJob): void {
+    if (!job.sessionId || !ChatSessionStorage.sessionExists(this.filesDir, job.sessionId)) {
+      showToastSafely('原任务会话暂不可用'); return;
+    }
+    if (job.sessionId !== this.activeChatSessionId) {
+      if (this.blockChatSessionMutationIfBusy('打开该任务')) { return; }
+      this.selectChatSession(job.sessionId);
+    }
+    this.currentTab = MainTabIndex.Chat;
+  }
+
+  private async delegateHomeNote(note: HomeNote, assignment: SecretaryAssignment, retry: boolean): Promise<void> {
+    if (!this.ensureAiServiceLogin()) { throw new Error(AI_LOGIN_REQUIRED_MESSAGE); }
+    if (this.blockChatSessionMutationIfBusy('交办便签') || this.activeAgentRunner !== null ||
+      AgentExecutionController.isExecutionActive()) { throw new Error('已有任务正在执行，请稍后再试'); }
+    if (!this.secretaryDesk.start(note.key, note.title, assignment.route, retry)) { return; }
+    try {
+      if (assignment.context) {
+        const result = await this.handHomeItemToCodex(assignment.context, (id: string): void => {
+          this.secretaryDesk.update(note.key, 'running', '正在整理相关记录，准备委托。', id);
+        });
+        const state: SecretaryJobState = result.ok ? 'finished' :
+          (result.status === 'rejected' || result.status === 'cancelled' ? 'cancelled' :
+            (result.runId && result.status !== 'failed' ? 'review' : 'failed'));
+        this.secretaryDesk.update(note.key, state, result.ok ? '成果已保存到任务会话。' :
+          (result.error || '请打开任务会话查看进度。'));
+      } else {
+        await this.runSecretaryPhoneTask(note, assignment);
+      }
+    } catch (e) {
+      const message = (e as Error).message || '暂时无法办理，请稍后重试';
+      this.secretaryDesk.update(note.key, 'failed', message);
+      throw new Error(message);
+    }
+  }
+
+  private async runSecretaryPhoneTask(note: HomeNote, assignment: SecretaryAssignment): Promise<void> {
+    this.cloudThinking = true;
+    let sessionId = '';
+    try {
+      const state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), CHAT_MODE_CLOUD_AGENT);
+      if (!state.activeSession) { throw new Error('无法创建任务会话'); }
+      sessionId = state.activeSessionId;
+      this.applyChatSessionViewState(ChatSessionController.renameSession(this.filesDir, state, sessionId, note.title));
+      this.cloudTaskSessionId = sessionId;
+      this.cloudDebugImagePath = '';
+      const qwen = assignment.route === 'qwen';
+      this.secretaryDesk.update(note.key, 'running', qwen ? '正在将任务交给千问。' : '正在手机上办理。', sessionId);
+      this.appendChatMessageToExactSession(sessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
+        CHAT_MESSAGE_KIND_CHAT, (qwen ? '交给千问' : '在手机上执行') + ' · ' + note.title +
+          (assignment.goal !== note.title ? '\n' + assignment.goal : ''), Date.now()));
+      const result = await this.submitDirectCloudAgentTask(assignment.task,
+        { switchToChat: false, returnToHostAppOnFinish: !qwen });
+      if (!result.success) { throw new Error(result.error || '手机执行器暂不可用'); }
+      const message = qwen ? '任务已交给千问，可在千问对话中查看回复。' : '手机任务已结束，可在目标应用查看办理情况。';
+      this.appendChatMessageToExactSession(sessionId, createChatMessage(this.nextChatMessageId('task-result'), 'task',
+        CHAT_MESSAGE_KIND_TASK_RESULT, message, Date.now()));
+      if (this.cloudDebugImagePath) { this.attachTaskResultImage(sessionId, this.cloudDebugImagePath); }
+      this.secretaryDesk.update(note.key, 'finished', message);
+    } catch (e) {
+      const message = (e as Error).message || '任务未能完成';
+      if (sessionId) {
+        this.appendChatMessageToExactSession(sessionId, createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+          CHAT_MESSAGE_KIND_CHAT, message, Date.now()));
+      }
+      throw new Error(message);
+    } finally {
+      this.cloudTaskSessionId = '';
+      this.cloudThinking = false;
     }
   }
 
@@ -8269,6 +8338,7 @@ struct Index {
   @Builder MainTabContents() {
     TabContent() {
       HomePage({
+        active: this.pageVisible && this.currentTab === MainTabIndex.Home,
         onOpenMailSettings: (): void => {
           this.openSettingsFromTab(SettingsSectionId.MailAnalysis, MainTabIndex.Home);
         },
@@ -8285,8 +8355,10 @@ struct Index {
         onRefreshTaskSuggestions: async (): Promise<void> => {
           await this.refreshHomeTaskSuggestions(true);
         },
-        onOpenTasks: (): void => {
+        desk: this.secretaryDesk,
+        onDailyReview: (): void => {
           this.taskConfigViewOpen = false;
+          this.homeReviewRequested = true;
           this.currentTab = MainTabIndex.Task;
         },
         comfortConcerns: this.homeComfortConcerns,
@@ -8302,20 +8374,9 @@ struct Index {
         onSetRecommendationCompleted: (id: string, completed: boolean) => {
           this.setHomeRecommendationCompleted(id, completed);
         },
-        avatarVersions: this.avatarVersions,
-        onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
-          await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
-        },
-        codexBusy: this.cloudThinking,
-        onDelegateToCodex: async (request: HomeCodexRequest): Promise<void> => {
-          await this.handHomeItemToCodex(request);
-        },
-        onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
-          await this.generateHomeAvatar(mode, sourceImage);
-        },
-        onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
-          return await this.saveHomeAvatarReferencePhoto(sourceImage);
-        }
+        onDelegate: (note: HomeNote, assignment: SecretaryAssignment, retry: boolean): Promise<void> =>
+          this.delegateHomeNote(note, assignment, retry),
+        onOpenJob: (job: SecretaryJob): void => { this.openSecretaryJob(job); }
       })
     }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .tabBar(this.tabBarStyle(MainTabIndex.Home))
@@ -8427,6 +8488,7 @@ struct Index {
     .tabBar(this.tabBarStyle(MainTabIndex.Codex))
     TabContent() {
       TaskPage({
+        homeReviewRequested: $homeReviewRequested,
         active: this.pageVisible && this.currentTab === MainTabIndex.Task,
         taskScene: $taskScene,
         configViewOpen: $taskConfigViewOpen,

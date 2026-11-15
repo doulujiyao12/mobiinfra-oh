@@ -7,6 +7,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { AppTheme } from '../../utils/AppTheme';
+import { setSecretaryTarget } from './CodexChatTargetPicker';
 import { AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
 import { MarkdownView } from '../../components/MarkdownView';
@@ -795,6 +796,17 @@ export struct CodexPage {
           })
           .enabled(this.task === null && !this.busy).layoutWeight(1)
       }.width('100%')
+      Button('将此电脑和目录用于秘书交办').height(40).fontSize(14)
+        .fontColor($r('app.color.ui_accent_purple')).backgroundColor($r('app.color.ui_soft_purple'))
+        .enabled(this.workspaceId.length > 0 && this.savedConnections.some((item: CodexSavedConnection): boolean =>
+          item.origin === this.connectedOrigin))
+        .onClick((): void => {
+          const connection = this.savedConnections.find((item: CodexSavedConnection): boolean => item.origin === this.connectedOrigin);
+          if (connection) {
+            setSecretaryTarget(connection.id, this.workspaceId);
+            this.getUIContext().getPromptAction().showToast({ message: '秘书交办将使用此电脑和目录' });
+          }
+        })
       Row({ space: 10 }) {
         Text('模型').fontSize(14).fontColor(AppTheme.text('#172033')).width(72)
         Select(this.models.map((m: CodexModel): SelectOption => ({ value: m.displayName || m.model })))

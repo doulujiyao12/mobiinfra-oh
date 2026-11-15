@@ -164,11 +164,19 @@ test('preparing state is immediate, locks duplicate taps and passes prepared end
 });
 test('returning from file management reloads tasks without a historical scan', () => {
   let reloads = 0, reminders = 0;
-  const page = probe('pages/task/TaskPage.ets', 'TaskPage', ['onActiveChanged']);
+  const page = probe('pages/task/TaskPage.ets', 'TaskPage', ['onActiveChanged','consumeHomeReview']);
   Object.assign(page, { active: true, filesDir: fixture, isTaskExecutionBusy: () => false,
     reloadTasks: () => reloads++, onCollectionReminderChanged: () => reminders++ });
   page.onActiveChanged(); assert.equal(reloads, 1); assert.equal(reminders, 1);
   page.isTaskExecutionBusy = () => true; page.onActiveChanged(); assert.equal(reloads, 1);
+});
+test('Home review is consumed exactly once after the task tab and storage are ready', () => {
+  let calls=0;
+  const page=probe('pages/task/TaskPage.ets','TaskPage',['consumeHomeReview']);
+  Object.assign(page,{homeReviewRequested:true,active:false,filesDir:'',reminderRequest:'',
+    runEnabledTasks:async()=>{calls++;}});
+  page.consumeHomeReview();page.filesDir=fixture;page.consumeHomeReview();assert.equal(calls,0);
+  page.active=true;page.consumeHomeReview();page.consumeHomeReview();assert.equal(calls,1);
 });
 test('reminders use first generation time, including after reuse/restart, with stable legacy ordering', () => {
   const source = fs.readFileSync(path.join(base, 'datamanager/HomeRecommendationService.ets'), 'utf8');
@@ -185,10 +193,11 @@ test('reminders use first generation time, including after reuse/restart, with s
   assert.equal(items[0].id, 'legacy-a');
   assert.deepEqual(Array.from(exports.newestHomeRecommendations(JSON.parse(JSON.stringify(ordered))), r => r.id),
     Array.from(ordered, r => r.id));
-  const home = probe('pages/home/HomePage.ets', 'HomePage', ['visibleRecommendations']);
-  Object.assign(home, { nonCalendarRecommendations: () => ordered.slice(), profile: { calendarEnabled: true,
-    mailReminder: { id: 'mail', completed: false } }, calendarOverview: () => ({ reminder: { id: 'calendar' } }), showAllRecommendations: false });
-  assert.deepEqual(Array.from(home.visibleRecommendations(), r => r.id), ['calendar', 'mail', 'new', 'old', 'legacy-a', 'invalid', 'legacy-b']);
+  const { homeNoteBoard } = load('pages/home/HomeSecretary');
+  const reminders = [{ id: 'calendar:overview' }, { id: 'mail:overview' }, ...ordered].map(r =>
+    ({ ...r, title: r.id, desc: '', meta: '', sourceEventIds: [], completed: false }));
+  assert.deepEqual(Array.from(homeNoteBoard(reminders, [], 'reminder', false), n => n.reminder.id),
+    ['new', 'old', 'legacy-a', 'invalid', 'legacy-b']);
 });
 (async () => {
   try { for (const [name, run] of tests) { await run(); console.log('PASS ' + name); }

@@ -1392,6 +1392,7 @@ export class DataManagerFacade {
       }
       let domain = normalizeFreeText(item.domain) || 'other';
       let imageRefs = this.recommendationImages(item, eventMap);
+      const relatedFacts = this.recommendationFacts(item, eventMap);
       let recommendation: HomeRecommendationViewModel = {
         id: normalizeFreeText(item.id),
         domain: domain,
@@ -1403,7 +1404,8 @@ export class DataManagerFacade {
         imageRefs: imageRefs,
         thumbnailUri: this.recommendationThumbnail(imageRefs),
         sourceEventIds: (item.source_event_ids || []).slice(),
-        detail: this.recommendationDetail(item, eventMap),
+        detail: this.recommendationDetail(item, relatedFacts),
+        relatedFacts: relatedFacts,
         agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap),
         completed: item.completed === true
       };
@@ -1512,7 +1514,7 @@ export class DataManagerFacade {
     return meta;
   }
 
-  private recommendationDetail(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string {
+  private recommendationDetail(item: HomeRecommendationState, evidence: string[]): string {
     let lines: string[] = [];
     let desc = normalizeFreeText(item.desc);
     if (desc.length > 0) {
@@ -1522,6 +1524,14 @@ export class DataManagerFacade {
     if (meta.length > 0) {
       lines.push('信息：' + meta);
     }
+    if (evidence.length > 0) {
+      lines.push('相关记录');
+      lines = lines.concat(evidence);
+    }
+    return lines.join('\n');
+  }
+
+  private recommendationFacts(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string[] {
     let evidence: string[] = [];
     for (let eventId of item.source_event_ids || []) {
       let event = eventMap[eventId];
@@ -1540,13 +1550,7 @@ export class DataManagerFacade {
         break;
       }
     }
-    if (evidence.length > 0) {
-      lines.push('相关记录');
-      evidence.forEach((text: string) => {
-        lines.push(text);
-      });
-    }
-    return lines.join('\n');
+    return stableUnique(evidence);
   }
 
   private recommendationImages(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): CollectionImageViewModel[] {
