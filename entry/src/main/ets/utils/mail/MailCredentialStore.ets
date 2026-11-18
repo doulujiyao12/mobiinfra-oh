@@ -2,6 +2,7 @@ import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AppLogger } from '../AppLogger';
+import { CredentialEntry, CredentialState, CredentialVault } from '../CredentialVault';
 
 export const MAIL_CREDENTIAL_MISSING_MESSAGE: string =
   'MAIL_CREDENTIAL_MISSING: 本机未找到此邮箱配置的授权码，请到“邮箱分析”重新保存';
@@ -19,6 +20,17 @@ export class MailCredentialStore {
     return query;
   }
   static async load(accountKey: string): Promise<string> {
+    MailCredentialStore.query(accountKey);
+    return CredentialVault.transaction<string>('mail', async (state: CredentialState): Promise<string> => {
+      const entry = state.entries.find((item: CredentialEntry): boolean => item.id === accountKey);
+      if (entry !== undefined) { return entry.value || ''; }
+      if (state.legacyClosed) { return ''; }
+      const secret = await MailCredentialStore.loadLegacy(accountKey);
+      if (secret) { state.entries.push({ id: accountKey, value: secret }); }
+      return secret;
+    });
+  }
+  private static async loadLegacy(accountKey: string): Promise<string> {
     let query = MailCredentialStore.query(accountKey);
     query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ALL);
     try {
@@ -47,30 +59,22 @@ export class MailCredentialStore {
     if (bytes.length === 0 || bytes.length > 1024 || /[\x00-\x1f\x7f]/.test(secret)) {
       throw new Error('邮箱授权码为空、过长或包含控制字符');
     }
-    let query = MailCredentialStore.query(accountKey);
-    query.set(asset.Tag.SECRET, bytes);
-    query.set(asset.Tag.DATA_LABEL_CRITICAL_4, new util.TextEncoder().encodeInto('clawmate.mail.imap.v1'));
-    query.set(asset.Tag.ACCESSIBILITY, asset.Accessibility.DEVICE_UNLOCKED);
-    query.set(asset.Tag.AUTH_TYPE, asset.AuthType.NONE);
-    query.set(asset.Tag.SYNC_TYPE, asset.SyncType.NEVER);
-    query.set(asset.Tag.CONFLICT_RESOLUTION, asset.ConflictResolution.OVERWRITE);
-    try { await asset.add(query); }
-    catch (e) {
-      let code = MailCredentialStore.errorCode(e as Error);
-      AppLogger.warn('MailCredential', 'MAIL_CREDENTIAL_SAVE status=write_failed code=' + code);
-      throw new Error('MAIL_CREDENTIAL_WRITE_FAILED: 邮箱授权码未能写入安全存储，请重试（系统错误码 ' + code + '）');
-    }
-    if (await MailCredentialStore.load(accountKey) !== secret) {
-      AppLogger.warn('MailCredential', 'MAIL_CREDENTIAL_SAVE status=verify_failed');
-      throw new Error('MAIL_CREDENTIAL_VERIFY_FAILED: 邮箱授权码保存后校验失败，本次未确认保存成功，请重试');
-    }
+    MailCredentialStore.query(accountKey);
+    await CredentialVault.transaction<void>('mail', async (state: CredentialState): Promise<void> => {
+      const entry = state.entries.find((item: CredentialEntry): boolean => item.id === accountKey);
+      if (entry !== undefined) { entry.value = secret; }
+      else { state.entries.push({ id: accountKey, value: secret }); }
+    });
     AppLogger.info('MailCredential', 'MAIL_CREDENTIAL_SAVE status=verified');
   }
   static async remove(accountKey: string = ''): Promise<void> {
-    let query: asset.AssetMap = new Map();
-    if (accountKey) { query = MailCredentialStore.query(accountKey); }
-    else { query.set(asset.Tag.DATA_LABEL_CRITICAL_4, new util.TextEncoder().encodeInto('clawmate.mail.imap.v1')); }
-    try { await asset.remove(query); }
-    catch (e) { if ((e as BusinessError).code !== 24000002) { throw new Error('邮箱授权码未能移除，请重试'); } }
+    if (accountKey) { MailCredentialStore.query(accountKey); }
+    await CredentialVault.transaction<void>('mail', async (state: CredentialState): Promise<void> => {
+      if (!accountKey) { state.entries = []; state.legacyClosed = true; return; }
+      const entry = state.entries.find((item: CredentialEntry): boolean => item.id === accountKey);
+      // A tombstone prevents an old ASSET value from resurrecting a removed account.
+      if (entry !== undefined) { entry.value = null; }
+      else { state.entries.push({ id: accountKey, value: null }); }
+    });
   }
 }

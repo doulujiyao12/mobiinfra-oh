@@ -1,5 +1,6 @@
 import { asset } from '@kit.AssetStoreKit';
-import { util } from '@kit.ArkTS';
+import { util, JSON as ArkJSON } from '@kit.ArkTS';
+import { CredentialEntry, CredentialState, CredentialVault } from '../../utils/CredentialVault';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
   CodexConnection, CodexSavedConnection, codexConnectionLabel, normalizeCodexOrigin, validCodexToken, validCodexCa
@@ -7,7 +8,12 @@ import {
 
 const CONNECTION_GROUP: string = 'clawmate.codex.connections.v2';
 
-// V2 list queries use attributes only. The legacy credential is read for compatibility until migrated.
+interface StoredCodexConnection {
+  info: CodexSavedConnection;
+  connection: CodexConnection;
+}
+
+// Import ASSET V1/V2 once, preserving connection IDs used by saved sessions.
 export class CodexCredentialStore {
   private static query(id: string = 'legacy'): asset.AssetMap {
     if (id !== 'legacy' && !/^[a-zA-Z0-9-]{32,36}$/.test(id)) { throw new Error('连接编号无效'); }
@@ -20,7 +26,7 @@ export class CodexCredentialStore {
   private static metadata(attributes: asset.AssetMap): CodexSavedConnection | null {
     const bytes = attributes.get(asset.Tag.DATA_LABEL_CRITICAL_2) as Uint8Array | undefined;
     if (bytes === undefined) { return null; }
-    const item = JSON.parse(new util.TextDecoder().decodeWithStream(bytes)) as CodexSavedConnection;
+    const item = ArkJSON.parse(new util.TextDecoder().decodeWithStream(bytes)) as CodexSavedConnection;
     if (item === null || typeof item.id !== 'string' || !/^[a-zA-Z0-9-]{32,36}$/.test(item.id) ||
       typeof item.origin !== 'string' || normalizeCodexOrigin(item.origin) !== item.origin ||
       typeof item.name !== 'string' || item.name.length > 80 ||
@@ -30,7 +36,7 @@ export class CodexCredentialStore {
     return item;
   }
 
-  static async list(): Promise<CodexSavedConnection[]> {
+  private static async legacyList(): Promise<CodexSavedConnection[]> {
     let query: asset.AssetMap = new Map();
     query.set(asset.Tag.DATA_LABEL_CRITICAL_4, new util.TextEncoder().encodeInto(CONNECTION_GROUP));
     query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ATTRIBUTES);
@@ -44,30 +50,70 @@ export class CodexCredentialStore {
       const item = CodexCredentialStore.metadata(results[i]);
       if (item !== null) { items.push(item); }
     }
-    const legacy = await CodexCredentialStore.read('legacy');
+    const legacy = await CodexCredentialStore.readLegacy('legacy');
     if (legacy !== null && !items.some((item: CodexSavedConnection) => item.origin === legacy.origin)) {
       items.push({ id: 'legacy', name: codexConnectionLabel(legacy.origin), origin: legacy.origin, updatedAt: 0 });
     }
     return items.sort((a: CodexSavedConnection, b: CodexSavedConnection) => b.updatedAt - a.updatedAt);
   }
 
-  static async load(id: string = ''): Promise<CodexConnection | null> {
-    if (id.length === 0) {
-      const items = await CodexCredentialStore.list();
-      if (items.length === 0) { return null; }
-      id = items[0].id;
+  private static async records(state: CredentialState): Promise<StoredCodexConnection[]> {
+    if (!state.legacyClosed) {
+      const legacyItems = await CodexCredentialStore.legacyList();
+      for (const info of legacyItems) {
+        if (state.entries.some((entry: CredentialEntry): boolean => entry.id === info.id)) { continue; }
+        const connection = await CodexCredentialStore.readLegacy(info.id);
+        if (connection === null) { throw new Error('连接配置在迁移期间发生变化，请重试'); }
+        const record: StoredCodexConnection = { info: info, connection: connection };
+        state.entries.push({ id: info.id, value: ArkJSON.stringify(record) });
+      }
+      state.legacyClosed = true;
     }
-    return CodexCredentialStore.read(id);
+    const records: StoredCodexConnection[] = [];
+    for (const entry of state.entries) {
+      if (entry.value === null) { continue; }
+      const record = ArkJSON.parse(entry.value) as StoredCodexConnection;
+      if (!record || !record.info || !record.connection || record.info.id !== entry.id ||
+        typeof record.info.name !== 'string' || record.info.name.length > 80 ||
+        typeof record.info.updatedAt !== 'number' || !Number.isFinite(record.info.updatedAt) ||
+        record.info.origin !== record.connection.origin ||
+        normalizeCodexOrigin(record.connection.origin) !== record.connection.origin ||
+        !validCodexToken(record.connection.token) ||
+        (record.connection.caCertificate && !validCodexCa(record.connection.caCertificate))) {
+        throw new Error('本机连接配置无法读取，请重试');
+      }
+      records.push(record);
+    }
+    return records.sort((a: StoredCodexConnection, b: StoredCodexConnection): number =>
+      b.info.updatedAt - a.info.updatedAt);
   }
 
-  private static async read(id: string): Promise<CodexConnection | null> {
+  static async list(): Promise<CodexSavedConnection[]> {
+    return CredentialVault.transaction<CodexSavedConnection[]>('codex',
+      async (state: CredentialState): Promise<CodexSavedConnection[]> => {
+        const records = await CodexCredentialStore.records(state);
+        return records.map((record: StoredCodexConnection): CodexSavedConnection => record.info);
+      });
+  }
+
+  static async load(id: string = ''): Promise<CodexConnection | null> {
+    if (id) { CodexCredentialStore.query(id); }
+    return CredentialVault.transaction<CodexConnection | null>('codex',
+      async (state: CredentialState): Promise<CodexConnection | null> => {
+        const records = await CodexCredentialStore.records(state);
+        const record = id ? records.find((item: StoredCodexConnection): boolean => item.info.id === id) : records[0];
+        return record === undefined ? null : record.connection;
+      });
+  }
+
+  private static async readLegacy(id: string): Promise<CodexConnection | null> {
     let query = CodexCredentialStore.query(id);
     query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ALL);
     try {
       const results = await asset.query(query);
       if (results.length === 0) { return null; }
       const bytes = results[0].get(asset.Tag.SECRET) as Uint8Array;
-      const saved = JSON.parse(new util.TextDecoder().decodeWithStream(bytes)) as CodexConnection;
+      const saved = ArkJSON.parse(new util.TextDecoder().decodeWithStream(bytes)) as CodexConnection;
       const ca = results[0].get(asset.Tag.DATA_LABEL_CRITICAL_1) as Uint8Array | undefined;
       if (ca !== undefined) {
         const value = new util.TextDecoder().decodeWithStream(ca);
@@ -94,45 +140,36 @@ export class CodexCredentialStore {
   static async save(connection: CodexConnection, name: string = ''): Promise<CodexSavedConnection> {
     const origin = normalizeCodexOrigin(connection.origin);
     if (!validCodexToken(connection.token)) { throw new Error('桥接令牌格式无效'); }
-    const items = await CodexCredentialStore.list();
-    const existing = items.find((item: CodexSavedConnection) => item.origin === origin);
-    const id = existing !== undefined && existing.id !== 'legacy' ? existing.id : util.generateRandomUUID(true);
-    const info: CodexSavedConnection = {
-      id: id, origin: origin, name: (name.trim() || existing?.name || codexConnectionLabel(origin)).slice(0, 80),
-      updatedAt: Date.now()
-    };
-    let attributes = CodexCredentialStore.query(id);
-    // SECRET is limited to 1024 bytes; the public certificate uses a separate protected label.
-    const secret: CodexConnection = { origin: origin, token: connection.token };
-    const secretBytes = new util.TextEncoder().encodeInto(JSON.stringify(secret));
-    if (secretBytes.byteLength > 1024) { throw new Error('连接地址或令牌过长'); }
-    attributes.set(asset.Tag.SECRET, secretBytes);
     const ca = connection.caCertificate || 'system';
-    if (ca !== 'system' && !validCodexCa(ca)) { throw new Error('配对证书格式无效'); }
-    attributes.set(asset.Tag.DATA_LABEL_CRITICAL_1, new util.TextEncoder().encodeInto(ca));
-    attributes.set(asset.Tag.DATA_LABEL_CRITICAL_2, new util.TextEncoder().encodeInto(JSON.stringify(info)));
-    attributes.set(asset.Tag.DATA_LABEL_CRITICAL_4, new util.TextEncoder().encodeInto(CONNECTION_GROUP));
-    attributes.set(asset.Tag.ACCESSIBILITY, asset.Accessibility.DEVICE_UNLOCKED);
-    attributes.set(asset.Tag.AUTH_TYPE, asset.AuthType.NONE);
-    attributes.set(asset.Tag.SYNC_TYPE, asset.SyncType.NEVER);
-    attributes.set(asset.Tag.CONFLICT_RESOLUTION, asset.ConflictResolution.OVERWRITE);
-    await asset.add(attributes);
-    const legacy = await CodexCredentialStore.read('legacy');
-    if (legacy !== null && legacy.origin === origin) { await CodexCredentialStore.remove('legacy'); }
-    return info;
-  }
-
-  private static async remove(id: string): Promise<void> {
-    try { await asset.remove(CodexCredentialStore.query(id)); }
-    catch (e) { if ((e as BusinessError).code !== 24000002) { throw e as Error; } }
+    if (ca !== 'system' && !validCodexCa(ca)) {
+      throw new Error('配对证书格式无效');
+    }
+    const saved: CodexConnection = { origin: origin, token: connection.token };
+    if (ca !== 'system') { saved.caCertificate = ca; }
+    return CredentialVault.transaction<CodexSavedConnection>('codex',
+      async (state: CredentialState): Promise<CodexSavedConnection> => {
+        const records = await CodexCredentialStore.records(state);
+        const existing = records.find((item: StoredCodexConnection): boolean => item.info.origin === origin);
+        const info: CodexSavedConnection = {
+          id: existing === undefined ? util.generateRandomUUID(true) : existing.info.id,
+          origin: origin, name: (name.trim() || existing?.info.name || codexConnectionLabel(origin)).slice(0, 80),
+          updatedAt: Date.now()
+        };
+        const record: StoredCodexConnection = { info: info, connection: saved };
+        const value = ArkJSON.stringify(record);
+        const entry = state.entries.find((item: CredentialEntry): boolean => item.id === info.id);
+        if (entry === undefined) { state.entries.push({ id: info.id, value: value }); }
+        else { entry.value = value; }
+        return info;
+      });
   }
 
   static async forget(id: string = ''): Promise<void> {
-    if (id.length === 0) {
-      const items = await CodexCredentialStore.list();
-      if (items.length === 0) { return; }
-      id = items[0].id;
-    }
-    await CodexCredentialStore.remove(id);
+    if (id) { CodexCredentialStore.query(id); }
+    await CredentialVault.transaction<void>('codex', async (state: CredentialState): Promise<void> => {
+      const records = await CodexCredentialStore.records(state);
+      const target = id || records[0]?.info.id || '';
+      state.entries = state.entries.filter((entry: CredentialEntry): boolean => entry.id !== target);
+    });
   }
 }

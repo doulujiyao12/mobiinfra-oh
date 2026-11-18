@@ -3,6 +3,10 @@ import { AppTheme } from '../utils/AppTheme';
 import { clearPageStatusBarContext, refreshPageStatusBarAppearance } from '../utils/PageStatusBar';
 import { AppLogger } from '../utils/AppLogger';
 import { DebugSettings } from '../utils/DebugSettings';
+import { CredentialVault } from '../utils/CredentialVault';
+import { MailCredentialStore } from '../utils/mail/MailCredentialStore';
+import { MailStore } from '../utils/mail/MailStore';
+import { CodexCredentialStore } from '../pages/codex/CodexCredentialStore';
 import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { appBackgroundTasks } from '../utils/AppBackgroundTasks';
@@ -64,10 +68,12 @@ export default class EntryAbility extends UIAbility {
   private floatPanelRectChangeCallback: ((options: window.RectChangeOptions) => void) | null = null;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    CredentialVault.initialize(this.context.filesDir);
     try { DebugSettings.initialize(this.context); } catch (e) {
       // A settings failure keeps logging off; the settings page can retry.
       AppLogger.errorCause('Debug', 'Cannot initialize Debug settings', e as Error);
     }
+    this.migrateCredentials();
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
@@ -111,6 +117,16 @@ export default class EntryAbility extends UIAbility {
       ', want=' + this.wantBrief(want));
     if (RecordingInbox.accepts(want)) { this.receiveRecording(want); }
     else { ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam)); }
+  }
+
+  private async migrateCredentials(): Promise<void> {
+    try {
+      const mail = new MailStore(this.context.filesDir);
+      const settings = mail.settings();
+      if (settings.host && settings.username) { await MailCredentialStore.load(mail.accountKey(settings)); }
+    } catch (e) { AppLogger.warn('Credentials', 'Email credential migration deferred; retry on next access'); }
+    try { await CodexCredentialStore.list(); }
+    catch (e) { AppLogger.warn('Credentials', 'Codex credential migration deferred; retry on next access'); }
   }
 
   onDestroy(): void {

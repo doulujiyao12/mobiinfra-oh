@@ -6,6 +6,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const ts = require(process.argv[2] || 'typescript');
+const credentials = require('./fixtures/credential_platform.cjs').credentialPlatform();
+let assetUnavailable = false;
 const { gzipSync, gunzipSync } = require('node:zlib');
 const root = path.resolve(__dirname, '..');
 const cache = new Map();
@@ -51,10 +53,11 @@ const asset = {
   SyncType: { NEVER: 0 }, ConflictResolution: { OVERWRITE: 1 },
   add: async attributes => { storedAssets.set(attributes.get(1).toString(), attributes); },
   query: async query => {
+    if (assetUnavailable) throw Object.assign(Error('Signature changed'), { code: 24000002 });
     const alias = query.get(asset.Tag.ALIAS);
     const group = query.get(asset.Tag.DATA_LABEL_CRITICAL_4);
-    const items = [...storedAssets.values()].filter(item => alias ? item.get(asset.Tag.ALIAS).toString() === alias.toString() :
-      item.get(asset.Tag.DATA_LABEL_CRITICAL_4)?.toString() === group?.toString());
+    const items = [...storedAssets.values()].filter(item => alias ? Buffer.from(item.get(asset.Tag.ALIAS)).equals(Buffer.from(alias)) :
+      Buffer.from(item.get(asset.Tag.DATA_LABEL_CRITICAL_4) || []).equals(Buffer.from(group || [])));
     if (!items.length) throw Object.assign(new Error('Not found'), { code: 24000002 });
     return items.map(item => {
       const result = new Map(item);
@@ -82,7 +85,8 @@ const kitMocks = {
           Buffer.from(stream.nextOut).set(decoded); state.totalOut = decoded.length; state.availableIn = 0; return 1;
         }, inflateEnd: async () => 0 };
     }
-  } }, '@kit.PreviewKit': {}, '@kit.CryptoArchitectureKit': {},
+  } }, '@kit.PreviewKit': {}, '@kit.CryptoArchitectureKit': { cryptoFramework: credentials.cryptoFramework },
+  '@ohos.file.fs': { default: credentials.fs },
   '@kit.CoreFileKit': {
     fileIo: { OpenMode: { CREATE: 1, READ_WRITE: 2, READ_ONLY: 4 },
       open: async () => ({ fd: 1 }), close: async () => {}, stat: async () => ({ size: attachmentSize }),
@@ -105,9 +109,9 @@ const kitMocks = {
     get: async (key, fallback) => preferencesData.get(key) ?? fallback,
     put: async (key, value) => { preferencesData.set(key, value); }, flush: async () => {}
   }) } },
-  '@kit.ArkTS': { util: {
-    TextEncoder: class { encodeInto(value) { return Buffer.from(value); } },
-    TextDecoder: class { decodeWithStream(value) { return Buffer.from(value).toString(); } },
+  '@kit.ArkTS': { JSON, util: {
+    TextEncoder: credentials.util.TextEncoder,
+    TextDecoder: class { decodeToString(value) { return Buffer.from(value).toString(); } decodeWithStream(value) { return Buffer.from(value).toString(); } },
     Base64Helper: class {
       decodeSync(value) { return Buffer.from(value, 'base64'); }
       encodeToStringSync(value) { return Buffer.from(value).toString('base64'); }
@@ -289,21 +293,17 @@ async function main() {
   await assert.rejects(client.call('/v1/info'));
 
   const { CodexCredentialStore } = load('entry/src/main/ets/pages/codex/CodexCredentialStore.ets');
+  load('entry/src/main/ets/utils/CredentialVault.ets').CredentialVault.initialize('/sandbox');
   assert.equal(await CodexCredentialStore.load(), null);
-  await CodexCredentialStore.save({ origin: 'https://example.com', token: 'b'.repeat(43) });
+  await CodexCredentialStore.save({ origin: 'https://example.com', token: 'b'.repeat(43), caCertificate: '' });
   const saved = await CodexCredentialStore.load();
   assert.equal(saved.origin, 'https://example.com'); assert.equal(saved.token, 'b'.repeat(43));
-  const attributes = [...storedAssets.values()][0];
-  assert.equal(attributes.get(asset.Tag.SYNC_TYPE), asset.SyncType.NEVER);
-  assert.equal(attributes.get(asset.Tag.ACCESSIBILITY), asset.Accessibility.DEVICE_UNLOCKED);
+  assert.equal(storedAssets.size, 0, 'new connections use sandbox credentials');
   await CodexCredentialStore.forget(); assert.equal(await CodexCredentialStore.load(), null);
 
   const ca = '-----BEGIN CERTIFICATE-----\n' + 'A'.repeat(900) + '\n-----END CERTIFICATE-----\n';
   await CodexCredentialStore.save({ origin: 'https://example.com', token: 'b'.repeat(43), caCertificate: ca });
   assert.equal((await CodexCredentialStore.load()).caCertificate, ca);
-  const pairedAttributes = [...storedAssets.values()][0];
-  assert.ok(pairedAttributes.get(asset.Tag.SECRET).length <= 1024);
-  assert.ok(pairedAttributes.get(asset.Tag.DATA_LABEL_CRITICAL_1).length <= 2048);
   const firstId = (await CodexCredentialStore.list())[0].id;
   const second = await CodexCredentialStore.save({ origin: 'https://second.example.com', token: 's'.repeat(43), caCertificate: ca }, 'Office');
   assert.equal((await CodexCredentialStore.list()).length, 2);
@@ -320,25 +320,55 @@ async function main() {
   storedAssets.set(staleAlias.toString(), new Map([
     [asset.Tag.ALIAS, staleAlias], [asset.Tag.SECRET, Buffer.from(JSON.stringify({ origin: second.origin, token: 'o'.repeat(43) }))]
   ]));
-  cache.delete(path.join(root, 'entry/src/main/ets/pages/codex/CodexCredentialStore.ets'));
+  cache.delete(path.join(root, 'entry/src/main/ets/pages/codex/CodexCredentialStore.ets').replaceAll('\\', '/'));
   const upgradedStore = load('entry/src/main/ets/pages/codex/CodexCredentialStore.ets').CodexCredentialStore;
   assert.equal((await upgradedStore.load(second.id)).token, 't'.repeat(43), 'upgrade reads the latest saved token');
   const listedAfterUpgrade = await upgradedStore.list();
   assert.equal(listedAfterUpgrade.filter(item => item.origin === second.origin).length, 1, 'legacy fallback cannot replace/duplicate the current connection');
   assert.equal((await upgradedStore.load(second.id)).token, 't'.repeat(43), 'listing old assets never overwrites newer credentials');
   storedAssets.delete(staleAlias.toString());
+  assetUnavailable = true;
+  assert.equal((await CodexCredentialStore.load(second.id)).token, 't'.repeat(43));
+  await CodexCredentialStore.save({ origin: second.origin, token: 'u'.repeat(43), caCertificate: ca });
+  assetUnavailable = false;
+  assert.equal((await CodexCredentialStore.load(second.id)).token, 'u'.repeat(43));
+
+  // A fresh vault models the first upgrade from both ASSET formats.
+  credentials.reset(); storedAssets.clear();
   const legacyAlias = Buffer.from('clawmate.codex.connection.v1');
   storedAssets.set(legacyAlias.toString(), new Map([
     [asset.Tag.ALIAS, legacyAlias], [asset.Tag.SECRET, Buffer.from(JSON.stringify({ origin: 'https://legacy.example.com', token: 'l'.repeat(43) }))],
     [asset.Tag.DATA_LABEL_CRITICAL_1, Buffer.from(ca)]
   ]));
-  assert.ok((await CodexCredentialStore.list()).some(item => item.id === 'legacy'));
+  const v2Alias = Buffer.from('clawmate.codex.connections.v2.' + second.id);
+  storedAssets.set(v2Alias.toString(), new Map([
+    [asset.Tag.ALIAS, v2Alias], [asset.Tag.SECRET, Buffer.from(JSON.stringify({ origin: second.origin, token: 's'.repeat(43) }))],
+    [asset.Tag.DATA_LABEL_CRITICAL_1, Buffer.from(ca)],
+    [asset.Tag.DATA_LABEL_CRITICAL_2, Buffer.from(JSON.stringify(second))],
+    [asset.Tag.DATA_LABEL_CRITICAL_4, Buffer.from('clawmate.codex.connections.v2')]
+  ]));
+  credentials.failRename = true;
+  await assert.rejects(CodexCredentialStore.list());
+  credentials.failRename = false;
+  assert.equal((await CodexCredentialStore.list()).length, 2);
   assert.equal((await CodexCredentialStore.load('legacy')).caCertificate, ca);
   const migrated = await CodexCredentialStore.save(await CodexCredentialStore.load('legacy'), 'Home');
-  assert.notEqual(migrated.id, 'legacy');
-  assert.equal(storedAssets.has(legacyAlias.toString()), false);
-  assert.equal((await CodexCredentialStore.load(migrated.id)).token, 'l'.repeat(43));
-  assert.equal((await CodexCredentialStore.load(second.id)).token, 't'.repeat(43));
+  assert.equal(migrated.id, 'legacy', 'migration preserves IDs referenced by saved sessions');
+  assert.equal((await CodexCredentialStore.load(second.id)).token, 's'.repeat(43));
+  await Promise.all([
+    CodexCredentialStore.save({ origin: second.origin, token: 'n'.repeat(43) }),
+    CodexCredentialStore.save({ origin: 'https://third.example.com', token: 'z'.repeat(43) })
+  ]);
+  assetUnavailable = true;
+  assert.equal((await CodexCredentialStore.list()).length, 3);
+  assert.equal((await CodexCredentialStore.load(second.id)).token, 'n'.repeat(43));
+  assetUnavailable = false;
+  await CodexCredentialStore.forget('legacy');
+  assert.equal(await CodexCredentialStore.load('legacy'), null, 'old ASSET cannot resurrect deleted connections');
+  assert.equal((await CodexCredentialStore.load(second.id)).token, 'n'.repeat(43));
+  for (const value of credentials.files.values()) {
+    assert.ok(!value?.toString().includes('n'.repeat(43)), 'tokens are encrypted on disk');
+  }
   platformAccepted = true; PrivacyConsent.isAccepted(); deferred = false;
   const bundle = { type: 'clawmate-codex-pairing', version: 1, name: 'My PC', origin: 'https://example.com',
     serverId: 'server', code: 'c'.repeat(43), caCertificate: ca, expiresAt: Date.now() + 5 * 60000 };
@@ -541,7 +571,7 @@ async function main() {
     assert.deepEqual(Object.keys(helpNavigation.params), ['section']);
     assert.equal(helpNavigation.params.section, section, 'help routes carry no credentials or pairing data');
   }
-console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, explicit cancellation without a duplicate privacy gate, Asset Store size/trust policy, one-time pairing, task reconciliation, and help navigation.');
+console.log('PASS: production ArkTS endpoint/token policies, 6 tabs, RCP redirect/auth handling, explicit cancellation without a duplicate privacy gate, credential migration/persistence and certificate trust, one-time pairing, task reconciliation, and help navigation.');
   console.log('ArkUI rendering and HarmonyOS API type checking require the full DevEco SDK.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
