@@ -25,7 +25,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, base, 'uti
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
 }).outputText, { exports: cancelExports });
 const { WorkflowCancellation } = cancelExports;
-function batch(mode = 'phone', count = 3) {
+function batch(mode = 'phone', count = 3, autoSync = true) {
   let saved = Array.from({ length: count }, (_, i) => ({ id: 'task-' + i, title: '任务' + i, enabled: true, lastStatus: '' }));
   const state = { events: [], toasts: [], syncs: 0, history: 0, login: true, accepted: true, ready: true, claimed: 0, storage: {} };
   const storage = {
@@ -39,7 +39,7 @@ function batch(mode = 'phone', count = 3) {
     'runEnabledTasks', 'executeEnabledTasks', 'runSelectedWorkflow', 'isTaskCancelled', 'isWorkflowCancelledStatus',
     'isTaskExecutionBusy', 'batchRunButtonText', 'batchRunButtonEnabled', 'stopEnabledTasks'
   ], {
-    WorkflowCancellation, WorkflowStorage: storage,
+    WorkflowCancellation, WorkflowStorage: storage, AUTO_SYNC_AFTER_BATCH_TASKS: autoSync,
     AiLoginGuard: { ensure: () => state.login }, HuaweiPrivacyAccess: { ensure: async () => state.accepted },
     SelfHdcSetupGuard: { prepare: async () => state.ready ? { mode: 'phone', ip: '192.0.2.1', port: '12345' } : null },
     CollectionReminderService: { pendingIntent: () => ({}), claim: () => { state.claimed++; return true; }, clearRequest() {},
@@ -114,6 +114,36 @@ test('phone and PC batches sync once after every task has saved its summaries', 
     assert.deepEqual(state.events, ['run:task-0', 'saved:task-0', 'run:task-1', 'saved:task-1', 'run:task-2', 'saved:task-2', 'sync']);
     assert.equal(state.syncs, 1); assert.equal(state.history, 3); assert.ok(saved().every(item => item.lastStatus === 'success'));
     assert.equal(page.batchRunning, false); assert.equal(page.batchPreparing, false);
+  }
+});
+test('disabled auto sync preserves phone and PC results and unlocks the batch', async () => {
+  for (const mode of ['phone', 'pc']) {
+    const { page, state, saved } = batch(mode, 3, false);
+    await page.runEnabledTasks();
+    assert.equal(state.syncs, 0);
+    assert.equal(state.history, 3);
+    assert.ok(saved().every(item => item.lastStatus === 'success'));
+    assert.ok(state.toasts.includes('任务已完成'));
+    assert.equal(page.batchSyncing, false);
+    assert.equal(page.batchRunning, false);
+    assert.equal(page.batchPreparing, false);
+  }
+});
+test('disabled auto sync also covers reminder launches and partial failures', async () => {
+  const reminder = batch('phone', 1, false);
+  await reminder.page.runEnabledTasks('fixture-reminder', true);
+  assert.equal(reminder.state.claimed, 1);
+  assert.equal(reminder.state.syncs, 0);
+  for (const mode of ['phone', 'pc']) {
+    const { page, state } = batch(mode, 3, false);
+    const fail = async () => { throw Error('fixture failure'); };
+    page.onRunWorkflow = fail;
+    page.onRunPhoneWorkflow = fail;
+    await page.runEnabledTasks();
+    assert.equal(state.syncs, 0);
+    assert.ok(state.toasts.some(text => text.includes('任务执行中断')));
+    assert.ok(!state.toasts.includes('任务已完成'));
+    assert.equal(page.batchRunning, false);
   }
 });
 test('reminder-launched batches use the same one-time follow-up sync', async () => {

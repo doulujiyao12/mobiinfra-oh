@@ -1,4 +1,5 @@
 import { AppTheme } from '../../utils/AppTheme';
+import { AUTO_SYNC_AFTER_BATCH_TASKS } from '../../config/TaskExecutionConfig';
 import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
@@ -961,7 +962,7 @@ export struct TaskPage {
       }
       if (stoppedByCancel || cancellation.isCancelled()) {
         showToastSafely('批量执行已停止，剩余任务未下发', 1800);
-      } else if (attemptedTasks > 0) {
+      } else if (attemptedTasks > 0 && AUTO_SYNC_AFTER_BATCH_TASKS) {
         // Runners have finished deferred summaries and written daily-log before returning.
         // Keep the batch locked until its one follow-up sync settles.
         this.batchSyncing = true;
@@ -974,6 +975,11 @@ export struct TaskPage {
         } catch (e) {
           AppLogger.errorCause('Workflow.Batch', 'COLLECTION_SYNC_FAILED; collected files retained', e as Error);
           showToastSafely('采集结果已保留，同步分析未完成，可到汇总页重新同步', 3000);
+        }
+      } else if (attemptedTasks > 0) {
+        AppLogger.info('Workflow.Batch', 'COLLECTION_SYNC_DISABLED tasks=' + attemptedTasks + ' partial=' + stoppedByError);
+        if (!stoppedByError) {
+          showToastSafely('任务已完成', 1800);
         }
       }
     } finally {
