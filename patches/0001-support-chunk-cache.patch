@@ -1,0 +1,400 @@
+From 462782ef50a23367232deb916525063db5df46a5 Mon Sep 17 00:00:00 2001
+From: Erhu Feng <2748250768@qq.com>
+Date: Mon, 10 Aug 2026 00:02:11 +0800
+Subject: [PATCH] support chunk cache
+
+Signed-off-by: Erhu Feng <2748250768@qq.com>
+---
+ CMakeLists.txt                             |   4 +-
+ project/harmony/build_64.sh                |   2 +-
+ source/backend/hiai/backend/NPUBackend.cpp | 199 ++++++++++++++++-----
+ source/backend/hiai/backend/NPUBackend.hpp |   9 +-
+ 4 files changed, 166 insertions(+), 48 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 49ae6285..30e86bbe 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -84,7 +84,7 @@ option(MNN_LOW_MEMORY "Build MNN support low memory for weight quant model." OFF
+ option(MNN_BUILD_AUDIO "Build audio api in MNN." OFF)
+ option(MNN_SME2 "Use Arm sme2 instructions" ON)
+ option(MNN_METAL_TENSOR "Use Metal4 tensor instructions" ON)
+-option(MNN_HIAI_CACHE_OM_BY_CHUNK "Enable chunk-aware OM cache path for HiAI backend" OFF)
++option(MNN_HIAI_CACHE_OM_BY_CHUNK "Enable chunk- and shape-aware OM cache for HiAI backend" OFF)
+ option(HIAI_VERBOSE "Enable HiAI verbose log" OFF )
+ option(MNN_GENERATE_PODSPEC "Generate iOS podspec file from CMake configuration" OFF)
+ option(MOBIINFER_MNN "Enable MobiInfer MNN mode" OFF)
+@@ -1112,4 +1112,4 @@ endif()
+ if (MNN_GENERATE_PODSPEC)
+     include(${CMAKE_CURRENT_LIST_DIR}/cmake/generate_podspec.cmake)
+     generate_mnn_podspec_from_targets()
+-endif()
+\ No newline at end of file
++endif()
+diff --git a/project/harmony/build_64.sh b/project/harmony/build_64.sh
+index 00cbd67c..ad37bf53 100755
+--- a/project/harmony/build_64.sh
++++ b/project/harmony/build_64.sh
+@@ -15,7 +15,7 @@ cmake ../../../ \
+ -DMNN_SEP_BUILD=OFF \
+ -DHIAI_VERBOSE=ON \
+ -DHIAI_INT8_DIAG=0 \
+--DMNN_HIAI_CACHE_OM_BY_CHUNK=OFF \
++-DMNN_HIAI_CACHE_OM_BY_CHUNK=ON \
+ -DMNN_HIAI_FREE_CONST_HOST=1 \
+ -DMNN_LOW_MEMORY=ON \
+ -DMNN_SUPPORT_TRANSFORMER_FUSE=ON \
+diff --git a/source/backend/hiai/backend/NPUBackend.cpp b/source/backend/hiai/backend/NPUBackend.cpp
+index 1e91a7fe..f11b7f50 100644
+--- a/source/backend/hiai/backend/NPUBackend.cpp
++++ b/source/backend/hiai/backend/NPUBackend.cpp
+@@ -8,10 +8,14 @@
+ 
+ #include "NPUBackend.hpp"
+ #include <fstream>
++#include <algorithm>
++#include <cstdint>
++#include <iomanip>
+ #include <sstream>
+ #include <iostream>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <unistd.h>
+ #include <errno.h>
+ #include <core/Macro.h>
+ #include <core/TensorUtils.hpp>
+@@ -268,20 +272,27 @@ namespace MNN {
+ #endif
+     bool WriteToOMFile(domi::ModelBufferData om_model_buff, std::string om_file_path)
+     {
+-        FILE *fp;
+-        fp = fopen(om_file_path.c_str(), "wb");
++        const std::string tempPath = om_file_path + ".tmp";
++        FILE *fp = fopen(tempPath.c_str(), "wb");
+         if (fp == NULL) {
+-            printf("%s open failed !!!", om_file_path.c_str());
++            printf("%s open failed !!!", tempPath.c_str());
+             return false;
+         }
+ 
+-        uint32_t write_size = (uint32_t)fwrite(om_model_buff.data, 1, om_model_buff.length, fp);
+-        if (write_size != om_model_buff.length) {
+-            fclose(fp);
++        size_t write_size = fwrite(om_model_buff.data, 1, om_model_buff.length, fp);
++        bool flushed = fflush(fp) == 0;
++        bool synced = flushed && fsync(fileno(fp)) == 0;
++        bool closed = fclose(fp) == 0;
++        if (write_size != om_model_buff.length || !synced || !closed) {
++            ::remove(tempPath.c_str());
+             printf("write om file failed !!!");
+             return false;
+         }
+-        fclose(fp);
++        if (::rename(tempPath.c_str(), om_file_path.c_str()) != 0) {
++            ::remove(tempPath.c_str());
++            printf("replace om cache file failed !!!");
++            return false;
++        }
+         return true;
+     }
+ // #endif
+@@ -829,11 +840,82 @@ namespace MNN {
+         return code;
+     }
+ 
++    void NPUBackend::resetLoadedTensorInfo() {
++        mInputDimension.clear();
++        mOutputDimension.clear();
++        mInputTensors.clear();
++        mOutputTensors.clear();
++        mMNNOutTensors.clear();
++        mOutputMemToIndex.clear();
++#if MNN_HIAI_USE_LOCAL_NPU_FIXES
++        if (!mInputOrder.empty()) {
++            mInputMap.clear();
++        }
++#endif
++    }
++
++#if MNN_HIAI_CACHE_OM_BY_CHUNK
++    std::string NPUBackend::buildOmCacheShapeKey() const {
++        // The key deliberately excludes pointer values and the absolute sandbox path.
++        // It remains stable across App launches while separating graph chunks and all
++        // input/output tensor layouts that affect HiAI online compilation.
++        std::ostringstream signature;
++        signature << "hiai_om_cache_v2|ops=" << mGrapMap.size();
++        auto slashPos = pNPUModelDirPath.find_last_of('/');
++        std::string chunkName = slashPos == std::string::npos
++                                  ? pNPUModelDirPath
++                                  : pNPUModelDirPath.substr(slashPos + 1);
++        signature << "|chunk=" << chunkName;
++#if MNN_HIAI_USE_LOCAL_NPU_FIXES
++        std::vector<InputOrderEntry> orderedInputs = mInputOrder;
++        std::stable_sort(orderedInputs.begin(), orderedInputs.end(),
++                         [](const InputOrderEntry& left, const InputOrderEntry& right) {
++                             return left.inputIndex < right.inputIndex;
++                         });
++        for (const auto& entry : orderedInputs) {
++            const Tensor* tensor = reinterpret_cast<const Tensor*>(entry.tensorPtr);
++            signature << "|in=" << entry.inputIndex << ':' << entry.byteSize << ':'
++                      << tensorShapeString(tensor);
++            if (tensor != nullptr) {
++                signature << ':' << (int)tensor->buffer().type.code
++                          << ':' << (int)tensor->buffer().type.bits
++                          << ':' << (int)tensor->buffer().type.lanes
++                          << ':' << (int)TensorUtils::getDescribe(tensor)->dimensionFormat;
++            }
++        }
++#endif
++        int outputIndex = 0;
++        for (const auto& opMap : mOutGEOpMap) {
++            for (const auto* tensor : opMap.second) {
++                signature << "|out=" << outputIndex++ << ':' << tensorShapeString(tensor);
++                if (tensor != nullptr) {
++                    signature << ':' << tensor->size()
++                              << ':' << (int)tensor->buffer().type.code
++                              << ':' << (int)tensor->buffer().type.bits
++                              << ':' << (int)tensor->buffer().type.lanes
++                              << ':' << (int)TensorUtils::getDescribe(tensor)->dimensionFormat;
++                }
++            }
++        }
++
++        const std::string value = signature.str();
++        uint64_t hash = 14695981039346656037ULL;
++        for (unsigned char ch : value) {
++            hash ^= (uint64_t)ch;
++            hash *= 1099511628211ULL;
++        }
++        std::ostringstream key;
++        key << "shape_" << std::hex << std::setw(16) << std::setfill('0') << hash;
++        return key.str();
++    }
++#endif
++
+     int NPUBackend::getInOutTensorInfo(string modelName) {
+         if (mMgrClient == nullptr) {
+             MNN_HIAI_LOG("getInOutTensorInfo: mMgrClient is null, abort");
+             return -1;
+         }
++        resetLoadedTensorInfo();
+         int ret = mMgrClient->GetModelIOTensorDim(modelName, mInputDimension, mOutputDimension);
+         if (ret != hiai::AI_SUCCESS) {
+             MNN_ERROR("[NPU] Get model IO Tensor failed: %d \n", ret);
+@@ -914,6 +996,13 @@ namespace MNN {
+                     }
+                 }
+             }
++            for (size_t mi = 0; mi < mnnAssigned.size(); mi++) {
++                if (!mnnAssigned[mi]) {
++                    MNN_ERROR("[NPU] Input tensor does not match cached OM: index=%d size=%zu\n",
++                              mInputOrder[mi].inputIndex, mInputOrder[mi].byteSize);
++                    return -1;
++                }
++            }
+         }
+ #endif
+         auto index = 0;
+@@ -935,10 +1024,11 @@ namespace MNN {
+         // reuses any matching slot so that same-shape MNN outputs can share one DDK buffer.
+ 
+         std::vector<bool> ddkSlotUsed(mOutputTensors.size(), false);
++        bool outputMappingValid = true;
+         for (auto opMap : mOutGEOpMap) {
+             for (auto tensor : opMap.second) {
+                 mMNNOutTensors.push_back(tensor);
+-                int mnnBytes = tensor->elementSize() * sizeof(float);
++                int mnnBytes = (int)tensor->size();
+                 int ddkSlot = -1;
+                 // Pass 1: prefer an unmatched DDK slot with the same byte size.
+                 for (int di = 0; di < (int)mOutputTensors.size(); di++) {
+@@ -962,6 +1052,10 @@ namespace MNN {
+                 if (memPtr != nullptr && ddkSlot >= 0) {
+                     mOutputMemToIndex[memPtr] = ddkSlot;
+                 }
++                if (ddkSlot < 0) {
++                    outputMappingValid = false;
++                    MNN_ERROR("[NPU] Output tensor does not match cached OM: bytes=%d\n", mnnBytes);
++                }
+                 MNN_HIAI_LOG("%d MNNTensor output DIM:%d,%d,%d,%d -> ddkSlot=%d\n", index,
+                           tensor->batch(), tensor->channel(), tensor->height(), tensor->width(), ddkSlot);
+ 
+@@ -971,7 +1065,7 @@ namespace MNN {
+             MNN_HIAI_LOG("getInOutTensorInfo: MISMATCH npuOutputs=%zu vs mnnOutputs=%zu (same-shape outputs will share DDK buffer)",
+                          mOutputTensors.size(), mMNNOutTensors.size());
+         }
+-        return 0;
++        return outputMappingValid ? 0 : -1;
+     }
+     ErrorCode NPUBackend::bulidIRModelAndLoad() {
+         std::vector<ge::Operator> inputs;
+@@ -993,18 +1087,17 @@ namespace MNN {
+         std::string omCachePath;
+         if (!pNPUModelDirPath.empty() && pNPUModelDirPath != ".") {
+             if (ensureDirRecursive(pNPUModelDirPath)) {
+-                omCachePath = pNPUModelDirPath + "/vision.om";
+-                // Use chunk suffix as model name to avoid potential name collision.
+-                auto slashPos = pNPUModelDirPath.find_last_of('/');
+-                std::string suffix = (slashPos == std::string::npos)
+-                                       ? pNPUModelDirPath
+-                                       : pNPUModelDirPath.substr(slashPos + 1);
+-                if (!suffix.empty()) {
+-                    modelName = "vision_" + suffix;
++                std::string shapeKey = buildOmCacheShapeKey();
++                std::string cacheDir = pNPUModelDirPath + "/om_cache_v2/" + shapeKey;
++                if (ensureDirRecursive(cacheDir)) {
++                    omCachePath = cacheDir + "/vision.om";
++                    modelName = "v_" + shapeKey.substr(6);
++                } else {
++                    MNN_PRINT("[NPU_CACHE] cannot create cache directory: %s\n", cacheDir.c_str());
+                 }
+             } else {
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: ensureDirRecursive failed for npu dir: %s",
+-                             pNPUModelDirPath.c_str());
++                MNN_PRINT("[NPU_CACHE] cannot create chunk directory: %s\n",
++                          pNPUModelDirPath.c_str());
+             }
+         }
+ #endif
+@@ -1032,20 +1125,29 @@ namespace MNN {
+                 domi::ModelBufferData cachedBuff;
+                 cachedBuff.data = omBytes.data();
+                 cachedBuff.length = (uint32_t)omBytes.size();
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: cache HIT, loading OM: %s (%u bytes)",
+-                             omCachePath.c_str(), (unsigned)cachedBuff.length);
++                MNN_PRINT("[NPU_CACHE] hit: %s (%u bytes)\n",
++                          omCachePath.c_str(), (unsigned)cachedBuff.length);
+                 mMgrClient = LoadModelSync(cachedBuff, modelName);
+                 if (mMgrClient != nullptr) {
+                     int result = getInOutTensorInfo(modelName);
+-                    MNN_HIAI_LOG("bulidIRModelAndLoad: cache LoadModelSync OK, getInOutTensorInfo %s",
+-                                 result == 0 ? "OK" : "FAILED");
+-                    return (result == 0) ? NO_ERROR : INVALID_VALUE;
++                    if (result == 0) {
++                        MNN_PRINT("[NPU_CACHE] validated: %s\n", omCachePath.c_str());
++                        return NO_ERROR;
++                    }
++                    mMgrClient->UnLoadModel();
++                    mMgrClient.reset();
++                    resetLoadedTensorInfo();
+                 }
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: cache LoadModelSync FAILED, fallback to BuildIRModel");
++                ::remove(omCachePath.c_str());
++                MNN_PRINT("[NPU_CACHE] invalid cache removed; recompiling: %s\n",
++                          omCachePath.c_str());
+             } else {
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: cache read FAILED for %s, fallback to BuildIRModel",
+-                             omCachePath.c_str());
++                ::remove(omCachePath.c_str());
++                MNN_PRINT("[NPU_CACHE] unreadable cache removed; recompiling: %s\n",
++                          omCachePath.c_str());
+             }
++        } else if (!omCachePath.empty()) {
++            MNN_PRINT("[NPU_CACHE] miss; compiling: %s\n", omCachePath.c_str());
+         }
+ #endif
+ 
+@@ -1075,6 +1177,7 @@ namespace MNN {
+         if (!createBufferSuc) {
+             MNN_ERROR("[NPU] Create Model Buff failed \n");
+             MNN_HIAI_LOG("bulidIRModelAndLoad: CreateModelBuff FAILED");
++            return INVALID_VALUE;
+         } else {
+             MNN_HIAI_LOG("bulidIRModelAndLoad: CreateModelBuff OK length=%u", (unsigned)om_model_buff.length);
+         }
+@@ -1087,19 +1190,6 @@ namespace MNN {
+             return INVALID_VALUE;
+         }
+         MNN_HIAI_LOG("bulidIRModelAndLoad: BuildIRModel OK out_length=%u", (unsigned)om_model_buff.length);
+-#if MNN_HIAI_CACHE_OM_BY_CHUNK
+-        if (!omCachePath.empty()) {
+-            if (WriteToOMFile(om_model_buff, omCachePath)) {
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: cache SAVE OK -> %s", omCachePath.c_str());
+-            } else {
+-                MNN_HIAI_LOG("bulidIRModelAndLoad: cache SAVE FAILED -> %s", omCachePath.c_str());
+-            }
+-        }
+-#else
+-#ifdef HIAI_DEBUG
+-        WriteToOMFile(om_model_buff, "/data/local/tmp/test.om");
+-#endif
+-#endif
+         MNN_HIAI_LOG("bulidIRModelAndLoad: [stage 9] LoadModelSync() START ...");
+         mMgrClient = LoadModelSync(om_model_buff, modelName);
+ 
+@@ -1110,12 +1200,31 @@ namespace MNN {
+             return INVALID_VALUE;
+         }
+         MNN_HIAI_LOG("bulidIRModelAndLoad: LoadModelSync OK model=%s", modelName.c_str());
+-
+-        ir_build.ReleaseModelBuff(om_model_buff);
+-
+         int result = getInOutTensorInfo(modelName);
+         MNN_HIAI_LOG("bulidIRModelAndLoad: getInOutTensorInfo %s",
+                      result == 0 ? "OK" : "FAILED");
++        if (result == 0) {
++#if MNN_HIAI_CACHE_OM_BY_CHUNK
++            if (!omCachePath.empty()) {
++                if (WriteToOMFile(om_model_buff, omCachePath)) {
++                    MNN_PRINT("[NPU_CACHE] saved: %s (%u bytes)\n",
++                              omCachePath.c_str(), (unsigned)om_model_buff.length);
++                } else {
++                    MNN_PRINT("[NPU_CACHE] save failed: %s\n", omCachePath.c_str());
++                }
++            }
++#else
++#ifdef HIAI_DEBUG
++            WriteToOMFile(om_model_buff, "/data/local/tmp/test.om");
++#endif
++#endif
++        }
++        ir_build.ReleaseModelBuff(om_model_buff);
++        if (result != 0) {
++            mMgrClient->UnLoadModel();
++            mMgrClient.reset();
++            resetLoadedTensorInfo();
++        }
+         return (result == 0) ? NO_ERROR : INVALID_VALUE;
+     }
+ 
+@@ -1123,6 +1232,10 @@ namespace MNN {
+ #ifdef HIAI_DEBUG
+         ATrace_beginSection("HIAI process");
+ #endif
++        if (mMgrClient == nullptr) {
++            MNN_ERROR("[NPU] Process skipped because model manager is null\n");
++            return -1;
++        }
+         hiai::AiContext context;
+         string key = "model_name";
+         string value = to_string(modelIndex);
+diff --git a/source/backend/hiai/backend/NPUBackend.hpp b/source/backend/hiai/backend/NPUBackend.hpp
+index ca5b22e8..8ad75738 100644
+--- a/source/backend/hiai/backend/NPUBackend.hpp
++++ b/source/backend/hiai/backend/NPUBackend.hpp
+@@ -14,8 +14,9 @@
+ #endif
+ 
+ // Enable chunk-aware OM cache:
+-//   - Save/read OM as "<npu_model_dir>/chunk_i/vision.om" when runtime passes
+-//     per-chunk EXTERNAL_NPU_FILE_DIR.
++//   - Save/read OM as
++//     "<npu_model_dir>/chunk_i/om_cache_v2/<shape-key>/vision.om" when runtime
++//     passes per-chunk EXTERNAL_NPU_FILE_DIR.
+ //   - Set to 0 to keep legacy behavior.
+ #ifndef MNN_HIAI_CACHE_OM_BY_CHUNK
+ #define MNN_HIAI_CACHE_OM_BY_CHUNK 0
+@@ -374,6 +375,10 @@ namespace MNN {
+ 
+     private:
+         int getInOutTensorInfo(string modelName);
++        void resetLoadedTensorInfo();
++#if MNN_HIAI_CACHE_OM_BY_CHUNK
++        std::string buildOmCacheShapeKey() const;
++#endif
+ 
+     public:
+ 
+-- 
+2.38.1.windows.1
+
