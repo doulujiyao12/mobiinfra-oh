@@ -16,7 +16,8 @@ const compile = source => ts.transpileModule(source, {
 
 function fixture(saved = {}) {
   const values = new Map(Object.entries(saved)), calls = [], listeners = new Map(), modules = new Map();
-  const state = { failRead: false, failFlush: false, waitFlush: null };
+  const state = { failRead: false, failFlush: false, waitFlush: null, flushCount: 0, preferenceStores: [],
+    frames: [], mounted: true, failSchedule: false };
   const context = {
     getApplicationContext: () => ({ setColorMode() {} }),
     eventHub: {
@@ -29,20 +30,25 @@ function fixture(saved = {}) {
   const settings = {
     getSync: (key, fallback) => values.has(key) ? values.get(key) : fallback,
     putSync: (key, value) => values.set(key, value),
-    async flush() { if (state.waitFlush) await state.waitFlush; if (state.failFlush) throw Error('disk failure'); }
+    async flush() { state.flushCount++; if (state.waitFlush) await state.waitFlush; if (state.failFlush) throw Error('disk failure'); }
   };
   const recorderController = {
     initialize: () => calls.push('recorder-init'), setForeground: value => calls.push(['foreground', value]),
-    async destroy() { calls.push('recorder-destroy'); }, async stopPlayback() {}
+    async destroy() { calls.push('recorder-destroy'); }, async stopPlayback() {}, subscribe() {}, unsubscribe() {}
   };
   const phoneSyncController = {
     initialize: () => calls.push('sync-init'), async connect() { calls.push('connect'); },
-    async destroy() { calls.push('sync-destroy'); }
+    async destroy() { calls.push('sync-destroy'); }, subscribe() {}, unsubscribe() {}
   };
   const external = {
     '@kit.AbilityKit': { UIAbility: class { context = context; }, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 0 } } },
-    '@kit.ArkUI': {},
-    '@kit.ArkData': { preferences: { getPreferencesSync: () => { if (state.failRead) throw Error('read failed'); return settings; } } },
+    '@kit.ArkUI': { FrameCallback: class {} },
+    '@kit.PerformanceAnalysisKit': { hilog: { warn() {} } },
+    '@kit.ArkData': { preferences: { getPreferencesSync: (_, options) => {
+      state.preferenceStores.push(options.name);
+      if (state.failRead) throw Error('read failed');
+      return settings;
+    } } },
     '../services/RecorderController': { recorderController }, '../services/PhoneSyncController': { phoneSyncController },
     '../services/BackgroundTasks': { backgroundTasks: { destroy: () => calls.push('background-destroy') } }
   };
@@ -59,25 +65,34 @@ function fixture(saved = {}) {
   }
   const policy = load('config/WatchPrivacyPolicy.ts');
   const consent = load('services/WatchPrivacyConsent.ets').watchPrivacyConsent;
+  const { WatchPhoneGuide } = load('services/WatchPhoneGuide.ets');
+  const { WatchCrownFocus } = load('services/WatchCrownFocus.ets');
   const Ability = load('entryability/HiWearMainAbility.ets').default;
   function page(names) {
     const text = fs.readFileSync(path.join(base, 'pages/Index.ets'), 'utf8');
     const tree = ts.createSourceFile('page.ts', text.replace('struct Index', 'class Index'), ts.ScriptTarget.Latest, true);
     const component = tree.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'Index');
-    const methods = names.map(name => {
+    const methods = [...new Set([...names, 'preparePhoneGuide'])].map(name => {
       const method = component.members.find(n => ts.isMethodDeclaration(n) && n.name?.getText(tree) === name);
       assert(method, name); return method.getText(tree);
     });
     const exports = {};
     vm.runInNewContext(compile('exports.Page = class {' + methods.join('\n') + '}'), {
-      exports, ...policy, watchPrivacyConsent: consent, recorderController
+      exports, ...policy, watchPrivacyConsent: consent, recorderController, phoneSyncController, WatchPhoneGuide
     });
     const instance = new exports.Page();
-    Object.assign(instance, { pageActive: true, privacyAccepted: false, privacyBusy: false,
-      privacyError: '', policyVisible: false, deletionTargets: [], getUIContext: () => ({ getHostContext: () => context }) });
+    Object.assign(instance, { pageActive: true, pageVisible: false, crownFocus: new WatchCrownFocus(), privacyAccepted: false, privacyBusy: false,
+      privacyError: '', policyVisible: false, deletionTargets: [], phoneGuideVisible: false, hidePhoneGuide: false,
+      phoneGuideBusy: false, phoneGuideError: '', getUIContext: () => ({ getHostContext: () => context,
+        postFrameCallback: frame => { if (state.failSchedule) throw Error('window closed'); state.frames.push(frame); },
+        getFocusController: () => ({ requestFocus: id => {
+          if (!state.mounted) throw Object.assign(Error('component does not exist'), { code: 150003 });
+          calls.push(['focus', id]);
+        } }) }) });
     return instance;
   }
-  return { values, calls, listeners, state, context, policy, consent, Ability, page };
+  const render = () => { const frames = state.frames.splice(0); frames.forEach(frame => frame.onIdle(0)); };
+  return { values, calls, listeners, state, context, policy, consent, Ability, page, render };
 }
 
 test('first launch and unacknowledged events cannot initialize audio or phone synchronization', async () => {
@@ -125,7 +140,9 @@ test('decline exits without consent and Back cannot expose the main UI', async (
 test('UI agreement emits only after persistence; a late result cannot start services on a closed page', async () => {
   const h = fixture(), ability = new h.Ability(); ability.onCreate(); ability.onForeground();
   const page = h.page(['agreePrivacy']); await page.agreePrivacy();
-  assert.equal(page.privacyAccepted, true); assert(h.calls.includes('recorder-init')); await ability.onDestroy();
+  assert.equal(page.privacyAccepted, true); assert(h.calls.includes('recorder-init'));
+  assert.equal(page.privacyError, ''); assert.equal(page.phoneGuideVisible, true);
+  await ability.onDestroy();
   const other = fixture(), late = new other.Ability(); late.onCreate(); late.onForeground();
   let release; other.state.waitFlush = new Promise(resolve => { release = resolve; });
   const closed = other.page(['agreePrivacy']), saving = closed.agreePrivacy();
@@ -187,4 +204,111 @@ test('dialog permits child touch and keeps the policy entry outside the clipped 
   const height = Number(dialog.match(/WATCH_DIALOG_HEIGHT_PERCENT: number = (\d+)/)[1]);
   // Default text sizes: padding 24, title 20, link 32, footer 34 and three gaps of 8 vp.
   assert(240 * height / 100 - 24 - 20 - 32 - 34 - 24 >= 32, 'Reserve a usable body viewport on small watches');
+});
+
+test('phone guide waits for privacy consent; ordinary dismissal appears again on the next launch', async () => {
+  const h = fixture(); h.consent.initialize(h.context);
+  const fresh = h.page(['aboutToAppear']); fresh.aboutToAppear();
+  assert.equal(fresh.phoneGuideVisible, false);
+  assert(!h.state.preferenceStores.includes('watch_onboarding'));
+  await h.consent.accept();
+  const page = h.page(['aboutToAppear', 'dismissPhoneGuide']); page.aboutToAppear();
+  assert.equal(page.phoneGuideVisible, true);
+  const flushes = h.state.flushCount;
+  await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideVisible, false); assert.equal(h.state.flushCount, flushes);
+  const reopened = h.page(['aboutToAppear']); reopened.aboutToAppear();
+  assert.equal(reopened.phoneGuideVisible, true);
+});
+
+test('explicit opt-out persists after dismissal, without changing privacy consent', async () => {
+  const h = fixture(); h.consent.initialize(h.context); await h.consent.accept();
+  const page = h.page(['dismissPhoneGuide']); page.preparePhoneGuide(); page.hidePhoneGuide = true;
+  await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideVisible, false); assert.equal(page.phoneGuideBusy, false);
+  assert.equal(h.values.get('phone_guide_hidden'), true); assert.equal(h.consent.isAccepted(), true);
+  const reopened = h.page([]); reopened.preparePhoneGuide();
+  assert.equal(reopened.phoneGuideVisible, false);
+});
+
+test('failed opt-out remains visible, restores its preference and supports a successful retry', async () => {
+  const h = fixture(), page = h.page(['dismissPhoneGuide']);
+  page.preparePhoneGuide(); page.hidePhoneGuide = true; h.state.failFlush = true;
+  await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideVisible, true); assert.equal(page.phoneGuideBusy, false);
+  assert.notEqual(page.phoneGuideError, ''); assert.equal(h.values.get('phone_guide_hidden'), false);
+  const reopened = h.page([]); reopened.preparePhoneGuide(); assert.equal(reopened.phoneGuideVisible, true);
+  h.state.failFlush = false; await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideError, ''); assert.equal(page.phoneGuideVisible, false);
+});
+
+test('preference read failure still allows dismissing the phone guide without opting out', async () => {
+  const h = fixture(), page = h.page(['dismissPhoneGuide']); h.state.failRead = true;
+  page.preparePhoneGuide(); assert.equal(page.phoneGuideVisible, true);
+  await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideVisible, false); assert.equal(h.state.flushCount, 0);
+});
+
+test('Back closes the phone guide; duplicate opt-out taps cannot start multiple saves', async () => {
+  const h = fixture(), page = h.page(['dismissPhoneGuide', 'onBackPress']);
+  page.privacyAccepted = true; page.preparePhoneGuide();
+  assert.equal(page.onBackPress(), true); assert.equal(page.phoneGuideVisible, false);
+  page.preparePhoneGuide(); page.hidePhoneGuide = true;
+  let release; h.state.waitFlush = new Promise(resolve => { release = resolve; });
+  const pending = page.dismissPhoneGuide(); await page.dismissPhoneGuide();
+  assert.equal(page.phoneGuideBusy, true); assert.equal(h.state.flushCount, 1);
+  release(); await pending;
+  assert.equal(page.phoneGuideVisible, false); assert.equal(page.phoneGuideBusy, false);
+});
+
+test('crown focus follows visible content and returns to the page after overlays close', () => {
+  const h = fixture(), page = h.page(['restoreCrownFocus', 'mainContentEnabled', 'onPageShow']);
+  const target = () => { page.onPageShow(); h.render(); return h.calls.at(-1)[1]; };
+  assert.equal(target(), 'watch-dialog-scroll', 'Initial privacy dialog');
+  page.policyVisible = true; assert.equal(target(), 'watch-policy-scroll');
+  page.policyVisible = false; page.privacyAccepted = true; page.preparePhoneGuide();
+  assert.equal(target(), 'watch-dialog-scroll'); assert.equal(page.mainContentEnabled(), false);
+  page.phoneGuideVisible = false; assert.equal(target(), 'watch-page-scroll');
+  assert.equal(page.mainContentEnabled(), true);
+  page.deletionTargets = [{ name: 'recording.wav' }];
+  assert.equal(target(), 'watch-dialog-scroll'); assert.equal(page.mainContentEnabled(), false);
+  page.deletionTargets = []; assert.equal(target(), 'watch-page-scroll');
+  const count = h.calls.length; page.pageActive = false; page.restoreCrownFocus();
+  assert.equal(h.calls.length, count, 'Do not request focus on an unmounted page');
+});
+
+test('startup observer does not focus unmounted content; focus waits until frame end', () => {
+  const h = fixture(), page = h.page(['restoreCrownFocus', 'onPageShow']);
+  h.state.mounted = false;
+  page.privacyAccepted = true; page.restoreCrownFocus();
+  assert.equal(h.state.frames.length, 0, 'aboutToAppear precedes page visibility');
+  page.onPageShow(); assert.equal(h.calls.length, 0);
+  h.state.mounted = true; h.render();
+  assert.deepEqual(h.calls, [['focus', 'watch-page-scroll']]);
+});
+
+test('multiple UI changes coalesce and resolve the latest visible target after layout', () => {
+  const h = fixture(), page = h.page(['restoreCrownFocus', 'onPageShow']);
+  page.onPageShow(); page.privacyAccepted = true; page.restoreCrownFocus();
+  page.phoneGuideVisible = true; page.restoreCrownFocus();
+  page.phoneGuideVisible = false; page.policyVisible = true; page.restoreCrownFocus();
+  assert.equal(h.state.frames.length, 1); h.render();
+  assert.deepEqual(h.calls, [['focus', 'watch-policy-scroll']]);
+});
+
+test('hide and destroy invalidate old callbacks even if the page is shown again before they run', () => {
+  const h = fixture(), page = h.page(['restoreCrownFocus', 'onPageShow', 'onPageHide', 'aboutToDisappear']);
+  page.onPageShow(); page.onPageHide(); page.privacyAccepted = true; page.onPageShow();
+  h.render(); assert.deepEqual(h.calls, [['focus', 'watch-page-scroll']]);
+  page.restoreCrownFocus(); page.aboutToDisappear(); h.render();
+  assert.equal(h.calls.length, 1);
+});
+
+test('unavailable focus target and destroyed UI context cannot crash or block future focus', () => {
+  const h = fixture(), page = h.page(['restoreCrownFocus', 'onPageShow']);
+  h.state.failSchedule = true; assert.doesNotThrow(() => page.onPageShow());
+  h.state.failSchedule = false; h.state.mounted = false;
+  page.restoreCrownFocus(); assert.doesNotThrow(() => h.render());
+  h.state.mounted = true; page.restoreCrownFocus(); h.render();
+  assert.deepEqual(h.calls, [['focus', 'watch-dialog-scroll']]);
 });

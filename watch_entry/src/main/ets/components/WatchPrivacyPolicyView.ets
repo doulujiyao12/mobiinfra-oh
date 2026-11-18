@@ -7,6 +7,11 @@ import { WATCH_PRIVACY_APP_NAME, WATCH_PRIVACY_DEVELOPER, WATCH_PRIVACY_CONTACT,
 export struct WatchPrivacyPolicyView {
   @State private message: string = '';
   onBack: () => void = (): void => {};
+  onFocusRequest: () => void = (): void => {};
+
+  private focusContent(): void {
+    this.onFocusRequest();
+  }
 
   private async openPolicy(): Promise<void> {
     try {
@@ -40,6 +45,12 @@ export struct WatchPrivacyPolicyView {
             .fontColor(WatchTheme.text).backgroundColor(WatchTheme.surface).onClick(this.onBack)
         }.width('100%').padding(8)
       }.width('70%').height('70%').scrollBar(BarState.Auto).clip(true)
+        .id('watch-policy-scroll').focusable(true).defaultFocus(true).focusOnTouch(true)
+        .digitalCrownSensitivity(CrownSensitivity.MEDIUM)
+        .onAppear((): void => { this.focusContent(); })
+        .onTouch((event: TouchEvent): void => {
+          if (event.type === TouchType.Up) { this.focusContent(); }
+        })
     }.width('100%').height('100%').justifyContent(FlexAlign.Center).backgroundColor(WatchTheme.background)
   }
 }

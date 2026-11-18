@@ -10,24 +10,33 @@ import { watchPrivacyConsent } from '../services/WatchPrivacyConsent';
 import { WATCH_PRIVACY_APP_NAME, WATCH_PRIVACY_DEVELOPER, WATCH_PRIVACY_ACCEPTED_EVENT } from '../config/WatchPrivacyPolicy';
 import { WatchRoundDialog } from '../components/WatchRoundDialog';
 import { WatchPrivacyPolicyView } from '../components/WatchPrivacyPolicyView';
+import { WatchPhoneGuide } from '../services/WatchPhoneGuide';
+import { WatchCrownFocus } from '../services/WatchCrownFocus';
 
 @Entry
 @Component
 struct Index {
   @State snapshot: WatchState = new WatchState();
-  @State screen: string = 'recorder';
+  @State @Watch('restoreCrownFocus') screen: string = 'recorder';
   @State selected: RecordingInfo | undefined = undefined;
   @State sync: SyncViewState = new SyncViewState();
   @State libraryDate: string = '';
   @State selectionMode: boolean = false;
   @State selectedNames: string[] = [];
   @State libraryMessage: string = '';
-  @State private deletionTargets: RecordingInfo[] = [];
-  @State private privacyAccepted: boolean = false;
+  @State @Watch('restoreCrownFocus') private deletionTargets: RecordingInfo[] = [];
+  @State @Watch('restoreCrownFocus') private privacyAccepted: boolean = false;
   @State private privacyBusy: boolean = false;
   @State private privacyError: string = '';
-  @State private policyVisible: boolean = false;
+  @State @Watch('restoreCrownFocus') private policyVisible: boolean = false;
+  @State @Watch('restoreCrownFocus') private phoneGuideVisible: boolean = false;
+  @State private hidePhoneGuide: boolean = false;
+  @State private phoneGuideBusy: boolean = false;
+  @State private phoneGuideError: string = '';
+  private phoneGuideSettings: WatchPhoneGuide | undefined = undefined;
   private pageActive: boolean = false;
+  private pageVisible: boolean = false;
+  private crownFocus: WatchCrownFocus = new WatchCrownFocus();
   private pageScroller: Scroller = new Scroller();
   private bars: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
   private sensitivities: RecordingSensitivity[] = ['sensitive', 'normal', 'strict'];
@@ -35,6 +44,7 @@ struct Index {
   aboutToAppear(): void {
     this.pageActive = true;
     this.privacyAccepted = watchPrivacyConsent.isAccepted();
+    if (this.privacyAccepted) { this.preparePhoneGuide(); }
     recorderController.subscribe((value: WatchState) => {
       this.snapshot = value;
       if (this.selectedNames.length > 0) {
@@ -46,12 +56,65 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageActive = false;
+    this.onPageHide();
     recorderController.unsubscribe(); phoneSyncController.unsubscribe();
+  }
+
+  onPageShow(): void {
+    this.pageVisible = true;
+    this.restoreCrownFocus();
+  }
+
+  onPageHide(): void {
+    this.pageVisible = false;
+    this.crownFocus.cancel();
+  }
+
+  private restoreCrownFocus(): void {
+    if (!this.pageActive || !this.pageVisible) { return; }
+    this.crownFocus.request(this.getUIContext(), (): string => {
+      if (!this.pageActive || !this.pageVisible) { return ''; }
+      return this.policyVisible ? 'watch-policy-scroll' :
+        (!this.privacyAccepted || this.phoneGuideVisible || this.deletionTargets.length > 0 ?
+          'watch-dialog-scroll' : 'watch-page-scroll');
+    });
+  }
+
+  private mainContentEnabled(): boolean {
+    return this.deletionTargets.length === 0 && !this.phoneGuideVisible;
+  }
+
+  private preparePhoneGuide(): void {
+    this.hidePhoneGuide = false;
+    this.phoneGuideError = '';
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      this.phoneGuideSettings = new WatchPhoneGuide(context);
+      this.phoneGuideVisible = this.phoneGuideSettings.shouldShow();
+    } catch (_) { this.phoneGuideVisible = true; }
+  }
+
+  private async dismissPhoneGuide(): Promise<void> {
+    if (this.phoneGuideBusy) { return; }
+    this.phoneGuideBusy = true;
+    this.phoneGuideError = '';
+    try {
+      if (this.hidePhoneGuide) {
+        if (this.phoneGuideSettings === undefined) {
+          this.phoneGuideSettings = new WatchPhoneGuide(this.getUIContext().getHostContext() as common.UIAbilityContext);
+        }
+        await this.phoneGuideSettings.dismissPermanently();
+      }
+      if (this.pageActive) { this.phoneGuideVisible = false; }
+    } catch (_) {
+      if (this.pageActive) { this.phoneGuideError = '选择未保存，请重试'; }
+    } finally { if (this.pageActive) { this.phoneGuideBusy = false; } }
   }
 
   onBackPress(): boolean {
     if (this.policyVisible) { this.policyVisible = false; return true; }
     if (!this.privacyAccepted) { return this.privacyBusy; }
+    if (this.phoneGuideVisible) { this.dismissPhoneGuide(); return true; }
     if (this.deletionTargets.length > 0) { this.deletionTargets = []; return true; }
     if (this.snapshot.status === 'deleting') { return true; }
     if (this.screen === 'dates') { this.screen = 'library'; return true; }
@@ -166,6 +229,7 @@ struct Index {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       context.eventHub.emit(WATCH_PRIVACY_ACCEPTED_EVENT);
       this.privacyAccepted = true;
+      this.preparePhoneGuide();
     } catch (error) {
       if (this.pageActive) { this.privacyError = (error as Error).message; }
     } finally { if (this.pageActive) { this.privacyBusy = false; } }
@@ -283,6 +347,11 @@ struct Index {
         Text(this.sync.peerName).fontSize(12).fontColor(WatchTheme.textMuted)
       }
       Text(this.sync.message).fontSize(14).fontColor(WatchTheme.primaryLight).textAlign(TextAlign.Center)
+      if (this.sync.status === 'waiting') {
+        Column({ space: 8 }) {
+          this.PhoneConnectionInstructions()
+        }.width('100%').padding(10).borderRadius(16).backgroundColor(WatchTheme.surface)
+      }
       if (this.sync.status === 'transferring' || this.sync.status === 'awaiting_ack') {
         Text(`${Math.round(this.sync.progress)}%`).fontSize(30).fontColor(WatchTheme.text)
       }
@@ -487,8 +556,52 @@ struct Index {
     }
     .width('100%').height('100%').backgroundColor(WatchTheme.background)
     .scrollBar(BarState.Off)
-    .enabled(this.deletionTargets.length === 0)
-    .accessibilityLevel(this.deletionTargets.length === 0 ? 'auto' : 'no-hide-descendants')
+    .id('watch-page-scroll').focusable(this.mainContentEnabled()).defaultFocus(true).focusOnTouch(true)
+    .digitalCrownSensitivity(CrownSensitivity.MEDIUM)
+    .onAppear((): void => { this.restoreCrownFocus(); })
+    .onTouch((event: TouchEvent): void => {
+      if (event.type === TouchType.Up) { this.restoreCrownFocus(); }
+    })
+    .enabled(this.mainContentEnabled())
+    .accessibilityLevel(this.mainContentEnabled() ? 'auto' : 'no-hide-descendants')
+  }
+
+  @Builder private PhoneConnectionInstructions() {
+    Text('如需连接手机，请下载手机端 ClawMate。').fontSize(13).lineHeight(18)
+      .fontColor(WatchTheme.textSecondary).width('100%')
+    Text('汇总 → 录音分析\n→ 连接手表').fontSize(14).lineHeight(20)
+      .fontColor(WatchTheme.primaryLight).width('100%').textAlign(TextAlign.Center)
+    Text('目前仅支持 HarmonyOS 5.0 及以上版本的手机端应用同步。').fontSize(12).lineHeight(17)
+      .fontColor(WatchTheme.textSecondary).width('100%')
+  }
+
+  @Builder private PhoneGuideMessage() {
+    this.PhoneConnectionInstructions()
+    if (this.phoneGuideError) {
+      Text(this.phoneGuideError).fontSize(12).fontColor(WatchTheme.error).width('100%')
+    }
+  }
+
+  @Builder private PhoneGuideChoice() {
+    Row({ space: 4 }) {
+      Checkbox({ name: 'hide-phone-guide' }).select(this.hidePhoneGuide).width(16).height(16).margin(0)
+        .selectedColor(WatchTheme.primary).unselectedColor(WatchTheme.textMuted)
+        .enabled(!this.phoneGuideBusy).focusOnTouch(false).accessibilityText('不再提醒')
+        .onChange((checked: boolean): void => { this.hidePhoneGuide = checked; })
+      Text('不再提醒').fontSize(11).maxLines(1).fontColor(WatchTheme.textSecondary)
+        .onClick((): void => {
+          if (!this.phoneGuideBusy) { this.hidePhoneGuide = !this.hidePhoneGuide; }
+        })
+    }.width(64).height(34).flexShrink(0).justifyContent(FlexAlign.Center)
+  }
+
+  @Builder private PhoneGuideDialog() {
+    WatchRoundDialog({ title: '连接手机', showCancel: false,
+      onFocusRequest: (): void => { this.restoreCrownFocus(); },
+      confirmLabel: this.phoneGuideBusy ? '保存中' : '知道了', busy: this.phoneGuideBusy,
+      onConfirm: (): void => { this.dismissPhoneGuide(); },
+      contentBuilder: (): void => { this.PhoneGuideMessage(); },
+      showFooterLeading: true, footerLeadingBuilder: (): void => { this.PhoneGuideChoice(); } })
   }
 
   @Builder private DeleteMessage() {
@@ -498,6 +611,7 @@ struct Index {
 
   @Builder private DeleteDialog() {
     WatchRoundDialog({ title: this.deletionTargets.length === 1 ? '删除这段录音？' : `删除 ${this.deletionTargets.length} 段录音？`,
+      onFocusRequest: (): void => { this.restoreCrownFocus(); },
       cancelLabel: '保留', confirmLabel: '删除', dangerous: true,
       onCancel: (): void => { this.deletionTargets = []; }, onConfirm: (): void => { this.deleteConfirmed(); },
       contentBuilder: (): void => { this.DeleteMessage(); } })
@@ -519,6 +633,7 @@ struct Index {
 
   @Builder private PrivacyDialog() {
     WatchRoundDialog({ title: '隐私政策', cancelLabel: '不同意', confirmLabel: this.privacyBusy ? '请稍候' : '同意',
+      onFocusRequest: (): void => { this.restoreCrownFocus(); },
       busy: this.privacyBusy, onCancel: (): void => { this.declinePrivacy(); },
       onConfirm: (): void => { this.agreePrivacy(); }, contentBuilder: (): void => { this.PrivacyMessage(); },
       showContentAction: true, contentActionBuilder: (): void => { this.PrivacyPolicyAction(); } })
@@ -527,12 +642,14 @@ struct Index {
   build() {
     Stack() {
       if (this.policyVisible) {
-        WatchPrivacyPolicyView({ onBack: (): void => { this.policyVisible = false; } })
+        WatchPrivacyPolicyView({ onBack: (): void => { this.policyVisible = false; },
+          onFocusRequest: (): void => { this.restoreCrownFocus(); } })
       } else if (!this.privacyAccepted) {
         this.PrivacyDialog()
       } else {
         this.MainContent()
-        if (this.deletionTargets.length > 0) { this.DeleteDialog() }
+        if (this.phoneGuideVisible) { this.PhoneGuideDialog() }
+        else if (this.deletionTargets.length > 0) { this.DeleteDialog() }
       }
     }.width('100%').height('100%').backgroundColor(WatchTheme.background)
   }

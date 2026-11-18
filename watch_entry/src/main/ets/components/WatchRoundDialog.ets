@@ -13,11 +13,19 @@ export struct WatchRoundDialog {
   @Prop dangerous: boolean = false;
   @Prop busy: boolean = false;
   @Prop showContentAction: boolean = false;
+  @Prop showCancel: boolean = true;
+  @Prop showFooterLeading: boolean = false;
   onCancel: () => void = (): void => {};
   onConfirm: () => void = (): void => {};
+  onFocusRequest: () => void = (): void => {};
   @BuilderParam contentBuilder: () => void = this.Empty;
   @BuilderParam contentActionBuilder: () => void = this.Empty;
+  @BuilderParam footerLeadingBuilder: () => void = this.Empty;
   @Builder private Empty() { Column() {} }
+
+  private focusContent(): void {
+    this.onFocusRequest();
+  }
 
   build() {
     Column() {
@@ -25,17 +33,25 @@ export struct WatchRoundDialog {
         Text(this.title).fontSize(16).fontWeight(FontWeight.Medium).fontColor(WatchTheme.text)
           .width('100%').textAlign(TextAlign.Center).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).flexShrink(0)
         Scroll() {
-          Column({ space: 8 }) { this.contentBuilder() }.width('100%').alignItems(HorizontalAlign.Start)
+          Column({ space: 8 }) { this.contentBuilder() }.width('100%').padding({ right: 8 })
+            .alignItems(HorizontalAlign.Start)
         }.width('100%').layoutWeight(1).scrollable(ScrollDirection.Vertical)
-          .enableScrollInteraction(true).scrollBar(BarState.Auto).clip(true)
+          .enableScrollInteraction(true).scrollBar(BarState.On)
+          .scrollBarWidth(3).scrollBarColor(WatchTheme.primaryLight).clip(true)
+          .id('watch-dialog-scroll').focusable(true).defaultFocus(true).focusOnTouch(true)
+          .digitalCrownSensitivity(CrownSensitivity.MEDIUM)
+          .onAppear((): void => { this.focusContent(); })
         if (this.showContentAction) {
           Column() { this.contentActionBuilder() }.width('100%').flexShrink(0)
         }
         Row({ space: 8 }) {
-          Button(this.cancelLabel).fontSize(13).height(34).layoutWeight(1).padding(0)
-            .fontColor(WatchTheme.textSecondary).backgroundColor(WatchTheme.background).enabled(!this.busy)
-            .onClick(this.onCancel)
-          Button(this.confirmLabel).fontSize(13).height(34).layoutWeight(1).padding(0)
+          if (this.showFooterLeading) { this.footerLeadingBuilder() }
+          if (this.showCancel) {
+            Button(this.cancelLabel).fontSize(13).height(34).layoutWeight(1).padding(0)
+              .fontColor(WatchTheme.textSecondary).backgroundColor(WatchTheme.background).enabled(!this.busy)
+              .onClick(this.onCancel)
+          }
+          Button(this.confirmLabel).fontSize(this.showFooterLeading ? 12 : 13).height(34).layoutWeight(1).padding(0)
             .fontColor(this.dangerous ? WatchTheme.danger : WatchTheme.onPrimary)
             .backgroundColor(this.dangerous ? WatchTheme.dangerSurface : WatchTheme.primary).enabled(!this.busy)
             .onClick(this.onConfirm)
@@ -45,5 +61,8 @@ export struct WatchRoundDialog {
     }.width('100%').height('100%').justifyContent(FlexAlign.Center)
       // Default lets the Scroll/buttons receive touch while blocking the covered UI.
       .backgroundColor('#B3000000').hitTestBehavior(HitTestMode.Default)
+      .onTouch((event: TouchEvent): void => {
+        if (event.type === TouchType.Up) { this.focusContent(); }
+      })
   }
 }
