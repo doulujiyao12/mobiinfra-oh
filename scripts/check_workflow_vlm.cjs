@@ -13,6 +13,13 @@ const test = (name, body) => cases.push({name, body});
 const timeout = JSON.stringify({action: 'error', reason: 'Operation timeout'});
 const answer = (today, summary = '一条可见消息') => JSON.stringify({summary, contains_today_chat: today});
 
+function assertRetryTemperature(first, retry) {
+  assert.deepEqual(first.slice(0, 4), retry.slice(0, 4));
+  assert.deepEqual(clone(retry[4]), {
+    ...clone(first[4] || {}), temperature: Math.min(2, (first[4]?.temperature ?? 0) + 0.2)
+  });
+}
+
 function fixtureToday() {
   const workflow = JSON.parse(fs.readFileSync(path.join(root,
     'entry/src/main/resources/rawfile/workflows/configs/default_weixin_today_chat.json'), 'utf8'));
@@ -101,12 +108,99 @@ function environment(handler, options = {}) {
       configFileName: 'fixture.json', workflowJson: JSON.stringify(workflow)})};
 }
 
+for (const blocking of [false, true]) {
+  test('summary sends repetition penalty for blocking=' + blocking, async () => {
+    const env = environment(() => '截图摘要');
+    assert.equal((await env.run(ordinary(blocking))).status, 'success');
+    assert.equal(env.calls.length, 2);
+    assert.ok(env.calls.every(call => call[4]?.repetition_penalty === 1.1));
+  });
+}
+
+test('WeChat summary uses capture-only context and preserves the structured contract', async () => {
+  const env = environment(() => answer(false));
+  assert.equal((await env.run(fixtureToday())).status, 'success');
+  const prompt = env.calls[0][0];
+  assert.ok(prompt.startsWith('【任务执行时间参考】\n采集时间：'));
+  assert.ok(!prompt.includes('方括号[]补充绝对日期'));
+  assert.ok(!prompt.includes('请基于给定图片做总结'));
+  assert.deepEqual(env.summary().steps['3.iter1.2'].output.structured_output,
+    {summary: '一条可见消息', contains_today_chat: false});
+});
+
+const transcriptLine = (time, body = '一条消息') =>
+  '- 位置：左侧｜发送人：成员甲｜聊天对象：当前群聊｜时间原文：' + time + '｜原文：' + body;
+
+test('today consistency stops before swiping when a valid summary contradicts its true flag', async () => {
+  const transcript = transcriptLine('未显示', '今天有空吗') + '\n' + transcriptLine('昨天 下午 10:37');
+  const env = environment(() => answer(true, transcript));
+  assert.equal((await env.run(fixtureToday())).status, 'success');
+  assert.equal(env.calls.length, 1, 'No second model request or image read');
+  assert.equal(env.actions.length, 0); assert.equal(env.images().length, 1);
+  const run = env.summary();
+  assert.deepEqual(run.steps['3.iter1.2'].output.structured_output, {summary: transcript, contains_today_chat: false});
+  assert.equal(run.steps['3'].output.break_iteration, 1);
+  assert.equal(run.steps['3.iter2.1'], undefined);
+  assert.ok(env.logs.some(log => log.includes('today consistency corrected')));
+  assert.ok(env.logs.some(log => log.includes('"contains_today_chat":true')), 'Original model response remains in diagnostics');
+  assert.ok(env.daily().includes('一条消息'), 'Captured content is still saved');
+});
+
+test('today consistency recognizes relative, weekday and explicit-date labels across message formats', async () => {
+  for (const label of ['昨天', '前天 上午 9:10', '上周', '上周三 18:20', '上周星期六 下午 7:14',
+    '星期日', '周五 下午 03:20', '11月17日', '2026年11月18日 上午 9:10', '2026-11-17 22:37', '2026/11/17', '2026.11.17']) {
+    const env = environment(() => answer(true, transcriptLine(label).replace(/｜/g, '|').replace('- ', '')));
+    assert.equal((await env.run(fixtureToday())).status, 'success', label);
+    assert.equal(env.calls.length, 1, label); assert.equal(env.actions.length, 0, label);
+    assert.equal(env.summary().steps['3.iter1.2'].output.structured_output.contains_today_chat, false, label);
+  }
+});
+
+test('today consistency ignores body dates, unrecognized time fields and task or conversation headings', async () => {
+  for (const label of ['未显示', '·', '上午 9:10', '15:30', '昨天的材料看了吗', '下周三', '还没打到车', '99月99日', '昨天 99:99']) {
+    const text = '会话名称：昨天星期三讨论群\n采集时间：2026-11-18\n' +
+      transcriptLine(label, '昨天没空，下周见。时间原文：昨天 下午 10:37｜原文：这是聊天内容') +
+      '\n引用内容：时间原文：昨天 下午 10:37';
+    const env = environment(({index}) => answer(index === 1, text));
+    assert.equal((await env.run(fixtureToday())).status, 'success', label);
+    assert.equal(env.calls.length, 2, label);
+    assert.equal(env.actions.filter(action => action.action === 'swipe_with_coords').length, 1, label);
+    assert.equal(env.summary().steps['3.iter1.2'].output.structured_output.contains_today_chat, true, label);
+    assert.ok(!env.logs.some(log => log.includes('today consistency corrected')), label);
+  }
+});
+
+test('today consistency preserves false judgments and does not affect ordinary summary workflows', async () => {
+  const env = environment(() => answer(false, transcriptLine('未显示')));
+  assert.equal((await env.run(fixtureToday())).status, 'success'); assert.equal(env.actions.length, 0);
+  assert.ok(!env.logs.some(log => log.includes('today consistency corrected')));
+  const ordinaryEnv = environment(() => transcriptLine('昨天 下午 10:37'));
+  assert.equal((await ordinaryEnv.run(ordinary(true))).status, 'success');
+  assert.equal(ordinaryEnv.calls.length, 2);
+  assert.equal(ordinaryEnv.actions.filter(action => action.action === 'swipe_with_coords').length, 1);
+});
+
+test('legacy summaries retain their execution date instructions', async () => {
+  const env = environment(() => '截图摘要');
+  assert.equal((await env.run(ordinary(true))).status, 'success');
+  assert.ok(env.calls[0][0].includes('方括号[]补充绝对日期'));
+});
+
+test('ordinary image questions omit summary repetition penalty', async () => {
+  const workflow = ordinary(true);
+  workflow.steps[0].steps[1].inputs.mode = 'answer';
+  const env = environment(() => '截图回答');
+  assert.equal((await env.run(workflow)).status, 'success');
+  assert.ok(env.calls.every(call => call[4] === undefined));
+});
+
 test('recorded timeout envelope fails after two attempts, before any swipe or next iteration', async () => {
   const env = environment(() => timeout), workflow = fixtureToday(), original = JSON.stringify(workflow);
   const result = await env.run(workflow);
   assert.equal(result.status, 'failed'); assert.match(result.message, /Operation timeout/);
   assert.equal(env.calls.length, 2); assert.equal(env.actions.length, 0); assert.equal(env.images().length, 1);
-  assert.deepEqual(env.calls[0], env.calls[1]); assert.equal(env.daily(), '');
+  assertRetryTemperature(env.calls[0], env.calls[1]); assert.equal(env.daily(), '');
+  assert.equal(env.calls[0][4].repetition_penalty, 1.1);
   assert.equal(env.rawFailures().length, 2); assert.ok(env.rawFailures().every(([,raw]) => raw === timeout));
   assert.equal(env.summary().steps['3.iter1.2'].status, 'failed');
   assert.equal(env.summary().steps['3.iter2.1'], undefined);
@@ -121,7 +215,10 @@ test('a transient timeout recovers on the same evidence, then swipes once and st
     return index === 2 ? answer(true, '今天的消息') : answer(false, '昨天的消息');
   });
   assert.equal((await env.run(fixtureToday())).status, 'success');
-  assert.equal(env.calls.length, 3); assert.deepEqual(env.calls[0], env.calls[1]);
+  assert.equal(env.calls.length, 3); assertRetryTemperature(env.calls[0], env.calls[1]);
+  assert.equal(env.calls[0][4].temperature, undefined);
+  assert.equal(env.calls[1][4].temperature, 0.2);
+  assert.equal(env.calls[2][4].temperature, undefined);
   assert.notEqual(env.calls[1][1], env.calls[2][1]);
   assert.equal(env.actions.filter(action => action.action === 'swipe_with_coords').length, 1);
   assert.equal(env.images().length, 2); assert.ok(!env.daily().includes('Operation timeout'));
@@ -134,7 +231,7 @@ test('retry uses the original prompt and accepts only an independent judgment fi
   assert.equal((await env.run(fixtureToday())).status, 'success');
   assert.equal(env.calls.length, 2); assert.equal(env.actions.length, 0);
   assert.equal(env.calls[0][1], env.calls[1][1]);
-  assert.deepEqual(env.calls[0], env.calls[1]);
+  assertRetryTemperature(env.calls[0], env.calls[1]);
   const schema = fixtureToday().steps[0].steps[1].inputs.json_schema;
   assert.ok(env.calls[0][0].endsWith('请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' + JSON.stringify(schema)));
   assert.ok(!env.calls[0][0].includes('【必须遵守的输出格式】'));
@@ -252,7 +349,7 @@ test('the original simple JSON suffix follows the schema and stays identical on 
   const result = await env.runner.runTool({id: 1, type: 'tool', tool_name: 'vlm_qa', inputs: {
     mode: 'answer', question: '读取截图中的内容并判断是否继续', image: 'same-image', json_schema: schema}}, '1');
   assert.equal(result.structured_output.can_continue, false);
-  assert.deepEqual(env.calls[0], env.calls[1]);
+  assertRetryTemperature(env.calls[0], env.calls[1]);
   assert.ok(env.calls[1][0].endsWith('请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' + JSON.stringify(schema)));
   assert.ok(!env.calls[1][0].includes('【必须遵守的输出格式】'));
   assert.ok(!env.calls[1][0].includes('上次返回格式不符合要求'));
@@ -301,6 +398,11 @@ test('deferred summaries share the two-attempt budget and preserve successful si
   });
   assert.equal((await env.run(ordinary())).status, 'failed');
   assert.deepEqual([...counts.values()], [2, 2]); assert.equal(env.images().length, 2);
+  for (const image of ['image-1', 'image-2']) {
+    const calls = env.calls.filter(call => call[1] === image);
+    assertRetryTemperature(calls[0], calls[1]);
+    assert.equal(calls[0][4].temperature, undefined);
+  }
   assert.ok(env.daily().includes('第一屏的有效消息')); assert.ok(!env.daily().includes('Operation timeout'));
   assert.equal(env.summary().steps['3.iter2.2'].status, 'failed');
 });

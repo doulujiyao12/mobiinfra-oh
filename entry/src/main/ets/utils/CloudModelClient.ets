@@ -201,7 +201,7 @@ interface CloudThinkingOptions {
   type: string;
 }
 
-interface CloudChatOptions {
+export interface CloudChatOptions {
   temperature?: number;
   top_p?: number;
   top_k?: number;
@@ -1396,7 +1396,8 @@ export class CloudModelClient {
       cloudDeciderApiKey(config), config.deciderModel, 256);
   }
 
-  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig, maxTokens: number = 1024): Promise<string> {
+  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig, maxTokens: number = 1024,
+    chatOptions?: CloudChatOptions): Promise<string> {
     // workflow 图片问答保留独立的输出预算，读取超时统一限制为 20 秒。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
@@ -1410,7 +1411,7 @@ export class CloudModelClient {
       text: question
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      cloudDeciderApiKey(config), config.deciderModel, maxTokens, GUI_IMAGE_ANALYSIS_READ_TIMEOUT_MS);
+      cloudDeciderApiKey(config), config.deciderModel, maxTokens, GUI_IMAGE_ANALYSIS_READ_TIMEOUT_MS, chatOptions);
   }
 
   async chatImagesQuestion(question: string, imageBase64List: string[], config: CloudModelConfig): Promise<string> {

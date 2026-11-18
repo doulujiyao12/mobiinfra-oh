@@ -1287,7 +1287,8 @@ export class WorkflowStorage {
     return { id: id, type: 'gui_action', action: 'screenshot', file_name: fileName };
   }
 
-  private static summaryToolStep(id: number, imageVariable: string, question: string): WorkflowStep {
+  private static summaryToolStep(id: number, imageVariable: string, question: string,
+    timeContext?: 'capture_only'): WorkflowStep {
     return {
       id: id,
       type: 'tool',
@@ -1295,7 +1296,8 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: imageVariable,
-        question: question
+        question: question,
+        time_context: timeContext
       }
     };
   }
@@ -1390,6 +1392,7 @@ export class WorkflowStorage {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
         question: WECHAT_TODAY_SUMMARY_PROMPT,
+        time_context: 'capture_only',
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };
@@ -1482,7 +1485,7 @@ export class WorkflowStorage {
       WorkflowStorage.loopStep(3, [
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
         WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_b64}',
-          WECHAT_SUMMARY_PROMPT),
+          WECHAT_SUMMARY_PROMPT, 'capture_only'),
         WorkflowStorage.ifStep(3, WorkflowStorage.condition('${loop.last}', '==', false), [
           WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
           WorkflowStorage.sleepStep(2, 1.0)

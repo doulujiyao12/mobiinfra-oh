@@ -3,7 +3,7 @@ import { HomeCodexRequest } from '../../datamanager/HomeCodexContext';
 import { homeReminderCodexRequest, homeReminderSupportsCodex, homeSuggestionCodexRequest } from './HomeCodexHandoff';
 import { HomeTaskSuggestion, buildHomeTaskExecutionRequest, homeTaskSupportsQwen } from './HomeTaskSuggestion';
 
-export type HomeNoteFilter = 'all' | 'reminder' | 'suggestion';
+export type HomeNoteFilter = 'all' | 'reminder' | 'suggestion' | 'life';
 export type SecretaryRoute = 'phone' | 'qwen' | 'codex';
 
 export interface HomeNote {
@@ -70,13 +70,14 @@ export function homeNoteSources(note: HomeNote): HomeNoteSource[] {
 export function homeNoteBoard(reminders: HomeRecommendationViewModel[], suggestions: HomeTaskSuggestion[],
   filter: HomeNoteFilter, includeCompleted: boolean): HomeNote[] {
   const notes = reminders.filter((r: HomeRecommendationViewModel): boolean =>
-    !r.id.startsWith('calendar:') && r.id !== 'mail:overview').map(homeReminderNote);
+    !r.id.startsWith('calendar:') && r.id !== 'mail:overview' &&
+      (filter === 'life' ? r.section === 'life' : r.section !== 'life')).map(homeReminderNote);
   const open = notes.filter((n: HomeNote): boolean => !n.completed);
   const pending = open.filter((n: HomeNote): boolean => !!n.meta)
     .concat(open.filter((n: HomeNote): boolean => !n.meta));
   const finished = includeCompleted ? notes.filter((n: HomeNote): boolean => n.completed) : [];
   const ideas = suggestions.map(homeSuggestionNote);
-  if (filter === 'reminder') { return pending.concat(finished); }
+  if (filter === 'reminder' || filter === 'life') { return pending.concat(finished); }
   if (filter === 'suggestion') { return ideas; }
   const board: HomeNote[] = [];
   for (let i = 0; i < Math.max(pending.length, ideas.length); i++) {

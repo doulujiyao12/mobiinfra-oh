@@ -33,6 +33,11 @@ export class WorkflowDateContext {
     return dateReferenceBlock + '\n\n【' + sectionTitle + '】\n' + trimmedPrompt;
   }
 
+  withCaptureDatePrompt(prompt: string): string {
+    return '【任务执行时间参考】\n采集时间：' + this.runTimestamp() + ' ' + this.weekdayCn(this.startedAt) +
+      '\n时间标签和聊天气泡中的时间表达按原文保留，日期换算由App后续处理。\n\n' + prompt.trim();
+  }
+
   withDatePromptAsTask(task: string): string {
     let dateReferenceBlock = '【任务执行时间参考】\n' + this.datePrompt();
     return dateReferenceBlock + '\n\n' + task.trim();

@@ -17,13 +17,36 @@ const todayPrompt = exportsObject.WECHAT_TODAY_CHAT_CHECK_PROMPT;
 assert.equal(typeof todayPrompt, 'string');
 const todaySummaryPrompt = exportsObject.WECHAT_TODAY_SUMMARY_PROMPT;
 const todayDescription = exportsObject.WECHAT_TODAY_CHAT_DESCRIPTION;
-assert.equal(todaySummaryPrompt, '【聊天内容记录】\n' + prompt + '\n\n' + todayPrompt);
-assert.ok(!/[\r\n]/.test(todayPrompt), 'Today-check instructions must be one paragraph');
+assert.equal(todaySummaryPrompt.split('会话类型：')[1].split('\n\n【今日聊天判断】')[0],
+  prompt.split('会话类型：')[1].split('\n\n【输出前检查】')[0]);
 assert.equal(todayDescription, '判断当前聊天内容是否为今天的聊天内容。');
+const outputExample = todaySummaryPrompt.split('\n').find(line => line.startsWith('{"summary":'));
+assert.deepEqual(JSON.parse(outputExample), {summary: '聊天记录文本', contains_today_chat: true});
+assert.ok(todaySummaryPrompt.includes('contains_today_chat位于summary字符串外。'));
+assert.ok(todaySummaryPrompt.includes('换行写成\\n，内容中的英文双引号写成\\"'));
 assert.ok(todayPrompt.includes('微信自动显示的居中时间分隔标签'));
-assert.ok(todayPrompt.includes('聊天气泡正文') && todayPrompt.includes('任务执行时间参考、规则文字和示例'));
+assert.ok(todayPrompt.includes('聊天气泡中的内容') && todayPrompt.includes('提示词中的日期均不参与判断'));
 assert.ok(!prompt.includes('contains_today_chat'), 'Ordinary transcript tasks must not acquire today-only rules');
-assert.ok(todayPrompt.includes('这一条优先级最高：即使同一页也出现“上午/下午＋时间”，仍返回 false。'));
+assert.ok(todayPrompt.includes('同页同时出现“上午/下午＋时间”也返回false。'));
+assert.ok(todaySummaryPrompt.includes('聊天气泡里面出现“昨天”“下周”“上个月”等时间词，不影响contains_today_chat。'));
+for (const value of [prompt, todaySummaryPrompt]) {
+  assert.ok(value.includes('任务的聊天对象或者群聊名是${context.contact_name}'));
+  assert.ok(value.includes('3. 私聊：左侧聊天头像旁没有成员昵称'));
+  assert.ok(value.includes('右侧气泡的发送人填写“我”，聊天对象填写私聊对象的人名。'));
+  assert.ok(value.includes('聊天对象根据截图中的@、称呼、回复关系和上下文判断'));
+  assert.ok(value.includes('无法确定具体接收人时填写群名，不猜测姓名。'));
+  assert.ok(value.includes('时间原文初始为“未显示”'));
+  assert.ok(value.includes('已经记录的上方消息不使用新出现的下方标签。'));
+  assert.ok(!value.includes('左侧成员1（姓名未显示）'));
+  assert.ok(value.includes('带斜杠的内容只选一个'));
+  assert.ok(value.includes('- 位置：左侧/右侧｜发送人：'));
+  assert.ok(!value.includes('左侧/右侧/居中'));
+  assert.ok(!value.includes('系统消息'));
+  assert.ok(value.includes('会话类型、会话名称各写一行'));
+  assert.ok(value.includes('确认每条记录保留了五个字段名'));
+  assert.ok(value.includes('发送人：按下方私聊或群聊规则填写｜聊天对象：按下方私聊或群聊规则填写'));
+  assert.ok(value.includes('“按下方私聊或群聊规则填写”为填写说明'));
+}
 function summaryQuestions(value) {
   if (Array.isArray(value)) return value.flatMap(summaryQuestions);
   if (!value || typeof value !== 'object') return [];
@@ -71,7 +94,7 @@ visit(source);
 assert.deepEqual(references.sort(), ['defaultWeixinWorkflow', 'weixinTodaySummaryToolStep']);
 assert.ok(source.statements.some(node => ts.isImportDeclaration(node) && node.moduleSpecifier.text === './WechatSummaryPrompt' &&
   node.importClause?.namedBindings?.elements?.some(item => item.name.text === 'WECHAT_SUMMARY_PROMPT')));
-console.log('PASS: ordinary summaries stay unchanged; compact today rules follow the shared transcript; packaged defaults, fallback builders and short schema descriptions agree.');
+console.log('PASS: shared transcript, packaged defaults, fallback builders and short schema descriptions agree.');
 
 // Run the actual storage/title/copy methods against in-memory task files.
 // This also checks that existing configs are corrected on reload, without
@@ -132,6 +155,10 @@ function loadDateModule(name) {
     {exports:exported,Date,require:id=>loadDateModule(path.basename(id))});return exported;
 }
 const {WorkflowDateContext}=loadDateModule('WorkflowDateContext');
+const capturePrompt = new WorkflowDateContext(new Date(2026, 10, 17, 17, 58, 23)).withCaptureDatePrompt(todaySummaryPrompt);
+assert.ok(capturePrompt.startsWith('【任务执行时间参考】\n采集时间：2026年11月17日 17:58:23 星期二\n'));
+assert.ok(capturePrompt.includes('时间标签和聊天气泡中的时间表达按原文保留，日期换算由App后续处理。'));
+assert.equal(capturePrompt.split('【任务执行时间参考】').length, 2);
 const runnerSource=ts.createSourceFile('WorkflowRunner.ets',fs.readFileSync(path.join(root,'entry/src/main/ets/utils/WorkflowRunner.ets'),'utf8'),ts.ScriptTarget.Latest,true);
 const runnerClass=runnerSource.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='WorkflowRunner');
 const methodNames=['createSummaryJob','dailySummaryLogText','appendDailySummaryLog'];
@@ -140,7 +167,9 @@ assert.equal(methods.length,methodNames.length);
 const runnerExports={},savedLogs=new Map();
 vm.runInNewContext(ts.transpileModule('class Runner {\n'+methods.map(n=>n.getText(runnerSource)).join('\n')+'\n}\nexports.Runner=Runner;',
   {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:runnerExports,ArkJSON:JSON,
-  WorkflowStorage:{dailyLogDir:()=>'/app/daily-log',ensureDirectory(){},countFiles:()=>0,writeText:(p,t)=>savedLogs.set(p,t)}});
+    dailyLogMaxEntryId:loadDateModule('DailyLogEntryIdentity').dailyLogMaxEntryId,
+    WorkflowStorage:{dailyLogDir:()=>'/app/daily-log',ensureDirectory(){},countFiles:p=>savedLogs.has(p)?1:0,
+      readText:p=>savedLogs.get(p),writeText:(p,t)=>savedLogs.set(p,t)}});
 const runner=new runnerExports.Runner(),capture=new WorkflowDateContext(new Date(2026,10,2,23,59));
 Object.assign(runner,{filesDir:'/app',runDate:'2026-11-01',runDir:'/app/runs/example',workflow:null,runningTask:null,
   dateContext:new WorkflowDateContext(new Date(2026,10,3,0,10)),startSummaryJob:async()=>({ok:true}),
@@ -152,3 +181,19 @@ assert.ok(text.includes('时间：2026-11-02 23:50'));
 const logPath=runner.appendDailySummaryLog(text,job.date_context);
 assert.equal(logPath,'/app/daily-log/2026-11-02/chat.md');assert.ok(savedLogs.get(logPath).includes('时间：2026-11-02 23:50'));
 console.log('PASS: actual deferred-summary methods freeze the collection date and log partition across midnight.');
+
+// Execute the real append method against model text that previously reset IDs.
+const identity=loadDateModule('DailyLogEntryIdentity');
+runner.appendDailySummaryLog('第一条\n    . 来源：文章作者',job.date_context);
+runner.appendDailySummaryLog('下一张截图',job.date_context);
+assert.deepEqual(Array.from(identity.dailyLogEntryBlocks(savedLogs.get(logPath).split('-->')[1]),e=>e.index),[1,2,3]);
+savedLogs.set(logPath,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({latest_entry_index:9,entry_batch_ids:{12:'old-run'}})+'\n-->\n\n5. 原始记录\n\n2. 更小的编号\n    . 正文说明');
+runner.appendDailySummaryLog('新记录',job.date_context);
+assert.ok(savedLogs.get(logPath).endsWith('13. 新记录\n'));
+assert.equal(JSON.parse(savedLogs.get(logPath).split('\n-->')[0].split('DAILY_LOG_METADATA\n')[1]).entry_batch_ids['12'],'old-run');
+assert.equal(identity.dailyLogMaxEntryId('5. 消息\n    . 来源：作者\n\n2. 消息'),5);
+const readSaved=savedLogs.get.bind(savedLogs),beforeReadFailure=readSaved(logPath);
+savedLogs.get=()=>{throw Error('injected read failure');};
+assert.throws(()=>runner.appendDailySummaryLog('不得覆盖原文件',job.date_context),/未覆盖原始记录/);
+savedLogs.get=readSaved;assert.equal(savedLogs.get(logPath),beforeReadFailure);
+console.log('PASS: summary append ignores body punctuation and preserves the largest persisted entry ID.');

@@ -594,18 +594,19 @@ const COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT: string =
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '你是用户的行动与关注规划助手。\n' +
   '输入是上游提取的候选信号，不是必须展示的提醒；todo_text是候选建议，summary和normalized_fact是事实依据，todo_deadline是明确截止日期（可能为空）。候选建议也可能过度推断，须回到事实判断。\n' +
-  'todo_type包括care关心跟进、research深入研究/比较调研、plan探索规划，以及buy购买、pay付款、pickup取货、order下单、renew续费、book预订、repair维修、appointment预约、attend参加、depart出发、check_in入住、reimburse报销、other其他行动。\n\n' +
-  '先判断现在提醒能给用户带来什么实际帮助，再生成卡片。保留：与用户有关且尚待处理的明确行动/约定；对用户或其在意的人仍有实际影响、值得关心跟进的状态；用户明确希望了解、比较或落实的具体研究/规划问题。明确日期不是必要条件，也不要求必须是正式承诺。\n' +
-  '排除：普通闲聊或一次浏览/消费衍生的泛泛建议，随口感叹、无具体目标的意向，无用户关联的他人独立安排，已经回答、办妥、取消或被后续内容替代且没有剩余问题的事项。不要把例行寒暄、即时反应、聊天中顺手完成的小动作升级为持续待办；但明确未完成的承诺、重要问题不能因此排除。\n' +
-  '关心他人须有具体需要或持续影响，不能把每个近况都变成问候；研究须有具体疑问或决策价值，不能把每个兴趣词都变成调研。不能只凭“可能已做”、时间经过、没有日期或一句“好的/收到”判定完成；resolved仅用于事实明确支持已解决。\n' +
+  'todo_type是上游行动类型：care关心、research调研、plan规划、buy购买、pickup取货、order下单、renew续费、book预订、repair维修、appointment预约、attend参加、depart出发、check_in入住、reimburse报销、other其他。类型只帮助理解，不能因为有类型就展示；pay待付款不推荐。\n\n' +
+  '先筛选，再分组。主要提醒(section=focus)聚焦：①与用户有关、仍需处理的工作事项，如会议、需要查看或反馈的文件、交付与协作；②家人、朋友、同事确有需要或持续影响、值得关心的事情；③用户确实有意推进的出行、聚餐、游玩规划；④有具体问题和决策价值、值得深入调研的事项；⑤遗漏会有明显后果的其他重要事项。明确日期不是必要条件，也不要求必须是正式承诺。不要从一次浏览、普通兴趣或随口感叹扩展出新任务。\n' +
+  '生活琐事(section=life)：仍有明确办理需要的取货、续费、下单、预订、日常购买、维修、预约、入住等，集中到此组，不混入主要提醒。工作或完整出行规划中的必要步骤应归入对应核心目标，不拆成多张琐事卡；有明确重大影响的事项可归focus。待付款直接跳过，不放入任何组。两组都要过滤不重要、没有实际提醒价值的事项。\n' +
+  '排除：无用户关联的他人安排、例行寒暄、普通近况、泛泛建议，以及已经回答、办妥、取消或被新进展替代且没有剩余问题的事项。对通常当场完成的短时小事，结合事实发生时间、上下文和后续进展判断；若已过办理场景、没有继续待办的证据且提醒价值低，就跳过，不因没有明确“完成”二字一直追提醒。重要未完成承诺、持续影响和仍有效的约定不能仅因时间经过或一句“好的/收到”被排除。\n' +
+  '关心须有具体需要，研究须有具体疑问或决策价值，规划须有真实意向及可推进的目标。宁可不提醒低价值小事，但不要漏掉用户真正关心且仍有用的事情。跳过不等于已完成：resolved仅用于事实明确支持已解决；疑似顺手办完、时效已过且无继续跟进价值的用low_value；有价值但暂不需要行动的用not_now。\n' +
   '同一对象的同一目标合成一张卡片，保留必要前置条件及最新进展，不要把一个目标拆成许多琐碎建议；不同事项分别判断，不因一件已完成就放弃其他事项。重要事项宁可保留，不为凑数量生成，也不设固定条数上限。\n\n' +
   '返回严格 JSON：\n' +
-  '{"recommendations":[{"tag":"简短标签","title":"简洁具体的标题","desc":"事实依据及有用的下一步","domain":"eat|wear|live|travel|work|other","source_event_ids":["e1"]}],"skipped":[{"event_id":"e2","reason":"low_value"}]}。\n\n' +
+  '{"recommendations":[{"section":"focus|life","tag":"简短标签","title":"简洁具体的标题","desc":"事实依据及有用的下一步","domain":"eat|wear|live|travel|work|other","source_event_ids":["e1"]}],"skipped":[{"event_id":"e2","reason":"low_value"}]}。section填写focus或life之一，与domain分开；同一核心目标只归一组。\n\n' +
   '每个输入event_id必须且只能归入一张卡片的source_event_ids，或一条skipped；不得遗漏、重复或编造编号。skipped.reason只用resolved（已有解决证据）、low_value（提醒价值不足）、not_now（有价值但当前尚不需要，后续可复查）。没有值得提醒的内容可返回recommendations空数组，但须在skipped说明每条输入；没有跳过项则skipped为空数组。\n' +
   '不要编造输入里没有的人名、地点、商品、金额或行动。\n\n' +
   'tag用于卡片左上角，如“值得关心”“值得研究”“可以规划”或“待购买”等；title围绕具体关注点写简洁标题；desc说明事实依据和用户可以考虑的下一步。建议不能写成必须执行的指令，也不能暗示用户已经承诺。无原文依据不加期限，不作医学诊断或推荐具体药物。\n\n' +
-  'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。\n' +
-  '根据chat_attribution及原文分清实际主体和行动人，聊天对象的任务不能改成用户自己的任务。关心他人时明确姓名和关系；关注用户自己时不加他人姓名前缀。不同主体、不同类型的事项不要合并。标题和说明避免无依据地写“你需要”。\n' +
+  'title 和 desc 不要使用省略号或“...”截断内容；围绕事实支持且仍有效的核心事项写，不照搬已经过时或过度推断的todo_text。\n' +
+  '根据chat_attribution及原文分清实际主体和行动人，聊天对象的任务不能改成用户自己的任务。关心他人时明确姓名和关系；关注用户自己时不加他人姓名前缀。不同主体或独立目标不要合并，同一目标的必要步骤可以合并。标题和说明避免无依据地写“你需要”。\n' +
   '对于“想去/打算/考虑”等尚未确认的意向，使用“待关注”等标签，标题和说明保留人物及意向语气，不得写成已经约定、必须参加或用户已经答应同行。\n' +
   '优先处理重要未完成行动及有实际影响的关注点，再考虑探索建议。不要输出 markdown。';
 
@@ -1450,6 +1451,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
       }
       let domains = normalizeDomains([normalizeFreeText(raw['domain'])]);
       let item: HomeRecommendationState = {
+        section: raw['section'] === 'life' ? 'life' : (raw['section'] === 'focus' ? 'focus' : undefined),
         id: normalizeFreeText(raw['id']) || 'todo-' + String(index + 1),
         tag: this.normalizeRecommendationTag(raw['tag']),
         title: title,

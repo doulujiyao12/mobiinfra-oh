@@ -47,6 +47,9 @@ export class HomeRecommendationRequestCodec {
         throw new Error('关注规划的 title 或 source_event_ids 字段不完整');
       }
       let ids = item['source_event_ids'] as string[];
+      if (item['section'] !== undefined && item['section'] !== 'focus' && item['section'] !== 'life') {
+        throw new Error('关注规划的 section 只能是 focus 或 life');
+      }
       if (ids.length === 0) { throw new Error('关注规划的 source_event_ids 不能为空'); }
       let withinCard: Set<string> = new Set<string>();
       let originals: string[] = [];

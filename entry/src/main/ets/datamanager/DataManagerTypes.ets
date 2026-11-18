@@ -312,6 +312,7 @@ export interface ProfileClaim {
 }
 
 export interface ProfileDomainState {
+  next_rollup_at?: number;
   domain: string;
   display_name: string;
   input_hash: string;
@@ -400,6 +401,7 @@ export interface HomeDomainViewModel {
 }
 
 export interface HomeRecommendationViewModel {
+  section?: 'focus' | 'life';
   calendarStart?: number;
   calendarEnd?: number;
   calendarAllDay?: boolean;
@@ -421,6 +423,7 @@ export interface HomeRecommendationViewModel {
 }
 
 export interface HomeRecommendationState {
+  section?: 'focus' | 'life';
   // First generation time; reusing/completing a card must not make it new again.
   created_at?: string;
   id: string;

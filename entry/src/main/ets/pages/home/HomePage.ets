@@ -115,6 +115,7 @@ export struct HomePage {
   private currentNote(): HomeNote | undefined {
     if (!this.selected) { return undefined; }
     return homeNoteBoard(this.profile.recommendations, this.taskSuggestions, 'all', true)
+      .concat(homeNoteBoard(this.profile.recommendations, [], 'life', true))
       .find((note: HomeNote): boolean => note.key === this.selected?.key);
   }
 
@@ -310,6 +311,7 @@ export struct HomePage {
             this.FilterTab('猜你喜欢', 'suggestion')
             if (this.profile.mailReminder) { this.SourceButton('邮件', false) }
             if (this.profile.calendarEnabled) { this.SourceButton('日历', true) }
+            this.FilterTab('生活琐事', 'life')
           }
         }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).align(Alignment.Start).layoutWeight(1)
         Button({ type: ButtonType.Normal }) {
@@ -338,7 +340,7 @@ export struct HomePage {
         }.width('100%')
       } else {
         Text(this.filter === 'suggestion' ? (this.taskSuggestionsLoading ? '正在整理推荐' :
-          (this.taskSuggestionError || '暂时没有新推荐')) : '暂时没有待办事项')
+          (this.taskSuggestionError || '暂时没有新推荐')) : (this.filter === 'life' ? '暂无需要处理的生活琐事' : '暂时没有待办事项'))
           .fontSize(16).fontColor($r('app.color.ui_text_secondary')).width('100%')
           .textAlign(TextAlign.Center).padding({ top: 25, bottom: 25 })
       }
@@ -355,8 +357,8 @@ export struct HomePage {
             .onClick((): void => { this.turnPage(1); })
         }.width('100%').justifyContent(FlexAlign.Center)
       }
-      if (this.filter !== 'suggestion' && this.profile.recommendations.some((item: HomeRecommendationViewModel): boolean =>
-        item.completed && !item.id.startsWith('calendar:') && item.id !== 'mail:overview')) {
+      if (this.filter !== 'suggestion' && homeNoteBoard(this.profile.recommendations, [], this.filter, true)
+        .some((note: HomeNote): boolean => note.completed)) {
         Button(this.showCompleted ? '隐藏已完成' : '查看已完成').height(36).fontSize(13)
           .padding({ left: 4, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('app.color.ui_text_muted'))
           .onClick((): void => { this.showCompleted = !this.showCompleted; this.noteAnchor = 0; })

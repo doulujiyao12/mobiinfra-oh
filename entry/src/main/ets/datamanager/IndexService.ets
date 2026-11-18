@@ -1,4 +1,5 @@
 import { JSON as ArkJSON, taskpool } from '@kit.ArkTS';
+import { compatibleDailyLogText } from './DailyLogReferenceCompatibility';
 import { WorkflowRunEvidence } from './WorkflowRunEvidence';
 import { readWorkflowRunEvidence } from './WorkflowRunEvidenceTask';
 import { SyncWorkSlice } from './SyncWorkSlice';
@@ -97,6 +98,7 @@ export interface IndexBuildResult {
 }
 
 export interface IndexCompletion {
+  profile_next_due?: number;
   event_analysis_policy?: string;
   chat_context_policy?: string;
   failed_event_count?: number;
@@ -603,7 +605,7 @@ export class IndexService {
       chat_context_policy: CHAT_CONTEXT_POLICY,
       revision: String(Date.now()) + '-' + String(Math.random()), generated_at: profile.generated_at,
       event_count: profile.event_count, claim_count: profile.claim_count,
-      profile_identity: manifest.profile_identity || '',
+      profile_identity: manifest.profile_identity || '', profile_next_due: this.nextProfileRollup(profile),
       calendar_hash: new CalendarMemoryStore(this.paths.filesDir).indexFingerprint(),
       // This receipt certifies a successfully published generation. Untouched
       // sources retain their own model policies; a scoped refresh must not
@@ -1780,6 +1782,7 @@ export class IndexService {
       if (!this.storage.exists(path)) { continue; }
       let text = this.storage.readText(path, '\u0000EVIDENCE_UNREADABLE\u0000');
       if (text === '\u0000EVIDENCE_UNREADABLE\u0000') { throw new Error('读取截图来源失败，请重试同步'); }
+      text = compatibleDailyLogText(text, path, this.paths, this.storage);
       let document = parseDailyLogDocument(text);
       pending.push({ relative: relative, document: document });
       let batches = document.entry_batch_ids || createStringMap();
@@ -1865,8 +1868,34 @@ export class IndexService {
       let evidence: SourceImageEvidence = { schema: SOURCE_IMAGE_EVIDENCE_SCHEMA, summary_match_policy: SUMMARY_IMAGE_MATCH_POLICY, source_path: relative,
         resolved_runs: !Object.keys(batchMap).some((key: string): boolean =>
           unresolvedRuns.has(normalizeFreeText(batchMap[key]).replace(/^workflow:/, ''))), entries: [] };
-      for (let entry of parseNumberedEntries(document.body)) {
+      let entries = parseNumberedEntries(document.body);
+      let seenIds = new Set<number>();
+      let ambiguousIds = new Set<number>();
+      for (let entry of entries) {
+        if (seenIds.has(entry.index)) { ambiguousIds.add(entry.index); }
+        seenIds.add(entry.index);
+      }
+      // Legacy references keep their already published evidence. Correctness
+      // for new entries comes from unique IDs, not rewriting old associations.
+      let legacy = ambiguousIds.size > 0 ?
+        this.storage.readJson<SourceImageEvidence | null>(this.sourceEvidencePath(relative), null) : null;
+      let legacyValid = this.validSourceEvidence(legacy, relative);
+      let retainedRefs = new Set<string>();
+      for (let entry of entries) {
         await work.checkpoint();
+        if (ambiguousIds.has(entry.index)) {
+          let ref = relative + '#' + entry.index;
+          if (retainedRefs.has(ref)) { continue; }
+          retainedRefs.add(ref);
+          let retained = legacyValid && legacy ? legacy.entries.filter((item: SourceImageEvidenceEntry): boolean => item.source_ref === ref) : [];
+          if (retained.length === 0) { evidence.resolved_runs = false; }
+          for (let old of retained) {
+            if (old.image_paths.length > 0) { imageReferences[ref] = old.image_paths.slice(); }
+            if (old.batch_id) { this.chatContexts.add(old.batch_id, ref, old.text, old.image_paths, old.order); }
+            evidence.entries.push(old);
+          }
+          continue;
+        }
         let entryText = normalizeFreeText(entry.text);
         let ref = relative + '#' + entry.index;
         let batchId = chat && entryBatches ? normalizeFreeText(entryBatches[String(entry.index)]) : '';
@@ -3183,7 +3212,8 @@ export class IndexService {
         let legacyHash = this.storage.sha256Text(PROFILE_BLOCK_POLICY + ':' + domain + ':' +
           this.modelClient.profileCacheIdentity(modelConfig) + ':' + ArkJSON.stringify(domainEvents));
         if (reuseAllowed && previousDomain && (previousDomain.input_hash === inputHash || previousDomain.input_hash === legacyHash) &&
-          isProfileDomainStateReusable(previousDomain, eventIds.length)) {
+          isProfileDomainStateReusable(previousDomain, eventIds.length) &&
+          !(modelConfig.enabled && previousDomain.next_rollup_at && previousDomain.next_rollup_at <= Date.now())) {
           domainState = this.copyProfileDomain(previousDomain);
           domainState.input_hash = inputHash;
           domainState.event_ids = eventIds;
@@ -3202,6 +3232,7 @@ export class IndexService {
             });
           let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
           domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
+          domainState.next_rollup_at = cache.nextDue;
         }
       }
       domainsState[domain] = domainState;
@@ -3217,6 +3248,54 @@ export class IndexService {
     };
     profile.claim_count = this.profileClaimCount(profile);
     return profile;
+  }
+
+  private nextProfileRollup(profile: ProfileState): number {
+    let next = 0;
+    for (let key of Object.keys(profile.domains)) {
+      const due = profile.domains[key].next_rollup_at || 0;
+      if (due > 0 && (!next || due < next)) { next = due; }
+    }
+    return next;
+  }
+
+  async refreshDueProfileRollups(receipt: IndexCompletion | null, config: DataManagerModelConfig,
+    progress?: DataManagerProgressCallback): Promise<boolean> {
+    const now = Date.now();
+    if (!config.enabled || !receipt || !receipt.profile_next_due || receipt.profile_next_due > now ||
+      !this.isCompleteGeneration(receipt.revision, config)) { return false; }
+
+    const profile = this.loadProfileState();
+    const pending = Object.keys(profile.domains).filter((key: string): boolean => {
+      const due = profile.domains[key].next_rollup_at || 0;
+      return due > 0 && due <= now;
+    });
+    if (pending.length === 0) { return false; }
+    let ids: string[] = [];
+    for (let key of pending) { ids = ids.concat(profile.domains[key].event_ids); }
+    const indexed = this.loadEventsByIds(stableUnique(ids));
+    let processed = false;
+    for (let key of pending) {
+      const domain = profile.domains[key];
+      const events = domain.event_ids.filter((id: string): boolean => !!indexed[id])
+        .map((id: string): IndexedEvent => indexed[id]);
+      // Only maintain checkpoints for the exact facts in this published domain.
+      // A changed source belongs to the ordinary incremental index build.
+      if (domain.input_hash !== this.profileDomainInputHash(key, events, config)) { continue; }
+      const cache = new ProfileBlockCache(this.paths, this.storage, this.modelClient);
+      await cache.build(key, events, config, progress);
+      domain.next_rollup_at = cache.nextDue;
+      processed = true;
+    }
+    const current = this.completion();
+    if (!processed || !current || current.revision !== receipt.revision ||
+      current.profile_next_due !== receipt.profile_next_due) { return false; }
+    current.profile_next_due = this.nextProfileRollup(profile);
+    const batch = new IndexWriteBatch(this.paths.indexesRoot, this.storage);
+    batch.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), profile);
+    batch.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'completion.json'), current);
+    batch.commit();
+    return true;
   }
 
   private profileDomainKeys(): string[] {
@@ -3240,6 +3319,7 @@ export class IndexService {
     range.start_date = domain.date_range ? domain.date_range.start_date || '' : '';
     range.end_date = domain.date_range ? domain.date_range.end_date || '' : '';
     let copied: ProfileDomainState = {
+      next_rollup_at: domain.next_rollup_at,
       domain: domain.domain,
       display_name: domain.display_name,
       input_hash: domain.input_hash,

@@ -50,7 +50,20 @@ interface HomeRecommendationBuildSelection {
 }
 
 const HOME_TODO_NO_DEADLINE_RECENT_DAYS: number = 7;
-const HOME_FOLLOW_UP_POLICY: string = 'home-follow-up-v3-value-selection';
+const HOME_FOLLOW_UP_POLICY: string = 'home-follow-up-v4-focus-life';
+
+// Older cards have no section. Classify their structured source types at read
+// time without changing historical facts or deriving categories from titles.
+export function homeRecommendationSection(item: HomeRecommendationState,
+  events: Record<string, IndexedEvent>): 'focus' | 'life' {
+  if (item.section === 'focus' || item.section === 'life') { return item.section; }
+  const routineTypes: string[] = ['buy', 'pickup', 'order', 'renew', 'book', 'repair', 'appointment', 'check_in'];
+  const ids = item.source_event_ids || [];
+  return ids.length > 0 && ids.every((id: string): boolean => {
+    const event = events[id];
+    return !!event && routineTypes.indexOf(event.todo.type) >= 0 && (event.domains || []).indexOf('work') < 0;
+  }) ? 'life' : 'focus';
+}
 
 export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
   let parts: string[] = ['home_recommendation_source_v1'];
@@ -264,6 +277,7 @@ export class HomeRecommendationService {
       if (isChatCollectionEvent(event) && event.chat_attribution &&
         (event.chat_attribution.status !== 'pending' || !chatHasKnownActionOwners(event.chat_attribution))) { return; }
       let todoType = normalizeFreeText(event.todo.type);
+      if (todoType === 'pay') { return; }
       let deadline = normalizeFreeText(event.todo.deadline);
       let hasCurrentOrFutureDeadline = isCurrentOrFutureTodoDeadline(deadline, today);
       let hasNoDeadlineAction = deadline.length === 0 && todoType.length > 0;
@@ -413,6 +427,7 @@ export class HomeRecommendationService {
       }
       let domain = normalizeFreeText(item.domain) || this.firstEventDomain(eventIds, context.events);
       let recommendation: HomeRecommendationState = {
+        section: homeRecommendationSection(item, context.events),
         created_at: normalizeFreeText(item.created_at || ''),
         id: id,
         tag: normalizeFreeText(item.tag),
@@ -468,6 +483,7 @@ export class HomeRecommendationService {
         card.source_input_hash === sourceHash && card.source_event_ids.length === eventIds.length &&
           eventIds.every((id: string): boolean => card.source_event_ids.indexOf(id) >= 0));
       let recommendation: HomeRecommendationState = {
+        section: homeRecommendationSection(item, context.events),
         created_at: original ? original.created_at : createdAt,
         id: original ? original.id : this.nextRecommendationId(usedIds),
         tag: this.normalizeRecommendationTag(item.tag, eventIds, context.events),

@@ -1,4 +1,5 @@
 import { DataManagerPaths } from './DataManagerPaths';
+import { compatibleDailyLogText } from './DailyLogReferenceCompatibility';
 import { DataManagerStorage } from './DataManagerStorage';
 import { PersonMemoryStore } from './PersonMemoryStore';
 import { MemoryChangeJournal, MemorySourceChange } from './MemoryChangeJournal';
@@ -7,7 +8,7 @@ import { ModelStreamActivity } from './ModelStreamActivity';
 import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
 import { IndexService, IndexSourceSelection } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups, readableCollectionGroupTitle } from './CollectionGroupingService';
-import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
+import { HomeRecommendationBuildResult, HomeRecommendationService, homeRecommendationSection } from './HomeRecommendationService';
 import { HomeCodexContext, HomeCodexRequest, HomeCodexContextService } from './HomeCodexContext';
 import { collectionProfileNote } from './CollectionProfileNote';
 import { dataManagerInfo } from './DataManagerLog';
@@ -188,7 +189,7 @@ export function shouldShowHomeRecommendationInView(sourceEventIds: string[], eve
   let recentLowerBoundExclusive = addDays(today, -7);
   for (let eventId of eventIds) {
     let event = eventMap[eventId];
-    if (!event) {
+    if (!event || event.todo.type === 'pay') {
       return false;
     }
     let deadline = normalizeFreeText(event.todo.deadline);
@@ -445,6 +446,8 @@ export class DataManagerFacade {
       let selection: IndexSourceSelection = { chat: processChat, calendar: calendar, statePaths: statePaths };
       if (this.indexService.selectedSourcesNeedRefresh(selection, modelConfig)) {
         await this.indexService.build(modelConfig, report, selection);
+      } else {
+        await this.indexService.refreshDueProfileRollups(this.indexService.completion(), modelConfig, report);
       }
       if (chat || calendar) { this.recordSuccessfulMemoryCheck(); }
       this.emitProgress(report, '个人记忆已更新', '已完成本次聊天和日历检查', 1, 1, 100);
@@ -482,6 +485,7 @@ export class DataManagerFacade {
       ' calendarChanged=' + (previousSnapshot.calendar_hash !== currentSnapshot.calendar_hash) +
       ' reusePublished=' + adoptPublishedMemory);
     if (adoptPublishedMemory || this.canSkipRefresh(previousSnapshot, currentSnapshot, modelConfig)) {
+      const updatedRollups = await this.indexService.refreshDueProfileRollups(published, modelConfig, progress);
       this.emitProgress(progress, '检查分组', '正在检查采集分组是否有变化', 96, 100, 96);
       let receipt = this.indexService.completion();
       let cachedGroups = !this.fullSourceCheck && receipt &&
@@ -500,8 +504,9 @@ export class DataManagerFacade {
         skipped.skipped = false;
         skipped.message = chatMessage;
       }
-      if (groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
+      if (updatedRollups || groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
         let actions: string[] = [];
+        if (updatedRollups) { actions.push('更新到期的画像摘要'); }
         if (groups.updatedGroupDocs > 0) {
           actions.push(`补充更新 ${groups.updatedGroupDocs} 个采集分组`);
         }
@@ -662,6 +667,7 @@ export class DataManagerFacade {
         }
         let content = this.storage.readText(absolute, '\u0000SYNC_UNREADABLE\u0000');
         if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
+        content = compatibleDailyLogText(content, absolute, this.paths, this.storage);
         readFiles++; readChars += content.length;
         let hash = this.storage.sha256Text(content);
         if (old && old.sha256 === hash) { continue; }
@@ -700,6 +706,7 @@ export class DataManagerFacade {
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
       let content = this.storage.readText(path, '\u0000SYNC_UNREADABLE\u0000');
       if (content === '\u0000SYNC_UNREADABLE\u0000') { throw new Error('读取采集日志失败，请重试同步'); }
+      content = compatibleDailyLogText(content, path, this.paths, this.storage);
       let document = parseDailyLogDocument(content);
       let entryCount = parseNumberedEntries(document.body).length;
       files.push({
@@ -1397,6 +1404,7 @@ export class DataManagerFacade {
       let imageRefs = this.recommendationImages(item, eventMap);
       const relatedFacts = this.recommendationFacts(item, eventMap);
       let recommendation: HomeRecommendationViewModel = {
+        section: homeRecommendationSection(item, eventMap),
         id: normalizeFreeText(item.id),
         domain: domain,
         tag: this.recommendationTag(item.tag, item.source_event_ids || [], eventMap),

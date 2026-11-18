@@ -1,3 +1,4 @@
+import { dailyLogEntryBlocks, DailyLogEntryBlock } from '../utils/DailyLogEntryIdentity';
 import {
   AggregatedRecord,
   BooleanMap,
@@ -258,25 +259,8 @@ export function parseDailyLogDocument(content: string): DailyLogParseResult {
 }
 
 export function parseNumberedEntries(body: string): NumberedEntry[] {
-  let entries: NumberedEntry[] = [];
-  let normalized = body.trim();
-  if (normalized.length === 0) {
-    return entries;
-  }
-  let pattern = /(?:^|\n\s*\n)(\d+)\.\s+([\s\S]*?)(?=\n\s*\n\d+\.\s+|$)/g;
-  let match: RegExpExecArray | null = pattern.exec(normalized);
-  while (match !== null) {
-    let text = match[2].trim();
-    if (text.length > 0) {
-      let entry: NumberedEntry = {
-        index: Number(match[1]),
-        text: text
-      };
-      entries.push(entry);
-    }
-    match = pattern.exec(normalized);
-  }
-  return entries;
+  return dailyLogEntryBlocks(body.trim()).filter((entry: DailyLogEntryBlock): boolean => entry.text.length > 0)
+    .map((entry: DailyLogEntryBlock): NumberedEntry => { return { index: entry.index, text: entry.text }; });
 }
 
 export function sourceRef(sourceDate: string, fileName: string, entryIndex: number): string {

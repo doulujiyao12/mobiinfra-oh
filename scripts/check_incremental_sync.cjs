@@ -103,6 +103,70 @@ test('profile warm-up, identical sync and a new month reuse independent historic
   assert.ok(model.merges.length-mergeCalls<=5);assert.ok(cache.stats.reused>0);
   assert.ok(![...disk.values()].join('').includes(config.apiKey));
 });
+test('dirty rollups use current evidence immediately and compact only on the 7/30-day schedule',async()=>{
+  reset();
+  const originalNow=Date.now, day=86400000, start=new Date(2026,7,12,12).getTime();
+  let now=start;
+  Date.now=()=>now;
+  try {
+    const model=new Model(), merges=[];
+    model.summarizeProfileBlock=async(_domain,events)=>({...payload(events),claims:events.map(e=>({
+      statement:e.normalized_fact,event_ids:[e.event_id],kind:'topic',confidence:'medium',example:''}))});
+    model.combineProfileBlocks=async(_domain,blocks,events,config,final)=>{
+      merges.push({final,count:events.length});
+      return {...payload(events,final),claims:blocks.flatMap(b=>b.claims)};
+    };
+    const cache=new ProfileBlockCache(paths,storage,model);
+    const input=[event('jan','2026-01-10'),event('apr','2026-04-10'),event('may','2026-05-10'),event('jun','2026-06-10')];
+    await cache.build('work',input,config);
+    assert.equal(cache.nextDue,0);
+    const changed=[...input.slice(0,2),{...input[2],normalized_fact:'corrected'},event('added','2026-06-11')];
+    now+=day;merges.length=0;
+    const result=await cache.build('work',changed,config);
+    assert.deepEqual(merges.map(m=>m.final),[true]);
+    const facts=clone(result.claims).map(c=>c.statement);
+    assert.ok(facts.includes('corrected') && facts.includes(changed[3].normalized_fact));
+    assert.ok(!facts.includes(input[2].normalized_fact) && !facts.includes(input[3].normalized_fact));
+    assert.equal(cache.nextDue,start+7*day);
+    now=start+6*day;merges.length=0;await cache.build('work',changed,config);assert.equal(merges.length,0);
+    now=start+7*day;await cache.build('work',changed,config);
+    assert.deepEqual(merges,[{final:false,count:3}]);assert.equal(cache.nextDue,start+30*day);
+    now=start+30*day;merges.length=0;await cache.build('work',changed,config);
+    assert.deepEqual(merges,[{final:false,count:4}]);assert.equal(cache.nextDue,0);
+    now+=100*day;merges.length=0;await cache.build('work',changed,config);assert.equal(merges.length,0);
+  } finally {Date.now=originalNow;}
+});
+
+test('pending rollups close at period boundaries and resume on a no-change sync after failure',async()=>{
+  reset();const realNow=Date.now;
+  let now=new Date(2026,11,29,12).getTime();Date.now=()=>now;
+  try {
+    const model=new Model(),service=new IndexService(paths,storage,model);
+    function save(month,text){
+      const date=month+'-01';
+      storage.writeJsonAtomic(paths.outputStatePath(month,'work.md'),{metadata:{},records:[{record_id:1,
+        first_seen_date:date,last_seen_date:date,source_refs:[date+'/work.md#1'],source_dates:[date],
+        workflow_scene_ids:[0],summary:text,normalized_fact:text,raw_excerpts:[],tags:[],dedup_status:'new',model_notes:[],dedup_text:text}]});
+    }
+    for(const month of ['2026-08','2026-10','2026-11'])save(month,'工作会议 '+month);
+    await service.build(config);now+=86400000;
+    save('2026-12','工作会议 新增安排');await service.build(config);
+    const receipt=service.completion(),before=service.loadProfileState(),boundary=new Date(2027,0,1).getTime();
+    assert.equal(receipt.profile_next_due,boundary);
+    reads.clear();assert.equal(await service.refreshDueProfileRollups(receipt,config),false);
+    assert.ok(!reads.has(paths.indexesRoot+'/profile/state.json'));
+    now=boundary;model.fail=true;
+    await assert.rejects(service.refreshDueProfileRollups(receipt,config),/interrupted/);
+    assert.equal(service.completion().profile_next_due,boundary);
+    model.fail=false;const leaves=model.leaves.length;
+    assert.equal(await service.refreshDueProfileRollups(service.completion(),config),true);
+    assert.equal(model.leaves.length,leaves);assert.equal(service.completion().profile_next_due,0);
+    assert.equal(service.completion().revision,receipt.revision);
+    assert.equal(service.loadProfileState().generated_at,before.generated_at);
+    assert.deepEqual(service.loadProfileState().domains.work.claims,before.domains.work.claims);
+  } finally {Date.now=realNow;}
+});
+
 test('editing old evidence, deleting a month and deleting all inputs cannot retain stale root facts',async()=>{
   reset();const model=new Model(),cache=new ProfileBlockCache(paths,storage,model);
   const input=[event('a','2025-01-01'),event('b','2026-01-01')];await cache.build('work',input,config);
@@ -312,7 +376,7 @@ test('ArkTS modules reject delete operators while allowing Map and Set deletion 
   assert.equal(deleteOperators('delete entries[key];','invalid.ts').length,1,'Detect the ArkTS-only incompatibility');
   assert.equal(deleteOperators('entries.delete(key); entries.clear(); // delete entries[key]','valid.ts').length,0);
   const modules=['DataManagerStorage','IndexWriteBatch','IndexService','DataManagerFacade','ConsolidationService',
-    'DataPipelineModelClient','ProfileBlockCache','SyncMetrics'];
+    'DailyLogReferenceCompatibility','DataPipelineModelClient','ProfileBlockCache','SyncMetrics'];
   const errors=modules.flatMap(name=>deleteOperators(fs.readFileSync(path.join(root,base+name+'.ets'),'utf8'),name+'.ts'));
   assert.deepEqual(errors,[],'ArkTS forbids DeleteExpression: '+errors.join(', '));
 });
@@ -320,6 +384,13 @@ test('ArkTS modules reject delete operators while allowing Map and Set deletion 
 test('production declarations check changed business modules with strict types and platform-only stubs',()=>{
   const sources=new Map(),etsRoot=path.join(root,'entry/src/main/ets');
   const actual=['datamanager/WorkflowRunEvidence','datamanager/WorkflowRunEvidenceTask','datamanager/SyncWorkSlice','datamanager/ProfileBlockCache','datamanager/IndexWriteBatch','datamanager/SyncMetrics','datamanager/MemoryChangeJournal',
+    'datamanager/DailyLogReferenceCompatibility','utils/DailyLogEntryIdentity',
+    'datamanager/CollectionChatIdentity','datamanager/PersonMemoryStore','datamanager/PersonMemory',
+    'datamanager/HomeCodexContext','datamanager/CollectionProfileNote','datamanager/EventAnalysisPolicy',
+    'datamanager/ModelJsonResponse','datamanager/ChatMessageEvidence','datamanager/ProfileEvidence',
+    'datamanager/ProfileRequestCodec','datamanager/ChatCollectionContext','datamanager/MemorySemanticSearch','utils/MemorySupplement',
+    'datamanager/HomeCodexBrief','utils/CodexRequestBudget','datamanager/DataManagerQueryEventsTool',
+    'utils/ChatToolRegistry','utils/MobileGuiTaskTypes','pages/codex/CodexChatTypes','pages/codex/CodexTypes',
     'datamanager/DataManagerStorage','datamanager/DataManagerTypes','datamanager/DataManagerPaths','datamanager/IndexService','datamanager/ChatFactDedup',
     'datamanager/DataPipelineModelClient','datamanager/HomeRecommendationRequestCodec','datamanager/ModelStreamActivity','datamanager/EventStreamParser','datamanager/DataManagerUtils','datamanager/ChatMemoryExtraction','datamanager/ConsolidationService',
     'datamanager/DataManagerFacade','datamanager/CollectionGroupingService','datamanager/HomeRecommendationService',
@@ -628,6 +699,7 @@ test('automatic memory processing forwards detailed stages and releases metrics/
   facade.paths=paths;facade.storage=Object.assign(new Storage(),{beginReadSession(){begins++;},endReadSession(){ends++;}});facade.ensureReady=()=>{};
   facade.modelClient={resetSyncMetrics(){},reportSyncMetrics(){}};
   facade.indexService={beginSyncRead(){begins++;},endSyncRead(){ends++;},selectedSourcesNeedRefresh:()=>changed,
+    completion:()=>null,refreshDueProfileRollups:async()=>false,
     build:async(_config,progress)=>{builds++;progress({stage:'生成画像',message:'fixture',current:1,total:2,percent:90});}};
   facade.consolidationService={consolidateChat:async(_config,progress)=>{
     progress({stage:'整理聊天',message:'fixture',current:1,total:1,percent:58});return [];}};
@@ -2465,6 +2537,112 @@ function evidenceFixture(day,filename,run,texts=['小王请我发论文，我说
     summary:text,normalized_fact:text,first_seen_date:day,last_seen_date:day,source_dates:[day],workflow_scene_ids:[3],source_refs:[refs[i]]}));
   storage.writeJsonAtomic(state,{metadata:{},records});return {relative,log,refs,state,records};
 }
+function retiredIdentityFixture() {
+  const relative='2026-11-01/chat.md',file=paths.dailyLogRoot+'/'+relative,state=paths.outputStatePath('2026-11','chat.md');
+  const header=m=>'<!-- DAILY_LOG_METADATA\n'+JSON.stringify(m,null,2)+'\n-->\n\n';
+  const meta={workflow_metadata:{task_scene_id:3},latest_entry_index:2,entry_batch_ids:{1:'workflow:second',2:'workflow:stable'}};
+  const original=header(meta)+'1. 内容甲\n\n2. 独立内容\n\n1. 内容乙\n';
+  const renumbered=header({...meta,latest_entry_index:4,entry_batch_ids:{2:'workflow:stable'}})+'3. 内容甲\n\n2. 独立内容\n\n4. 内容乙\n';
+  const backupDir=paths.consolidationRoot+'/source-repair-backups';storage.ensureDir(backupDir);
+  storage.writeTextAtomic(backupDir+'/'+storage.sha256Text(file+'\n'+original)+'.md',original);
+  storage.writeTextAtomic(file,renumbered);
+  storage.writeJsonAtomic(state,{metadata:{processed_entry_hashes:{[relative+'#1']:'saved'}},records:[]});
+  return {relative,file,state,original,renumbered};
+}
+
+test('daily identity: compatibility reads old references without writing any historical data',()=>{
+  reset();const f=retiredIdentityFixture(),{compatibleDailyLogText}=load(base+'DailyLogReferenceCompatibility');
+  const before=clone([...disk.entries()]),writesBefore=writes.length;
+  assert.equal(compatibleDailyLogText(f.renumbered,f.file,paths,storage),f.original);
+  assert.equal(compatibleDailyLogText(f.renumbered,f.file,paths,storage),f.original);
+  assert.equal(writes.length,writesBefore);assert.deepEqual(clone([...disk.entries()]),before);
+  assert.equal(compatibleDailyLogText(f.renumbered.replace('内容甲','实际修改'),f.file,paths,storage),f.renumbered.replace('内容甲','实际修改'));
+  storage.writeJsonAtomic(f.state,{metadata:{processed_entry_hashes:{[f.relative+'#3']:'new'}},records:[]});
+  assert.equal(compatibleDailyLogText(f.renumbered,f.file,paths,storage),f.renumbered,'Already completed new identities stay unchanged');
+});
+
+test('daily identity: appended unique entries coexist with old references and only new facts are pending',()=>{
+  reset();const f=retiredIdentityFixture(),{compatibleDailyLogText}=load(base+'DailyLogReferenceCompatibility');
+  const utils=load(base+'DataManagerUtils'),hash=load(base+'ConsolidationService').sourceEntryProcessingHash;
+  const service=new ConsolidationService(paths,storage,new DataPipelineModelClient());
+  storage.writeTextAtomic(f.file,f.original);const originalEntries=service.collectSourceEntries();
+  const hashes=Object.fromEntries(originalEntries.map(e=>[e.source_ref,hash(storage,e)]));
+  const state={metadata:{processed_entry_hashes:hashes},records:[]};storage.writeJsonAtomic(f.state,state);
+  const appended=f.renumbered+'\n5. 新增消息\n';storage.writeTextAtomic(f.file,appended);
+  const before=clone([...disk.entries()]);const entries=service.collectSourceEntries();
+  assert.deepEqual(Array.from(entries,e=>e.entry_index),[1,1,2,5]);
+  const group=service.groupEntriesByMonth(entries)[0];assert.equal(service.requiresGroupRebuild(group,state),false);
+  assert.deepEqual(Array.from(service.pendingEntries(entries,state),e=>e.entry_index),[5]);
+  assert.deepEqual(clone([...disk.entries()]),before);
+  const projected=utils.parseDailyLogDocument(compatibleDailyLogText(appended,f.file,paths,storage));
+  assert.equal(projected.entry_batch_ids['1'],'workflow:second');
+  // A surviving earlier occurrence also counts; traversal order cannot trigger a rebuild.
+  state.metadata.processed_entry_hashes[f.relative+'#1']=hash(storage,originalEntries[0]);
+  assert.equal(service.requiresGroupRebuild(group,state),false);assert.deepEqual(Array.from(service.pendingEntries(entries,state),e=>e.entry_index),[5]);
+});
+
+test('daily identity: an upgrade neither scans nor repairs unchanged legacy logs',()=>{
+  reset();const file=paths.dailyLogRoot+'/2026-06-01/chat.md',raw='1. 旧内容甲\n\n1. 旧内容乙\n';storage.writeTextAtomic(file,raw);
+  const old={catalog_schema:'source-catalog-v1',calendar_hash:'[]',tree_hash:'old',root:'workflows/daily-log',file_count:1,entry_count:2,
+    files:[{path:'2026-06-01/chat.md',sha256:storage.sha256Text(raw),entry_count:2}]};
+  storage.writeJsonAtomic(paths.consolidationRoot+'/daily-log-snapshot.json',old);
+  const journal=new (load(base+'MemoryChangeJournal').MemoryChangeJournal)('/app',storage);journal.setReady('daily');
+  const facade=Object.create(DataManagerFacade.prototype);Object.assign(facade,{storage,paths});reads.clear();const count=writes.length;
+  assert.equal(facade.buildDailyLogSnapshot().tree_hash,'old');assert.equal(reads.has(file),false);assert.equal(writes.length,count);
+  assert.equal(new ConsolidationService(paths,storage,new DataPipelineModelClient()).collectSourceEntries().length,2);
+  assert.equal(storage.readText(file),raw);assert.equal(writes.length,count);
+});
+
+test('daily identity: interrupted renumbering keeps the previous snapshot and does not schedule historical groups',()=>{
+  reset();const f=retiredIdentityFixture();const snapshot={catalog_schema:'source-catalog-v1',calendar_hash:'[]',tree_hash:'old',root:'workflows/daily-log',file_count:1,entry_count:3,
+    files:[{path:f.relative,sha256:storage.sha256Text(f.original),entry_count:3}]};
+  storage.writeJsonAtomic(paths.consolidationRoot+'/daily-log-snapshot.json',snapshot);
+  const journal=new (load(base+'MemoryChangeJournal').MemoryChangeJournal)('/app',storage);journal.setReady('daily');journal.mark('daily',f.relative);
+  const facade=Object.create(DataManagerFacade.prototype);Object.assign(facade,{storage,paths});const before=clone([...disk.entries()]);
+  assert.equal(facade.buildDailyLogSnapshot().tree_hash,'old');assert.deepEqual(Array.from(facade.changedDailyPaths),[]);
+  assert.deepEqual(clone([...disk.entries()]),before);
+});
+
+test('daily identity: an ambiguous old image reference cannot contaminate a new unique entry',async()=>{
+  reset();const f=evidenceFixture('2026-11-01','chat.md','run-new',['新内容']);
+  const raw='<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3},entry_batch_ids:{2:'workflow:run-new'}})+'\n-->\n\n1. 内容甲\n\n1. 内容乙\n\n2. 新内容\n';
+  storage.writeTextAtomic(f.log,raw);storage.writeJsonAtomic(f.state,{metadata:{},records:[{...f.records[0],source_refs:[f.relative+'#1',f.relative+'#2']}]});
+  const before=storage.readText(f.log),service=new IndexService(paths,storage,new Model());
+  const images=await service.buildImageReferenceMap([f.state],[f.relative]);
+  assert.equal(images[f.relative+'#1'],undefined);assert.deepEqual(clone(images[f.relative+'#2']),['runs/run-new/image-0.png']);
+  assert.equal(storage.readText(f.log),before);
+});
+
+test('daily identity: published legacy image references stay unchanged when a fresh unique entry arrives',async()=>{
+  reset();const f=evidenceFixture('2026-11-01','chat.md','run-new',['新内容']);
+  const service=new IndexService(paths,storage,new Model()),ref=f.relative+'#1';
+  const oldEntries=[{source_ref:ref,batch_id:'workflow:legacy',text:'旧内容甲',order:1,image_paths:[]},
+    {source_ref:ref,batch_id:'workflow:legacy',text:'旧内容乙',order:2,image_paths:['runs/legacy/old.png']}];
+  storage.writeJsonAtomic(service.sourceEvidencePath(f.relative),{schema:'source-image-evidence-v1',source_path:f.relative,resolved_runs:true,
+    summary_match_policy:'committed-summary-v2',entries:oldEntries});
+  storage.writeTextAtomic(f.log,'<!-- DAILY_LOG_METADATA\n'+JSON.stringify({workflow_metadata:{task_scene_id:3},entry_batch_ids:{2:'workflow:run-new'}})+'\n-->\n\n1. 旧内容甲\n\n1. 旧内容乙\n\n2. 新内容\n');
+  storage.writeJsonAtomic(f.state,{metadata:{},records:[{...f.records[0],source_refs:[ref,f.relative+'#2']}]});
+  const images=await service.buildImageReferenceMap([f.state],[f.relative]);
+  assert.deepEqual(clone(images[ref]),['runs/legacy/old.png']);assert.deepEqual(clone(images[f.relative+'#2']),['runs/run-new/image-0.png']);
+  assert.deepEqual(clone(storage.readJson(service.sourceEvidencePath(f.relative),null).entries.filter(e=>e.source_ref===ref)),oldEntries);
+});
+
+test('daily identity: full sync after append splits only the new entry and leaves historical groups intact',async()=>{
+  await sourceFacade(async(facade,cfg)=>{
+    const old=paths.dailyLogRoot+'/2026-06-01/old.md',file=paths.dailyLogRoot+'/2026-11-01/task.md';
+    storage.writeTextAtomic(old,'1. 已完成旧项目验收\n');
+    storage.writeTextAtomic(file,'1. 已确认研发计划\n\n1. 已收到采购报价\n');
+    await facade.refreshInternal(cfg);
+    const historyState=storage.readText(paths.outputStatePath('2026-06','old.md'));
+    const originalSplit=facade.modelClient.splitEntriesIntoFacts.bind(facade.modelClient),calls=[];
+    facade.modelClient.splitEntriesIntoFacts=async(entries,...rest)=>{calls.push(Array.from(entries,e=>e.source_ref));return originalSplit(entries,...rest);};
+    storage.writeTextAtomic(file,storage.readText(file)+'\n2. 报销单已寄出\n');logs.length=0;reads.clear();
+    await facade.refreshInternal(cfg);
+    assert.deepEqual(calls,[['2026-11-01/task.md#2']]);assert.ok(!logs.some(s=>s.includes('SYNC_SOURCE_REBUILD')));
+    assert.equal(storage.readText(paths.outputStatePath('2026-06','old.md')),historyState);assert.equal(reads.has(old),false);
+  });
+});
+
 test('index evidence: a new collection never opens unrelated historical logs or runs',async()=>{
   reset();for(let i=0;i<250;i++)evidenceFixture('2020-01-01','old-'+i+'.md','old-'+i);
   const fresh=evidenceFixture('2026-11-01','wechat.md','20261101-new');reads.clear();
@@ -2873,7 +3051,7 @@ test('analysis recovery: a same-day legacy recommendation cache cannot bypass th
   const document={generated_at:'2026-11-03T01:00:00',input_hash:'old',total_events:0,recommendations:[]};
   storage.writeJsonAtomic(paths.homeRecommendationsPath(),document);
   assert.equal(service.cachedBuildResult('2026-11-03'),null);
-  storage.writeJsonAtomic(paths.homeRecommendationsPath(),{...document,policy:'home-follow-up-v3-value-selection'});
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),{...document,policy:'home-follow-up-v4-focus-life'});
   assert.equal(service.cachedBuildResult('2026-11-03').reused,true);
 });
 
@@ -3227,7 +3405,7 @@ test('reminder selection: cloud selection preserves undated important actions an
   cloudHandler=async options=>{
     calls++;const prompt=options.messages[0].content,input=JSON.parse(options.messages[1].content);
     assert.match(prompt,/候选建议也可能过度推断/);assert.match(prompt,/明确日期不是必要条件/);
-    assert.match(prompt,/不能只凭“可能已做”/);assert.match(prompt,/不设固定条数上限/);
+    assert.match(prompt,/跳过不等于已完成/);assert.match(prompt,/重要未完成承诺/);assert.match(prompt,/不设固定条数上限/);
     assert.ok(!prompt.includes('不要丢弃任何输入事件'));assert.equal(input.events[0].todo_deadline,'');
     return JSON.stringify({recommendations:[{title:'确认后联系',desc:'先确认材料，再联系相关人员',source_event_ids:['e1']}],
       skipped:[{event_id:'e2',reason:'low_value'}]});
@@ -3315,6 +3493,43 @@ test('reminder selection: pruning cards preserves remaining skip decisions and i
   reset();const empty=selectionServiceFixture({});
   await empty.build({...config,enabled:false});assert.equal(empty.cachedBuildResult('2026-11-07').reused,true,
     'An empty input can still receive a receipt without enabling a model');
+});
+
+test('reminder scope: payments are excluded, life sections persist and history is never rewritten',async()=>{
+  reset();const candidates={payment:selectionEvent('payment','pay'),parcel:selectionEvent('parcel','pickup'),
+    meeting:selectionEvent('meeting','attend'),trip:selectionEvent('trip','plan'),booking:selectionEvent('booking','book')};
+  candidates.parcel.domains=['live'];candidates.booking.domains=['travel'];
+  let calls=0;cloudHandler=async options=>{
+    calls++;const input=JSON.parse(options.messages[1].content),prompt=options.messages[0].content;
+    assert.ok(input.events.every(e=>e.todo_type!=='pay'));
+    assert.match(prompt,/section=life/);assert.match(prompt,/待付款直接跳过/);assert.match(prompt,/没有继续待办的证据/);
+    return JSON.stringify({recommendations:input.events.map(e=>({title:e.todo_text,section:e.todo_type==='pickup'?'life':'focus',
+      source_event_ids:[e.event_id]})),skipped:[]});
+  };
+  const service=selectionServiceFixture(candidates);await service.build(config);
+  const doc=service.loadDocument();assert.equal(doc.total_events,4);
+  const sections=Object.fromEntries(doc.recommendations.map(r=>[r.source_event_ids[0],r.section]));
+  assert.deepEqual(sections,{booking:'focus',meeting:'focus',parcel:'life',trip:'focus'});
+  const facade=load(base+'DataManagerFacade');
+  assert.equal(facade.shouldShowHomeRecommendationInView(['payment'],candidates,'2026-11-07'),false);
+  assert.equal(facade.shouldShowHomeRecommendationInView(['meeting'],candidates,'2026-11-07'),true);
+  facade.setHomeRecommendationCompletedInDocument(doc,doc.recommendations.find(r=>r.section==='life').id,true);
+  storage.writeJsonAtomic(paths.homeRecommendationsPath(),doc);
+  candidates.extra=selectionEvent('extra','research');await service.build(config);
+  assert.equal(calls,2);assert.ok(service.loadDocument().recommendations.some(r=>r.section==='life'&&r.completed));
+  assert.ok(writes.every(file=>file===paths.homeRecommendationsPath()),'Only the home selection cache may change');
+});
+
+test('reminder scope: legacy cards classify from source types and explicit decisions take precedence',()=>{
+  const {homeRecommendationSection}=load(base+'HomeRecommendationService');
+  const events={a:{...selectionEvent('a','book'),domains:['travel']},b:selectionEvent('b','book')};
+  assert.equal(homeRecommendationSection({source_event_ids:['a']},events),'life');
+  assert.equal(homeRecommendationSection({source_event_ids:['b']},events),'focus');
+  assert.equal(homeRecommendationSection({source_event_ids:['a'],section:'focus'},events),'focus');
+  assert.equal(homeRecommendationSection({source_event_ids:['missing']},events),'focus');
+  const {HomeRecommendationRequestCodec}=load(base+'HomeRecommendationRequestCodec');
+  const codec=new HomeRecommendationRequestCodec(reminderRecoveryEvents());
+  assert.throws(()=>codec.validateAndDecode({recommendations:[{title:'test',section:'arbitrary',source_event_ids:['e1','e2']}]}),/section/);
 });
 
 (async()=>{const selected=cases.filter(([name])=>!process.env.SYNC_TEST_FILTER||name.includes(process.env.SYNC_TEST_FILTER));for(const[name,run]of selected){await run();console.log('PASS '+name);}console.log(selected.length+' incremental sync checks passed');})()

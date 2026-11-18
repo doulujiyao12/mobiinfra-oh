@@ -1,6 +1,6 @@
 import { AiServiceAccess } from './AiServiceAccess';
 import { JSON as ArkJSON } from '@kit.ArkTS';
-import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
+import { CloudChatOptions, CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { WorkflowCancellation } from './WorkflowCancellation';
@@ -8,7 +8,9 @@ import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
+import { dailyLogMaxEntryId } from './DailyLogEntryIdentity';
 import { recoverWorkflowStructuredFields } from './WorkflowStructuredRecovery';
+import { nonTodayWechatTimeLabel } from './WechatSummaryConsistency';
 import { WorkflowStorage } from './WorkflowStorage';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser } from './AgentActionParser';
@@ -31,6 +33,7 @@ const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
 export const DEFAULT_MAX_GUI_STEPS: number = 20;
 export const DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT: number = 2;
 const VLM_QA_MAX_ATTEMPTS: number = 2;
+const SUMMARY_CHAT_OPTIONS: CloudChatOptions = { repetition_penalty: 1.1 };
 
 export function resolveGuiTaskMaxSteps(step: WorkflowStep): number {
   let raw = step.max_steps;
@@ -1227,6 +1230,9 @@ export class WorkflowRunner {
     let promptBody = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
     let prompt = mode === 'summary' ? summaryDateContext.withDatePrompt(promptBody, 'VLM 图片问答问题') :
       this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
+    if (mode === 'summary' && inputs.time_context === 'capture_only') {
+      prompt = summaryDateContext.withCaptureDatePrompt(question);
+    }
     if (inputs.json_schema !== undefined && inputs.json_schema !== null) {
       prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
         ArkJSON.stringify(inputs.json_schema);
@@ -1248,7 +1254,7 @@ export class WorkflowRunner {
     // Summary is the only visual evidence extraction stage. Preserve full page
     // transcripts (including speakers and replies) instead of truncating at 1024.
     let result = await this.requestVlmQa(actualId, prompt, imageBase64, mode === 'summary' ? 4096 : 1024,
-      inputs.json_schema, true);
+      inputs.json_schema, true, mode === 'summary' ? SUMMARY_CHAT_OPTIONS : undefined);
     let response = result.response;
     this.ensureNotCancelled();
     this.log('VLM QA response:\n' + response);
@@ -1260,6 +1266,14 @@ export class WorkflowRunner {
       response: response
     };
     let structuredOutput = result.structured_output;
+    if (mode === 'summary' && structuredOutput !== undefined &&
+      structuredOutput['contains_today_chat'] === true && typeof structuredOutput['summary'] === 'string') {
+      let stopLabel = nonTodayWechatTimeLabel(structuredOutput['summary'] as string);
+      if (stopLabel.length > 0) {
+        structuredOutput['contains_today_chat'] = false;
+        this.log('VLM QA today consistency corrected (' + actualId + '): true -> false, time_label=' + stopLabel);
+      }
+    }
     if (structuredOutput !== undefined) {
       output.structured_output = structuredOutput;
     }
@@ -1275,7 +1289,7 @@ export class WorkflowRunner {
   // Only inference and response validation are retried. Device actions and log commits
   // stay outside this boundary, so a retry reads the same evidence without duplicating work.
   private async requestVlmQa(actualId: string, prompt: string, imageBase64: string, maxTokens: number,
-    schema?: Object, showProgress: boolean = false): Promise<VlmQaResponse> {
+    schema?: Object, showProgress: boolean = false, chatOptions?: CloudChatOptions): Promise<VlmQaResponse> {
     let lastError = '';
     for (let attempt = 1; attempt <= VLM_QA_MAX_ATTEMPTS; attempt++) {
       this.ensureNotCancelled();
@@ -1285,8 +1299,22 @@ export class WorkflowRunner {
           '（' + attempt + '/' + VLM_QA_MAX_ATTEMPTS + '）');
       }
       let response = '';
+      let attemptOptions = chatOptions;
+      if (attempt > 1) {
+        let originalOptions: CloudChatOptions = chatOptions || {};
+        attemptOptions = {
+          top_p: originalOptions.top_p,
+          top_k: originalOptions.top_k,
+          min_p: originalOptions.min_p,
+          presence_penalty: originalOptions.presence_penalty,
+          repetition_penalty: originalOptions.repetition_penalty,
+          chat_template_kwargs: originalOptions.chat_template_kwargs,
+          temperature: Math.min(2, (originalOptions.temperature ?? 0) + 0.2)
+        };
+      }
       try {
-        response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), maxTokens);
+        response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider(), maxTokens,
+          attemptOptions);
         this.ensureNotCancelled();
         let result = this.validateVlmQaResponse(response, schema);
         if (result.recovered_fields !== undefined && result.recovered_fields.length > 0) {
@@ -1366,7 +1394,7 @@ export class WorkflowRunner {
 
   private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
-      let result = await this.requestVlmQa(actualId, prompt, imageBase64, 4096);
+      let result = await this.requestVlmQa(actualId, prompt, imageBase64, 4096, undefined, false, SUMMARY_CHAT_OPTIONS);
       return {
         ok: true,
         actual_id: actualId,
@@ -1765,15 +1793,17 @@ export class WorkflowRunner {
             try {
               let previous = ArkJSON.parse(existing.substring(start, metadataEnd).trim()) as DailyLogMetadata;
               entryBatches = previous.entry_batch_ids || {};
+              latest = previous.latest_entry_index;
             } catch (e) { /* Preserve the existing body even if old metadata is malformed. */ }
           }
           body = existing.substring(metadataEnd + 3).trim();
         } else {
           body = existing.trim();
         }
-        latest = this.lastEntryNumber(body);
+        latest = dailyLogMaxEntryId(body, latest, entryBatches);
       }
     } catch (e) {
+      throw new Error('读取已有采集日志失败，未覆盖原始记录');
     }
     let next = latest + 1;
     let runParts = this.runDir.replace(/\\/g, '/').split('/');
@@ -2021,21 +2051,6 @@ export class WorkflowRunner {
       }
     }
     return parts.join('__') + '.md';
-  }
-
-  private lastEntryNumber(body: string): number {
-    let lines = body.split('\n');
-    let last = 0;
-    for (let i = 0; i < lines.length; i++) {
-      let dot = lines[i].indexOf('. ');
-      if (dot > 0) {
-        let value = Number(lines[i].substring(0, dot));
-        if (!isNaN(value)) {
-          last = value;
-        }
-      }
-    }
-    return last;
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {

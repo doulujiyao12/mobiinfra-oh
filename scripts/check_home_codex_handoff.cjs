@@ -64,6 +64,19 @@ test('the note board mixes sources, prioritizes deadlines and retains completed 
   assert.equal(homeNoteBoard(source,[suggestion],'suggestion',false).length,1);
   assert.throws(()=>planHomeNote({...notes[2],canDelegate:false},'phone','打开微信'),/详情/);
 });
+test('life errands have a separate board while details and delegation retain their source IDs',()=>{
+  const {homeNoteBoard,planHomeNote}=load(base+'pages/home/HomeSecretary');
+  const life={id:'parcel',section:'life',title:'取快递',desc:'包裹已到',meta:'',completed:false,domain:'live',
+    sourceEventIds:['parcel-source'],imageRefs:[],detail:'包裹已到',agentTask:''};
+  const focus={...life,id:'work',section:'focus',title:'查看会议材料'};
+  const done={...life,id:'done',completed:true};
+  const source=[life,focus,done,{...life,id:'calendar:1'},{...life,id:'mail:overview'}];
+  for(const filter of ['all','reminder'])assert.deepEqual(Array.from(homeNoteBoard(source,[],filter,false),n=>n.reminder.id),['work']);
+  const notes=homeNoteBoard(source,[],'life',false);assert.equal(notes.length,1);assert.equal(notes[0].reminder.id,'parcel');
+  assert.deepEqual(Array.from(homeNoteBoard(source,[],'life',true),n=>n.reminder.id),['parcel','done']);
+  assert.equal(planHomeNote(notes[0],'codex','').context.eventIds[0],'parcel-source');
+});
+
 test('item details keep distinct source excerpts without repeating the title, summary or metadata',()=>{
   const {homeNoteSources}=load(base+'pages/home/HomeSecretary');
   const note={title:'选购手机',body:'比较两款手机',meta:'周五前'};

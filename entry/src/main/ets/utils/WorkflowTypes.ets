@@ -28,6 +28,7 @@ export interface WorkflowToolInputs {
   question?: string;
   json_schema?: Object;
   blocking?: boolean;
+  time_context?: 'capture_only';
 }
 
 export interface WorkflowStep {

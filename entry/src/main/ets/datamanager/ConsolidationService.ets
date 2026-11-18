@@ -3,6 +3,7 @@ import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { dataManagerInfo, dataManagerWarn } from './DataManagerLog';
+import { compatibleDailyLogText } from './DailyLogReferenceCompatibility';
 import {
   AggregatedRecord,
   CandidateFact,
@@ -295,6 +296,7 @@ export class ConsolidationService {
         if (content.length === 0) {
           continue;
         }
+        content = compatibleDailyLogText(content, path, this.paths, this.storage);
         let document = parseDailyLogDocument(content);
         let body = normalizeFreeText(document.body);
         let rawBody = document.body;
@@ -541,25 +543,26 @@ export class ConsolidationService {
   }
 
   private requiresGroupRebuild(group: EntryGroup, state: ConsolidatedState): boolean {
-    let current: StringMap = {};
-    group.entries.forEach((entry: SourceEntry) => current[entry.source_ref] = sourceEntryProcessingHash(this.storage, entry));
+    let current = this.sourceHashesByRef(group.entries);
     let previous = state.metadata.processed_entry_hashes || createStringMap();
-    if (Object.keys(previous).some((ref: string): boolean => !current[ref] || previous[ref] !== current[ref])) { return true; }
+    if (Object.keys(previous).some((ref: string): boolean => !current[ref] || current[ref].indexOf(previous[ref]) < 0)) { return true; }
     return state.records.some((record: AggregatedRecord): boolean =>
       (record.source_refs || []).some((ref: string): boolean => !current[ref] || !previous[ref]));
   }
 
   private pendingEntries(entries: SourceEntry[], state: ConsolidatedState): SourceEntry[] {
+    let current = this.sourceHashesByRef(entries);
     let processedByHash = state.metadata.processed_entry_hashes || createStringMap();
     let processedRefs: Record<string, boolean> = new Object() as Record<string, boolean>;
     state.records.forEach((record: AggregatedRecord) => {
       (record.source_refs || []).forEach((ref: string) => processedRefs[ref] = true);
     });
     return entries.filter((entry: SourceEntry) => {
-      let currentHash = sourceEntryProcessingHash(this.storage, entry);
       let previousHash = processedByHash[entry.source_ref] || '';
       if (previousHash.length > 0) {
-        return previousHash !== currentHash;
+        // Preserve already processed legacy identities even if several old
+        // occurrences share the ID. New unique IDs remain independent work.
+        return current[entry.source_ref].indexOf(previousHash) < 0;
       }
       return processedRefs[entry.source_ref] !== true;
     });
@@ -573,6 +576,15 @@ export class ConsolidationService {
       }
     }
     return maxId + 1;
+  }
+
+  private sourceHashesByRef(entries: SourceEntry[]): Record<string, string[]> {
+    let hashes: Record<string, string[]> = {};
+    for (let entry of entries) {
+      if (!hashes[entry.source_ref]) { hashes[entry.source_ref] = []; }
+      hashes[entry.source_ref].push(sourceEntryProcessingHash(this.storage, entry));
+    }
+    return hashes;
   }
 
   private findMatchedRecord(records: AggregatedRecord[], decision: DedupDecision): AggregatedRecord | null {
