@@ -21,7 +21,10 @@ import { RecordingCalendarScope, RecordingCalendarWeek, recordingCalendarMonth, 
 import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
-import { picker } from '@kit.CoreFileKit';
+import { ClassroomMaterialsView, ClassroomPhotoStrip } from './ClassroomMaterialsView';
+import { CLASSROOM_SOURCE, ClassroomPhoto, RecordingRouteParams } from '../../utils/recording/ClassroomMaterials';
+import { classroomPhotos, photographLesson } from '../../utils/recording/ClassroomFiles';
+import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { RecordingStore } from '../../utils/recording/RecordingStore';
 import { DEFAULT_RECORDING_MODEL_URL, RecordingModelProgress, RecordingModels, RECORDING_MODELS } from '../../utils/recording/RecordingModels';
 import { RecordingCapture } from '../../utils/recording/RecordingCapture';
@@ -52,6 +55,10 @@ interface PendingWatchProcessing { recordIds: string[]; queue: number; transferE
 @Component
 struct RecordingPage {
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
+  @State private classroom: boolean = false;
+  @State private takingPhoto: boolean = false;
+  @State private livePhotos: ClassroomPhoto[] = [];
+  @State private livePhotoDirectory: string = '';
   @State private records: RecordingRecord[] = [];
   @State private recordingSearchQuery: string = '';
   @StorageLink('recordingAiSearch') private recordingAiSearch: boolean = DEFAULT_RECORDING_AI_SEARCH;
@@ -158,6 +165,7 @@ struct RecordingPage {
 
   aboutToAppear(): void {
     this.alive = true;
+    this.classroom = (router.getParams() as RecordingRouteParams)?.classroom === true;
     this.speakerSwitchOn = this.separateSpeakers;
     let context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
@@ -175,7 +183,7 @@ struct RecordingPage {
       let importError = AppStorage.get<string>('recordingAnalysisImportError') || '';
       if (importError) { this.error = importError; AppStorage.setOrCreate('recordingAnalysisImportError', ''); }
       let id = AppStorage.get<string>(RECORDING_INBOX_KEY) || '';
-      if (id.length > 0 && !this.busy) {
+      if (!this.classroom && id.length > 0 && !this.busy) {
         this.selected = this.records.find((record: RecordingRecord): boolean => record.id === id) || null;
         AppStorage.setOrCreate(RECORDING_INBOX_KEY, '');
       }
@@ -200,7 +208,8 @@ struct RecordingPage {
   }
   private reload(): void {
     if (this.store === null) { return; }
-    this.records = this.store.list();
+    const records = this.store.list();
+    this.records = this.classroom ? records.filter((item: RecordingRecord): boolean => item.source === CLASSROOM_SOURCE) : records;
     this.refreshRecordingCalendar();
     if (!this.recordingAiSearch && this.recordingSearchActive()) {
       this.recordingSearchHits = searchRecordingKeywords(this.records, [this.recordingSearchQuery]);
@@ -317,7 +326,7 @@ struct RecordingPage {
   }
   private async startRecording(): Promise<void> {
     if (this.busy || this.watchQueueRunning || this.store === null) { return; }
-    let source = recordingAudioSource(this.audioSource);
+    let source = recordingAudioSource(this.classroom ? 'environment' : this.audioSource);
     this.captureStopPending = false;
     this.busy = true; this.startingRecording = true; this.jobKind = 'capture';
     this.status = source === 'environment' ? '正在准备麦克风' : '请确认系统屏幕授权，仅采集声音，不录制画面';
@@ -333,13 +342,20 @@ struct RecordingPage {
         if (grant.authResults[0] !== 0) { throw new Error('录音需要麦克风权限，可在系统设置中开启'); }
       }
       if (epoch !== this.epoch) { return; }
-      let record = this.store.create('录制'); record.title = '录音 ' + this.clockTime(new Date(record.createdAt));
+      let record = this.store.create(this.classroom ? CLASSROOM_SOURCE : '录制');
+      this.recordingDraft = record;
+      record.title = (this.classroom ? '课堂 ' : '录音 ') + this.clockTime(new Date(record.createdAt));
+      if (this.classroom) {
+        this.livePhotoDirectory = this.store.directory(record.id) + '/classroom';
+        fs.mkdirSync(this.livePhotoDirectory);
+        this.livePhotos = [];
+      }
       const systemAsr = this.useSystemAsr();
       const useLive = this.liveTranscribe && (systemAsr || this.models?.readyForTranscription(false) === true);
       record.transcriptionEngine = systemAsr ? 'system' : 'sensevoice';
       if (useLive) { record.analysis = emptyLiveAnalysis(0); record.transcriptionComplete = false; }
       if (useLive && systemAsr && record.analysis !== null) { record.analysis.modelId = SYSTEM_ASR_MODEL_ID; record.analysis.method = 'system'; }
-      record.capturing = true; record.audioSource = source; this.recordingDraft = record;
+      record.capturing = true; record.audioSource = source;
       this.externalInteraction = source !== 'environment';
       await this.capture.start(this.store.audioPath(record.id), (): void => {
         if (this.startingRecording) { this.captureStopPending = true; return; }
@@ -402,6 +418,19 @@ struct RecordingPage {
       if (this.alive && !this.recording) { this.busy = false; this.jobKind = ''; }
     }
   }
+  private async takeLessonPhoto(): Promise<void> {
+    if (!this.recording || !this.classroom || !this.recordingDraft || this.takingPhoto) { return; }
+    const directory = this.livePhotoDirectory;
+    const seconds = this.capture.availableSamples() / 16000;
+    this.takingPhoto = true; this.externalInteraction = true;
+    try {
+      if (await photographLesson(this.context(), directory, seconds) && this.alive && this.livePhotoDirectory === directory) {
+        this.livePhotos = classroomPhotos(directory);
+      }
+    } catch (e) { promptAction.showToast({ message: (e as Error).message || '照片未保存' }); }
+    finally { this.externalInteraction = false; this.takingPhoto = false; }
+  }
+
   private async stopRecording(): Promise<void> {
     if (!this.recording) { return; }
     this.recording = false; clearInterval(this.timer); this.timer = -1;
@@ -432,6 +461,11 @@ struct RecordingPage {
       live?.cancel();
       if (this.live === live) { this.live = null; }
       if (this.alive && epoch === this.epoch) { this.busy = false; this.jobKind = ''; this.status = saved?.transcriptionComplete ? '录音与转写已保存' : '录音已保存'; }
+    }
+    if (this.alive && epoch === this.epoch && saved && this.selected?.id === saved.id &&
+      this.classroom && !saved.transcriptionComplete && !this.error) {
+      await this.analyze(false, this.autoSummary);
+      return;
     }
     if (this.alive && epoch === this.epoch && this.autoSummary && saved?.transcriptionComplete && !this.error &&
       this.selected?.id === saved.id && saved.analysis?.segments.some((segment: RecordingSegment): boolean => !!segment.text.trim())) { await this.summarize(); }
@@ -654,7 +688,8 @@ struct RecordingPage {
       this.selected = { schema: record.schema, id: record.id, title: record.title, createdAt: record.createdAt,
         source: record.source, duration: record.duration, analysis: record.analysis, summary: record.summary, watch: record.watch,
         capturing: record.capturing, audioSource: record.audioSource, titleEdited: record.titleEdited,
-        localSummaryDraft: record.localSummaryDraft };
+        localSummaryDraft: record.localSummaryDraft, audioDeleted: record.audioDeleted,
+        transcriptionComplete: record.transcriptionComplete, transcriptionEngine: record.transcriptionEngine };
     }
   }
   private beginRename(record: RecordingRecord): void {
@@ -676,7 +711,7 @@ struct RecordingPage {
     if (this.busy || this.watchQueueRunning || record === null || this.store === null) { return; }
     this.recordingListScroller.closeAllSwipeActions();
     let result = await promptAction.showDialog({ title: '删除这条录音？',
-      message: this.recordTitle(record) + '\n录音、转写和摘要将一起删除。' + (record.watch ? '手表原录音会保留。' : ''),
+      message: this.recordTitle(record) + (record.source === CLASSROOM_SOURCE ? '\n录音、转写、摘要、课堂照片和本课的资料入口将一起删除。' : '\n录音、转写和摘要将一起删除。') + (record.watch ? '手表原录音会保留。' : ''),
       buttons: [{ text: '取消', color: '#8E8E93' }, { text: '删除', color: '#FF3B30' }] });
     if (result.index !== 1 || this.busy || !this.alive || this.store === null) { return; }
     await this.playback.stop(); this.playing = -2;
@@ -1196,19 +1231,25 @@ struct RecordingPage {
     List({ scroller: this.recordingListScroller, space: 14 }) {
       ListItem() {
         Column({ space: 18 }) {
-          if (this.recordingSearchActive()) { this.SearchFeedback() } else { this.HomeHeader() }
+          if (this.classroom) {
+            Row() {
+              Text('课堂记录').fontSize(19).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+              Blank()
+              Text(this.records.length + ' 节').fontSize(14).fontColor(AppTheme.text('#737D90'))
+            }.width('100%').padding({ top: 6, bottom: 4 })
+          } else if (this.recordingSearchActive()) { this.SearchFeedback() } else { this.HomeHeader() }
         }.width('100%')
       }
       if (this.recordingSearchRows().length === 0) {
         ListItem() {
           Column({ space: 12 }) {
-            Image($r('app.media.source_recording')).width(40).height(40).opacity(0.6)
+            Image(this.classroom ? $r('app.media.classroom_book') : $r('app.media.source_recording')).width(40).height(40).opacity(0.8)
             Text(this.recordingSearchActive() ? (this.recordingSearchBusy ? '正在寻找相关录音' :
               this.recordingSearchError ? '搜索未完成' : this.recordingSearchNotice === '搜索已停止' ? '搜索已停止' :
               this.recordingSearchRan ? '没有匹配的录音' : '点搜索，我来帮你找') :
-              this.calendarScope === 'day' ? '这一天还没有录音' : this.calendarScope === 'month' ? '本月还没有录音' : '暂无录音')
+              this.classroom ? '还没有课堂记录' : this.calendarScope === 'day' ? '这一天还没有录音' : this.calendarScope === 'month' ? '本月还没有录音' : '暂无录音')
               .fontSize(18).fontColor(AppTheme.text('#737D90'))
-            if (!this.recordingSearchActive()) { Text('轻点下方录音，也可以导入 WAV。').fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93')) }
+            if (!this.recordingSearchActive()) { Text(this.classroom ? '开始上课后，可以随手拍下板书和课件。' : '轻点下方录音，也可以导入 WAV。').fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93')) }
           }.width('100%').padding({ top: 44, bottom: 44 })
         }
       } else {
@@ -1223,6 +1264,28 @@ struct RecordingPage {
     }.width('100%').layoutWeight(1).padding({ left: 22, right: 22, top: 14, bottom: 12 })
       .contentEndOffset(this.recordingDockVisible() ? RECORDING_DOCK_INSET : 0).scrollBar(BarState.Off)
   }
+  @Builder private ClassroomDock() {
+    Row({ space: 6 }) {
+      if (this.recording) {
+        Button({ type: ButtonType.Capsule }) {
+          Row({ space: 6 }) {
+            Image($r('app.media.classroom_camera')).width(20).height(20)
+            Text('拍照').fontSize(15).fontColor(AppTheme.text('#316B69'))
+          }
+        }.height(42).backgroundColor(Color.Transparent).enabled(!this.takingPhoto)
+          .onClick((): void => { this.takeLessonPhoto(); })
+      }
+      Button(this.recording ? '结束课堂' : '开始上课').fontSize(15).fontWeight(FontWeight.Medium).height(42)
+        .padding({ left: 24, right: 24 }).fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#316B69'))
+        .enabled(!this.takingPhoto && (!this.busy || this.recording)).onClick((): void => {
+          if (this.recording) { this.stopRecording().catch((e: Error): void => { this.message(e); }); }
+          else { this.startRecording(); }
+        })
+    }.padding(4).borderRadius(26).backgroundColor($r('app.color.ui_glass_mask'))
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, { colorMode: ThemeColorMode.SYSTEM })
+      .border({ width: 1, color: $r('app.color.ui_glass_border') }).margin({ bottom: 8 })
+  }
+
   @Builder private RecordingDock() {
     Row({ space: 4 }) {
       Button({ type: ButtonType.Normal }) {
@@ -1285,13 +1348,25 @@ struct RecordingPage {
             this.VoiceTimeline()
           }.layoutWeight(1)
         }.width('100%').padding(12).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
-        if (!this.busy && this.audioAvailable() && this.analysis() !== null && (this.canResumeAnalysis() || this.selected.transcriptionComplete === false)) {
+        if (this.selected.source === CLASSROOM_SOURCE && this.store !== null) {
+          ClassroomMaterialsView({ directory: this.store.directory(this.selected.id) + '/classroom',
+            getRecord: (): RecordingRecord | null => this.selected, working: this.busy || this.takingPhoto,
+            photoRevision: this.livePhotos.length,
+            needsTranscript: !this.selected.analysis || this.selected.transcriptionComplete === false,
+            canPrepare: this.audioAvailable() || (!!this.selected.analysis && this.selected.transcriptionComplete !== false),
+            onPrepare: (): void => {
+              if (!this.selected?.analysis || this.selected.transcriptionComplete === false) { this.analyze(false, true); }
+              else { this.summarize(); }
+            },
+            ready: this.selected.transcriptionComplete !== false && !!this.selected.summary && this.selected.summary.complete !== false })
+        }
+        if (this.selected.source !== CLASSROOM_SOURCE && !this.busy && this.audioAvailable() && this.analysis() !== null && (this.canResumeAnalysis() || this.selected.transcriptionComplete === false)) {
           Button(this.canResumeAnalysis() ? '继续转写' : '完成转写').fontSize(17).height(48).padding({ left: 28, right: 28 })
             .width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#5260ED'))
             .onClick((): void => { this.analyze(); })
         }
         if (this.analysis() === null) {
-          if (!this.busy && this.audioAvailable()) {
+          if (this.selected.source !== CLASSROOM_SOURCE && !this.busy && this.audioAvailable()) {
             Button(this.canResumeAnalysis() ? '继续转写' : '开始转写').fontSize(17).height(48).padding({ left: 28, right: 28 })
               .width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#5260ED'))
               .onClick((): void => { this.analyze(); })
@@ -1524,16 +1599,22 @@ struct RecordingPage {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
         if (this.showRecordingSettings) { this.SettingsContent() }
-        else if (this.selected === null && !this.recording) { this.SearchControls(); this.Home() }
+        else if (this.selected === null && !this.recording) {
+          if (!this.classroom) { this.SearchControls() }
+          this.Home()
+        }
         else {
           Scroll(this.scroller) {
             Column({ space: 18 }) {
               if (this.recording) {
                 Column({ space: 24 }) {
-                  Text('正在录音').fontSize(20).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+                  Text(this.classroom ? '课堂进行中' : '正在录音').fontSize(20).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
                   Text(recordingTime(this.seconds)).fontSize(48).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#FF453A'))
-                  Text(recordingAudioSourceLabel(this.audioSource)).fontSize(17).fontColor(AppTheme.text('#8E8E93'))
+                  Text(this.classroom ? '随堂照片 ' + this.livePhotos.length + ' 张' : recordingAudioSourceLabel(this.audioSource)).fontSize(17).fontColor(AppTheme.text('#8E8E93'))
                 }.width('100%').padding({ top: 26, bottom: 24 })
+                if (this.classroom && this.livePhotos.length > 0) {
+                  ClassroomPhotoStrip({ photos: this.livePhotos, directory: this.livePhotoDirectory })
+                }
                 if (this.liveStatus) {
                   Column({ space: 14 }) {
                     Row() {
@@ -1567,11 +1648,13 @@ struct RecordingPage {
           }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
         }
       }.width('100%').height('100%').padding({ top: APP_HEADER_CONTENT_GAP })
-      if (this.recordingDockVisible()) { this.RecordingDock() }
+      if (this.recordingDockVisible()) {
+        if (this.classroom) { this.ClassroomDock() } else { this.RecordingDock() }
+      }
     }.width('100%').height('100%')
   }
   @Builder private PageHeader() {
-    AppHeader({ title: this.showRecordingSettings ? '录音设置' : this.selected === null ? '录音' : this.recordTitle(this.selected),
+    AppHeader({ title: this.showRecordingSettings ? '录音设置' : this.selected === null ? (this.classroom ? '智慧课堂' : '录音') : this.recordTitle(this.selected),
       showBackButton: true, actionLabel: this.showRecordingSettings ? '' : '更多',
       onBackClick: (): void => { this.goBack(); }, onActionClick: (): void => { this.openRecordingSettings(); } })
   }

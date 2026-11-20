@@ -45,7 +45,11 @@ export class CodexChatService {
   load(id: string): CodexChatRun | null { return this.store.load(id); }
   private save(operation: CodexChatOperation): void { this.store.save(operation.run); }
   private requireCurrent(operation: CodexChatOperation): void {
-    if (operation.paused || !ChatSessionStorage.sessionExists(this.filesDir, operation.run.sessionId)) {
+    const owner = operation.run.sessionId;
+    const lesson = /^classroom:([a-f0-9-]{36})$/.exec(owner);
+    const exists = lesson ? fileIo.accessSync(this.filesDir + '/recording-analysis/' + lesson[1] + '/classroom') :
+      ChatSessionStorage.sessionExists(this.filesDir, owner);
+    if (operation.paused || !exists) {
       throw new Error('聊天已关闭或删除，远端状态待同步');
     }
   }
@@ -116,7 +120,15 @@ export class CodexChatService {
         run.taskId = envelope.task.id;
       }
       this.save(operation);
-      const attachments = await this.uploadImages(operation, execution.imagePaths);
+      const current = operation;
+      const attachments = execution.uploadMaterials ? await execution.uploadMaterials(async (name: string, base64: string): Promise<string> => {
+        this.requireCurrent(current);
+        if (current.stopRequested || execution.isCancelled()) { throw new Error('已取消发送课堂资料'); }
+        const reply = await current.client.call(CODEX_UPLOAD_ROUTE, { workspaceId: current.run.workspaceId, name: name,
+          base64: base64, image: false });
+        if (!reply.attachment) { throw new Error('电脑未确认收到课堂资料'); }
+        return reply.attachment.id;
+      }) : await this.uploadImages(operation, execution.imagePaths);
       this.requireCurrent(operation);
       if (execution.isCancelled() || operation.stopRequested) { run.status = 'cancelled'; this.save(operation); return codexChatResult(run); }
       // Persist the request ID BEFORE POST. An ambiguous response is reconciled

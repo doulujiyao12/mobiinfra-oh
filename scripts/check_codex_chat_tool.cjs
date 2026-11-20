@@ -214,6 +214,28 @@ async function main() {
   backend(); e = env();
   result = await e.service.execute(request, { ...e.execution, imagePaths: ['/sandbox/other-chat/private.png'] });
   assert.equal(result.status, 'failed'); assert.equal(calls.filter(c => c.route === '/v1/uploads' || c.route.endsWith('/turns')).length, 0);
+  // A classroom owns its own run, sends selected files after confirmation and receives the three documents.
+  b = backend(); e = env();
+  const lessonId = randomUUID();
+  mocks['@kit.CoreFileKit'].fileIo.accessSync = p => p === e.dir + '/recording-analysis/' + lessonId + '/classroom';
+  const materials = {...e.execution,sessionId:'classroom:'+lessonId,
+    uploadMaterials:async upload=>[await upload('classroom.zip','YWJj')]};
+  result = await e.service.execute(request,{...materials,selectTarget:async()=>null});
+  assert.equal(result.status,'rejected');assert.equal(calls.length,0);
+  handler = async (route,body)=>{
+    const reply=await b.call(route,body);
+    if (reply.task?.status==='completed') {
+      const artifact=reply.task.artifacts.at(-1);
+      reply.task.artifacts=['课堂笔记','知识要点','模拟试题'].map((name,i)=>({...artifact,id:'word-'+i,name:name+'.docx',
+        mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}));
+    }
+    return reply;
+  };
+  result=await e.service.execute(request,materials);
+  assert.equal(result.status,'completed');assert.equal(result.received,3);
+  assert.deepEqual(copy(e.store.load(result.runId).files.map(f=>f.name)),['课堂笔记.docx','知识要点.docx','模拟试题.docx']);
+  assert.equal(calls.find(c=>c.route==='/v1/uploads').body.image,false);
+  assert.deepEqual(calls.find(c=>c.route.endsWith('/turns')).body.attachments,['upload-1']);
   // Unsupported connectors fail before dispatch; in-app delegation has no second privacy gate.
   b = backend(); e = env(); b.info.permissionSettingsSupported = false;
   result = await e.service.execute(request, e.execution); assert.equal(result.status, 'failed');

@@ -39,6 +39,7 @@ files.push(path.join(root,'entry/src/main/ets/workers/RecordingAnalysisWorker.et
   path.join(root,'entry/src/main/ets/workers/RecordingLiveWorker.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingPage.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingSummaryView.ets'),
+  path.join(root,'entry/src/main/ets/pages/recording/ClassroomMaterialsView.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingSettingsView.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/RecordingCalendarView.ets'),
   path.join(root,'entry/src/main/ets/pages/recording/WatchRecordingPickerView.ets'),

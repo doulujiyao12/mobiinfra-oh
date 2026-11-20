@@ -166,6 +166,11 @@ export class RecordingStore {
       let path = dir + '/' + name;
       if (fs.accessSync(path)) { fs.unlinkSync(path); }
     }
+    const lesson = dir + '/classroom';
+    if (fs.accessSync(lesson)) {
+      for (const entry of fs.listFileSync(lesson)) { fs.unlinkSync(lesson + '/' + entry); }
+      fs.rmdirSync(lesson);
+    }
     fs.rmdirSync(dir);
   }
   removeAudio(record: RecordingRecord): void {

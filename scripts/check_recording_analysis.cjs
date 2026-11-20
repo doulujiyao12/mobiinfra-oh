@@ -341,7 +341,7 @@ async function testAsync(name,fn){if(!selectedTest(name))return;await fn();tests
   });
   await testAsync('Speaker separation defaults off, requires approval to enable, and cancellation restores the switch',async()=>{
     const source=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/recording/RecordingPage.ets'),'utf8');
-    assert(source.includes("PersistentStorage.persistProp('recordingSpeakerSeparation', false)"));
+    assert(fs.readFileSync(path.join(root,base,'RecordingPreferences.ets'),'utf8').includes("PersistentStorage.persistProp('recordingSpeakerSeparation', false)"));
     const tree=ts.createSourceFile('page.ts',source.replace('struct RecordingPage','class RecordingPage'),ts.ScriptTarget.Latest,true);
     const component=tree.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='RecordingPage');
     const method=component.members.find(n=>ts.isMethodDeclaration(n)&&n.name?.getText(tree)==='setSpeakerSeparation').getText(tree);
@@ -504,7 +504,7 @@ async function testAsync(name,fn){if(!selectedTest(name))return;await fn();tests
     const methods=component.members.filter(n=>ts.isMethodDeclaration(n)&&names.includes(n.name?.getText(tree))).map(n=>n.getText(tree)).join('\n');
     let confirmation=0;const exported={};
     vm.runInNewContext(ts.transpileModule('exports.Page=class {'+methods+'}',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
-      {exports:exported,Date,recordingUsesAutomaticTitle:types.recordingUsesAutomaticTitle,promptAction:{showDialog:async()=>({index:confirmation})}});
+      {exports:exported,Date,CLASSROOM_SOURCE:load(base+'ClassroomMaterials').CLASSROOM_SOURCE,recordingUsesAutomaticTitle:types.recordingUsesAutomaticTitle,promptAction:{showDialog:async()=>({index:confirmation})}});
     const open=store.create('录制'),target=store.create('录制');
     for(const r of [open,target]){files.set(store.audioPath(r.id),wave());store.save(r);}
     const page=new exported.Page();Object.assign(page,{alive:true,busy:false,selected:open,store,reference:null,
@@ -1209,6 +1209,66 @@ async function testAsync(name,fn){if(!selectedTest(name))return;await fn();tests
     const finishing=runner.finish(64000);const rejected=assert.rejects(finishing,/已停止/);runner.cancel();await rejected;
     const before=runner.snapshot(4).segments.length;thread.onmessage({data:{kind:'done',processed:64000,segments:[],speech:[],error:''}});
     assert.equal(runner.snapshot(4).segments.length,before);assert.equal(runner.snapshot(4).segments[0].text,'已完成内容');assert(thread.terminated);assert.equal(failures.length,1);
+  });
+  await testAsync('Classroom packages keep long transcripts, timed selected photos and section summaries without audio or voiceprints',async()=>{
+    const material=load(base+'ClassroomMaterials');
+    const photo=material.classroomPhoto('photo-23750-'+crypto.randomUUID()+'.jpg');
+    assert.equal(photo.seconds,23.75);
+    assert.equal(material.classroomPhoto('../'+photo.name),null);
+    const summary={title:'物理课',overview:'能量守恒',keyPoints:['功和能'],decisions:[],actionItems:[],openQuestions:[]};
+    const record={source:'课堂',title:'能量',duration:3600,createdAt:'2026-11-19',analysis:{
+      segments:[{start:0,end:3599,speaker:1,text:'课堂'.repeat(20000)+'最后一条证据'}],
+      speakers:[{id:1,name:'讲师',embedding:['PRIVATE-VOICEPRINT']}]},summary:{...summary,
+      sections:[{start:60,end:90,summary:{...summary,overview:'分段重点'}}]}};
+    const notes=material.classroomText(record,[photo]);
+    for(const expected of ['00:23','讲师','最后一条证据','分段重点',photo.name])assert(notes.includes(expected));
+    assert(!notes.includes('PRIVATE-VOICEPRINT'));assert(!material.classroomText(record,[]).includes('.jpg'));
+    assert.throws(()=>material.classroomText({...record,transcriptionComplete:false},[]),/转写/);
+    assert.throws(()=>material.classroomText({...record,summary:{...summary,complete:false}},[]),/摘要/);
+    const output=crypto.randomBytes(8*1024*1024+137);
+    const kit=mocks['@kit.BasicServicesKit'],util=mocks['@kit.ArkTS'].util;
+    const oldStat=io.stat,oldRead=maxRead;
+    mocks['@kit.CameraKit'] ||= {};mocks['@kit.ImageKit'] ||= {};
+    util.Base64Helper=class{encodeToStringSync(value){return Buffer.from(value).toString('base64');}};
+    io.stat=async key=>io.statSync(key);maxRead=65537;
+    const photoBytes=Buffer.from([255,216,255,217]);files.set('/lesson/'+photo.name,photoBytes);
+    kit.zlib={compressFile:async(dir,dest)=>{
+      assert.deepEqual(io.listFileSync(dir).sort(),['lesson.md',photo.name].sort());
+      assert.equal(files.get(dir+'/lesson.md').toString(),notes);assert(files.get(dir+'/'+photo.name).equals(photoBytes));
+      files.set(dest,output);
+    }};
+    const {uploadClassroomPack}=load(base+'ClassroomFiles');
+    try{
+      const chunks=[],names=[];
+      const ids=await uploadClassroomPack('/cache','/lesson',record,[photo],async(name,data)=>{
+        chunks.push(Buffer.from(data,'base64'));names.push(name);return String(names.length);});
+      assert.deepEqual(Array.from(ids),['1','2']);assert.deepEqual(names,['classroom.zip.001','classroom.zip.002']);
+      assert(Buffer.concat(chunks).equals(output));
+      await assert.rejects(uploadClassroomPack('/cache','/lesson',record,[photo],async()=>{throw Error('offline');}),/offline/);
+      assert(![...files.keys(),...dirs].some(p=>p.startsWith('/cache/lesson-pack-')));
+    }finally{maxRead=oldRead;io.stat=oldStat;delete kit.zlib;delete util.Base64Helper;}
+  });
+  await testAsync('Classroom photo capture survives camera cancellation, keeps sample timestamps and follows recording deletion',async()=>{
+    const camera=mocks['@kit.CameraKit'] ||= {},imageKit=mocks['@kit.ImageKit'] ||= {};
+    const capture=load(base+'ClassroomFiles'),store=new (load(base+'RecordingStore').RecordingStore)('/app');
+    const record=store.create('课堂'),lesson=store.directory(record.id)+'/classroom';
+    dirs.add(lesson);files.set(store.audioPath(record.id),wave());store.save(record);
+    const core=mocks['@kit.CoreFileKit'];core.fileUri={getUriFromPath:p=>p};
+    camera.camera={CameraPosition:{CAMERA_POSITION_BACK:1}};
+    let accept=false;
+    camera.cameraPicker={PickerMediaType:{PHOTO:'photo'},pick:async(_ctx,_types,profile)=>{
+      assert(io.accessSync(profile.saveUri));return {resultCode:accept?0:-1,mediaType:'photo',resultUri:profile.saveUri};}};
+    imageKit.image={createImageSource:()=>({getImageInfo:async()=>({size:{width:4800,height:3200}}),
+      createPixelMap:async(opts)=>{assert.equal(opts.desiredSize.width,2400);return {release:async()=>{}};},release:async()=>{}}),
+      createImagePacker:()=>({packing:async()=>new Uint8Array([255,216,255,217]).buffer,release:async()=>{}})};
+    assert.equal(await capture.photographLesson({cacheDir:'/cache'},lesson,4),false);
+    assert.equal(capture.classroomPhotos(lesson).length,0);
+    accept=true;assert.equal(await capture.photographLesson({cacheDir:'/cache'},lesson,5.125),true);
+    const [photo]=capture.classroomPhotos(lesson);
+    assert.equal(photo.seconds,5.125);assert.equal(files.get(lesson+'/'+photo.name).length,4);
+    assert(![...files.keys()].some(p=>p.startsWith('/cache/lesson-camera-') || p.endsWith('.jpg.part')));
+    store.removeAudio(record);assert(io.accessSync(lesson+'/'+photo.name));assert(!store.hasAudio(record.id));
+    store.remove(record.id);assert(!io.accessSync(lesson+'/'+photo.name));assert(!io.accessSync(lesson));
   });
   test('Page, Worker and WAV entry points are registered without importing memory services',()=>{
     const pages=JSON.parse(fs.readFileSync(path.join(root,'entry/src/main/resources/base/profile/main_pages.json'),'utf8'));

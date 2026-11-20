@@ -5,6 +5,7 @@ import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { RecordingRouteParams } from '../../utils/recording/ClassroomMaterials';
 import { PersonalInfoSection } from './PersonalInfoSection';
 import { WechatAutoSummarySettings, WechatCollectionForm } from '../../utils/wechat/WechatAutoSummarySettings';
 import {
@@ -402,10 +403,26 @@ export struct CollectionPage {
   }
 
   @Builder AnalysisShortcuts() {
-    Row() {
-      this.AnalysisShortcut('图库分析', $r('app.media.source_gallery'), '#329AA2', '#28618A', 'pages/gallery/GalleryPage')
-      Divider().vertical(true).height(26).strokeWidth(0.5).color($r('app.color.ui_border'))
-      this.AnalysisShortcut('录音分析', $r('app.media.source_recording_white'), '#D96B56', '#AC425F', 'pages/recording/RecordingPage')
+    Column() {
+      Row() {
+        this.AnalysisShortcut('图库分析', $r('app.media.source_gallery'), '#329AA2', '#28618A', 'pages/gallery/GalleryPage')
+        Divider().vertical(true).height(26).strokeWidth(0.5).color($r('app.color.ui_border'))
+        this.AnalysisShortcut('录音分析', $r('app.media.source_recording_white'), '#D96B56', '#AC425F', 'pages/recording/RecordingPage')
+      }.width('100%')
+      Divider().strokeWidth(0.5).color($r('app.color.ui_border'))
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 12 }) {
+          Image($r('app.media.classroom_book')).width(32).height(32).padding(6)
+            .backgroundColor($r('app.color.ui_surface_muted')).borderRadius(10)
+          Text('智慧课堂').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.ui_text_primary'))
+          Blank()
+          Text('›').fontSize(22).fontColor($r('app.color.ui_text_muted'))
+        }.width('100%')
+      }.width('100%').height(56).padding({ left: 16, right: 18 }).backgroundColor(Color.Transparent)
+        .onClick((): void => {
+          const params: RecordingRouteParams = { classroom: true };
+          router.pushUrl({ url: 'pages/recording/RecordingPage', params: params });
+        })
     }.width('100%').backgroundColor($r('app.color.ui_surface')).borderRadius(18).clip(true)
   }
 
