@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { CodexRpc } from '../../bridge/codex/rpc.mjs';
 import { BridgeCore } from '../../bridge/codex/core.mjs';
@@ -9,34 +9,70 @@ import { Settings, writePrivate } from './settings.mjs';
 import { ensureCertificates, lanAddresses } from './certificates.mjs';
 import { VERSION } from './paths.mjs';
 import { TailscaleDiscovery } from './tailscale.mjs';
+import { findCodexRuntime, validateCodexSelection } from './codex-runtime.mjs';
 import QRCode from 'qrcode';
 
 export class CompanionManager extends EventEmitter {
   server = null; core = null; rpc = null; state = 'stopped'; lastError = ''; account = null;
+  runtimeError = ''; runtimeSetup = null;
   constructor(directory, layout, dependencies = {}) {
     super(); this.settings = new Settings(directory); this.layout = layout;
     this.tailscale = dependencies.tailscale || new TailscaleDiscovery();
-    this.rpcFactory = dependencies.rpcFactory || (() => new CodexRpc(layout.codex, undefined, { env: {
-      ...process.env, PATH: path.join(path.dirname(layout.codex), '..', 'codex-path') + path.delimiter + (process.env.PATH || '')
-    } }));
+    this.rpcFactory = dependencies.rpcFactory || (() => {
+      const executable = findCodexRuntime({ resources: layout.base, preferredExecutable: this.settings.value.codexExecutable });
+      const tools = path.join(path.dirname(executable), '..', 'codex-path');
+      // A Unix npm launcher may need Node.js via its shebang when started from a GUI.
+      const runtimePath = [existsSync(tools) ? tools : '', process.env.PATH, path.dirname(layout.node)].filter(Boolean);
+      const env = { ...process.env, PATH: runtimePath.join(path.delimiter) };
+      return new CodexRpc(executable, undefined, { env });
+    });
     this.pairing = new PairingManager(this.settings.directory);
   }
   async initialize() {
-    this.rpc = this.rpcFactory();
-    this.rpc.on('message', message => {
+    await this.ensureRuntime();
+    await this.tailscale.refresh();
+  }
+
+  async ensureRuntime() {
+    if (!this.runtimeSetup && (!this.rpc || this.rpc.closed)) {
+      this.runtimeSetup = this.connectRuntime().finally(() => { this.runtimeSetup = null; });
+    }
+    await this.runtimeSetup;
+    return !!this.rpc && !this.rpc.closed;
+  }
+
+  async connectRuntime() {
+    this.account = null;
+    let rpc;
+    try { rpc = this.rpcFactory(); }
+    catch (error) { this.runtimeError = error.message; return; }
+    this.rpc = rpc;
+    rpc.on('message', message => {
+      if (this.rpc !== rpc) return;
       if (message.method === 'account/login/completed') {
         this.lastLogin = { success: !!message.params.success, error: message.params.error || '' };
         this.readAccount().catch(() => {}); this.emit('change');
       }
       if (message.id !== undefined && message.method && !this.core) {
-        this.rpc.send({ id: message.id, error: { code: -32601, message: 'Unsupported local interaction' } });
+        rpc.send({ id: message.id, error: { code: -32601, message: 'Unsupported local interaction' } });
       }
     });
-    this.rpc.on('stopped', () => { this.state = 'error'; this.lastError = 'Codex 已退出。请关闭并重新打开 PC 应用。'; this.emit('change'); });
-    await this.rpc.initialize(); await this.readAccount(); await this.tailscale.refresh();
+    rpc.on('stopped', () => {
+      if (this.rpc !== rpc) return;
+      this.account = null;
+      this.state = 'error'; this.runtimeError = '本机 Codex 已退出，请重新打开 ClawMate Codex。'; this.emit('change');
+    });
+    try { await rpc.initialize(); await this.readAccount(); this.runtimeError = ''; }
+    catch {
+      this.rpc = null; rpc.close();
+      this.runtimeError = '无法启动本机 Codex。请更新 Codex，或选择另一个 Codex 程序。';
+    }
   }
   async readAccount() {
-    const result = await this.rpc.request('account/read', { refreshToken: false });
+    const rpc = this.rpc;
+    if (!rpc || rpc.closed) return this.account = null;
+    const result = await rpc.request('account/read', { refreshToken: false });
+    if (this.rpc !== rpc || rpc.closed) return this.account;
     this.requiresOpenaiAuth = result.requiresOpenaiAuth;
     this.account = result.account ? { type: result.account.type,
       email: result.account.email || '', planType: result.account.planType || '' } : null;
@@ -51,6 +87,8 @@ export class CompanionManager extends EventEmitter {
     const origins = config.networkMode === 'public' ? [config.publicOrigin].filter(Boolean) :
       (config.host === '127.0.0.1' ? ['127.0.0.1'] : addresses).map(ip => `https://${ip}:${config.port}`);
     return { version: VERSION, state: this.state, lastError: this.lastError, account: this.account,
+      runtimeError: this.runtimeError, codexExecutable: this.rpc?.closed ? '' : this.rpc?.command || '',
+      hasCustomCodex: !!this.settings.value.codexExecutable,
       login: this.lastLogin || null, config, origins, devices: this.pairing.list(),
       fingerprint: this.certificates?.fingerprint || '', tasks: this.core?.list() || [],
       dataDirectory: this.settings.directory, launcher: this.layout.launcher,
@@ -60,8 +98,28 @@ export class CompanionManager extends EventEmitter {
     if (this.server || this.state === 'starting') throw new Error('请先停止手机连接服务，再修改项目或网络配置。');
     this.settings.update(body); return this.status();
   }
+  async selectCodexExecutable(filename) {
+    if (this.server || ['running', 'starting'].includes(this.state)) throw new Error('请先停止手机连接服务，再切换 Codex。');
+    if (this.runtimeSetup) throw new Error('正在连接 Codex，请稍候。');
+    if (typeof filename !== 'string') throw new Error('无效的 Codex 程序路径。');
+    if (filename) validateCodexSelection(filename, this.layout.base);
+    this.settings.setCodexExecutable(filename);
+
+    const previous = this.rpc;
+    this.rpc = null;
+    if (this.core) { this.core.close(); this.core = null; }
+    else previous?.close();
+    this.loginId = null;
+    this.lastLogin = null;
+    await this.ensureRuntime();
+    if (!this.server && this.state === 'error' && !this.runtimeError) {
+      this.state = 'stopped'; this.lastError = '';
+    }
+    return this.status();
+  }
   async login(type = 'chatgpt') {
     if (!['chatgpt', 'chatgptDeviceCode'].includes(type)) throw new Error('无效的登录方式。');
+    if (!await this.ensureRuntime()) throw new Error(this.runtimeError);
     this.lastLogin = null;
     const result = await this.rpc.request('account/login/start', { type });
     this.loginId = result.loginId;
@@ -74,6 +132,7 @@ export class CompanionManager extends EventEmitter {
   }
   async logout() {
     if (this.server) throw new Error('请先停止连接服务，再退出 Codex 账号。');
+    if (!await this.ensureRuntime()) throw new Error(this.runtimeError);
     await this.rpc.request('account/logout'); await this.readAccount(); return this.status();
   }
   async start() {
@@ -81,6 +140,8 @@ export class CompanionManager extends EventEmitter {
     if (this.state === 'starting') throw new Error('服务正在启动，请稍候。');
     this.state = 'starting'; this.lastError = '';
     try {
+      if (this.core) { this.rpc = null; this.core.close(); this.core = null; }
+      if (!await this.ensureRuntime()) throw new Error(this.runtimeError);
       await this.readAccount();
       if (!this.account && this.requiresOpenaiAuth !== false) throw new Error('请先登录 Codex。');
       const config = this.settings.value;
@@ -90,7 +151,6 @@ export class CompanionManager extends EventEmitter {
         { cert: config.certFile, key: config.keyFile, caCertificate: '', fingerprint: '' };
       const bridgeConfig = { ...config, stateDir: path.join(this.settings.directory, 'tasks'), tls: this.certificates,
         desktopCoordination: true };
-      if (this.core) { this.core.close(); this.core = null; await this.initialize(); }
       this.core = new BridgeCore(bridgeConfig, this.rpc);
       await this.core.initialize({ initializeRpc: false });
       this.server = createBridgeServer(bridgeConfig, this.core, { pairing: this.pairing });
@@ -140,8 +200,9 @@ export class CompanionManager extends EventEmitter {
   async dispatch(method, body = {}) {
     if (this.updatePreparing && !['status', 'cancelUpdate'].includes(method)) throw new Error('正在准备安装更新，请稍候');
     switch (method) {
-      case 'status': await this.readAccount(); await this.tailscale.refresh(); return this.status();
+      case 'status': if (!this.runtimeSetup) await this.readAccount(); await this.tailscale.refresh(); return this.status();
       case 'configure': return this.configure(body);
+      case 'selectCodexExecutable': return this.selectCodexExecutable(body.filename);
       case 'login': return this.login(body.type);
       case 'cancelLogin': await this.cancelLogin(); return this.status();
       case 'logout': return this.logout();

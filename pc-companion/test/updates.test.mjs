@@ -174,7 +174,7 @@ function installFixture(t, platform = 'linux') {
   const dataDir = path.join(root, 'private'); const folder = path.join(dataDir, 'updates/install-fixture'); mkdirSync(folder, { recursive: true });
   writeFileSync(path.join(dataDir, 'pairing-preserve'), 'private data'); writeFileSync(path.join(dataDir, 'update-resume.json'), JSON.stringify({ version: '1.1.14', wasRunning: true }));
   const archive = path.join(dataDir, 'updates', platform === 'linux' ? 'app.tar.gz' : 'app.exe');
-  const data = platform === 'linux' ? tar(['host/cli.mjs', 'bin/clawmate-codex', 'runtime/node', 'runtime/bin/codex'].map(name => ({ name, data: 'new-version' }))) : Buffer.from('MZinstaller');
+  const data = platform === 'linux' ? tar(['host/cli.mjs', 'bin/clawmate-codex', 'runtime/node'].map(name => ({ name, data: 'new-version' }))) : Buffer.from('MZinstaller');
   writeFileSync(archive, data);
   return { root, job: { version: '1.1.14', platform, kind: platform === 'linux' ? 'terminal' : 'desktop', installRoot, dataDir, folder, archive, size: data.length, sha256: hash(data), parentPid: process.pid } };
 }

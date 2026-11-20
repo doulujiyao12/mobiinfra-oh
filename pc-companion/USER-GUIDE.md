@@ -1,6 +1,8 @@
 # ClawMate Codex 电脑端
 
-安装这一个程序即可从鸿蒙 ClawMate 使用电脑上的 Codex。运行组件已随程序内置，不需要安装 Node.js、npm、Git 或查找源代码。项目本身需要的编译器和依赖仍由项目决定。
+ClawMate 桥接使用电脑上已安装的 Codex 桌面版或 CLI。桥接自带 Node.js。更新本机 Codex 后，完全退出并重新打开桥接应用，或重启终端桥接服务，下次连接会使用当前安装的版本。
+
+Windows 会优先查找已安装的官方桌面版，macOS 会在「应用程序」中查找 Codex，Linux 优先使用 PATH 中的 CLI。自定义安装时，在桌面端的「Codex 账号」中点击「选择 Codex 程序」，选择已安装的可执行文件，macOS 也可以选 `Codex.app`。选择会保存在本机，文件移走后会重新查找。点击「恢复自动查找」可清除保存的位置。命令行环境也可以通过 `CLAWMATE_CODEX_EXECUTABLE` 指定可执行文件的绝对路径。
 
 [下载安装包与分平台步骤](../docs/codex/README.md) · [Windows](../docs/codex/windows.md) · [macOS](../docs/codex/macos.md) · [Linux CLI](../docs/codex/linux.md) · [Tailscale 组网教程](../docs/codex/tailscale.md)
 
@@ -96,6 +98,8 @@ clawmate-codex quit
 ## 应用更新
 
 1.1.13 起，桌面侧栏的“应用更新”可检查 GitHub 上的连接器发布。默认启动 12 秒后检查，此后每 6 小时检查一次；可以关闭自动检查，或选择接收测试版。检查失败会显示错误，不会把网络失败当成“已是最新”。更新操作仅在本机 GUI/CLI 可用，不向手机开放安装接口。
+
+Linux 从旧的内置 Codex 版本升级时，请手动替换一次桥接程序。旧更新器会检查新包内是否有 Codex 可执行文件。桥接配置与配对保存在独立的应用数据目录。
 
 发现新版本后点击“下载更新”。下载支持暂停续传，完成后核对 GitHub 提供的 SHA256 摘要或同一 Release 的 `SHA256SUMS.txt`；缺少校验信息、大小不一致或校验失败都不会安装。
 

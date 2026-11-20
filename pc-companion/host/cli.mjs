@@ -10,7 +10,7 @@ import { ensureDaemon, quitDaemon } from './daemon-client.mjs';
 import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from './updates.mjs';
 
 const HELP = `ClawMate Codex ${VERSION}
-无需 Node.js、npm 或源码。桌面安装程序已内置相同命令行工具。
+使用本机安装的 Codex 桌面版或 CLI。桥接自带 Node.js 和启动工具。
 
 clawmate-codex setup                 交互配置电脑名称、项目和监听端口
 clawmate-codex setup --project PATH  配置项目（可用于无桌面的服务器）
@@ -30,6 +30,7 @@ clawmate-codex update --yes          无交互确认更新；--download-only 只
 clawmate-codex --version             显示版本
 
 可选：--origin https://IP:PORT 选择配对地址；setup --config FILE 导入公网 TLS 配置。
+CLAWMATE_CODEX_EXECUTABLE 可指定本机 Codex 可执行文件的绝对路径。
 配置和登录凭据仅保存在本机，不需要编辑源代码。`;
 function flag(args, name) { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; }
 

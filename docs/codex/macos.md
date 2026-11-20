@@ -1,8 +1,8 @@
 # macOS 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.15
+[返回下载与指南](README.md) · ClawMate Codex 1.1.16
 
-在自己的电脑安装 ClawMate Codex 连接器，登录、选择项目，再用手机扫码。运行组件已经内置，无需另装 Node.js 或 npm。
+在电脑安装 Codex 桌面版或 CLI，再安装 ClawMate Codex 连接器。选好项目后，用手机扫码配对。
 
 > 支持 Apple Silicon（M 系列）和 Intel 芯片。当前应用未签名、未公证。
 
@@ -19,9 +19,9 @@ xattr -dr com.apple.quarantine "/Applications/ClawMate Codex.app"
 open "/Applications/ClawMate Codex.app"
 ```
 
-## 3. 登录 Codex 账号
+## 3. 连接 Codex 账号
 
-在电脑「连接设置」点击「使用浏览器登录」，在官方登录页面完成授权。账号需具备 Codex 使用资格。OpenAI 登录凭据留在电脑，手机使用独立的设备凭据。
+连接器会查找电脑上已安装的 Codex。找不到时，在「Codex 账号」点击「选择 Codex 程序」。需要登录时，点击「使用浏览器登录」并在官方页面完成授权。
 
 ## 4. 选择允许操作的目录
 
@@ -53,7 +53,7 @@ open "/Applications/ClawMate Codex.app"
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.15)
+- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.16)
 - [Apple 官方：打开未公证的 App](https://support.apple.com/zh-cn/102445)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->

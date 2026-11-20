@@ -64,7 +64,7 @@ class PortableTests(unittest.TestCase):
             portable.mac_bundle(original, stage, '1.1.1', destination)
             with zipfile.ZipFile(destination) as result:
                 prefix = 'ClawMate Codex.app/Contents/'
-                self.assertEqual(plistlib.loads(result.read(prefix + 'Info.plist'))['CFBundleExecutable'], 'Electron')
+                self.assertEqual(plistlib.loads(result.read(prefix + 'Info.plist'))['CFBundleExecutable'], 'clawmate-codex-desktop')
                 self.assertEqual(plistlib.loads(result.read(prefix + 'Info.plist'))['CFBundleShortVersionString'], '1.1.1')
                 self.assertTrue(stat.S_ISLNK(result.getinfo(prefix + 'Frameworks/Test.framework/Versions/Current').external_attr >> 16))
                 self.assertEqual(result.getinfo(prefix + 'Resources/runtime/node').external_attr >> 16 & 0o777, 0o755)

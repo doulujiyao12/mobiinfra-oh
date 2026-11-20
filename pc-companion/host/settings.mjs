@@ -24,6 +24,11 @@ export class Settings {
     }
   }
   save() { writePrivate(this.filename, this.value); }
+  setCodexExecutable(filename) {
+    const value = { ...this.value, codexExecutable: filename };
+    writePrivate(this.filename, value);
+    this.value = value;
+  }
   publicValue() {
     const { name, host, port, workspaces, networkMode, publicOrigin, certFile, keyFile } = this.value;
     return { name, host, port, workspaces, networkMode, publicOrigin, certFile, keyFile };

@@ -71,7 +71,8 @@ def mac_bundle(source, stage, version, destination):
                 shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
         output.writestr('BUILD-NOTES.txt',
                         'ClawMate Codex ' + version + '\nUnsigned evaluation bundle built on a different host.\n'
-                        'This .app contains native macOS Electron, Node and Codex runtimes.\n'
+                        'This .app contains native macOS Electron and Node runtimes.\n'
+                        'Install Codex desktop or Codex CLI separately.\n'
                         'Developer ID signing/notarization and native macOS validation are pending.\n'
                         'Production distribution must be built and signed on macOS.\n')
 

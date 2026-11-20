@@ -22,20 +22,8 @@ if (platform === 'win32') {
 }
 const nodeFolder = path.join(temporary, nodeName);
 cpSync(path.join(nodeFolder, platform === 'win32' ? 'node.exe' : 'bin/node'), path.join(destination, platform === 'win32' ? 'node.exe' : 'node'));
-const codexArchive = download(lock.targets[target].codex.url, path.join(temporary, 'codex.tgz'), lock.targets[target].codex.sha512, 'sha512');
-execFileSync('tar', ['-xzf', codexArchive, '-C', temporary], { stdio: 'inherit' });
-const triple = `${arch === 'x64' ? 'x86_64' : 'aarch64'}-${platform === 'win32' ? 'pc-windows-msvc' : platform === 'darwin' ? 'apple-darwin' : 'unknown-linux-musl'}`;
-const codexFolder = path.join(temporary, 'package', 'vendor', triple);
-// Include Codex's companion binaries (code-mode host and search tools), not just the main executable.
-cpSync(codexFolder, destination, { recursive: true });
 const licenses = path.join(destination, 'licenses'); mkdirSync(licenses, { recursive: true });
 cpSync(path.join(nodeFolder, 'LICENSE'), path.join(licenses, 'NODE-LICENSE.txt'));
-const pkg = JSON.parse(readFileSync(path.join(temporary, 'package', 'package.json'), 'utf8'));
-writeFileSync(path.join(licenses, 'CODEX-PACKAGE.json'), JSON.stringify({ name: pkg.name, version: pkg.version, license: pkg.license, repository: pkg.repository }, null, 2));
-// The release includes upstream license and notices; fail rather than silently shipping without them.
-download(lock.codexLicense.url, path.join(licenses, 'CODEX-LICENSE.txt'), lock.codexLicense.sha256);
-if (platform !== 'win32') {
-  chmodSync(path.join(destination, 'node'), 0o755); chmodSync(path.join(destination, 'bin', 'codex'), 0o755);
-}
-writeFileSync(path.join(destination, 'runtime.json'), JSON.stringify({ target, nodeVersion: lock.nodeVersion, codexVersion: lock.codexVersion }, null, 2));
-console.log('Prepared verified runtimes:', target);
+if (platform !== 'win32') chmodSync(path.join(destination, 'node'), 0o755);
+writeFileSync(path.join(destination, 'runtime.json'), JSON.stringify({ target, nodeVersion: lock.nodeVersion }, null, 2));
+console.log('Prepared verified Node.js runtime:', target);

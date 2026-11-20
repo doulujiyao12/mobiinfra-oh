@@ -6,7 +6,7 @@
 
 1.1.14 修复跨平台构建的 macOS 包将安装环境误判为开发环境、错误报告缺少 Node 的问题。选择项目时先列出本机 Codex 的已有项目与近期会话目录，支持搜索和浏览其他文件夹；只有主动添加并保存后才会授权手机。发现过程只读取目录元数据，不读取会话内容或登录凭据。
 
-桌面版使用 Electron 的隔离界面；终端版通过 Go 编译的本机入口启动随包附带的 Node 与官方 Codex。两者共用仅在本机提供的有鉴权控制通道和同一套配置。手机仍通过 HTTPS 调用既有任务接口。
+桌面版使用 Electron 界面，终端版通过 Go 启动器启动随包附带的 Node.js。两者共用本机管理服务，并使用用户已安装的 Codex 桌面版或 CLI。手机通过 HTTPS 调用任务接口。
 
 1.1.9 补充 Linux 用户态 Tailscale：通过本机只读 LocalAPI 发现当前节点的 IPv4，支持自定义 socket，统一用于地址列表、配对和证书。不会修改 Tailscale、启用公网转发或改变 Windows/macOS 的网卡发现逻辑；配置和排查见[使用指南](USER-GUIDE.md#tailscale-组网)。
 
@@ -34,7 +34,7 @@ node pc-companion/build/distribute.mjs linux-x64
 
 `linux-x64` 可替换为 `linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`。桌面安装包由对应平台构建；终端包可以交叉构建。
 
-`runtime-lock.json` 固定官方运行时的版本与哈希。构建必须匹配已提交的校验值，不读取运行时的 latest 标签。维护者升级运行时版本时，先调整 `build/resolve-runtime-lock.mjs`，生成新锁文件并审查后再构建。
+`runtime-lock.json` 固定随包 Node.js 的版本与哈希。维护者升级 Node.js 时，调整 `build/resolve-runtime-lock.mjs`，生成新锁文件并审查后再构建。本机 Codex 版本由用户安装的桌面版或 CLI 决定。
 
 ```bash
 node pc-companion/build/resolve-runtime-lock.mjs
@@ -87,4 +87,4 @@ CI 的 Windows 签名使用 `WINDOWS_CSC_LINK`、`WINDOWS_CSC_KEY_PASSWORD`；ma
 
 对外上架鸿蒙 App 前，先完成 Windows/macOS 签名发行、下载地址配置、各平台干净机器验证、真机配对及 App 隐私声明核对。源码中不会放置发行证书或凭据。
 
-依赖边界：生产 JS 使用二维码库和固定版本的 `ws`；后者只连接本机私有 Unix socket，打包关闭可选原生扩展。证书生成和验证使用 Go/Node 标准加密库。Codex、Node、Electron 和生产 JS 依赖的许可与声明随安装包提供。上游登录、模型套餐和账号权益由 OpenAI 决定，本应用不承诺任何模型调用权益。
+依赖边界：生产 JS 使用二维码库和固定版本的 `ws`；后者只连接本机私有 Unix socket，打包关闭可选原生扩展。证书生成和验证使用 Go/Node 标准加密库。Node.js、Electron 和生产 JS 依赖的许可与声明随安装包提供。上游登录、模型套餐和账号权益由 OpenAI 决定。

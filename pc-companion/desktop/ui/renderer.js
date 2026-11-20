@@ -41,10 +41,15 @@ async function refresh() {
   $('sideState').textContent = running ? '手机连接服务已启动' : snapshot.state === 'error' ? '服务需要检查' : '手机连接服务未启动';
   $('sideDot').classList.toggle('running', running);
   const account = snapshot.account;
-  $('accountBadge').textContent = account ? '已登录' : '尚未登录'; $('accountBadge').classList.toggle('good', !!account);
-  $('accountDescription').textContent = account ? [account.email || account.type, account.planType].filter(Boolean).join(' · ') : '内置 Codex 运行组件，无需安装 Node.js 或其他命令行工具。';
+  $('accountBadge').textContent = snapshot.runtimeError ? 'Codex 不可用' : account ? '已登录' : '尚未登录';
+  $('accountBadge').classList.toggle('good', !!account && !snapshot.runtimeError);
+  $('accountDescription').textContent = snapshot.runtimeError || (account ?
+    [account.email || account.type, account.planType].filter(Boolean).join(' · ') : '使用电脑上已安装的 Codex。');
   $('start').disabled = running; $('stop').disabled = !running; $('save').disabled = running; $('addProject').disabled = running;
   $('login').disabled = !!account; $('deviceLogin').disabled = !!account; $('logout').disabled = !account || running;
+  $('chooseCodex').disabled = $('autoFindCodex').disabled = running || snapshot.state === 'starting';
+  $('autoFindCodex').hidden = !snapshot.hasCustomCodex;
+  $('accountDescription').title = snapshot.codexExecutable || '';
   if (snapshot.login?.success) $('loginCode').hidden = true;
   if (!dirty) {
     for (const [key, id] of [['name', 'computerName'], ['port', 'port'], ['host', 'host'], ['networkMode', 'networkMode'], ['publicOrigin', 'publicOrigin'], ['certFile', 'certFile'], ['keyFile', 'keyFile']]) $(id).value = snapshot.config[key] || '';
@@ -85,7 +90,7 @@ for (const [id, kind, target] of [['chooseCert', 'cert', 'certFile'], ['chooseKe
 $('save').addEventListener('click', () => act(async () => { await window.companion.call('configure', formConfig()); dirty = false; notice('配置已保存。'); }));
 $('start').addEventListener('click', () => act(async () => {
   if (dirty) { await window.companion.call('configure', formConfig()); dirty = false; }
-  notice('正在启动内置 Codex 和安全连接…'); await window.companion.call('start'); notice('连接服务已启动，接下来在“手机配对”中连接自己的手机。'); view('pairing');
+  notice('正在启动手机连接服务…'); await window.companion.call('start'); notice('连接服务已启动，接下来在“手机配对”中连接自己的手机。'); view('pairing');
 }));
 $('stop').addEventListener('click', () => act(async () => { await window.companion.call('stop'); $('pairingResult').hidden = true; notice('手机连接服务已停止。'); }));
 for (const [id, type] of [['login', 'chatgpt'], ['deviceLogin', 'chatgptDeviceCode']]) $(id).addEventListener('click', () => act(async () => {
@@ -94,6 +99,12 @@ for (const [id, type] of [['login', 'chatgpt'], ['deviceLogin', 'chatgptDeviceCo
   $('loginCode').textContent = result.userCode ? `在已打开的官方页面输入验证码：${result.userCode}\n${result.verificationUrl}` : '已在系统浏览器打开官方登录页面，完成后会自动更新登录状态。';
 }));
 $('logout').addEventListener('click', () => act(async () => { await window.companion.call('logout'); notice('已退出 Codex 账号。'); }));
+for (const [id, action] of [['chooseCodex', 'choose'], ['autoFindCodex', 'auto']]) $(id).addEventListener('click', () => act(async () => {
+  const result = await window.companion.codexRuntime(action);
+  if (!result) return;
+  $('loginCode').hidden = true;
+  notice(result.runtimeError || (action === 'choose' ? '已连接所选 Codex。' : '已恢复自动查找。'), !!result.runtimeError);
+}));
 $('generatePairing').addEventListener('click', () => act(async () => {
   const result = await window.companion.call('pair', { origin: $('origin').value });
   $('pairingResult').hidden = false; $('pairingQr').src = result.qr;

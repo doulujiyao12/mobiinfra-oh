@@ -1,20 +1,20 @@
 # Linux CLI 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.15
+[返回下载与指南](README.md) · ClawMate Codex 1.1.16
 
 适用于 x64 Linux 服务器，无需桌面环境。下面命令在服务器执行；把项目目录和示例 IP 换成自己的实际值。
 
-> 请以持有项目和原 Codex 会话的普通用户运行。保留解压后的 bin、runtime 和 host 目录，不要只移动启动文件。
+> 请先安装 Codex CLI，再以持有项目和原 Codex 会话的普通用户运行连接器。请保留解压后的 bin、runtime 和 host 目录。
 
 ## 1. 下载并解压
 
 下载终端版，先比对 Release 的 SHA256 校验清单，再解压到用户目录。目标目录应为空；升级时先结束任务并退出旧服务。
 
 ```bash
-curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.15-linux-x64.tar.gz \
-  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.15/ClawMate-Codex-Terminal-1.1.15-linux-x64.tar.gz
+curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz \
+  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.16/ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz
 mkdir -p "$HOME/ClawMate-Codex"
-tar -xzf ClawMate-Codex-Terminal-1.1.15-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
+tar -xzf ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
 cd "$HOME/ClawMate-Codex"
 ```
 
@@ -72,12 +72,13 @@ cat phone.clawmate-codex-pair.json
 ## 常见问题与注意事项
 
 - 配对码 5 分钟内有效，只能使用一次。请粘贴完整配对信息或导入配对文件；证书指纹不是 token。不要公开配对码和文件。
+- Codex CLI 安装在自定义位置时，可以在首次启动连接器前用 CLAWMATE_CODEX_EXECUTABLE 指定 Codex 可执行文件的绝对路径。
 - 手机查看原电脑会话时，桥接需与原 Codex 使用相同 OS 用户和 CODEX_HOME，且配置该会话的实际项目目录。兼容的原生 daemon 在线时可实时共享；其他用户、容器或 no-daemon 独占会话不一定支持。
 - Tailscale 使用用户态模式且未显示 100 开头地址时，可在首次启动后台前设置 CLAWMATE_TAILSCALE_SOCKET=/实际路径/tailscaled.sock。已有后台须在空闲时先退出，才会继承新环境变量。
 - 新任务默认允许工作目录内修改并请求批准。超时检查网络、status、服务端口与 Tailscale 策略；不要通过关闭 TLS 校验解决证书错误。
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.15)
+- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.16)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->

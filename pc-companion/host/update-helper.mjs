@@ -45,7 +45,7 @@ export async function applyUpdate(job, dependencies = {}) {
   const stage = mkdtempSync(path.join(parent, '.clawmate-stage-'));
   await extractUpdate(job.archive, stage, job.kind);
   const resources = job.kind === 'desktop' ? path.join(stage, 'resources') : stage;
-  for (const name of ['bin/clawmate-codex', 'runtime/node', 'runtime/bin/codex', 'host/cli.mjs']) {
+  for (const name of ['bin/clawmate-codex', 'runtime/node', 'host/cli.mjs']) {
     if (!statSync(path.join(resources, name)).isFile()) throw new Error('新版本缺少必要运行组件');
   }
   const reported = run(path.join(resources, 'runtime/node'), [path.join(resources, 'host/cli.mjs'), '--version'], {

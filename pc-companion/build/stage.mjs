@@ -1,10 +1,12 @@
 import { build } from 'esbuild';
-import { mkdirSync, cpSync, copyFileSync, readFileSync, writeFileSync, chmodSync, readdirSync } from 'node:fs';
+import { mkdirSync, cpSync, copyFileSync, readFileSync, writeFileSync, chmodSync, existsSync, realpathSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const target = process.argv[2] || `${process.platform}-${process.arch}`;
+const lock = JSON.parse(readFileSync(path.join(root, 'runtime-lock.json'), 'utf8'));
+if (!Object.hasOwn(lock.targets, target)) throw new Error('Unsupported build target: ' + target);
 const [platform, arch] = target.split('-');
 const output = path.join(root, 'out', target);
 const resources = path.join(output, 'resources');
@@ -15,7 +17,22 @@ execFileSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', path.join(reso
   cwd: path.join(root, 'launcher'), stdio: 'inherit', env: { ...process.env, CGO_ENABLED: '0',
     GOOS: platform === 'win32' ? 'windows' : platform, GOARCH: arch === 'x64' ? 'amd64' : 'arm64' }
 });
-cpSync(path.join(root, 'vendor', target), path.join(resources, 'runtime'), { recursive: true });
+const stagedResources = path.join(realpathSync(root), 'out', target, 'resources');
+if (path.relative(stagedResources, realpathSync(resources))) throw new Error('Stage resources must be inside the workspace');
+for (const directory of ['runtime', 'licenses']) {
+  const targetDir = path.join(stagedResources, directory);
+  if (existsSync(targetDir)) {
+    if (path.relative(targetDir, realpathSync(targetDir))) throw new Error('Refusing to replace a linked staging directory');
+    rmSync(targetDir, { recursive: true });
+  }
+}
+const runtime = path.join(resources, 'runtime');
+const vendor = path.join(root, 'vendor', target);
+mkdirSync(path.join(runtime, 'licenses'), { recursive: true });
+copyFileSync(path.join(vendor, 'node' + extension), path.join(runtime, 'node' + extension));
+if (platform !== 'win32' && process.platform !== 'win32') chmodSync(path.join(runtime, 'node'), 0o755);
+copyFileSync(path.join(vendor, 'licenses', 'NODE-LICENSE.txt'), path.join(runtime, 'licenses', 'NODE-LICENSE.txt'));
+writeFileSync(path.join(runtime, 'runtime.json'), JSON.stringify({ target, nodeVersion: lock.nodeVersion }, null, 2));
 cpSync(path.resolve(root, '../AppScope/resources/base/media/Icon.png'), path.join(resources, 'icon.png'));
 const banner = "import { createRequire as __makeRequire } from 'node:module'; const require = __makeRequire(import.meta.url);";
 // Node 22 provides UTF-8 validation; keep optional native WebSocket addons out of all portable bundles.

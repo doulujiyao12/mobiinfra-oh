@@ -1,4 +1,10 @@
-ClawMate Codex 1.1.15
+ClawMate Codex 1.1.16
+
+- Refresh the available model catalog when the phone requests it. Keep the last complete catalog if Codex cannot refresh it.
+- Apply the selected model speed to the next message sent from the phone, using the tiers advertised by Codex. The updated phone app exposes the speed selector.
+- Restore sharing with desktop clients that use coordination protocol 13 and retain support for protocol 11.
+
+Previous release: 1.1.15
 
 - Fix macOS local control socket startup when the canonical temporary directory exceeds the Unix socket path limit. Select a short private endpoint before binding and report control-channel failures with their original error code.
 - Retain per-user private directories, socket permissions and token authentication. Existing projects, sessions and phone pairing are preserved.

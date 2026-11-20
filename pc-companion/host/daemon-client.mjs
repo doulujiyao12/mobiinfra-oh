@@ -9,7 +9,8 @@ const pending = new Map();
 const gone = error => ['ENOENT', 'ECONNREFUSED', 'ENOTSOCK'].includes(error.code);
 const samePath = (a, b) => typeof a === 'string' && typeof b === 'string' &&
   (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
-const matches = (status, layout) => status.version === VERSION && samePath(status.launcher, layout.launcher);
+const matches = (status, layout) => status.version === VERSION && samePath(status.launcher, layout.launcher) &&
+  typeof status.codexExecutable === 'string' && typeof status.hasCustomCodex === 'boolean';
 const newer = version => {
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) return null;
   const current = VERSION.split('.').map(Number); const installed = version.split('.').map(Number);
@@ -17,7 +18,7 @@ const newer = version => {
   return false;
 };
 function validateInstallation(layout) {
-  for (const filename of [layout.node, layout.cli, layout.launcher, layout.codex]) {
+  for (const filename of [layout.node, layout.cli, layout.launcher]) {
     try { if (!statSync(filename).isFile()) throw new Error('not a file'); }
     catch { throw new Error('当前安装缺少运行组件 ' + path.basename(filename) + '，请重新安装完整的 ClawMate Codex。'); }
   }

@@ -100,6 +100,29 @@ ipcMain.handle('companion:choose', async (event, kind) => {
     properties: kind === 'project' ? ['openDirectory'] : ['openFile'] });
   return selected.canceled ? '' : selected.filePaths[0];
 });
+ipcMain.handle('companion:codexRuntime', async (event, action) => {
+  trusted(event);
+  if (!['choose', 'auto'].includes(action)) throw new Error('不支持的 Codex 选择方式。');
+
+  let filename = '';
+  if (action === 'choose') {
+    const windows = process.platform === 'win32';
+    const mac = process.platform === 'darwin';
+    const selection = await dialog.showOpenDialog(window, {
+      title: mac ? '选择 Codex.app 或 Codex CLI' : '选择 Codex 可执行文件',
+      properties: windows ? ['openFile'] : ['openFile', 'showHiddenFiles'],
+      ...(windows ? { filters: [{ name: 'Codex 可执行文件', extensions: ['exe'] }] } : {})
+    });
+    if (selection.canceled || !selection.filePaths.length) return null;
+    filename = selection.filePaths[0];
+    if (mac && path.extname(filename).toLowerCase() === '.app') {
+      filename = path.join(filename, 'Contents', 'Resources', 'codex');
+    }
+  }
+  await ensureDaemon(directory, layout);
+  if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');
+  return controlRequest(directory, 'selectCodexExecutable', { filename });
+});
 ipcMain.handle('companion:projects', async event => {
   trusted(event);
   return discoverCodexProjects({ excludeDirectory: directory });

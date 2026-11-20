@@ -1,5 +1,5 @@
 // Keep downloads pinned to a verified release; never guess the latest asset name.
-export const CODEX_BRIDGE_VERSION: string = '1.1.15';
+export const CODEX_BRIDGE_VERSION: string = '1.1.16';
 export const CODEX_BRIDGE_TAG: string = 'codex-bridge-v' + CODEX_BRIDGE_VERSION;
 export const CODEX_REPOSITORY_URL: string = 'https://github.com/doulujiyao12/mobiinfra-oh';
 export const CODEX_RELEASE_URL: string = CODEX_REPOSITORY_URL + '/releases/tag/' + CODEX_BRIDGE_TAG;
@@ -66,7 +66,7 @@ export function codexDownloads(): CodexDownload[] {
   ];
 }
 
-export const CODEX_DOWNLOAD_NOTICE: string = '安装包未签名，Mac 未公证；请选择与你电脑芯片匹配的版本。';
+export const CODEX_DOWNLOAD_NOTICE: string = '请先在电脑安装 Codex 桌面版或 CLI，再下载与你电脑芯片匹配的连接器。安装包未签名，Mac 未公证。';
 export const CODEX_PAIRING_NOTE: string = '配对码 5 分钟内有效，只能使用一次。请粘贴完整配对信息或导入配对文件；证书指纹不是 token。不要公开配对码和文件。';
 
 const DESKTOP_NOTES: string[] = [
@@ -91,7 +91,7 @@ function desktopGuide(platform: CodexPlatform): CodexGuide {
       command: 'xattr -dr com.apple.quarantine "/Applications/ClawMate Codex.app"\nopen "/Applications/ClawMate Codex.app"' });
   }
   steps.push(
-    { title: '登录 Codex 账号', body: '在电脑「连接设置」点击「使用浏览器登录」，在官方登录页面完成授权。账号需具备 Codex 使用资格。OpenAI 登录凭据留在电脑，手机使用独立的设备凭据。', command: '' },
+    { title: '连接 Codex 账号', body: '连接器会查找电脑上已安装的 Codex。找不到时，在「Codex 账号」点击「选择 Codex 程序」。需要登录时，点击「使用浏览器登录」并在官方页面完成授权。', command: '' },
     { title: '选择允许操作的目录', body: '点击「选择项目」，添加实际项目文件夹。保留「局域网 · 自动安全配对」，监听范围选择「允许局域网 / 远程设备访问」，保存设置。只添加你希望手机操作的项目。', command: '' },
     { title: '启动手机连接', body: '点击「启动手机连接」，确认服务已启动。手机和电脑先连接同一个可互访的 Wi-Fi；异地连接请先按 Tailscale 教程组网。默认端口为 8787，以电脑实际显示为准。', command: '' },
     { title: '生成配对二维码', body: '在电脑「手机配对」选择手机能访问的本机地址：同一 Wi-Fi 选局域网 IP，Tailscale 选 100 开头的 IP。点击「生成配对信息」，保持二维码页面打开。', command: '' },
@@ -105,7 +105,7 @@ function desktopGuide(platform: CodexPlatform): CodexGuide {
   }
   return {
     id: platform, title: platformName + ' 连接指南',
-    intro: '在自己的电脑安装 ClawMate Codex 连接器，登录、选择项目，再用手机扫码。运行组件已经内置，无需另装 Node.js 或 npm。',
+    intro: '在电脑安装 Codex 桌面版或 CLI，再安装 ClawMate Codex 连接器。选好项目后，用手机扫码配对。',
     notice: mac ? '支持 Apple Silicon（M 系列）和 Intel 芯片。当前应用未签名、未公证。' :
       '适用于 Windows x64。当前安装包未签名，请先核对 Release 中的 SHA256。',
     steps: steps,
@@ -119,7 +119,7 @@ function linuxGuide(): CodexGuide {
   return {
     id: 'linux', title: 'Linux CLI 连接指南',
     intro: '适用于 x64 Linux 服务器，无需桌面环境。下面命令在服务器执行；把项目目录和示例 IP 换成自己的实际值。',
-    notice: '请以持有项目和原 Codex 会话的普通用户运行。保留解压后的 bin、runtime 和 host 目录，不要只移动启动文件。',
+    notice: '请先安装 Codex CLI，再以持有项目和原 Codex 会话的普通用户运行连接器。请保留解压后的 bin、runtime 和 host 目录。',
     steps: [
       { title: '下载并解压', body: '下载终端版，先比对 Release 的 SHA256 校验清单，再解压到用户目录。目标目录应为空；升级时先结束任务并退出旧服务。', command:
         'curl -fL --retry 3 -o ' + filename + ' \\\n  ' + DOWNLOAD_ROOT + filename + '\nmkdir -p "$HOME/ClawMate-Codex"\ntar -xzf ' + filename + ' -C "$HOME/ClawMate-Codex"\ncd "$HOME/ClawMate-Codex"' },
@@ -135,6 +135,7 @@ function linuxGuide(): CodexGuide {
         './bin/clawmate-codex status\n./bin/clawmate-codex devices\n# 空闲时停止连接服务\n./bin/clawmate-codex stop\n# 确认要退出后台时\n./bin/clawmate-codex quit' }
     ],
     notes: [CODEX_PAIRING_NOTE,
+      'Codex CLI 安装在自定义位置时，可以在首次启动连接器前用 CLAWMATE_CODEX_EXECUTABLE 指定 Codex 可执行文件的绝对路径。',
       '手机查看原电脑会话时，桥接需与原 Codex 使用相同 OS 用户和 CODEX_HOME，且配置该会话的实际项目目录。兼容的原生 daemon 在线时可实时共享；其他用户、容器或 no-daemon 独占会话不一定支持。',
       'Tailscale 使用用户态模式且未显示 100 开头地址时，可在首次启动后台前设置 CLAWMATE_TAILSCALE_SOCKET=/实际路径/tailscaled.sock。已有后台须在空闲时先退出，才会继承新环境变量。',
       '新任务默认允许工作目录内修改并请求批准。超时检查网络、status、服务端口与 Tailscale 策略；不要通过关闭 TLS 校验解决证书错误。'
