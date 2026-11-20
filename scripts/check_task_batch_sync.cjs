@@ -36,12 +36,16 @@ function batch(mode = 'phone', count = 3, autoSync = true) {
     }
   };
   const page = probe('pages/task/TaskPage.ets', 'TaskPage', [
-    'runEnabledTasks', 'executeEnabledTasks', 'runSelectedWorkflow', 'isTaskCancelled', 'isWorkflowCancelledStatus',
-    'isTaskExecutionBusy', 'batchRunButtonText', 'batchRunButtonEnabled', 'stopEnabledTasks'
+    'runEnabledTasks', 'executeEnabledTasks', 'runSelectedWorkflow', 'runTask', 'onTaskRunPressed',
+    'isSingleTaskActive', 'taskRunButtonText', 'taskRunButtonEnabled', 'isTaskExecutionBusy',
+    'batchRunButtonText', 'batchRunButtonEnabled', 'stopEnabledTasks'
   ], {
     WorkflowCancellation, WorkflowStorage: storage, AUTO_SYNC_AFTER_BATCH_TASKS: autoSync,
     AiLoginGuard: { ensure: () => state.login }, HuaweiPrivacyAccess: { ensure: async () => state.accepted },
-    SelfHdcSetupGuard: { prepare: async () => state.ready ? { mode: 'phone', ip: '192.0.2.1', port: '12345' } : null },
+    SelfHdcSetupGuard: { prepare: async () => {
+      await state.prepare?.();
+      return state.ready ? { mode: 'phone', ip: '192.0.2.1', port: '12345' } : null;
+    } },
     CollectionReminderService: { pendingIntent: () => ({}), claim: () => { state.claimed++; return true; }, clearRequest() {},
       recordSuccessfulCollection: async () => { state.history++; } },
     AppStorage: { setOrCreate: (key, value) => { state.storage[key] = value; } },
@@ -50,6 +54,7 @@ function batch(mode = 'phone', count = 3, autoSync = true) {
   });
   Object.assign(page, { filesDir: '/app', taskControlMode: mode, tasks: storage.loadTasks(), batchRunning: false,
     batchPreparing: false, batchSyncing: false, batchStopRequested: false, runningTaskId: '', preparingTaskId: '', active: true,
+    singleTaskCancellation: null, singleTaskStopRequested: false,
     reminderWindowReady: true, phoneControlBusy: false, agentExecutionBusy: false, batchCancellation: null,
     getUIContext: () => ({}), flushTaskContextDrafts: () => false, refreshCardContextInputs() {}, invalidateFileStats() {},
     onEnsureDesktopCompanion: async () => true,
@@ -135,14 +140,15 @@ test('disabled auto sync also covers reminder launches and partial failures', as
   assert.equal(reminder.state.claimed, 1);
   assert.equal(reminder.state.syncs, 0);
   for (const mode of ['phone', 'pc']) {
-    const { page, state } = batch(mode, 3, false);
-    const fail = async () => { throw Error('fixture failure'); };
+    const { page, state, saved } = batch(mode, 3, false);
+    const fail = async task => { state.events.push('run:' + task.id); throw Error('连接已终止'); };
     page.onRunWorkflow = fail;
     page.onRunPhoneWorkflow = fail;
     await page.runEnabledTasks();
     assert.equal(state.syncs, 0);
-    assert.ok(state.toasts.some(text => text.includes('任务执行中断')));
-    assert.ok(!state.toasts.includes('任务已完成'));
+    assert.deepEqual(state.events, ['run:task-0', 'run:task-1', 'run:task-2']);
+    assert.ok(saved().every(item => item.lastStatus === 'failed' && item.lastMessage === '连接已终止'));
+    assert.ok(state.toasts.includes('批量执行结束，成功 0 项，失败 3 项'));
     assert.equal(page.batchRunning, false);
   }
 });
@@ -170,17 +176,73 @@ test('stopping collection drops the remaining queue and does not launch new anal
   await page.runEnabledTasks(); assert.deepEqual(state.events, ['task-0']); assert.equal(state.syncs, 0);
   assert.equal(page.batchCancellation, null); assert.equal(page.batchStopRequested, false);
 });
-test('failed phone or PC tasks stop dispatch but still sync already collected results', async () => {
+test('stored phone or PC failures continue dispatch and sync once at the end', async () => {
   for (const mode of ['phone', 'pc']) {
     const { page, state, storage, saved } = batch(mode), normal = page.onRunWorkflow;
     const run = async task => {
-      if (task.id === 'task-1') { storage.updateTaskRun('/app', task.id, 'failed', 'fixture task failed'); }
+      if (task.id === 'task-1') { storage.updateTaskRun('/app', task.id, mode === 'phone' ? 'failed' : '失败', 'fixture task failed'); }
       else { await normal(task); }
     };
     page.onRunWorkflow = run; page.onRunPhoneWorkflow = run;
     await page.runEnabledTasks(); assert.equal(state.syncs, 1);
-    assert.equal(saved()[1].lastStatus, 'failed'); assert.equal(saved()[2].lastStatus, '');
-    assert.ok(state.toasts.some(text => text.includes('部分任务未完成')));
+    assert.equal(saved()[1].lastMessage, 'fixture task failed'); assert.equal(saved()[2].lastStatus, 'success');
+    assert.deepEqual(state.events, ['run:task-0', 'saved:task-0', 'run:task-2', 'saved:task-2', 'sync']);
+    assert.ok(state.toasts.some(text => text.includes('成功 2 项，失败 1 项')));
+  }
+});
+test('single-task stop during preparation never dispatches the workflow', async () => {
+  for (const mode of ['phone', 'pc']) {
+    const { page, state, saved } = batch(mode);
+    const task = page.tasks[0];
+    let entered, finish;
+    const preparing = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { finish = resolve; });
+    state.prepare = async () => { entered(); await gate; };
+    page.onEnsureDesktopCompanion = async () => { await state.prepare(); return true; };
+    const running = page.runTask(task);
+    assert.equal(page.taskRunButtonText(task.id), '终止');
+    assert.equal(page.taskRunButtonEnabled(task.id), true);
+    await preparing;
+    page.onTaskRunPressed(task);
+    assert.equal(page.taskRunButtonText(task.id), '正在终止…');
+    assert.equal(page.taskRunButtonEnabled(task.id), false);
+    finish();
+    await running;
+    assert.deepEqual(state.events, []);
+    assert.equal(saved()[0].lastStatus, '');
+    assert.equal(page.taskRunButtonText(task.id), '运行');
+    assert.equal(page.taskRunButtonEnabled(task.id), true);
+  }
+});
+test('single-task stop cancels the active runner and keeps other tasks locked until cleanup', async () => {
+  for (const mode of ['phone', 'pc']) {
+    const { page, state, saved } = batch(mode);
+    const [selected, other] = page.tasks;
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const cleanup = new Promise(resolve => { finish = resolve; });
+    const run = async (_task, cancellation) => {
+      cancellation.setHandler(() => state.events.push('cancel'));
+      entered();
+      await cleanup;
+      cancellation.throwIfCancelled();
+    };
+    page.onRunWorkflow = run; page.onRunPhoneWorkflow = run;
+    const running = page.runTask(selected);
+    await started;
+    assert.equal(page.taskRunButtonText(selected.id), '终止');
+    assert.equal(page.taskRunButtonEnabled(other.id), false);
+    page.onTaskRunPressed(selected);
+    page.onTaskRunPressed(selected);
+    assert.deepEqual(state.events, ['cancel']);
+    assert.equal(page.taskRunButtonText(selected.id), '正在终止…');
+    assert.equal(page.taskRunButtonEnabled(other.id), false);
+    finish();
+    await running;
+    assert.equal(saved()[0].lastStatus, 'cancelled');
+    assert.equal(page.singleTaskCancellation, null);
+    assert.equal(page.taskRunButtonText(selected.id), '运行');
+    assert.equal(page.taskRunButtonEnabled(other.id), true);
   }
 });
 test('analysis failure preserves successful task status, unlocks the batch and allows another run', async () => {
