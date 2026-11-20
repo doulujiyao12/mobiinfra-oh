@@ -9,6 +9,7 @@ const active = status => ['starting', 'running', 'waitingApproval', 'stopping'].
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 const bound = (value, length = 48000) => String(value ?? '').slice(-length);
 const forbidden = key => ['__proto__', 'prototype', 'constructor'].includes(String(key));
+const desktopStreamVersions = new Set([11, 13]);
 
 // Follower requests enter the desktop's in-memory turn before app-server
 // deserialization. Its renderer requires text_elements even on plain text.
@@ -170,13 +171,20 @@ export class DesktopSessions {
     }
     if (message.method !== 'thread-stream-state-changed') return;
     try {
-      if (message.version !== 11) throw new Error('桌面共享协议版本不兼容，已停止转发');
+      if (!desktopStreamVersions.has(message.version)) {
+        const version = Number.isSafeInteger(message.version) ? String(message.version) : '未知';
+        throw new Error(`桌面共享协议版本不兼容（收到 ${version}，支持 11、13），已停止转发`);
+      }
       const change = params.change;
       if (!Number.isSafeInteger(change?.revision) || change.revision < 0) throw new Error('桌面快照版本无效');
-      if (change.revision <= entry.revision) return;
+      const sameStream = message.version === entry.streamVersion;
+      if (sameStream && (change.revision < entry.revision ||
+          (change.revision === entry.revision && (entry.synchronized || change.type !== 'snapshot')))) return;
       const initial = !entry.state;
       if (change.type === 'snapshot') entry.state = change.conversationState;
-      else if (change.type === 'patches' && entry.state && change.baseRevision === entry.revision) {
+      else if (change.type === 'patches' && entry.synchronized && sameStream && change.baseRevision === entry.revision) {
+        // Version 13 can also include transcript rendering hints. The Immer
+        // patches carry the authoritative state, including the text changes.
         entry.state = applyDesktopPatches(entry.state, change.patches);
       } else {
         entry.synchronized = false; entry.task.desktopConnected = false; entry.task.status = 'unknown'; entry.task.approvals = [];
@@ -184,7 +192,8 @@ export class DesktopSessions {
         this.ipc.follow(entry.task.id, entry.owner, true); return;
       }
       if (Buffer.byteLength(JSON.stringify(entry.state)) > 16 * 1024 * 1024) throw new Error('桌面共享状态过大，已停止同步');
-      this.validate(entry.task, entry.state); entry.revision = change.revision; entry.synchronized = true;
+      this.validate(entry.task, entry.state); entry.streamVersion = message.version;
+      entry.revision = change.revision; entry.synchronized = true;
       this.apply(entry, initial); entry.ready();
     } catch (error) { entry.reject(error); this.unavailable(entry, error.message); }
   }

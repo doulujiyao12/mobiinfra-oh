@@ -54,6 +54,50 @@ test('health is authenticated, independent of the executor and advertises bounde
   assert.equal((await fetch(base + '/v1/health?token=x', { headers })).status, 400);
 });
 
+test('info refreshes the visible catalog and retains the last complete list when refresh fails', async t => {
+  const { config, core, rpc } = await fixture(t);
+  const server = createBridgeServer(config, core);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = 'http://127.0.0.1:' + server.address().port + '/v1/info';
+  const headers = { Authorization: 'Bearer ' + config.token };
+  const info = async () => (await fetch(url, { headers })).json();
+  const original = (await info()).models[0];
+  assert.equal(original.model, 'test');
+
+  const replacement = { ...original, id: 'new-model', model: 'new-model', serviceTiers: [{ id: 'priority', name: 'Fast' }] };
+  let fail = false;
+  rpc.request = async (method, params) => {
+    assert.equal(method, 'model/list'); assert.equal(params.includeHidden, false);
+    if (params.cursor === undefined) return { data: [fail ? original : replacement], nextCursor: 'page-2' };
+    assert.equal(params.cursor, 'page-2');
+    if (fail) throw new Error('Catalog unavailable');
+    return { data: [original], nextCursor: null };
+  };
+  const fresh = await info();
+  assert.equal(fresh.modelsStale, false); assert.equal(fresh.serviceTiersSupported, true);
+  assert.deepEqual(fresh.models, [replacement, original]);
+  fail = true;
+  const cached = await info();
+  assert.equal(cached.modelsStale, true); assert.deepEqual(cached.models, fresh.models);
+});
+
+test('speed overrides are validated per model and forwarded only for the submitted turn', async t => {
+  const { core, rpc } = await fixture(t);
+  const task = await core.create(createBody);
+  await assert.rejects(core.start(task.id, { ...turnBody(), serviceTier: 'priority' }), /不支持此速度档位/);
+  assert.equal(rpc.calls.filter(call => call.method === 'turn/start').length, 0);
+  core.models[0].serviceTiers = [{ id: 'priority', name: 'Fast' }];
+  for (const tier of ['priority', 'default', undefined]) {
+    const result = await core.start(task.id, { ...turnBody(), serviceTier: tier });
+    const sent = rpc.calls.filter(call => call.method === 'turn/start').at(-1).params;
+    assert.equal(sent.serviceTierForTurn, tier);
+    assert.equal(sent.serviceTier, undefined, 'do not change the desktop thread setting');
+    assert.equal(result.serviceTier, tier);
+    core.onMessage({ method: 'turn/completed', params: { threadId: task.id, turn: { id: result.turnId, status: 'completed' } } });
+  }
+});
+
 test('gzip, delta, unchanged and full fallback responses preserve the same task content', async t => {
   const { config, core } = await fixture(t); const task = await core.create(createBody);
   core.item(task, 'one', 'assistant', 'initial', true); task.items[0].text = 'history '.repeat(1500); core.touch(task);

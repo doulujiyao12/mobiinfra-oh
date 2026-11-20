@@ -10,6 +10,7 @@ import { DesktopSessions } from './desktop-sessions.mjs';
 import { DaemonSessions } from './daemon-sessions.mjs';
 import { executionSettings, runtimePermissions } from './permissions.mjs';
 import { reconnectProgress, approvalReviewProgress } from './progress.mjs';
+import { readContext, cancelledRead } from './read-coordinator.mjs';
 export { BridgeError } from './errors.mjs';
 
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -94,13 +95,24 @@ export class BridgeCore {
 
   async initialize({ initializeRpc = true } = {}) {
     if (initializeRpc) await this.rpc.initialize();
+    await this.refreshModels();
+    this.ready = true;
+  }
+
+  async refreshModels() {
+    const models = [];
+    const cursors = new Set();
     let cursor;
     do {
       const page = await this.rpc.request('model/list', { limit: 100, includeHidden: false, cursor });
-      this.models.push(...page.data);
+      models.push(...page.data);
       cursor = page.nextCursor;
-    } while (cursor && this.models.length < 1000);
-    this.ready = true;
+      if (cursor && (cursors.has(cursor) || cursors.size >= 9)) throw new Error('Invalid model catalog pagination');
+      cursors.add(cursor);
+    } while (cursor);
+    if (readContext.getStore()?.signal.aborted) throw cancelledRead();
+    if (!models.length) throw new Error('Codex returned no available models');
+    this.models = models;
   }
 
   save() {
@@ -259,6 +271,10 @@ export class BridgeCore {
     check(text(body.text) && Array.isArray(body.attachments) && body.attachments.length <= 6, 'Invalid input');
     check(body.text.trim() || body.attachments.length, 'Empty task');
     const model = this.model(body.model, body.effort);
+    const serviceTier = body.serviceTier;
+    check(serviceTier === undefined || (typeof serviceTier === 'string' && (serviceTier === 'default' ||
+      model.serviceTiers?.some(tier => tier.id === serviceTier) || model.additionalSpeedTiers?.includes(serviceTier))),
+    '所选模型不支持此速度档位，请刷新模型列表并重新选择');
     const settings = executionSettings(body, task); const permissions = runtimePermissions(settings, task.cwd);
     this.workspace(task.workspaceId);
     const input = [];
@@ -297,6 +313,7 @@ export class BridgeCore {
         this.loaded.add(id);
       }
       task.model = body.model; task.effort = body.effort || ''; task.error = '';
+      task.serviceTier = serviceTier;
       task.mode = settings.mode; task.approvalMode = settings.approvalMode;
       delete task.progress; task.startedAt = Date.now(); task.lastActivityAt = task.startedAt;
       this.finalReplies.delete(id); task.artifactWarning = '';
@@ -306,7 +323,7 @@ export class BridgeCore {
       if (task.title === '新任务') task.title = (body.text.trim() || names.join('、')).slice(0, 50);
       this.touch(task); this.save();
       const result = await executionRpc.request('turn/start', { threadId: id, input, cwd: task.cwd,
-        model: task.model, effort: task.effort || null, approvalPolicy: permissions.approvalPolicy,
+        model: task.model, effort: task.effort || null, serviceTierForTurn: serviceTier, approvalPolicy: permissions.approvalPolicy,
         approvalsReviewer: permissions.approvalsReviewer, sandboxPolicy: permissions.sandboxPolicy });
       task.turnId = result.turn.id;
       const pendingUser = task.items.find(item => item.id === body.requestId); if (pendingUser) pendingUser.turnId = result.turn.id;

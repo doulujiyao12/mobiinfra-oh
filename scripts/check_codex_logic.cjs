@@ -509,6 +509,33 @@ async function main() {
   await page.send(); assert.equal(page.draft, 'Keep until confirmed'); assert.ok(page.pendingRequestId);
   page.applyTask({ ...page.task, revision: 4, lastRequestConfirmed: true });
   assert.equal(page.draft, ''); assert.equal(page.pendingRequestId, '');
+  const modelsPage = new CodexPage();
+  modelsPage.followOutput = false; modelsPage.connected = true; modelsPage.taskSettingsOpen = true;
+  const baseModel = { model: 'basic-model', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }] };
+  const fastModel = { model: 'fast-model', serviceTiers: [{ id: 'priority', name: 'Fast' }] };
+  modelsPage.models = [baseModel]; modelsPage.modelId = baseModel.model; modelsPage.effort = 'medium';
+  modelsPage.client.call = async route => {
+    assert.equal(route, '/v1/info');
+    return { ready: true, serviceTiersSupported: true, models: [fastModel, baseModel] };
+  };
+  await modelsPage.refreshModelCatalog();
+  assert.equal(modelsPage.models.length, 2); assert.equal(modelsPage.modelId, baseModel.model);
+  assert.equal(modelsPage.effort, 'medium'); assert.equal(modelsPage.speedOptions().length, 0);
+  modelsPage.chooseModel(fastModel.model);
+  assert.equal(modelsPage.speedOptions().map(tier => tier.name).join(','), '跟随电脑,标准,快速');
+  modelsPage.serviceTier = 'priority';
+  modelsPage.client.call = async () => { throw new Error('offline'); };
+  await modelsPage.refreshModelCatalog();
+  assert.equal(modelsPage.modelsStale, true); assert.equal(modelsPage.speedName(), '快速');
+  modelsPage.task = { ...pcHistory, model: fastModel.model, external: false, status: 'idle' };
+  modelsPage.draft = 'Use selected speed';
+  modelsPage.client.call = async (route, body) => {
+    if (route === '/v1/tasks') return { tasks: [] };
+    assert.equal(body.serviceTier, 'priority');
+    return { task: { ...modelsPage.task, lastRequestId: body.requestId, serviceTier: body.serviceTier } };
+  };
+  await modelsPage.send(); assert.equal(modelsPage.draft, '');
+  modelsPage.chooseModel(baseModel.model); assert.equal(modelsPage.serviceTier, '');
   assert.equal(types.codexTaskBusy('releasing'), true);
   assert.equal(types.codexStatusLabel('releasing'), '正在保存并释放会话');
   page.task = pcHistory; page.sameSessionSupported = false; page.draft = 'Keep this draft';

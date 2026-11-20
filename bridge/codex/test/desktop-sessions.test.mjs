@@ -238,6 +238,51 @@ test('unsupported protocol, changed project, foreign owner and disconnect fail c
   f.ipc.version = 11; await f.core.desktopSessions.attach(task); f.ipc.emit('disconnected', new Error('offline'));
   assert.equal(task.status, 'unknown'); assert.equal(task.desktopConnected, false); assert.equal(f.ipc.closed, false);
 });
+
+test('version 13 shares the original conversation and applies canonical text patches', async t => {
+  const f = await fixture(t);
+  f.ipc.version = 13;
+  const task = await f.core.history.read('original');
+  await f.core.start(task.id, { ...f.turn(), serviceTier: 'default' });
+  const started = f.ipc.calls.find(call => call.method === 'thread-follower-start-turn');
+  assert.equal(started.owner, 'desktop-owner');
+  assert.equal(started.params.turnStart.request.serviceTierForTurn, 'default');
+  const turn = f.ipc.state.turns[0];
+  turn.items = [{ id: 'output', type: 'agentMessage', text: 'Starting' }];
+  f.ipc.state.turnHistory = { kind: 'canonical', history: {
+    entitiesByKey: { current: turn }, islands: [{ entries: [{ value: 'current' }] }]
+  } };
+  f.ipc.snapshot();
+  assert.equal(task.items.at(-1).text, 'Starting');
+  f.ipc.emit('broadcast', { method: 'thread-stream-state-changed', version: 13, sourceClientId: 'desktop-owner', params: {
+    conversationId: task.id, hostId: 'local', change: { type: 'patches', baseRevision: f.ipc.revision, revision: ++f.ipc.revision,
+      patches: [{ op: 'replace', path: ['turnHistory', 'history', 'entitiesByKey', 'current', 'items', 0, 'text'], value: 'Updated text' }],
+      acceptedTextChanges: [{ type: 'text', key: { entityKey: 'current' }, target: { field: 'text' },
+        edits: [{ at: 0, deleteCount: 8, insert: 'Updated text' }] }] } } });
+  assert.equal(task.items.at(-1).text, 'Updated text');
+  assert.equal(task.desktopConnected, true);
+  assert.equal(f.calls.some(call => ['thread/resume', 'thread/fork', 'turn/start'].includes(call.method)), false);
+});
+
+test('a stream version change must supply a fresh snapshot before patches can apply', async t => {
+  const f = await fixture(t);
+  const task = await f.core.history.read('original');
+  f.ipc.autoSnapshot = false;
+  const change = { type: 'patches', baseRevision: f.ipc.revision, revision: f.ipc.revision + 1,
+    patches: [{ op: 'replace', path: ['title'], value: 'Unexpected title' }] };
+  const params = { conversationId: task.id, hostId: 'local', change };
+  f.ipc.emit('broadcast', { method: 'thread-stream-state-changed', version: 13, sourceClientId: 'desktop-owner', params });
+  assert.equal(task.desktopConnected, false);
+  assert.equal(task.title, 'Shared live');
+  f.ipc.emit('broadcast', { method: 'thread-stream-state-changed', version: 11, sourceClientId: 'desktop-owner', params });
+  assert.equal(task.title, 'Shared live', 'patches cannot replace a recovery snapshot');
+  f.ipc.version = 13;
+  f.ipc.revision = 0;
+  f.ipc.state.title = 'New snapshot';
+  f.ipc.snapshot();
+  assert.equal(task.desktopConnected, true);
+  assert.equal(task.title, 'New snapshot');
+});
 test('shared completion only publishes new final deliverables and closing the bridge merely detaches', async t => {
   const f = await fixture(t); const filename = path.join(f.cwd, 'final.pdf'); writeFileSync(filename, '%PDF-final');
   f.ipc.state.turns = [{ turnId: 'historic', status: 'completed', params: {}, items: [{ id: 'old', type: 'agentMessage', phase: 'final_answer', text: `[old](<${filename}>)` }] }];

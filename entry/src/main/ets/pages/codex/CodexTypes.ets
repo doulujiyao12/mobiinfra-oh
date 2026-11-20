@@ -2,12 +2,15 @@ export interface CodexEffort {
   reasoningEffort: string;
   description: string;
 }
+export interface CodexServiceTier { id: string; name: string; }
 export interface CodexModel {
   id: string;
   model: string;
   displayName: string;
   defaultReasoningEffort: string;
   supportedReasoningEfforts: CodexEffort[];
+  serviceTiers?: CodexServiceTier[];
+  additionalSpeedTiers?: string[];
   inputModalities?: string[];
   isDefault?: boolean;
 }
@@ -74,6 +77,7 @@ export interface CodexTask {
   workspaceId: string;
   model: string;
   effort: string;
+  serviceTier?: string;
   mode: string;
   turnId: string;
   items: CodexItem[];
@@ -116,6 +120,8 @@ export interface CodexEnvelope {
   name?: string;
   workspaces?: CodexWorkspace[];
   models?: CodexModel[];
+  modelsStale?: boolean;
+  serviceTiersSupported?: boolean;
   tasks?: CodexTaskSummary[];
   task?: CodexTask;
   taskDelta?: CodexTaskDelta;
@@ -216,6 +222,7 @@ export interface CodexTurnBody {
   attachments: string[];
   model: string;
   effort: string;
+  serviceTier?: string;
   mode?: string;
   approvalMode?: string;
 }

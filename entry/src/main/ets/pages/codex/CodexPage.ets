@@ -25,7 +25,7 @@ import { parseCodexPairingInput } from './CodexPairingInput';
 import { CodexHelpParams, CodexHelpSection } from './CodexHelpContent';
 import {
   CODEX_MAX_FILE_BYTES, CodexConnection, CodexModel, CodexWorkspace, CodexTask, CodexTaskSummary,
-  CodexAttachment, CodexItem, CodexApproval, CodexAnswer, CodexEffort, CodexArtifact, CodexLocalArtifact,
+  CodexAttachment, CodexItem, CodexApproval, CodexAnswer, CodexEffort, CodexServiceTier, CodexTurnBody, CodexArtifact, CodexLocalArtifact,
   normalizeCodexOrigin, codexTaskBusy, codexStatusLabel, CodexSavedConnection, CodexScreen, CODEX_PAIRING_PREFIX,
   codexApprovalLabel, codexExecutionNotice, codexLinkLabel, mergeCodexTask, codexTimeline, codexTimelineKey, CodexTimelineEntry
 } from './CodexTypes';
@@ -35,7 +35,7 @@ export struct CodexPage {
   @Prop @Watch('activeChanged') active: boolean = false;
   @Prop navigationBottomInset: number = 0;
   @Link @Watch('screenChanged') screen: number;
-  @Link taskSettingsOpen: boolean;
+  @Link @Watch('refreshModelCatalog') taskSettingsOpen: boolean;
   @Link historyOpen: boolean;
   @State private originInput: string = '';
   @State private tokenInput: string = '';
@@ -60,9 +60,13 @@ export struct CodexPage {
   @State private serverName: string = '';
   @State private workspaces: CodexWorkspace[] = [];
   @State private models: CodexModel[] = [];
+  @State private modelsRefreshing: boolean = false;
+  @State private modelsStale: boolean = false;
+  @State private serviceTiersSupported: boolean = false;
   @State private workspaceId: string = '';
   @State private modelId: string = '';
   @State private effort: string = '';
+  @State private serviceTier: string = '';
   @State private mode: string = 'workspace-write';
   @State private approvalMode: string = 'ask';
   @State private tasks: CodexTaskSummary[] = [];
@@ -181,6 +185,7 @@ export struct CodexPage {
     this.tasks = []; this.attachments = []; this.tokenInput = ''; this.pendingRequestId = '';
     this.pairedConnection = null; this.pairingInput = '';
     this.draft = ''; this.models = []; this.workspaces = []; this.serverName = ''; this.expandedTools = [];
+    this.modelsRefreshing = false; this.modelsStale = false; this.serviceTiersSupported = false; this.serviceTier = '';
     this.networkText = ''; this.busy = false; this.polling = false;
     this.localArtifacts = []; this.receivingArtifactId = ''; this.artifactProgress = ''; this.artifactError = '';
     this.artifactsSupported = false; this.artifactRetryAt = 0;
@@ -223,6 +228,8 @@ export struct CodexPage {
       this.clearTimer(); this.client.close(); this.client = candidate; this.pendingClient = null;
       this.connectedOrigin = connection.origin; this.tokenInput = ''; this.serverName = serverName;
       this.models = info.models; this.workspaces = info.workspaces;
+      this.modelsRefreshing = false; this.modelsStale = info.modelsStale === true;
+      this.serviceTiersSupported = info.serviceTiersSupported === true; this.serviceTier = '';
       this.artifactsSupported = info.artifactsSupported === true;
       this.resetComputerHistory(); this.existingSessionsSupported = info.existingSessionsSupported === true;
       this.sameSessionSupported = info.sameSessionSupported === true;
@@ -364,6 +371,43 @@ export struct CodexPage {
   private chooseModel(id: string): void {
     this.modelId = id;
     this.effort = this.models.find((m: CodexModel) => m.model === id)?.defaultReasoningEffort ?? '';
+    if (!this.speedOptions().some(tier => tier.id === this.serviceTier)) { this.serviceTier = ''; }
+  }
+
+  private async refreshModelCatalog(): Promise<void> {
+    if (!this.taskSettingsOpen || !this.connected || this.modelsRefreshing) { return; }
+    const epoch = this.epoch;
+    this.modelsRefreshing = true;
+    try {
+      const result = await this.client.call('/v1/info');
+      if (epoch !== this.epoch) { return; }
+      if (!result.ready || !result.models?.length) { this.modelsStale = true; return; }
+      this.models = result.models;
+      this.modelsStale = result.modelsStale === true;
+      this.serviceTiersSupported = result.serviceTiersSupported === true;
+      if (!this.busy && !this.running() && !this.pendingRequestId &&
+        !this.speedOptions().some(tier => tier.id === this.serviceTier)) { this.serviceTier = ''; }
+    } catch (e) { if (epoch === this.epoch) { this.modelsStale = true; } }
+    finally { if (epoch === this.epoch) { this.modelsRefreshing = false; } }
+  }
+
+  private speedOptions(): CodexServiceTier[] {
+    const model = this.models.find((item: CodexModel) => item.model === this.modelId);
+    if (!this.serviceTiersSupported || !model) { return []; }
+    const extra = model.serviceTiers?.length ? model.serviceTiers :
+      (model.additionalSpeedTiers ?? []).map((id: string): CodexServiceTier => ({ id: id, name: id }));
+    if (!extra.some(tier => tier.id !== 'default')) { return []; }
+    const options: CodexServiceTier[] = [{ id: '', name: '跟随电脑' }, { id: 'default', name: '标准' }];
+    extra.forEach((tier: CodexServiceTier): void => {
+      if (options.some(item => item.id === tier.id)) { return; }
+      const name = tier.id === 'priority' || tier.id === 'fast' ? '快速' : tier.name || tier.id;
+      options.push({ id: tier.id, name: name });
+    });
+    return options;
+  }
+
+  private speedName(): string {
+    return this.speedOptions().find(tier => tier.id === this.serviceTier)?.name || '跟随电脑';
   }
   private efforts(): CodexEffort[] {
     return this.models.find((m: CodexModel) => m.model === this.modelId)?.supportedReasoningEfforts ?? [];
@@ -553,7 +597,7 @@ export struct CodexPage {
     this.expandedTools = []; this.historyOpen = false;
     this.olderItems = []; this.historyCursor = ''; this.pendingResumeRequestId = ''; this.pendingResumeFingerprint = '';
     this.historyScope = 'phone';
-    this.mode = 'workspace-write'; this.approvalMode = 'ask'; this.schedulePoll(10);
+    this.mode = 'workspace-write'; this.approvalMode = 'ask'; this.serviceTier = ''; this.schedulePoll(10);
   }
   private async selectTask(id: string, external: boolean = false): Promise<void> {
     if (this.busy) { return; }
@@ -566,6 +610,8 @@ export struct CodexPage {
       if (epoch === this.epoch && result.task !== undefined) {
         this.task = result.task; this.workspaceId = result.task.workspaceId;
         this.modelId = result.task.model; this.effort = result.task.effort; this.mode = result.task.mode;
+        const tier = result.task.serviceTier || '';
+        this.serviceTier = this.speedOptions().some(option => option.id === tier) ? tier : '';
         this.approvalMode = result.task.approvalMode || 'ask';
         this.attachments = []; this.pendingRequestId = ''; this.expandedTools = []; this.historyOpen = false;
         this.localArtifacts = []; this.artifactError = ''; this.artifactRetryAt = 0;
@@ -610,10 +656,12 @@ export struct CodexPage {
         this.historyScope = 'computer';
       }
       if (!this.pendingRequestId) { this.pendingRequestId = util.generateRandomUUID(true); }
-      const result = await this.client.call('/v1/tasks/' + this.task.id + '/turns', {
+      const turn: CodexTurnBody = {
         requestId: this.pendingRequestId, text: this.draft, attachments: this.attachments.map((a: CodexAttachment) => a.id),
-        model: this.modelId, effort: this.effort, mode: this.mode, approvalMode: this.approvalMode
-      });
+        model: this.modelId, effort: this.effort, mode: this.mode, approvalMode: this.approvalMode,
+        serviceTier: this.serviceTier || undefined
+      };
+      const result = await this.client.call('/v1/tasks/' + this.task.id + '/turns', turn);
       if (epoch === this.epoch && result.task !== undefined) {
         this.applyTask(result.task);
         await this.refreshTasks();
@@ -815,9 +863,17 @@ export struct CodexPage {
           .optionFontColor(AppTheme.text('#172033')).selectedOptionFontColor(AppTheme.text('#5968FF'))
           .menuBackgroundColor(AppTheme.background('#FFFFFF')).backgroundColor(AppTheme.inputBackground())
           .height(44).borderRadius(12).padding({ left: 12, right: 12 })
-          .onSelect((index: number) => { if (index >= 0 && index < this.models.length) { this.chooseModel(this.models[index].model); } })
+          .onSelect((index: number, label: string) => {
+            const model = this.models[index];
+            if (model && (model.displayName || model.model) === label) { this.chooseModel(model.model); }
+          })
+          .onClick((): void => { this.refreshModelCatalog(); })
           .enabled(!this.running() && !this.busy).layoutWeight(1)
       }.width('100%')
+      if (this.modelsRefreshing || this.modelsStale) {
+        Text(this.modelsRefreshing ? '正在刷新模型列表…' : '暂时无法刷新，已显示上次获取的模型。')
+          .fontSize(12).fontColor(AppTheme.text('#747B87')).width('100%')
+      }
       if (this.efforts().length > 0) {
         Row({ space: 10 }) {
           Text('思考强度').fontSize(14).fontColor(AppTheme.text('#172033')).width(72)
@@ -829,6 +885,22 @@ export struct CodexPage {
             .height(44).borderRadius(12).padding({ left: 12, right: 12 })
             .onSelect((index: number) => {
               if (index >= 0 && index < this.efforts().length) { this.effort = this.efforts()[index].reasoningEffort; }
+            })
+            .enabled(!this.running() && !this.busy).layoutWeight(1)
+        }.width('100%')
+      }
+      if (this.speedOptions().length > 0) {
+        Row({ space: 10 }) {
+          Text('速度').fontSize(14).fontColor(AppTheme.text('#172033')).width(72)
+          Select(this.speedOptions().map((tier: CodexServiceTier): SelectOption => ({ value: tier.name })))
+            .selected(this.selectIndex(this.speedOptions().map((tier: CodexServiceTier) => tier.id), this.serviceTier))
+            .value(this.speedName()).font({ size: 14 }).fontColor(AppTheme.text('#172033'))
+            .optionFontColor(AppTheme.text('#172033')).selectedOptionFontColor(AppTheme.text('#5968FF'))
+            .menuBackgroundColor(AppTheme.background('#FFFFFF')).backgroundColor(AppTheme.inputBackground())
+            .height(44).borderRadius(12).padding({ left: 12, right: 12 })
+            .onSelect((index: number, label: string) => {
+              const tier = this.speedOptions()[index];
+              if (tier && tier.name === label) { this.serviceTier = tier.id; }
             })
             .enabled(!this.running() && !this.busy).layoutWeight(1)
         }.width('100%')

@@ -43,6 +43,7 @@ export function createBridgeServer(config, core, extensions = {}) {
   const rates = new Map();
   let uploadsInFlight = 0;
   const reads = new ReadCoordinator(); const sync = new TaskSync();
+  const catalogReads = new ReadCoordinator({ timeout: 5000 });
   const handler = async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -92,9 +93,14 @@ export function createBridgeServer(config, core, extensions = {}) {
       if (req.method === 'GET' && route === '/v1/health') return send(200, { protocol: 1, ready: core.ready, serverTime: Date.now() });
       if (req.method === 'GET' && route === '/v1/info') {
         core.requireReady();
+        let modelsStale = false;
+        try { await catalogReads.run('models', () => core.refreshModels()); }
+        catch { modelsStale = true; }
+        core.requireReady();
         return send(200, { protocol: 1, name: config.name || 'Codex PC', ready: core.ready,
           workspaces: core.workspaces.map(w => ({ id: w.id, name: w.name })),
-          models: core.models, maxFileBytes: MAX_FILE_BYTES, artifactsSupported: true, maxArtifactBytes: MAX_ARTIFACT_BYTES,
+          models: core.models, modelsStale, serviceTiersSupported: true,
+          maxFileBytes: MAX_FILE_BYTES, artifactsSupported: true, maxArtifactBytes: MAX_ARTIFACT_BYTES,
           existingSessionsSupported: true, sameSessionSupported: true, permissionSettingsSupported: true, taskUpdatesSupported: true,
           healthSupported: true, taskDeltaSupported: true, artifactChunkBytes: 262144,
           desktopSessionSharingSupported: !!config.desktopCoordination });
