@@ -127,7 +127,8 @@ test('worker validates the entire batch first, deduplicates names and continues 
   const removed = [], events = []; let refreshed = 0, bad = '';
   const exports = {};
   vm.runInNewContext(compile(dispatch + '\nexports.dispatch = dispatch;'), { exports, CaptureEvent: h.models.CaptureEvent,
-    running: false, starting: false, closing: false, directory: '/recordings', parseRecordingName: h.wav.parseRecordingName,
+    running: false, starting: false, closing: false, compressionGeneration: 0,
+    removeAudioCache: () => {}, directory: '/recordings', parseRecordingName: h.wav.parseRecordingName,
     fs: { unlinkSync: file => { if (file.endsWith(bad) && bad) throw Error('I/O'); removed.push(file); } },
     publishLibrary: () => { refreshed++; }, port: { postMessage: event => events.push(event) } });
   const a = h.record(1), b = h.record(2), c = h.record(3);

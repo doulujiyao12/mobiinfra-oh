@@ -6,6 +6,7 @@ export class SyncStoreCommand {
   filesDir: string = '';
   peer: string = '';
   id: string = '';
+  skipSha256: boolean = false;
   cursor: string = '';
   limit: number = 6;
   confirmation: SyncRequest = new SyncRequest();

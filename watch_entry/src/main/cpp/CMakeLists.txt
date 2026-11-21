@@ -14,3 +14,4 @@ target_compile_options(voicevad PRIVATE -O2 -fvisibility=hidden)
 # WebRTC fixed-point DSP intentionally relies on signed wraparound.
 target_compile_options(voicevad PRIVATE -fwrapv)
 target_link_libraries(voicevad PUBLIC libace_napi.z.so)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../phonebridge/src/main/cpp" watch_audio)

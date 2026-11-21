@@ -21,6 +21,7 @@ export async function createHarness(filesDir, options = {}) {
     WhenceType: { SEEK_SET: 0 },
     accessSync: value => fs.existsSync(value),
     mkdirSync: value => fs.mkdirSync(value),
+    rmdirSync: value => fs.rmdirSync(value),
     listFileSync: value => fs.readdirSync(value),
     statSync: value => fs.statSync(value),
     openSync: (value, flags) => {
@@ -87,10 +88,11 @@ export async function createHarness(filesDir, options = {}) {
         };
       }
     },
+    'libwatchaudio.so': { createAudioCodecJob: () => { throw new Error('codec unavailable in capture tests'); } },
     '@kit.BasicServicesKit': {}
   };
   const sandbox = vm.createContext({
-    console, ArrayBuffer, DataView, Int16Array,
+    console, ArrayBuffer, DataView, Int16Array, canIUse: () => false,
     Date: class extends Date { static now() { return state.now; } },
     setTimeout, clearTimeout,
     setInterval: callback => { const id = nextInterval++; intervalCallbacks.set(id, callback); return id; },

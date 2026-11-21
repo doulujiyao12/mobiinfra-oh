@@ -13,6 +13,7 @@ export class RecordingSyncEngine {
   private view: SyncViewState = new SyncViewState();
   private offer: TransferOffer | undefined = undefined;
   private phase: string = '';
+  private encoding: string = '';
   private deadline: number = 0;
   private generation: number = 0;
   private connected: boolean = true;
@@ -116,9 +117,11 @@ export class RecordingSyncEngine {
       } else {
         this.view.currentId = request.recordingId;
         this.view.status = 'preparing';
-        this.view.message = '正在校验录音';
+        this.view.message = '正在准备录音';
         this.emit();
-        try { this.offer = await this.repository.prepare(this.peer, request.recordingId); } catch (error) {
+        try {
+          this.offer = await this.repository.prepare(this.peer, request.recordingId, request.skipSha256 === true);
+        } catch (error) {
           this.idle('文件准备失败，请在手机重试');
           throw error;
         }
@@ -129,11 +132,11 @@ export class RecordingSyncEngine {
     } else if (request.type === 'READY_RECORDING') {
       this.requireTransfer(request.transferId);
       if (this.phase === 'offered') {
-        this.phase = 'sending';
+        this.phase = 'preparing';
         this.deadline = Date.now() + 180000;
-        this.view.status = 'transferring';
+        this.view.status = 'preparing';
         this.view.progress = 0;
-        this.view.message = '正在发送录音';
+        this.view.message = '正在准备录音';
         this.emit();
         const response: SyncResponse = this.statusResponse(request.requestId);
         try { await this.send(response); } catch (error) {
@@ -142,10 +145,10 @@ export class RecordingSyncEngine {
           throw error;
         }
         // Do not block the command queue: ACK/cancel may arrive before SDK completion.
-        this.beginTransfer().catch(() => {});
+        this.beginTransfer(request.acceptGzip === true, request.acceptAac === true).catch(() => {});
       } else { await this.send(this.statusResponse(request.requestId)); }
     } else if (request.type === 'ACK_RECORDING') {
-      // May also acknowledge an identical file already durably held by the phone.
+      // The phone can also acknowledge a copy already in its recording library.
       await this.repository.confirm(this.peer, request);
       if (this.offer?.transferId === request.transferId) {
         this.generation++;
@@ -182,27 +185,43 @@ export class RecordingSyncEngine {
     const response: SyncResponse = this.response(requestId, 'TRANSFER_STATE');
     response.transferId = this.offer?.transferId || '';
     response.recordingId = this.offer?.recording.id || '';
+    response.encoding = this.encoding;
     response.phase = this.phase || 'idle';
     response.progress = this.view.progress;
     return response;
   }
 
-  private async beginTransfer(): Promise<void> {
+  private async beginTransfer(acceptGzip: boolean, acceptAac: boolean): Promise<void> {
+    let lastReport = -Infinity;
+    let reporting = false;
     const generation: number = ++this.generation;
     const offer: TransferOffer = this.offer!;
     try {
-      await this.transport.transfer(offer.path, (progress: number): void => {
+      await this.transport.transfer(offer.path, (progress: number, compressing?: boolean, encoding?: string): void => {
         if (generation !== this.generation || !this.connected) { return; }
+        const phase = compressing ? 'compressing' : 'sending';
+        const phaseChanged = phase !== this.phase || (encoding !== undefined && encoding !== this.encoding);
+        this.phase = phase;
+        if (encoding !== undefined) { this.encoding = encoding; }
+        this.view.status = compressing ? 'preparing' : 'transferring';
+        this.view.message = compressing ? '正在压缩录音' : '正在发送录音';
         this.view.progress = Math.min(100, Math.max(0, progress));
         this.deadline = Date.now() + 180000;
         this.emit();
-      });
+        if (phaseChanged) { this.send(this.statusResponse('')).catch(() => {}); }
+        if (progress <= 0) { return; }
+        if (!reporting && Date.now() - lastReport >= 1000) {
+          lastReport = Date.now();
+          reporting = true;
+          this.send(this.statusResponse('')).catch(() => {}).finally(() => { reporting = false; });
+        }
+      }, acceptGzip, acceptAac);
       if (generation !== this.generation || !this.connected) { return; }
       this.phase = 'awaiting_ack';
       this.deadline = Date.now() + 60000;
       this.view.status = 'awaiting_ack';
       this.view.progress = 100;
-      this.view.message = '发送完成，等待手机校验确认';
+      this.view.message = '发送完成，等待手机确认';
       this.emit();
       await this.send(this.statusResponse(''));
     } catch (error) {
@@ -224,6 +243,7 @@ export class RecordingSyncEngine {
     this.view.currentId = '';
     this.view.progress = 0;
     this.view.status = 'connected';
+    this.encoding = '';
     this.view.message = message;
     this.emit();
   }

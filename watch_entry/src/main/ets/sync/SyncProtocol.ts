@@ -4,6 +4,9 @@ export const MAX_MESSAGE_BYTES: number = 4096;
 export const MAX_PAGE_SIZE: number = 8;
 
 export class SyncRequest {
+  acceptGzip?: boolean;
+  acceptAac?: boolean;
+  skipSha256?: boolean;
   protocol: string = SYNC_PROTOCOL;
   version: number = SYNC_VERSION;
   type: string = '';
@@ -57,6 +60,7 @@ export class SyncResponse {
   transferId: string = '';
   sha256: string = '';
   bytes: number = 0;
+  encoding: string = '';
   phase: string = '';
   progress: number = 0;
 }
@@ -111,8 +115,9 @@ export function decodeRequest(text: string): SyncRequest {
       throw new SyncFailure('BAD_REQUEST', '传输标识无效');
     }
   }
-  if (request.type === 'ACK_RECORDING' && (typeof request.sha256 !== 'string' ||
-    !/^[a-fA-F0-9]{64}$/.test(request.sha256) || !Number.isSafeInteger(request.bytes) || request.bytes <= 44)) {
+  const digest = request.sha256;
+  if (request.type === 'ACK_RECORDING' && (!Number.isSafeInteger(request.bytes) || request.bytes <= 44 ||
+    (digest !== undefined && digest !== '' && (typeof digest !== 'string' || !/^[a-fA-F0-9]{64}$/.test(digest))))) {
     throw new SyncFailure('BAD_REQUEST', '文件确认信息无效');
   }
   return request;
@@ -120,13 +125,14 @@ export function decodeRequest(text: string): SyncRequest {
 
 export interface SyncRepository {
   list(peer: string, cursor: string, limit: number): Promise<RecordingPage>;
-  prepare(peer: string, id: string): Promise<TransferOffer>;
+  prepare(peer: string, id: string, skipSha256?: boolean): Promise<TransferOffer>;
   confirm(peer: string, request: SyncRequest): Promise<void>;
   confirmedIds(peer: string): Promise<string[]>;
 }
 
 export interface SyncTransport {
   send(text: string): Promise<void>;
-  transfer(path: string, progress: (value: number) => void): Promise<void>;
+  transfer(path: string, progress: (value: number, compressing?: boolean, encoding?: string) => void,
+    acceptGzip?: boolean, acceptAac?: boolean): Promise<void>;
   cancel(): Promise<void>;
 }

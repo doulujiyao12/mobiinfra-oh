@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import path from 'node:path';
 import vm from 'node:vm';
 import crypto from 'node:crypto';
@@ -17,17 +18,23 @@ export function createSyncHarness(filesDir) {
     background: [], receivers: new Set(), serviceDie: new Set(), taskCancel: new Set(),
     devices: [{ randomId: 'paired-phone-1', name: 'Test HarmonyOS phone', category: 1, osCategory: 1 }],
     installed: true, sendFailures: 0, phoneReceivers: new Set(), phoneFileReceivers: new Set(),
-    autoTransfer: false, corruptNextTransfer: false, dropAckReplies: 0, fastRequestTimeout: 0,
+    autoTransfer: false, aacSupported: false, failAacDecode: false, codecRuns: [],
+    truncateNextTransfer: false, hashReads: 0, dropAckReplies: 0, fastRequestTimeout: 0,
     phoneRegistrations: [], deferBackground: false, releaseBackground: undefined
   };
   const io = {
     OpenMode: { CREATE: 64, READ_WRITE: 2, READ_ONLY: 0, TRUNC: 512 },
     WhenceType: { SEEK_SET: 0 },
     accessSync: name => fs.existsSync(name),
-    statSync: name => fs.statSync(name),
+    statSync: name => {
+      const value = typeof name === 'number' ? fs.fstatSync(name) : fs.statSync(name);
+      Object.defineProperty(value, 'mtime', { value: value.mtimeMs });
+      return value;
+    },
     listFileSync: name => fs.readdirSync(name),
     readTextSync: name => fs.readFileSync(name, 'utf8'),
     mkdirSync: name => fs.mkdirSync(name),
+    rmdirSync: name => fs.rmdirSync(name),
     unlinkSync: name => fs.unlinkSync(name),
     copyFile: async (from, to) => fs.copyFileSync(typeof from === 'number' ? handles.get(from).path : from, to),
     openSync: (name, flags) => {
@@ -71,12 +78,13 @@ export function createSyncHarness(filesDir) {
       if (!handles.has(file.file.fd)) { throw new Error('closed descriptor passed to Wear Engine'); }
       state.transfers.push({ id, app, file, callback });
       if (state.autoTransfer) {
+        callback(undefined, { progress: 42 });
         queueMicrotask(() => {
           const receivedPath = path.join(filesDir, `native-received-${state.transfers.length}.wav`);
           fs.copyFileSync(handles.get(file.file.fd).path, receivedPath);
-          if (state.corruptNextTransfer) {
-            state.corruptNextTransfer = false;
-            const bytes = fs.readFileSync(receivedPath); bytes[bytes.length - 1] ^= 1; fs.writeFileSync(receivedPath, bytes);
+          if (state.truncateNextTransfer) {
+            state.truncateNextTransfer = false;
+            fs.truncateSync(receivedPath, fs.statSync(receivedPath).size - 1);
           }
           for (const receiver of state.phoneFileReceivers) {
             receiver({ file: io.openSync(receivedPath, 0) });
@@ -130,8 +138,36 @@ export function createSyncHarness(filesDir) {
     TextDecoder: { create: () => ({ decodeToString: bytes => new TextDecoder('utf-8', { fatal: true }).decode(bytes) }) }
   };
   const sdk = {
-    '@kit.CoreFileKit': { fileIo: io, hash: { hash: async name => crypto.createHash('sha256').update(fs.readFileSync(name)).digest('hex') } },
-    '@kit.ArkTS': { util, worker: {} },
+    '@kit.CoreFileKit': { fileIo: io, hash: { hash: async name => {
+      state.hashReads++;
+      return crypto.createHash('sha256').update(fs.readFileSync(name)).digest('hex');
+    } } },
+    '@kit.ArkTS': { util, JSON, worker: {} },
+    // This fake tests orchestration only. Native AAC fidelity needs device verification.
+    'libwatchaudio.so': { createAudioCodecJob: () => {
+      let cancelled = false;
+      return {
+        progress: () => 50,
+        cancel: () => { cancelled = true; },
+        run: async (input, output, decode, rate, bytes) => {
+          state.codecRuns.push({ input, output, decode, rate, bytes });
+          if (!state.aacSupported) throw new Error('AAC unsupported');
+          if (cancelled) throw new Error('cancelled');
+          if (decode && state.failAacDecode) throw new Error('AAC decode failed');
+          const data = fs.readFileSync(input);
+          if (decode) {
+            const pcm = gunzipSync(data.subarray(7));
+            const restored = Buffer.concat([pcm, Buffer.alloc(2048)]);
+            restored.writeUInt32LE(restored.length - 8, 4);
+            restored.writeUInt32LE(restored.length - 44, 40);
+            fs.writeFileSync(output, restored);
+          } else {
+            fs.writeFileSync(output, Buffer.concat([Buffer.from([255, 241, 96, 64, 0, 0, 252]), gzipSync(data)]));
+          }
+          return fs.statSync(output).size;
+        }
+      };
+    } },
     '@kit.AbilityKit': { wantAgent: {
       OperationType: { START_ABILITY: 1 }, WantAgentFlags: { UPDATE_PRESENT_FLAG: 1 },
       getWantAgent: async () => ({})
@@ -146,7 +182,25 @@ export function createSyncHarness(filesDir) {
       updateBackgroundRunning: async (_context, modes) => { state.background.push(['update', [...modes]]); return {}; },
       stopBackgroundRunning: async () => { state.background.push(['stop', []]); }
     } },
-    '@kit.BasicServicesKit': {},
+    '@kit.BasicServicesKit': { zlib: {
+      ReturnStatus: { OK: 0 },
+      createGZip: async () => {
+        let target, chunks, decoded, offset = 0;
+        return {
+          gzopen: async (name, mode) => {
+            target = name;
+            if (mode === 'rb') decoded = gunzipSync(fs.readFileSync(name));
+            else chunks = [];
+          },
+          gzwrite: async (buffer, n) => { chunks.push(Buffer.from(new Uint8Array(buffer, 0, n))); return n; },
+          gzread: async buffer => {
+            const n = Math.min(buffer.byteLength, decoded.length - offset);
+            new Uint8Array(buffer).set(decoded.subarray(offset, offset + n)); offset += n; return n;
+          },
+          gzclose: async () => { if (chunks) fs.writeFileSync(target, gzipSync(Buffer.concat(chunks))); return 0; }
+        };
+      }
+    } },
     '@kit.WearEngine': { wearEngine: {
       DeviceCategory: { DEFAULT: 1 }, P2pResultCode: { COMMUNICATION_SUCCESS: 207 },
       getDeviceClient: () => ({ getConnectedDevices: async () => state.devices }), getP2pClient: () => client,

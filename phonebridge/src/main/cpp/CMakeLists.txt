@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.5.0)
+project(clawmate_watch_audio LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_library(watchaudio SHARED WatchAudioCodec.cpp)
+target_link_libraries(watchaudio PRIVATE libace_napi.z.so dl)
+target_compile_options(watchaudio PRIVATE -O2 -fvisibility=hidden)

@@ -1,10 +1,11 @@
 import { wearEngine } from '@kit.WearEngine';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, zlib } from '@kit.BasicServicesKit';
 import { MAX_MESSAGE_BYTES, SyncFailure, SyncTransport } from '../sync/SyncProtocol';
 import { backgroundTasks } from './BackgroundTasks';
 import { withTimeout } from '../core/Async';
+import { prepareWatchAac } from './WatchAudioEncoding';
 
 class ActiveTransfer {
   file: wearEngine.P2pFile;
@@ -48,19 +49,60 @@ export class WearEngineTransport implements SyncTransport {
     throw lastError;
   }
 
-  transfer(path: string, progress: (value: number) => void): Promise<void> {
+  transfer(path: string, progress: (value: number, compressing?: boolean, encoding?: string) => void,
+    acceptGzip: boolean = false, acceptAac: boolean = false): Promise<void> {
     if (!this.open || this.operation !== undefined) { return Promise.reject(new Error('文件通道忙或已关闭')); }
-    const operation: Promise<void> = this.runTransfer(path, progress);
+    const operation: Promise<void> = this.runTransfer(path, progress, acceptGzip, acceptAac);
     this.operation = operation;
     return operation.finally(() => { if (this.operation === operation) { this.operation = undefined; } });
   }
 
-  private async runTransfer(path: string, progress: (value: number) => void): Promise<void> {
+  private async compress(path: string, output: string, generation: number): Promise<boolean> {
+    const gzip = await zlib.createGZip();
+    await gzip.gzopen(output, 'wb1');
+    try {
+      const source = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        const buffer = new ArrayBuffer(128 * 1024);
+        while (this.open && generation === this.transferGeneration) {
+          const size = fs.readSync(source.fd, buffer);
+          if (size === 0) { break; }
+          if (await gzip.gzwrite(buffer, size) !== size) { return false; }
+        }
+      } finally { fs.closeSync(source.fd); }
+    } finally {
+      if (await gzip.gzclose() !== zlib.ReturnStatus.OK) { throw new Error('录音压缩失败'); }
+    }
+    const bytes = fs.statSync(output).size;
+    return bytes > 0 && bytes < fs.statSync(path).size;
+  }
+
+  private async runTransfer(path: string, progress: (value: number, compressing?: boolean, encoding?: string) => void,
+    acceptGzip: boolean, acceptAac: boolean): Promise<void> {
     const generation: number = ++this.transferGeneration;
+    const temporary = path + '.transfer.gz';
     await backgroundTasks.setMode('dataTransfer', true);
     try {
       if (!this.open || generation !== this.transferGeneration) { throw new Error('文件传输已取消'); }
-      const file: wearEngine.P2pFile = { file: fs.openSync(path, fs.OpenMode.READ_ONLY) };
+      let source = path;
+      if (acceptAac) {
+        progress(0, true, 'aac');
+        try {
+          const encoded = await prepareWatchAac(path,
+            (): boolean => this.open && generation === this.transferGeneration,
+            (percent: number): void => { progress(percent, true, 'aac'); });
+          if (encoded.length > 0) { source = encoded; }
+        } catch (error) { console.warn('WatchSync AAC preparation: ' + (error as Error).message); }
+      }
+      if (source === path && acceptGzip && canIUse('SystemCapability.BundleManager.Zlib') &&
+        fs.statSync(path).size >= 32 * 1024) {
+        progress(0, true, 'gzip');
+        try { if (await this.compress(path, temporary, generation)) { source = temporary; } } catch (_) {}
+      }
+      if (!this.open || generation !== this.transferGeneration) { throw new Error('文件传输已取消'); }
+      const file: wearEngine.P2pFile = { file: fs.openSync(source, fs.OpenMode.READ_ONLY) };
+      const encoding = source.endsWith('.transfer.aac') ? 'aac' : source === temporary ? 'gzip' : 'wav';
+      progress(0, false, encoding);
       await new Promise<void>((resolve, reject) => {
         const job: ActiveTransfer = new ActiveTransfer(file, reject);
         this.transferJob = job;
@@ -78,7 +120,10 @@ export class WearEngineTransport implements SyncTransport {
           });
         } catch (error) { this.finish(job); reject(error as Error); }
       });
-    } finally { await backgroundTasks.setMode('dataTransfer', false); }
+    } finally {
+      try { if (fs.accessSync(temporary)) { fs.unlinkSync(temporary); } }
+      finally { await backgroundTasks.setMode('dataTransfer', false); }
+    }
   }
 
   private finish(job: ActiveTransfer): void {

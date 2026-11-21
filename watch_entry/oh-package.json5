@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Wearable entry module",
   "dependencies": {
-    "libvoicevad.so": "file:./src/main/cpp/types/libvoicevad"
+    "libvoicevad.so": "file:./src/main/cpp/types/libvoicevad",
+    "libwatchaudio.so": "file:../phonebridge/src/main/cpp/types/libwatchaudio"
   }
 }

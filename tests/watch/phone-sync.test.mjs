@@ -168,14 +168,24 @@ test('actual companion client validates/saves WAV and recovers a lost ACK reply 
   assert.equal(h.state.phoneRegistrations[0].app.remoteApp.fingerprint, '6917613102135452205');
   const list = await phone.list();
   assert.equal(list.recordings[0].id, id);
+  const original = path.join(dir, 'recordings', id);
+  fs.writeFileSync(original, Buffer.concat([Buffer.from(createWavHeader(290000, 16000)), Buffer.alloc(290000, 9)]));
   h.state.dropAckReplies = 1; h.state.fastRequestTimeout = 100;
-  const saved = await phone.download(id);
+  const progress = [];
+  const saved = await phone.download(id, '', (value, compressing) => progress.push(compressing ? 'compressing' : value));
+  assert.deepEqual(progress.filter(value => value !== 'compressing'), [0, 42, 100]);
+  assert.equal(progress[0], 'compressing');
+  assert.equal(h.state.hashReads, 0, 'neither device reads the WAV to compute a hash');
+  assert.equal(h.state.messages.find(m => m.type === 'RECORDING_OFFER').sha256, '');
+  assert.ok(h.state.messages.some(message => message.phase === 'compressing'));
   assert.ok(saved.path.startsWith(phoneDir));
+  assert.ok(fs.statSync(path.join(dir, 'native-received-1.wav')).size < fs.statSync(original).size);
+  assert.equal(fs.existsSync(original + '.transfer.gz'), false);
   assert.deepEqual(fs.readFileSync(saved.path), fs.readFileSync(path.join(dir, 'recordings', id)));
   assert.deepEqual(Array.from(view.syncedIds), [id]);
   assert.equal(h.state.transfers.length, 1);
   assert.ok(h.state.messages.filter(m => m.type === 'RECORDING_ACKED').length >= 2);
-  // Existing durable local copy is SHA256-checked and ACKed without sending WAV again.
+  // A size-matching local copy is acknowledged without sending the WAV again.
   await phone.download(id);
   assert.equal(h.state.transfers.length, 1);
   // Simulate cleared phone app audio while watch still has its receipt. Must download again.
@@ -183,7 +193,24 @@ test('actual companion client validates/saves WAV and recovers a lost ACK reply 
   assert.equal((await phone.list()).recordings[0].synced, true);
   await phone.download(id);
   assert.equal(h.state.transfers.length, 2);
+
+  // With gzip disabled, the same hash-free protocol sends the original WAV.
+  const request = phone.request.bind(phone);
+  phone.request = (type, body) => {
+    if (type === 'READY_RECORDING') { delete body.acceptGzip; delete body.acceptAac; }
+    return request(type, body);
+  };
+  fs.unlinkSync(saved.path);
+  const rawProgress = [];
+  await phone.download(id, '', (_, compressing) => rawProgress.push(compressing));
+  assert(!rawProgress.includes(true));
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'native-received-3.wav')), fs.readFileSync(original));
   assert.ok(fs.existsSync(saved.path));
+  const restarted = store(h, dir);
+  assert.equal(restarted.sourceId(), phone.identity());
+  const peer = `${h.state.devices[0].randomId}|${h.state.registrations[0].app.remoteApp.fingerprint}`;
+  assert.equal((await restarted.list(peer, '', 6)).recordings[0].synced, true);
+  assert.equal(h.state.hashReads, 0);
 });
 
 test('whole-session offers larger than 100 MB are accepted up to the bounded phone library limit', async t => {
@@ -192,11 +219,12 @@ test('whole-session offers larger than 100 MB are accepted up to the bounded pho
   const phone = h.phoneClient({ filesDir: dir });
   phone.sourceId = 'test-source';
   phone.destination = () => '/verified/recording.wav';
-  phone.matches = async () => true; // Exercise offer/ACK validation without allocating gigabytes.
+  phone.matchesSize = () => true; // Exercise offer/ACK validation without allocating gigabytes.
   for (const bytes of [100 * 1024 * 1024 + 44, 48000 * 2 * 6 * 3600 + 44, 2 * 1024 * 1024 * 1024]) {
     const sent = [];
-    phone.request = async (type) => {
+    phone.request = async (type, body) => {
       sent.push(type);
+      if (type === 'ACK_RECORDING') assert.equal(body.sha256, 'a'.repeat(64));
       if (type === 'GET_RECORDING') return { type: 'RECORDING_OFFER', recordingId: id,
         transferId: 'transfer', sha256: 'a'.repeat(64), bytes, recording: { id, bytes } };
       return { type: type === 'ACK_RECORDING' ? 'RECORDING_ACKED' : 'CANCELLED' };
@@ -212,18 +240,94 @@ test('whole-session offers larger than 100 MB are accepted up to the bounded pho
   }
 });
 
-test('corrupted file is never acknowledged; retry obtains a verified durable copy', async t => {
+test('AAC negotiation restores WAV, preserves tail padding, caches encoding and reuses a moved phone copy', async t => {
+  const dir = fixture(t), id = wav(dir);
+  const original = path.join(dir, 'recordings', id);
+  fs.writeFileSync(original, Buffer.concat([Buffer.from(createWavHeader(290000, 16000)), Buffer.alloc(290000, 9)]));
+  const phoneDir = path.join(dir, 'phone'); fs.mkdirSync(phoneDir);
+  const h = createSyncHarness(dir); t.after(h.dispose);
+  h.state.aacSupported = true; h.state.autoTransfer = true;
+  const controller = h.load('services/PhoneSyncController.ets').phoneSyncController;
+  controller.initialize({ filesDir: dir }); t.after(() => controller.destroy());
+  await waitFor(() => h.state.receivers.size === 1);
+  const phone = h.phoneClient({ filesDir: phoneDir }); t.after(() => phone.close());
+  await phone.connect();
+  const stages = [];
+  const saved = await phone.download(id, '', (percent, compressing, restoring) =>
+    stages.push(restoring ? 'restoring' : compressing ? 'compressing' : percent));
+  assert.equal(stages[0], 'compressing');
+  assert(stages.includes('restoring'));
+  const audio = fs.readFileSync(saved.path);
+  assert.equal(audio.readUInt32LE(24), 16000);
+  assert.equal(audio.length, fs.statSync(original).size + 2048);
+  assert.deepEqual(audio.subarray(44, 290044), fs.readFileSync(original).subarray(44));
+  assert.equal(audio.readUInt32LE(40), audio.length - 44);
+  assert.equal(h.state.codecRuns.filter(run => !run.decode).length, 1);
+  assert(fs.existsSync(original + '.transfer.aac'));
+  fs.unlinkSync(saved.path);
+  const retry = await phone.download(id);
+  assert.equal(h.state.codecRuns.filter(run => !run.decode).length, 1, 'retry reuses the watch encoding');
+  const managed = path.join(phoneDir, 'managed.wav');
+  fs.renameSync(retry.path, managed);
+  const count = h.state.transfers.length;
+  assert.equal((await phone.download(id, managed)).path, managed);
+  assert.equal(h.state.transfers.length, count, 'AAC padding does not cause a duplicate transfer');
+  assert.equal(h.state.hashReads, 0);
+});
+
+test('phone AAC decoding failure automatically retries once with a lossless transfer', async t => {
+  const dir = fixture(t), id = wav(dir);
+  const original = path.join(dir, 'recordings', id);
+  fs.writeFileSync(original, Buffer.concat([Buffer.from(createWavHeader(290000, 16000)), Buffer.alloc(290000, 5)]));
+  const phoneDir = path.join(dir, 'phone'); fs.mkdirSync(phoneDir);
+  const h = createSyncHarness(dir); t.after(h.dispose);
+  h.state.aacSupported = true; h.state.failAacDecode = true; h.state.autoTransfer = true;
+  const controller = h.load('services/PhoneSyncController.ets').phoneSyncController;
+  controller.initialize({ filesDir: dir }); t.after(() => controller.destroy());
+  await waitFor(() => h.state.receivers.size === 1);
+  const phone = h.phoneClient({ filesDir: phoneDir }); t.after(() => phone.close());
+  await phone.connect();
+  const saved = await phone.download(id);
+  assert.deepEqual(fs.readFileSync(saved.path), fs.readFileSync(original));
+  assert.equal(h.state.transfers.length, 2);
+  assert.equal(h.state.codecRuns.filter(run => run.decode).length, 1);
+  assert.equal(h.state.messages.filter(message => message.type === 'RECORDING_ACKED').length, 1);
+  assert(!fs.readdirSync(path.dirname(saved.path)).some(name => name.endsWith('.part') || name.endsWith('.wire')));
+});
+
+test('AAC cache follows the source revision and cancellation cannot publish a partial cache', async t => {
+  const dir = fixture(t), id = wav(dir);
+  const original = `${dir}/recordings/${id}`;
+  const h = createSyncHarness(dir); t.after(h.dispose); h.state.aacSupported = true;
+  const encoder = h.load('services/WatchAudioEncoding.ets');
+  fs.writeFileSync(original, Buffer.concat([Buffer.from(createWavHeader(64000, 16000)), Buffer.alloc(64000, 1)]));
+  const [cached, shared] = await Promise.all([
+    encoder.prepareWatchAac(original, () => true, () => {}),
+    encoder.prepareWatchAac(original, () => true, () => {})
+  ]);
+  assert.equal(shared, cached);
+  assert.equal(h.state.codecRuns.length, 1);
+  fs.writeFileSync(original, Buffer.concat([Buffer.from(createWavHeader(66000, 16000)), Buffer.alloc(66000, 2)]));
+  await encoder.prepareWatchAac(original, () => true, () => {});
+  assert.equal(h.state.codecRuns.length, 2);
+  encoder.removeAudioCache(original);
+  assert(!fs.existsSync(cached));
+  await assert.rejects(encoder.prepareWatchAac(original, () => false, () => {}), /取消/);
+  assert(!fs.readdirSync(path.dirname(original)).some(name => name.includes('.transfer.aac')));
+});
+
+test('a truncated file is never acknowledged and can be retried', async t => {
   const dir = fixture(t); const id = wav(dir);
   const phoneDir = path.join(dir, 'phone'); fs.mkdirSync(phoneDir);
   const h = createSyncHarness(dir); t.after(h.dispose);
-  h.state.autoTransfer = true; h.state.corruptNextTransfer = true;
+  h.state.autoTransfer = true; h.state.truncateNextTransfer = true;
   const controller = h.load('services/PhoneSyncController.ets').phoneSyncController;
   let view; controller.subscribe(state => { view = state; });
   controller.initialize({ filesDir: dir }); t.after(() => controller.destroy());
   await waitFor(() => h.state.receivers.size === 1);
   const phone = h.phoneClient({ filesDir: phoneDir }); t.after(() => phone.close());
   await phone.connect();
-  await assert.rejects(phone.download(id), /SHA256/);
+  await assert.rejects(phone.download(id), /录音大小与手表记录不符|incorrect header check/);
   assert.equal(view.syncedIds.length, 0);
   assert.equal(h.state.messages.some(m => m.type === 'RECORDING_ACKED'), false);
   const saved = await phone.download(id);
@@ -263,7 +367,7 @@ test('managed phone library paths remain deduplicated after moving a verified do
   const reused = await phone.download(id, managed);
   assert.equal(reused.path, managed); assert.equal(reused.sourceId, phone.identity());
   assert.equal(h.state.transfers.length, 1);
-  const damaged = fs.readFileSync(managed); damaged[100] ^= 1; fs.writeFileSync(managed, damaged);
+  fs.truncateSync(managed, fs.statSync(managed).size - 1);
   const repaired = await phone.download(id, managed);
   assert.notEqual(repaired.path, managed); assert.equal(h.state.transfers.length, 2);
   assert.deepEqual(fs.readFileSync(repaired.path), fs.readFileSync(path.join(dir, 'recordings', id)));

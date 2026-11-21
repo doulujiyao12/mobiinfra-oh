@@ -17,7 +17,7 @@ export class RecordingWatchSync {
     } catch (e) { throw new Error(watchConnectionMessage(e as BusinessError)); }
   }
   async sync(context: common.UIAbilityContext, deviceId: string, store: RecordingStore,
-    progress: (text: string) => void, onSaved: (record: RecordingRecord) => void,
+    progress: (text: string, percent?: number) => void, onSaved: (record: RecordingRecord) => void,
     selection: RecordingWatchSelection): Promise<number> {
     const ids: string[] = Array.from(new Set<string>(selection.recordingIds));
     if (!selection.sourceId || ids.length === 0) { throw new Error('请先选择要同步的手表录音'); }
@@ -30,19 +30,31 @@ export class RecordingWatchSync {
       const existingRecords: Map<string, RecordingRecord> = this.localRecords(store, client.identity());
       for (let index = 0; index < ids.length; index++) {
         if (epoch !== this.epoch) { throw new Error('同步已停止'); }
-        progress('正在接收录音 ' + (index + 1) + '/' + ids.length);
+        const position = (index + 1) + '/' + ids.length;
+        progress('正在准备录音 ' + position, Math.floor(index * 100 / ids.length));
         let existing = existingRecords.get(ids[index]);
         // Keep an explicit local audio deletion even if it changed after listing.
         if (existing?.audioDeleted) { continue; }
-        let saved = await client.download(ids[index], existing === undefined ? '' : store.audioPath(existing.id));
+        let saved = await client.download(ids[index], existing === undefined ? '' : store.audioPath(existing.id),
+          (percent: number, compressing?: boolean, restoring?: boolean): void => {
+            if (epoch !== this.epoch) { return; }
+            if (compressing || restoring) {
+              const stage = compressing ? '手表正在压缩录音 ' : '正在还原录音 ';
+              progress(stage + position + ' · ' + percent + '%');
+              return;
+            }
+            const label = percent === 100 ? '正在保存录音 ' + position : '正在接收录音 ' + position + ' · ' + percent + '%';
+            progress(label, Math.floor((index * 100 + Math.min(99, percent)) / ids.length));
+          });
         if (epoch !== this.epoch) { throw new Error('同步已停止'); }
-        progress('校验并保存第 ' + (count + 1) + ' 条录音');
+        progress('正在保存录音 ' + position);
         let record = await store.importWatch(saved);
         // The managed library now owns a durable copy; retain no second audio cache.
         if (saved.path !== store.audioPath(record.id) && fs.accessSync(saved.path)) {
           try { fs.unlinkSync(saved.path); } catch (e) { /* A verified library copy already exists. */ }
         }
         count++; onSaved(record);
+        progress('已保存录音 ' + position, Math.floor((index + 1) * 100 / ids.length));
       }
       return count;
     } finally { await client.close(); if (this.client === client) { this.client = null; } }

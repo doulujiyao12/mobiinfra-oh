@@ -14,7 +14,7 @@ class WatchClient {
   async list(cursor) { if (listHook) await listHook(cursor); return pages.get(cursor); }
   async download(id, existing) {
     downloads.push([id, existing]); if (downloadHook) await downloadHook(id);
-    return { sourceId, recording: { id, createdAt: Date.now() }, sha256: 'abc', path: '/received/' + id };
+    return { sourceId, recording: { id, createdAt: Date.now() }, path: '/received/' + id };
   }
   async close() { closed++; }
 }

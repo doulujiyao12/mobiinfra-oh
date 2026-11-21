@@ -84,9 +84,7 @@ export class RecordingStore {
   async importWatch(saved: DownloadedRecording): Promise<RecordingRecord> {
     let existing = this.findWatch(saved.sourceId, saved.recording.id);
     if (existing !== null) {
-      if (existing.watch?.sha256 !== saved.sha256) { throw new Error('同一条手表录音的校验信息发生变化，原录音已保留'); }
-      // A different returned path means the receiver could not verify the
-      // managed copy and downloaded a replacement. Repair audio, retain edits.
+      // If the managed copy is missing or incomplete, restore its audio and retain edits.
       if (saved.path !== this.audioPath(existing.id)) {
         let input = fs.openSync(saved.path, fs.OpenMode.READ_ONLY);
         let temporary = this.audioPath(existing.id) + '.part';
@@ -103,7 +101,7 @@ export class RecordingStore {
       if (existing.audioDeleted && this.hasAudio(existing.id)) { existing.audioDeleted = false; this.save(existing); }
       return existing;
     }
-    return this.importWav(saved.path, { sourceId: saved.sourceId, recordingId: saved.recording.id, sha256: saved.sha256 }, saved.recording.createdAt);
+    return this.importWav(saved.path, { sourceId: saved.sourceId, recordingId: saved.recording.id }, saved.recording.createdAt);
   }
   list(): RecordingRecord[] {
     let result: RecordingRecord[] = [];

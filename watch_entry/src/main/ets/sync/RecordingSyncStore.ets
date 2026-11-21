@@ -21,7 +21,7 @@ class SyncJournal {
   pending: PendingTransfer | undefined = undefined;
 }
 
-/** Runs in its own Worker: catalog/hash/journal I/O never block microphone callbacks. */
+/** Runs in its own Worker so catalog and transfer preparation never block microphone callbacks. */
 export class RecordingSyncStore implements SyncRepository {
   private directory: string;
   private journalPath: string;
@@ -53,7 +53,7 @@ export class RecordingSyncStore implements SyncRepository {
     if (receipt === null || typeof receipt.peer !== 'string' || receipt.peer.length > 512 ||
       typeof receipt.id !== 'string' || parseRecordingName(receipt.id) === undefined || receipt.id.endsWith('.part') ||
       typeof receipt.transferId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(receipt.transferId) ||
-      typeof receipt.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
+      typeof receipt.sha256 !== 'string' || (receipt.sha256 !== '' && !/^[a-f0-9]{64}$/.test(receipt.sha256)) ||
       !Number.isSafeInteger(receipt.bytes) || receipt.bytes <= WAV_HEADER_BYTES ||
       !Number.isFinite(receipt.receivedAt)) { throw new Error('无效的同步确认'); }
   }
@@ -123,7 +123,7 @@ export class RecordingSyncStore implements SyncRepository {
     return page;
   }
 
-  async prepare(peer: string, id: string): Promise<TransferOffer> {
+  async prepare(peer: string, id: string, skipSha256: boolean = false): Promise<TransferOffer> {
     const recording: RecordingMetadata = this.metadata(id, peer);
     const path: string = this.path(id);
     const handle: fs.File = fs.openSync(path, fs.OpenMode.READ_ONLY);
@@ -134,8 +134,9 @@ export class RecordingSyncStore implements SyncRepository {
         throw new SyncFailure('INVALID_RECORDING', '录音文件头或长度无效');
       }
     } finally { fs.closeSync(handle.fd); }
-    const digest: string = (await hash.hash(path, 'sha256')).toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(digest) || fs.statSync(path).size !== recording.bytes) {
+    // Legacy phone versions require a digest in the offer.
+    const digest: string = skipSha256 ? '' : (await hash.hash(path, 'sha256')).toLowerCase();
+    if ((!skipSha256 && !/^[a-f0-9]{64}$/.test(digest)) || fs.statSync(path).size !== recording.bytes) {
       throw new SyncFailure('FILE_CHANGED', '录音文件在准备期间发生变化');
     }
     const old: PendingTransfer | undefined = this.journal.pending;
@@ -144,7 +145,8 @@ export class RecordingSyncStore implements SyncRepository {
     pending.id = id;
     pending.sha256 = digest;
     pending.bytes = recording.bytes;
-    pending.transferId = old !== undefined && old.peer === peer && old.id === id && old.sha256 === digest ?
+    pending.transferId = old !== undefined && old.peer === peer && old.id === id &&
+      old.bytes === recording.bytes && old.sha256 === digest ?
       old.transferId : util.generateRandomUUID(true);
     pending.receivedAt = 0;
     const next: SyncJournal = new SyncJournal();
@@ -162,7 +164,7 @@ export class RecordingSyncStore implements SyncRepository {
 
   async confirm(peer: string, request: SyncRequest): Promise<void> {
     this.path(request.recordingId);
-    const digest: string = request.sha256.toLowerCase();
+    const digest: string = (request.sha256 || '').toLowerCase();
     const previous: Receipt | undefined = this.journal.receipts.find((r: Receipt) => r.peer === peer &&
       r.id === request.recordingId && r.transferId === request.transferId && r.sha256 === digest && r.bytes === request.bytes);
     if (previous !== undefined) { return; } // Duplicate ACK after a lost response is idempotent.

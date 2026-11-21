@@ -32,7 +32,7 @@ export interface RecordingRecord {
   transcriptionComplete?: boolean;
   transcriptionEngine?: string;
 }
-export interface RecordingWatchSource { sourceId: string; recordingId: string; sha256: string; }
+export interface RecordingWatchSource { sourceId: string; recordingId: string; }
 export interface RecordingSummary {
   title: string; overview: string; keyPoints: string[]; decisions: string[];
   actionItems: string[]; openQuestions: string[]; model: string; generatedAt: string;

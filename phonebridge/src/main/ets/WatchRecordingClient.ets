@@ -1,8 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { wearEngine } from '@kit.WearEngine';
-import { fileIo as fs, hash } from '@kit.CoreFileKit';
-import { util } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { util, JSON as ArkJSON } from '@kit.ArkTS';
+import { AudioCodecJob, createAudioCodecJob } from 'libwatchaudio.so';
+import { BusinessError, zlib } from '@kit.BasicServicesKit';
 
 // Match the phone recording library's bounded WAV limit. One watch recording
 // can now span a whole session rather than a five-minute file.
@@ -44,10 +45,18 @@ export class WatchRecordingPage {
 export class DownloadedRecording {
   sourceId: string = '';
   recording: WatchRecording = new WatchRecording();
-  sha256: string = '';
   path: string = '';
 }
+class AudioReceipt {
+  sourceBytes: number = 0;
+  audioBytes: number = 0;
+}
 class Message {
+  acceptAac?: boolean;
+  acceptGzip?: boolean;
+  skipSha256?: boolean;
+  progress?: number;
+  phase?: string;
   protocol: string = PROTOCOL;
   version: number = 1;
   type: string = '';
@@ -75,6 +84,9 @@ class IncomingFile {
   reject: (error: Error) => void;
   timer: number = -1;
   handling: boolean = false;
+  lastProgress: number = -1;
+  compressing: boolean = false;
+  onProgress?: (percent: number, compressing?: boolean, restoring?: boolean) => void;
   constructor(offer: Message, resolve: (path: string) => void, reject: (error: Error) => void) {
     this.offer = offer; this.resolve = resolve; this.reject = reject;
   }
@@ -96,6 +108,8 @@ export class WatchRecordingClient {
   private pending: Map<string, PendingReply> = new Map();
   private incoming: IncomingFile | undefined = undefined;
   private downloading: boolean = false;
+  private aacEnabled: boolean = true;
+  private decoding: AudioCodecJob | undefined = undefined;
   private registeredMessage: boolean = false;
   private registeredFile: boolean = false;
   private generation: number = 0;
@@ -110,6 +124,20 @@ export class WatchRecordingClient {
       if (response === null || response.protocol !== PROTOCOL || response.version !== 1 ||
         typeof response.sourceId !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(response.sourceId) ||
         (this.sourceId.length > 0 && response.sourceId !== this.sourceId)) { return; }
+      const incoming = this.incoming;
+      if (response.type === 'TRANSFER_STATE' && incoming !== undefined && !incoming.handling &&
+        response.transferId === incoming.offer.transferId) {
+        if (response.phase === 'compressing') {
+          if (incoming.lastProgress < 0 && typeof response.progress === 'number' && Number.isFinite(response.progress)) {
+            incoming.compressing = true;
+            incoming.onProgress?.(Math.max(0, Math.min(99, Math.floor(response.progress))), true);
+          }
+        } else if (response.phase !== 'preparing' && typeof response.progress === 'number' &&
+          Number.isFinite(response.progress)) {
+          const percent = Math.min(99, Math.floor(response.progress));
+          if (percent > incoming.lastProgress) { incoming.lastProgress = percent; incoming.onProgress?.(percent); }
+        }
+      }
       const pending: PendingReply | undefined = this.pending.get(response.requestId);
       if (pending !== undefined) {
         if (response.type === 'ERROR') { pending.reject(new Error(`${response.code}: ${response.message}`)); }
@@ -123,6 +151,7 @@ export class WatchRecordingClient {
     const incoming: IncomingFile | undefined = this.incoming;
     if (incoming === undefined || incoming.handling) { try { fs.closeSync(file.file.fd); } catch (_) {} return; }
     incoming.handling = true;
+    incoming.onProgress?.(100);
     this.saveReceivedFile(file, incoming.offer).then((path: string) => incoming.resolve(path))
       .catch((error: Error) => incoming.reject(error)).finally(() => {
         try { fs.closeSync(file.file.fd); } catch (_) {}
@@ -154,17 +183,17 @@ export class WatchRecordingClient {
       // Register both receivers before the watch can send any response/file.
       const receiverDevice = this.deviceId;
       const messageRegistration = this.client.registerMessageReceiver(receiverDevice, this.peer, this.messageReceiver);
-      messageRegistration.then((): void => {
-        if (generation !== this.generation) { this.client.unregisterMessageReceiver(receiverDevice, this.peer, this.messageReceiver).catch((): void => {}); }
-      }).catch((): void => {});
-      await withTimeout(messageRegistration, 15000); this.ensureActive(generation);
-      this.registeredMessage = true;
+      const messagesReady = messageRegistration.then((): void => {
+        if (generation === this.generation) { this.registeredMessage = true; }
+        else { this.client.unregisterMessageReceiver(receiverDevice, this.peer, this.messageReceiver).catch((): void => {}); }
+      });
       const fileRegistration = this.client.registerFileReceiver(receiverDevice, this.peer, this.fileReceiver);
-      fileRegistration.then((): void => {
-        if (generation !== this.generation) { this.client.unregisterFileReceiver(receiverDevice, this.peer, this.fileReceiver).catch((): void => {}); }
-      }).catch((): void => {});
-      await withTimeout(fileRegistration, 15000); this.ensureActive(generation);
-      this.registeredFile = true;
+      const filesReady = fileRegistration.then((): void => {
+        if (generation === this.generation) { this.registeredFile = true; }
+        else { this.client.unregisterFileReceiver(receiverDevice, this.peer, this.fileReceiver).catch((): void => {}); }
+      });
+      await withTimeout(Promise.all([messagesReady, filesReady]), 15000);
+      this.ensureActive(generation);
       const started: wearEngine.P2pResult = await withTimeout(
         this.client.startRemoteApp(this.deviceId, this.peer.remoteApp.bundleName), 20000);
       this.ensureActive(generation);
@@ -238,42 +267,62 @@ export class WatchRecordingClient {
     } while (cursor.length > 0);
   }
 
-  async download(recordingId: string, existingPath: string = ''): Promise<DownloadedRecording> {
+  async download(recordingId: string, existingPath: string = '',
+    onProgress?: (percent: number, compressing?: boolean, restoring?: boolean) => void): Promise<DownloadedRecording> {
+    const generation = this.generation;
+    const aacEnabled = this.aacEnabled;
+    try { return await this.downloadOnce(recordingId, existingPath, onProgress); }
+    catch (error) {
+      this.ensureActive(generation);
+      if (aacEnabled && !this.aacEnabled) { return this.downloadOnce(recordingId, existingPath, onProgress); }
+      throw error as Error;
+    }
+  }
+
+  private async downloadOnce(recordingId: string, existingPath: string,
+    onProgress?: (percent: number, compressing?: boolean, restoring?: boolean) => void): Promise<DownloadedRecording> {
     if (this.downloading || this.sourceId.length === 0) { throw new Error('请先连接手表，且一次只下载一个录音'); }
     this.downloading = true;
     let offer: Message | undefined = undefined;
     try {
       const body: Message = new Message(); body.recordingId = recordingId;
+      body.skipSha256 = true;
       offer = await this.request('GET_RECORDING', body);
       if (offer.type !== 'RECORDING_OFFER' || offer.recordingId !== recordingId ||
-        !/^[a-f0-9]{64}$/.test(offer.sha256) || !Number.isSafeInteger(offer.bytes) || offer.bytes <= 44 ||
+        !Number.isSafeInteger(offer.bytes) || offer.bytes <= 44 ||
         offer.bytes > MAX_RECORDING_BYTES || offer.recording.id !== recordingId || offer.recording.bytes !== offer.bytes) {
         throw new Error('手表文件信息无效');
       }
       let destination: string = this.destination(recordingId);
-      // Let an integrated phone library reuse its own verified copy after moving
-      // an earlier download into its managed recording directory.
-      if (existingPath && await this.matches(existingPath, offer.bytes, offer.sha256)) { destination = existingPath; }
-      if (!await this.matches(destination, offer.bytes, offer.sha256)) {
+      // An earlier download may have been moved into the managed recording library.
+      const receiptPath = this.destination(recordingId) + '.audio.json';
+      if (existingPath && this.matchesSize(existingPath, offer.bytes, receiptPath)) {
+        destination = existingPath;
+      } else if (!this.matchesSize(destination, offer.bytes, receiptPath)) {
         const expected: Message = offer;
         const received: Promise<string> = new Promise<string>((resolve, reject) => {
           const incoming: IncomingFile = new IncomingFile(expected, resolve, reject);
+          incoming.onProgress = onProgress;
           incoming.timer = setTimeout(() => reject(new Error('录音接收超时，请重试')), 30 * 60 * 1000);
           this.incoming = incoming;
         });
         received.catch(() => {});
         const ready: Message = new Message(); ready.transferId = offer.transferId;
+        ready.acceptGzip = canIUse('SystemCapability.BundleManager.Zlib');
+        ready.acceptAac = this.aacEnabled && canIUse('SystemCapability.Multimedia.Media.AudioCodec');
         await this.request('READY_RECORDING', ready);
         await received;
       }
       const confirmation: Message = new Message();
       confirmation.recordingId = recordingId; confirmation.transferId = offer.transferId;
-      confirmation.sha256 = offer.sha256; confirmation.bytes = offer.bytes;
+      // Older watches still require their offer digest to be echoed in the receipt.
+      confirmation.sha256 = offer.sha256 || '';
+      confirmation.bytes = offer.bytes;
       const acknowledged: Message = await this.request('ACK_RECORDING', confirmation);
       if (acknowledged.type !== 'RECORDING_ACKED') { throw new Error('手表未确认同步状态'); }
       const result: DownloadedRecording = new DownloadedRecording();
       result.sourceId = this.sourceId; result.recording = offer.recording;
-      result.sha256 = offer.sha256; result.path = destination;
+      result.path = destination;
       return result;
     } catch (error) {
       if (offer?.transferId) {
@@ -297,26 +346,119 @@ export class WatchRecordingClient {
     return `${directory}/${id}`;
   }
 
-  private async matches(path: string, bytes: number, sha256: string): Promise<boolean> {
-    return fs.accessSync(path) && fs.statSync(path).size === bytes && (await hash.hash(path, 'sha256')).toLowerCase() === sha256;
+  private matchesSize(path: string, bytes: number, receiptPath: string = ''): boolean {
+    if (!fs.accessSync(path)) { return false; }
+    const stat = fs.statSync(path);
+    if (!stat.isFile()) { return false; }
+    if (stat.size === bytes) { return true; }
+    try {
+      const receipt = ArkJSON.parse(fs.readTextSync(receiptPath)) as AudioReceipt;
+      return receipt.sourceBytes === bytes && receipt.audioBytes === stat.size &&
+        stat.size > bytes && stat.size <= bytes + 8192;
+    } catch (_) { return false; }
+  }
+
+  private async restoreAac(source: string, path: string, offer: Message, generation: number): Promise<number> {
+    const job = createAudioCodecJob();
+    this.decoding = job;
+    const timer = setInterval((): void => {
+      if (generation !== this.generation || this.incoming?.offer !== offer) { job.cancel(); }
+      else { this.incoming?.onProgress?.(job.progress(), false, true); }
+    }, 300);
+    try {
+      this.incoming?.onProgress?.(0, false, true);
+      const bytes = await job.run(source, path, true, offer.recording.sampleRate, offer.bytes);
+      this.ensureActive(generation);
+      if (this.incoming?.offer !== offer) { throw new Error('录音接收已结束'); }
+      return bytes;
+    } catch (error) {
+      this.ensureActive(generation);
+      if (this.incoming?.offer !== offer) { throw new Error('录音接收已结束'); }
+      this.aacEnabled = false;
+      throw error as Error;
+    } finally {
+      clearInterval(timer);
+      if (this.decoding === job) { this.decoding = undefined; }
+    }
+  }
+
+  private async restoreGzip(source: string, path: string, offer: Message, generation: number): Promise<void> {
+    const gzip = await zlib.createGZip();
+    await gzip.gzopen(source, 'rb');
+    try {
+      const output = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        const buffer = new ArrayBuffer(128 * 1024);
+        let total = 0;
+        while (true) {
+          this.ensureActive(generation);
+          if (this.incoming?.offer !== offer) { throw new Error('录音接收已结束'); }
+          const size = await gzip.gzread(buffer);
+          if (size === 0) { break; }
+          total += size;
+          if (size < 0 || total > offer.bytes) { throw new Error('压缩录音大小异常'); }
+          let offset = 0;
+          while (offset < size) {
+            const written = fs.writeSync(output.fd, buffer.slice(offset, size));
+            if (written <= 0) { throw new Error('保存录音失败'); }
+            offset += written;
+          }
+        }
+      } finally { fs.closeSync(output.fd); }
+    } finally { await gzip.gzclose(); }
   }
 
   private async saveReceivedFile(file: wearEngine.P2pFile, offer: Message): Promise<string> {
     const path: string = this.destination(offer.recordingId);
-    const temporary: string = `${path}.part`;
-    await fs.copyFile(file.file.fd, temporary);
-    if (!await this.matches(temporary, offer.bytes, offer.sha256)) {
-      fs.unlinkSync(temporary);
-      throw new Error('录音大小或 SHA256 校验失败，未确认同步');
+    const generation = this.generation;
+    const temporary = path + '.' + util.generateRandomUUID(true) + '.part';
+    try {
+      const size = fs.statSync(file.file.fd).size;
+      if (size <= 0 || size > MAX_RECORDING_BYTES) { throw new Error('录音大小异常'); }
+      await fs.copyFile(file.file.fd, temporary + '.wire');
+      const header = new Uint8Array(8);
+      const wire = fs.openSync(temporary + '.wire', fs.OpenMode.READ_ONLY);
+      try { fs.readSync(wire.fd, header.buffer); } finally { fs.closeSync(wire.fd); }
+      const aac = header[0] === 255 && (header[1] & 0xF6) === 0xF0;
+      let audioBytes = offer.bytes;
+      if (aac) {
+        audioBytes = await this.restoreAac(temporary + '.wire', temporary, offer, generation);
+      } else if (size === offer.bytes && header[0] === 82 && header[1] === 73) {
+        fs.renameSync(temporary + '.wire', temporary);
+      } else if (size < offer.bytes && header[0] === 31 && header[1] === 139 &&
+        canIUse('SystemCapability.BundleManager.Zlib')) {
+        await this.restoreGzip(temporary + '.wire', temporary, offer, generation);
+      } else { throw new Error('录音大小与手表记录不符'); }
+      if (fs.statSync(temporary).size !== audioBytes) { throw new Error('录音大小与手表记录不符'); }
+      this.ensureActive(generation);
+      if (this.incoming?.offer !== offer) { throw new Error('录音接收已结束'); }
+      const handle = fs.openSync(temporary, fs.OpenMode.READ_WRITE);
+      try { fs.fsyncSync(handle.fd); } finally { fs.closeSync(handle.fd); }
+      fs.renameSync(temporary, path);
+      if (aac) {
+        const receipt = new AudioReceipt();
+        receipt.sourceBytes = offer.bytes; receipt.audioBytes = audioBytes;
+        const descriptor = fs.openSync(path + '.audio.json', fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        try {
+          const content = new util.TextEncoder().encodeInto(ArkJSON.stringify(receipt));
+          let offset = 0;
+          while (offset < content.byteLength) {
+            const size = fs.writeSync(descriptor.fd, content.slice(offset).buffer as ArrayBuffer);
+            if (size <= 0) { throw new Error('保存录音信息失败'); }
+            offset += size;
+          }
+        } finally { fs.closeSync(descriptor.fd); }
+      }
+      return path;
+    } finally {
+      if (fs.accessSync(temporary + '.wire')) { fs.unlinkSync(temporary + '.wire'); }
+      if (fs.accessSync(temporary)) { fs.unlinkSync(temporary); }
     }
-    const handle: fs.File = fs.openSync(temporary, fs.OpenMode.READ_WRITE);
-    try { fs.fsyncSync(handle.fd); } finally { fs.closeSync(handle.fd); }
-    fs.renameSync(temporary, path);
-    return path;
   }
 
   async close(): Promise<void> {
     this.generation++;
+    this.decoding?.cancel();
     const deviceId = this.deviceId;
     const registeredFile = this.registeredFile; const registeredMessage = this.registeredMessage;
     this.registeredFile = false; this.registeredMessage = false;

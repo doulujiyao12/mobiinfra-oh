@@ -854,12 +854,14 @@ struct RecordingPage {
     this.busy = true; this.jobKind = 'watch'; this.error = ''; this.progress = 0;
     AppLogger.info('WatchRecording', 'sync selected=' + selection.recordingIds.length + ' autoAnalyze=' + this.watchAutoAnalyze);
     try {
-      let count = await this.watchSync.sync(this.context(), this.watchDevice.id, this.store, (text: string): void => {
-        if (this.alive && epoch === this.epoch) { this.status = text; this.watchStatus = text; }
+      let count = await this.watchSync.sync(this.context(), this.watchDevice.id, this.store, (text: string, percent?: number): void => {
+        if (this.alive && epoch === this.epoch) {
+          this.status = text; this.watchStatus = text;
+          if (percent !== undefined) { this.progress = percent; }
+        }
       }, (record: RecordingRecord): void => {
         received.push(record);
         if (this.alive && epoch === this.epoch) {
-          this.progress = Math.round(received.length * 100 / selection.recordingIds.length);
           this.watchSelectedIds = this.watchSelectedIds.filter((id: string): boolean => id !== record.watch?.recordingId);
           this.watchItems = this.watchItems.map((item: RecordingWatchItem): RecordingWatchItem => {
             if (item.id !== record.watch?.recordingId) { return item; }

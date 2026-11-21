@@ -17,7 +17,7 @@ async function dispatch(command: SyncStoreCommand): Promise<void> {
     } else {
       if (store === undefined) { throw new SyncFailure('NOT_READY', '同步存储尚未就绪'); }
       if (command.kind === 'list') { result.page = await store.list(command.peer, command.cursor, command.limit); }
-      else if (command.kind === 'prepare') { result.offer = await store.prepare(command.peer, command.id); }
+      else if (command.kind === 'prepare') { result.offer = await store.prepare(command.peer, command.id, command.skipSha256); }
       else if (command.kind === 'confirm') { await store.confirm(command.peer, command.confirmation); }
       else if (command.kind === 'confirmed') { result.ids = await store.confirmedIds(command.peer); }
       else { throw new SyncFailure('BAD_REQUEST', '未知同步存储操作'); }

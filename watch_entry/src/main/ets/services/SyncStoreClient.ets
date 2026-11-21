@@ -60,9 +60,10 @@ export class SyncStoreClient implements SyncRepository {
     command.kind = 'list'; command.peer = peer; command.cursor = cursor; command.limit = limit;
     return (await this.call(command)).page;
   }
-  async prepare(peer: string, id: string): Promise<TransferOffer> {
+  async prepare(peer: string, id: string, skipSha256: boolean = false): Promise<TransferOffer> {
     const command: SyncStoreCommand = new SyncStoreCommand();
     command.kind = 'prepare'; command.peer = peer; command.id = id;
+    command.skipSha256 = skipSha256;
     return (await this.call(command)).offer;
   }
   async confirm(peer: string, request: SyncRequest): Promise<void> {

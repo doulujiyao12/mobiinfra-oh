@@ -44,7 +44,12 @@ assert.ok(example.app.products.every(product => !product.signingConfig));
 const dependencies = config('entry/oh-package.json5').dependencies;
 assert.equal(dependencies['@clawmate/watch-bridge'], 'file:../phonebridge');
 assert.ok(dependencies['sherpa_onnx'] && dependencies['libentry.so'], 'Phone native dependencies must be retained');
-assert.deepEqual(Object.keys(config('watch_entry/oh-package.json5').dependencies), ['libvoicevad.so']);
+const watchDependencies = config('watch_entry/oh-package.json5').dependencies;
+assert.deepEqual(Object.keys(watchDependencies).sort(), ['libvoicevad.so', 'libwatchaudio.so']);
+assert.equal(watchDependencies['libwatchaudio.so'], 'file:../phonebridge/src/main/cpp/types/libwatchaudio');
+assert.ok(read('watch_entry/src/main/cpp/CMakeLists.txt').includes('../../../../phonebridge/src/main/cpp'));
+assert.equal(config('phonebridge/oh-package.json5').dependencies['libwatchaudio.so'], 'file:./src/main/cpp/types/libwatchaudio');
+assert.ok(read('phonebridge/src/main/cpp/CMakeLists.txt').includes('WatchAudioCodec.cpp'));
 assert.equal(config('phonebridge/oh-package.json5').name, '@clawmate/watch-bridge');
 
 const entry = config('entry/src/main/module.json5').module;
@@ -105,6 +110,10 @@ const changedSources = [
   'entry/src/main/ets/utils/recording/WatchRecordingClient.ets',
   'phonebridge/Index.ets', 'phonebridge/src/main/ets/WatchRecordingClient.ets',
   'watch_entry/src/main/ets/config/PhonePeer.ts',
+  'watch_entry/src/main/ets/services/WatchAudioEncoding.ets',
+  'watch_entry/src/main/ets/workers/RecorderWorker.ets',
+  'watch_entry/src/main/ets/services/WearEngineTransport.ets',
+  'watch_entry/src/main/ets/sync/RecordingSyncEngine.ts',
   ...loads.map(item => item[0])
 ];
 changedSources.forEach(source);

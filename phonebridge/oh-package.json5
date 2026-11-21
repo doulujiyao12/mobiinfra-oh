@@ -3,5 +3,7 @@
   "version": "1.0.0",
   "description": "ClawMate watch recording receiver for a HarmonyOS companion app",
   "main": "Index.ets",
-  "dependencies": {}
+  "dependencies": {
+    "libwatchaudio.so": "file:./src/main/cpp/types/libwatchaudio"
+  }
 }

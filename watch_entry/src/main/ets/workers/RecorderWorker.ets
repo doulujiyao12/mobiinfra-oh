@@ -5,6 +5,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { createDetector, VoiceDetector } from 'libvoicevad.so';
 import { CaptureCommand, CaptureEvent, RecordingInfo, RecordingMode, RecordingSensitivity } from '../model/RecorderModels';
 import { AudioGate, GateSink, detectionProfile, normalizeRecordingSensitivity } from '../core/AudioGate';
+import { cleanInterruptedAudioCaches, prepareWatchAac, removeAudioCache } from '../services/WatchAudioEncoding';
 import { alignedPcmBytes, createWavHeader, isOwnWavHeader, MAX_SESSION_SECONDS,
   parseRecordingName, triggeredFileName, SEGMENT_SECONDS, WAV_HEADER_BYTES } from '../core/Wav';
 
@@ -33,6 +34,7 @@ let gate: AudioGate | undefined = undefined;
 let voiceDetector: VoiceDetector | undefined = undefined;
 let listenedSamples: number = 0;
 let saving: boolean = false;
+let compressionGeneration: number = 0;
 
 function errorText(error: BusinessError): string {
   return `${error.message || '系统操作失败'}${error.code ? ` (${error.code})` : ''}`;
@@ -261,6 +263,7 @@ async function startCapture(selectedMode: RecordingMode, selectedSensitivity: Re
   if (directory.length === 0) { throw new Error('存储尚未初始化'); }
   if (freeBytes() < SPACE_RESERVE * 2) { throw new Error('可用空间不足 64 MB，请先删除部分录音'); }
   starting = true;
+  compressionGeneration++;
   if (selectedMode !== 'sound' && selectedMode !== 'speech') { throw new Error('未知的录音模式'); }
   mode = selectedMode;
   const sensitivity: RecordingSensitivity = normalizeRecordingSensitivity(selectedSensitivity);
@@ -345,12 +348,19 @@ async function stopCapture(reason: string): Promise<void> {
     (sessionBytes > 0 ? '监听已结束，录音已保存' : '监听已结束，没有检测到可保存的片段') : reason;
   send('stopped', failure.length > 0 ? failure : notice);
   publishLibrary();
+  if (failure.length === 0 && sessionBytes > 0 && activeName.length > 0) {
+    const generation = ++compressionGeneration;
+    const path = directory + '/' + activeName;
+    prepareWatchAac(path, (): boolean => generation === compressionGeneration && !running && !starting,
+      (_percent: number): void => {}).catch((): void => {});
+  }
 }
 
 async function dispatch(command: CaptureCommand): Promise<void> {
   if (command.kind === 'init') {
     directory = `${command.filesDir}/recordings`;
     if (!fs.accessSync(directory)) { fs.mkdirSync(directory); }
+    try { cleanInterruptedAudioCaches(directory); } catch (_) {}
     let recoveryWarning: string = '';
     try { recoveryWarning = recoverPartialFiles(); } catch (error) {
       recoveryWarning = errorText(error as BusinessError);
@@ -367,6 +377,7 @@ async function dispatch(command: CaptureCommand): Promise<void> {
     publishLibrary();
   } else if (command.kind === 'delete') {
     if (running || starting || closing) { throw new Error('请先结束录音再删除文件'); }
+    compressionGeneration++;
     const names: string[] = Array.from(new Set<string>(command.names?.length ? command.names : [command.name]));
     // Validate the complete selection before touching any file.
     for (const name of names) {
@@ -375,7 +386,10 @@ async function dispatch(command: CaptureCommand): Promise<void> {
     }
     const result: CaptureEvent = new CaptureEvent(); result.kind = 'deleted'; result.requestId = command.requestId || '';
     for (const name of names) {
-      try { fs.unlinkSync(`${directory}/${name}`); result.deletedNames.push(name); }
+      try {
+        fs.unlinkSync(`${directory}/${name}`); result.deletedNames.push(name);
+        try { removeAudioCache(directory + '/' + name); } catch (_) {}
+      }
       catch (_) { result.failedNames.push(name); }
     }
     result.message = `已删除 ${result.deletedNames.length} 段录音` +
