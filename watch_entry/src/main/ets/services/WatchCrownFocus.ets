@@ -1,6 +1,14 @@
 import { FrameCallback, UIContext } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
+// Scroll already handles rotations when focused. Only forward events bubbled up from another control.
+export function scrollFromWatchAction(event: CrownEvent, scroller: Scroller, scrollFocused: boolean): void {
+  if (!scrollFocused && event.action === CrownAction.UPDATE) {
+    scroller.scrollBy(0, -event.degree * 2);
+    event.stopPropagation();
+  }
+}
+
 class FocusAfterLayout extends FrameCallback {
   private action: () => void;
 
@@ -23,7 +31,7 @@ export class WatchCrownFocus {
     this.queued = false;
   }
 
-  request(context: UIContext, target: () => string): void {
+  request(context: UIContext, target: () => string, retries: number = 2): void {
     if (this.queued) { return; }
     this.queued = true;
     const revision = this.revision;
@@ -36,8 +44,8 @@ export class WatchCrownFocus {
         try {
           context.getFocusController().requestFocus(id);
         } catch (_) {
-          // A window may disappear between layout and focus. Focus failure must
-          // never abort recording or application startup; the next show retries.
+          // A newly mounted overlay may still be waiting for window focus.
+          if (retries > 0) { this.request(context, target, retries - 1); return; }
           hilog.warn(0x0000, 'WatchCrownFocus', 'Focus target unavailable: %{public}s', id);
         }
       }));

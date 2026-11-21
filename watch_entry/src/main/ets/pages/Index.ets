@@ -76,7 +76,7 @@ struct Index {
       if (!this.pageActive || !this.pageVisible) { return ''; }
       return this.policyVisible ? 'watch-policy-scroll' :
         (!this.privacyAccepted || this.phoneGuideVisible || this.deletionTargets.length > 0 ?
-          'watch-dialog-scroll' : 'watch-page-scroll');
+          'watch-dialog-crown' : 'watch-page-scroll');
     });
   }
 
@@ -646,10 +646,11 @@ struct Index {
           onFocusRequest: (): void => { this.restoreCrownFocus(); } })
       } else if (!this.privacyAccepted) {
         this.PrivacyDialog()
+      } else if (this.phoneGuideVisible) {
+        this.PhoneGuideDialog()
       } else {
         this.MainContent()
-        if (this.phoneGuideVisible) { this.PhoneGuideDialog() }
-        else if (this.deletionTargets.length > 0) { this.DeleteDialog() }
+        if (this.deletionTargets.length > 0) { this.DeleteDialog() }
       }
     }.width('100%').height('100%').backgroundColor(WatchTheme.background)
   }

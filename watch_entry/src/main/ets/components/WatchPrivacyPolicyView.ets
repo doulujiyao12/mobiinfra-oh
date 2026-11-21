@@ -1,10 +1,13 @@
 import { common } from '@kit.AbilityKit';
 import { WatchTheme } from '../theme/WatchTheme';
+import { scrollFromWatchAction } from '../services/WatchCrownFocus';
 import { WATCH_PRIVACY_APP_NAME, WATCH_PRIVACY_DEVELOPER, WATCH_PRIVACY_CONTACT,
   WATCH_PRIVACY_POLICY_URL } from '../config/WatchPrivacyPolicy';
 
 @Component
 export struct WatchPrivacyPolicyView {
+  private scroller: Scroller = new Scroller();
+  private scrollFocused: boolean = false;
   @State private message: string = '';
   onBack: () => void = (): void => {};
   onFocusRequest: () => void = (): void => {};
@@ -23,7 +26,7 @@ export struct WatchPrivacyPolicyView {
 
   build() {
     Column() {
-      Scroll() {
+      Scroll(this.scroller) {
         Column({ space: 10 }) {
           Text('开发者隐私政策').fontSize(16).fontWeight(FontWeight.Medium).fontColor(WatchTheme.text)
             .width('100%').textAlign(TextAlign.Center)
@@ -47,10 +50,15 @@ export struct WatchPrivacyPolicyView {
       }.width('70%').height('70%').scrollBar(BarState.Auto).clip(true)
         .id('watch-policy-scroll').focusable(true).defaultFocus(true).focusOnTouch(true)
         .digitalCrownSensitivity(CrownSensitivity.MEDIUM)
+        .onFocus((): void => { this.scrollFocused = true; })
+        .onBlur((): void => { this.scrollFocused = false; })
         .onAppear((): void => { this.focusContent(); })
         .onTouch((event: TouchEvent): void => {
           if (event.type === TouchType.Up) { this.focusContent(); }
         })
     }.width('100%').height('100%').justifyContent(FlexAlign.Center).backgroundColor(WatchTheme.background)
+      .onDigitalCrown((event: CrownEvent): void => {
+        scrollFromWatchAction(event, this.scroller, this.scrollFocused);
+      })
   }
 }

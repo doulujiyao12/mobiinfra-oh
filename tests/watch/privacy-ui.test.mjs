@@ -56,7 +56,7 @@ function fixture(saved = {}) {
     const file = path.resolve(base, relative);
     if (modules.has(file)) return modules.get(file);
     const exports = {}; modules.set(file, exports);
-    vm.runInNewContext(compile(fs.readFileSync(file, 'utf8')), { exports, Promise, require: name => {
+    vm.runInNewContext(compile(fs.readFileSync(file, 'utf8')), { exports, Promise, CrownAction: { UPDATE: 1 }, require: name => {
       if (external[name]) return external[name];
       const target = ['.ts', '.ets'].map(ext => path.resolve(path.dirname(file), name + ext)).find(fs.existsSync);
       assert(target, name); return load(target);
@@ -66,7 +66,7 @@ function fixture(saved = {}) {
   const policy = load('config/WatchPrivacyPolicy.ts');
   const consent = load('services/WatchPrivacyConsent.ets').watchPrivacyConsent;
   const { WatchPhoneGuide } = load('services/WatchPhoneGuide.ets');
-  const { WatchCrownFocus } = load('services/WatchCrownFocus.ets');
+  const { WatchCrownFocus, scrollFromWatchAction } = load('services/WatchCrownFocus.ets');
   const Ability = load('entryability/HiWearMainAbility.ets').default;
   function page(names) {
     const text = fs.readFileSync(path.join(base, 'pages/Index.ets'), 'utf8');
@@ -92,7 +92,7 @@ function fixture(saved = {}) {
     return instance;
   }
   const render = () => { const frames = state.frames.splice(0); frames.forEach(frame => frame.onIdle(0)); };
-  return { values, calls, listeners, state, context, policy, consent, Ability, page, render };
+  return { values, calls, listeners, state, context, policy, consent, Ability, page, render, scrollFromWatchAction };
 }
 
 test('first launch and unacknowledged events cannot initialize audio or phone synchronization', async () => {
@@ -176,7 +176,7 @@ test('dialog rectangle fits inside round displays and both policy paths use the 
   for (const diameter of [240, 280, 320, 466]) {
     assert(Math.hypot(diameter * width / 200, diameter * height / 200) < diameter / 2);
   }
-  assert(dialog.includes('Scroll()')); assert(dialog.includes('.layoutWeight(1)'));
+  assert(dialog.includes('Scroll(this.scroller)')); assert(dialog.includes('.layoutWeight(1)'));
   assert.equal(h.policy.WATCH_PRIVACY_APP_NAME, 'clawmate'); assert.equal(h.policy.WATCH_PRIVACY_DEVELOPER, '冯二虎');
   assert.equal(h.policy.WATCH_PRIVACY_POLICY_URL,
     'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2069956295837932224');
@@ -188,7 +188,7 @@ test('dialog permits child touch and keeps the policy entry outside the clipped 
   const dialog = fs.readFileSync(path.join(base, 'components/WatchRoundDialog.ets'), 'utf8');
   assert(dialog.includes('.hitTestBehavior(HitTestMode.Default)'), 'Overlay must allow child touch');
   assert(!dialog.includes('HitTestMode.Block'), 'Block prevents the Scroll and buttons receiving touch');
-  const scrollStart = dialog.indexOf('Scroll()');
+  const scrollStart = dialog.indexOf('Scroll(this.scroller)');
   const scrollEnd = dialog.indexOf('.clip(true)', scrollStart);
   const scrollBody = dialog.slice(scrollStart, scrollEnd);
   assert(scrollBody.includes('this.contentBuilder()'));
@@ -262,19 +262,38 @@ test('Back closes the phone guide; duplicate opt-out taps cannot start multiple 
 });
 
 test('crown focus follows visible content and returns to the page after overlays close', () => {
+  const index = fs.readFileSync(path.join(base, 'pages/Index.ets'), 'utf8');
+  assert.match(index, /else if \(this\.phoneGuideVisible\) \{\s*this\.PhoneGuideDialog\(\)\s*\} else \{\s*this\.MainContent\(\)/);
+  const dialog = fs.readFileSync(path.join(base, 'components/WatchRoundDialog.ets'), 'utf8');
+  const focusTarget = dialog.slice(dialog.indexOf("Text(this.title)"), dialog.indexOf("Scroll(this.scroller)"));
+  assert.match(focusTarget, /id\('watch-dialog-crown'\)\.focusable\(true\)\.defaultFocus\(true\)/);
+  assert.match(focusTarget, /onDigitalCrown[\s\S]*scrollFromWatchAction\(event, this.scroller, false\)/);
   const h = fixture(), page = h.page(['restoreCrownFocus', 'mainContentEnabled', 'onPageShow']);
   const target = () => { page.onPageShow(); h.render(); return h.calls.at(-1)[1]; };
-  assert.equal(target(), 'watch-dialog-scroll', 'Initial privacy dialog');
+  assert.equal(target(), 'watch-dialog-crown', 'Initial privacy dialog');
   page.policyVisible = true; assert.equal(target(), 'watch-policy-scroll');
   page.policyVisible = false; page.privacyAccepted = true; page.preparePhoneGuide();
-  assert.equal(target(), 'watch-dialog-scroll'); assert.equal(page.mainContentEnabled(), false);
+  assert.equal(target(), 'watch-dialog-crown'); assert.equal(page.mainContentEnabled(), false);
   page.phoneGuideVisible = false; assert.equal(target(), 'watch-page-scroll');
   assert.equal(page.mainContentEnabled(), true);
   page.deletionTargets = [{ name: 'recording.wav' }];
-  assert.equal(target(), 'watch-dialog-scroll'); assert.equal(page.mainContentEnabled(), false);
+  assert.equal(target(), 'watch-dialog-crown'); assert.equal(page.mainContentEnabled(), false);
   page.deletionTargets = []; assert.equal(target(), 'watch-page-scroll');
   const count = h.calls.length; page.pageActive = false; page.restoreCrownFocus();
   assert.equal(h.calls.length, count, 'Do not request focus on an unmounted page');
+});
+
+test('crown rotation over a dialog action scrolls in both directions without double scrolling the focused Scroll', () => {
+  const { scrollFromWatchAction } = fixture();
+  const deltas = [];
+  const scroller = { scrollBy: (_x, dy) => deltas.push(dy) };
+  let stopped = 0;
+  const event = { action: 1, degree: 4, stopPropagation: () => stopped++ };
+  scrollFromWatchAction(event, scroller, false);
+  scrollFromWatchAction({ ...event, degree: -4 }, scroller, false);
+  scrollFromWatchAction(event, scroller, true);
+  scrollFromWatchAction({ ...event, action: 2 }, scroller, false);
+  assert.deepEqual(deltas, [-8, 8]); assert.equal(stopped, 2);
 });
 
 test('startup observer does not focus unmounted content; focus waits until frame end', () => {
@@ -310,5 +329,5 @@ test('unavailable focus target and destroyed UI context cannot crash or block fu
   h.state.failSchedule = false; h.state.mounted = false;
   page.restoreCrownFocus(); assert.doesNotThrow(() => h.render());
   h.state.mounted = true; page.restoreCrownFocus(); h.render();
-  assert.deepEqual(h.calls, [['focus', 'watch-dialog-scroll']]);
+  assert.deepEqual(h.calls, [['focus', 'watch-dialog-crown']]);
 });
