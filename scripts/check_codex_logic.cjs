@@ -39,7 +39,12 @@ const preferencesData = new Map();
 const appStorage = new Map();
 const dummy = () => {};
 const decorator = () => dummy;
-class Scroller { edges = []; scrollEdge(edge) { this.edges.push(edge); } }
+class Scroller {
+  edges = [];
+  yOffset = 0;
+  scrollEdge(edge) { this.edges.push(edge); }
+  currentOffset() { return { xOffset: 0, yOffset: this.yOffset }; }
+}
 function mockTimeout(callback, ms) {
   const id = timerSequence++;
   if (captureTimers) timerJobs.push({ id, callback, ms });
@@ -141,7 +146,7 @@ const kitMocks = {
 function load(relative) {
   const filename = path.resolve(root, relative.endsWith('.ets') ? relative : relative + '.ets').replaceAll('\\', '/');
   if (cache.has(filename)) return cache.get(filename);
-  if (/\/(AppTheme|AppHeader|FrostedPage|MarkdownView|CodexApprovalCard|CodexConnectionViews|CodexChatViews|CodexArtifactCard)\.ets$/.test(filename)) return {};
+  if (/\/(AppTheme|AppHeader|FrostedPage|MarkdownView|CodexMarkdownView|CodexApprovalCard|CodexConnectionViews|CodexChatViews|CodexArtifactCard)\.ets$/.test(filename)) return {};
   if (filename.endsWith('/chat/ChatPageTypes.ets')) return { chatPageBackgroundColor: () => '#FFFFFF' };
   let source = fs.readFileSync(filename, 'utf8');
   if (filename.endsWith('/CodexPage.ets')) {
@@ -414,9 +419,21 @@ async function main() {
   assert.equal(page.connectedOrigin, 'https://retained.example.com'); assert.equal(page.draft, 'Keep this draft');
   response.statusCode = 200;
   const savedCount = (await CodexCredentialStore.list()).length;
-  page.remember = false;
   response.toString = () => JSON.stringify({ protocol: 1, ready: true, name: 'Temporary',
     workspaces: [{ id: 'project', name: 'Project' }], models: [{ model: 'test-model', supportedReasoningEfforts: [] }], tasks: [] });
+  page.screen = types.CodexScreen.Connections;
+  deferred = true; resolveFetch = undefined;
+  const openingSavedConnection = page.connect(second.id);
+  await new Promise(setImmediate);
+  assert.equal(typeof resolveFetch, 'function');
+  assert.equal(page.connectingOrigin, second.origin);
+  page.cancelConnectionWork();
+  assert.equal(cancelledRequest, sentRequest);
+  resolveFetch(response); await openingSavedConnection; deferred = false;
+  assert.equal(page.screen, types.CodexScreen.Connections, 'a cancelled handshake cannot open a workspace');
+  assert.equal(page.client, retainedClient); assert.equal(page.connectedOrigin, 'https://retained.example.com');
+  assert.equal(page.busy, false); assert.equal(page.connectingOrigin, ''); assert.equal(page.errorText, '');
+  page.remember = false;
   await page.connect();
   assert.equal(page.screen, types.CodexScreen.Workspace);
   assert.equal(page.mode, 'workspace-write'); assert.equal(page.approvalMode, 'ask');
@@ -469,8 +486,88 @@ async function main() {
     if (route === '/v1/tasks') return { tasks: [] };
     throw new Error('Unexpected route: ' + route);
   };
-  await page.loadComputerHistory(true); await page.loadComputerHistory(false);
+  await page.loadComputerHistory(types.CodexHistoryLoad.Refresh);
+  await page.loadComputerHistory(types.CodexHistoryLoad.More);
   assert.equal(listPages, 2); assert.equal(page.computerTasks.length, 2, 'history pagination deduplicates records');
+
+  const historyPage = new CodexPage();
+  const historyLoad = types.CodexHistoryLoad;
+  historyPage.connected = true; historyPage.existingSessionsSupported = true; historyPage.historyScope = 'computer';
+  const historyReads = [];
+  const first = { id: 'first', updatedAt: 4 };
+  const secondThread = { id: 'second', updatedAt: 3 };
+  const older = { id: 'older', updatedAt: 1 };
+  const newest = { id: 'newest', updatedAt: 5 };
+  let head = { threads: [first, secondThread], nextThreadCursor: 'first-cursor' };
+  let historyFailure = false;
+  let historyReply;
+  let olderReply;
+  const historyIds = () => Array.from(historyPage.computerTasks, item => item.id);
+  const settleHistory = () => new Promise(setImmediate);
+  historyPage.client.call = async route => {
+    historyReads.push(route);
+    if (route.endsWith('cursor=first-cursor')) return { threads: [secondThread, older], nextThreadCursor: 'older-cursor' };
+    if (route.endsWith('cursor=new-cursor')) return { threads: [secondThread, { id: 'between', updatedAt: 2 }], nextThreadCursor: 'older-cursor' };
+    if (route.endsWith('cursor=older-cursor')) return olderReply;
+    assert.equal(route, '/v1/threads');
+    if (historyFailure) throw new Error('Disconnected');
+    if (historyReply !== undefined) return historyReply;
+    return head;
+  };
+  historyPage.openHistory();
+  assert.equal(historyPage.computerHistoryLoad, historyLoad.Refresh);
+  await settleHistory();
+  historyPage.historyOpen = false; historyPage.openHistory();
+  assert.deepEqual(historyReads, ['/v1/threads'], 'a warm computer drawer skips both history requests');
+  await historyPage.loadComputerHistory(historyLoad.More);
+  assert.deepEqual(historyIds(), ['first', 'second', 'older']);
+
+  historyPage.computerHistoryCheckedAt -= 31000;
+  historyPage.openHistory(); await settleHistory();
+  assert.equal(historyPage.computerCursor, 'older-cursor', 'an unchanged first page keeps the pagination position');
+  historyPage.computerHistoryCheckedAt -= 31000;
+  head = { threads: [newest, first], nextThreadCursor: 'new-cursor' };
+  historyPage.historyScroller.yOffset = 100;
+  historyPage.openHistory(); historyPage.openHistory();
+  assert.equal(historyPage.computerHistoryLoad, historyLoad.Background);
+  assert.equal(historyReads.length, 4, 'a second open does not duplicate an in-flight refresh');
+  await settleHistory();
+  assert.deepEqual(historyIds(), ['first', 'second', 'older'], 'refresh leaves a scrolled viewport intact');
+  let finishOlderRead;
+  olderReply = new Promise(resolve => { finishOlderRead = resolve; });
+  const readingOlder = historyPage.loadComputerHistory(historyLoad.More);
+  historyPage.historyScroller.yOffset = 0; historyPage.applyPendingComputerHistory();
+  assert.equal(historyPage.computerCursor, 'older-cursor', 'the pending refresh waits for pagination');
+  finishOlderRead({ threads: [], nextThreadCursor: '' }); await readingOlder;
+  assert.deepEqual(historyIds(), ['newest', 'first', 'second', 'older']);
+  assert.equal(historyPage.computerCursor, 'new-cursor');
+  await historyPage.loadComputerHistory(historyLoad.More);
+  assert.deepEqual(historyIds(), ['newest', 'first', 'second', 'between', 'older'], 'a changed page boundary backfills in order');
+
+  historyPage.computerHistoryCheckedAt -= 31000;
+  historyFailure = true;
+  historyPage.openHistory(); await settleHistory(); historyPage.openHistory();
+  assert.equal(historyReads.length, 7, 'a failed automatic refresh is throttled');
+  assert.equal(historyPage.historyError, ''); assert.equal(historyPage.computerTasks.length, 5);
+  historyFailure = false; head = { threads: [], nextThreadCursor: '' };
+  historyPage.computerHistoryCheckedAt -= 31000;
+  let finishHistoryRead;
+  historyReply = new Promise(resolve => { finishHistoryRead = resolve; });
+  historyPage.openHistory();
+  await historyPage.loadComputerHistory(historyLoad.Refresh);
+  assert.equal(historyPage.computerHistoryLoad, historyLoad.Refresh, 'manual refresh can join the background request');
+  finishHistoryRead(head); await settleHistory();
+  historyPage.openHistory();
+  assert.deepEqual(historyIds(), [], 'manual refresh replaces cached pages with the current result');
+  assert.equal(historyReads.length, 8, 'an empty successful result is cached');
+
+  historyReply = new Promise(resolve => { finishHistoryRead = resolve; });
+  const staleRead = historyPage.loadComputerHistory(historyLoad.Refresh);
+  historyPage.disconnect();
+  finishHistoryRead({ threads: [newest] }); await staleRead;
+  assert.deepEqual(historyIds(), [], 'a disconnected computer cannot repopulate the cache');
+  assert.equal(historyPage.computerHistoryLoad, historyLoad.Idle);
+
   await page.selectTask('pc-original', true);
   assert.equal(page.task.external, true); assert.equal(page.mode, 'read-only');
   await page.poll(); // An external preview must not poll the bridge-owned task route.
@@ -591,7 +688,19 @@ async function main() {
     return { task: { ...weakPage.task, revision: 2 } };
   };
   await weakPage.poll(); assert.equal(syncReads, 2); assert.equal(weakPage.task.revision, 2, 'a missing delta base triggers a full read');
-  weakPage.disconnect(); captureTimers = false; timerJobs = [];
+  weakPage.lastNetworkFailure = Date.now(); weakPage.lastNetworkSuccess = weakPage.lastNetworkFailure - 1;
+  let resolveHealth;
+  weakPage.client.call = async () => new Promise(resolve => { resolveHealth = resolve; });
+  const reconnecting = weakPage.checkConnection();
+  assert.equal(weakPage.linkLabel(), '正在重连');
+  assert.equal(weakPage.showDisconnectInStatus(), true);
+  weakPage.disconnect();
+  resolveHealth({ ready: true }); await reconnecting;
+  assert.equal(weakPage.screen, types.CodexScreen.Connections);
+  assert.equal(weakPage.connected, false); assert.equal(weakPage.healthChecking, false);
+  assert.equal(weakPage.lastNetworkSuccess, 0, 'a stale health response cannot restore a disconnected session');
+  assert.equal(weakPage.healthTimer, -1); assert.equal(weakPage.timer, -1);
+  captureTimers = false; timerJobs = [];
   for (const section of ['download', 'connect', 'tailscale']) {
     await page.openHelp(section);
     assert.equal(helpNavigation.url, 'pages/codex/CodexHelpPage');

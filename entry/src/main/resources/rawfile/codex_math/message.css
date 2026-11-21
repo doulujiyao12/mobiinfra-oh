@@ -1,0 +1,30 @@
+html, body { margin: 0; padding: 0; background: transparent; }
+body {
+  --text: #2f3645;
+  --accent: #414dcc;
+  --surface: #eef2f7;
+  --border: #cbd5e1;
+  color: var(--text);
+  font: 15px / 1.48 'HarmonyOS Sans', sans-serif;
+  overflow-wrap: anywhere;
+}
+body.dark { --text: #e0e5ef; --accent: #a5b4ff; --surface: #273449; --border: #556176; }
+#message > :first-child { margin-top: 0; }
+#message > :last-child { margin-bottom: 0; }
+p, li, blockquote, pre, ul, ol, .table { margin: 0 0 8px; }
+h1, h2, h3, h4, h5, h6 { margin: 0 0 8px; font-size: 17px; }
+h1, h2 { font-size: 19px; }
+ul, ol { padding-inline-start: 22px; }
+blockquote { padding-inline-start: 10px; border-inline-start: 3px solid var(--border); white-space: pre-line; }
+a { color: var(--accent); }
+pre { padding: 10px; border-radius: 8px; background: var(--surface); white-space: pre-wrap; }
+code { font: .93em monospace; }
+hr { border: 0; border-top: 1px solid var(--border); }
+.table { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; text-align: start; }
+th, td { padding: 5px 6px; text-align: start; }
+th { background: var(--surface); }
+.math-block { display: block; overflow-x: auto; padding: 3px 0; }
+.math-block .katex-display { margin: .2em 0; }
+.math-block .katex-display > .katex { width: max-content; min-width: 100%; }
+.math-inline .katex { font-size: 1.08em; }

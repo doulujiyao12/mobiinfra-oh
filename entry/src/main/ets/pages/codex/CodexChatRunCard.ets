@@ -1,7 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { AppTheme } from '../../utils/AppTheme';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
-import { MarkdownView } from '../../components/MarkdownView';
+import { CodexMarkdownView } from './CodexMarkdownView';
 import { codexLinkedArtifact, codexMarkdownExcerpt, codexWebLink } from './CodexMarkdownLinks';
 import { CodexChatService } from './CodexChatService';
 import { CodexChatRun, codexChatStatus } from './CodexChatTypes';
@@ -109,7 +109,7 @@ export struct CodexChatRunCard {
       }
       if (this.run?.answer) {
         AiGeneratedBadge({ compact: true })
-        MarkdownView({ text: this.answerText(), variant: 'chat_assistant',
+        CodexMarkdownView({ text: this.answerText(),
           onLinkClick: (target: string): void => { this.openMarkdownLink(target); } })
         if ((this.run?.answer.length || 0) > 1600) {
           Button(this.expanded ? '收起结果' : '展开结果').fontSize(12).height(30).backgroundColor(Color.Transparent)

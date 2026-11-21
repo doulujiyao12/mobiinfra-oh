@@ -60,6 +60,12 @@ export interface CodexApproval {
   questions: CodexQuestion[];
   canAccept?: boolean;
 }
+export enum CodexHistoryLoad {
+  Idle,
+  Refresh,
+  Background,
+  More
+}
 export interface CodexTaskSummary {
   id: string;
   title: string;

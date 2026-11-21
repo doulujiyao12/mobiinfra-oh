@@ -1,6 +1,6 @@
 import { APP_HEADER_HEIGHT } from '../../components/AppHeader';
 import { AppTheme } from '../../utils/AppTheme';
-import { CodexTaskSummary, CodexWorkspace, codexStatusLabel } from './CodexTypes';
+import { CodexHistoryLoad, CodexTaskSummary, CodexWorkspace, codexStatusLabel } from './CodexTypes';
 
 @Component
 export struct CodexWorkspaceHeader {
@@ -48,8 +48,9 @@ export struct CodexHistoryDrawer {
   @Prop bottomInset: number = 0;
   @Prop scope: string = 'phone';
   @Prop supportsComputerHistory: boolean = false;
-  @Prop loading: boolean = false;
+  @Prop load: CodexHistoryLoad = CodexHistoryLoad.Idle;
   @Prop hasMore: boolean = false;
+  scroller: Scroller = new Scroller();
   onClose: () => void = () => {};
   onNewTask: () => void = () => {};
   onSelect: (id: string) => void = () => {};
@@ -57,6 +58,7 @@ export struct CodexHistoryDrawer {
   onScope: (scope: string) => void = () => {};
   onRefresh: () => void = () => {};
   onMore: () => void = () => {};
+  onReachTop: () => void = () => {};
 
   private caption(item: CodexTaskSummary): string {
     const name = this.workspaces.find((workspace: CodexWorkspace) => workspace.id === item.workspaceId)?.name || '';
@@ -95,20 +97,24 @@ export struct CodexHistoryDrawer {
           Row({ space: 8 }) {
             Text(this.supportsComputerHistory ? '已授权项目中的本地会话' : '请升级电脑端以查看已有会话')
               .fontSize(11).fontColor(AppTheme.text('#747B87')).layoutWeight(1)
-            Button(this.loading ? '读取中' : '刷新').fontSize(12).height(32).padding({ left: 10, right: 10 })
+            Button(this.load === CodexHistoryLoad.Refresh ? '读取中' : '刷新')
+              .fontSize(12).height(32).padding({ left: 10, right: 10 })
               .backgroundColor(Color.Transparent).fontColor(AppTheme.text('#5968FF'))
-              .enabled(!this.busy && !this.loading && this.supportsComputerHistory).onClick(() => { this.onRefresh(); })
+              .enabled(!this.busy && this.supportsComputerHistory &&
+                (this.load === CodexHistoryLoad.Idle || this.load === CodexHistoryLoad.Background))
+              .onClick(() => { this.onRefresh(); })
           }.width('100%')
         }
         if (this.notice) {
           Text(this.notice).fontSize(12).lineHeight(18).fontColor(AppTheme.text('#B94D4D')).width('100%')
         }
-        Scroll() {
+        Scroll(this.scroller) {
           Column({ space: 6 }) {
             if (this.tasks.length === 0) {
-              Text(this.scope === 'computer' ? (this.loading ? '正在读取电脑会话…' : '暂无可显示的本地会话') : '新对话会保存在这里')
+              Text(this.scope === 'computer' ? (this.load === CodexHistoryLoad.Refresh ? '正在读取电脑会话…' : '暂无可显示的本地会话') :
+                '新对话会保存在这里')
                 .fontSize(13).fontColor(AppTheme.text('#747B87')).margin({ top: 24 })
-              if (this.scope === 'computer' && this.supportsComputerHistory && !this.loading) {
+              if (this.scope === 'computer' && this.supportsComputerHistory && this.load !== CodexHistoryLoad.Refresh) {
                 Text('请确认电脑端已添加该会话对应的项目').fontSize(11).fontColor(AppTheme.text('#747B87'))
                   .width('100%').textAlign(TextAlign.Center).margin({ top: 10 })
               }
@@ -122,14 +128,15 @@ export struct CodexHistoryDrawer {
               }.width('100%').alignItems(HorizontalAlign.Start).padding(14).borderRadius(14)
               .backgroundColor(item.id === this.selectedId ? AppTheme.background('#EEF0FF') : Color.Transparent)
               .enabled(!this.busy).onClick(() => { this.onSelect(item.id); })
-            }, (item: CodexTaskSummary) => item.id)
+            }, (item: CodexTaskSummary) => item.id + ':' + item.title + ':' + item.workspaceId + ':' + item.status)
             if (this.scope === 'computer' && this.hasMore) {
-              Button(this.loading ? '读取中…' : '加载更多').fontSize(13).height(40).width('100%')
+              Button(this.load === CodexHistoryLoad.More ? '读取中…' : '加载更多').fontSize(13).height(40).width('100%')
                 .backgroundColor(Color.Transparent).fontColor(AppTheme.text('#5968FF'))
-                .enabled(!this.busy && !this.loading).onClick(() => { this.onMore(); })
+                .enabled(!this.busy && this.load === CodexHistoryLoad.Idle).onClick(() => { this.onMore(); })
             }
           }.width('100%')
         }.width('100%').layoutWeight(1).align(Alignment.Top)
+        .onScrollEdge((edge: Edge) => { if (edge === Edge.Top) { this.onReachTop(); } })
         Divider().color(AppTheme.border('#ECEEF3'))
         Row({ space: 12 }) {
           Image($r('app.media.codex_computer')).width(24).height(24).fillColor(AppTheme.text('#5968FF'))

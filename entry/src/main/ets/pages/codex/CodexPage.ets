@@ -10,7 +10,7 @@ import { AppTheme } from '../../utils/AppTheme';
 import { setSecretaryTarget } from './CodexChatTargetPicker';
 import { AppHeader } from '../../components/AppHeader';
 import { FrostedPage } from '../../components/FrostedPage';
-import { MarkdownView } from '../../components/MarkdownView';
+import { CodexMarkdownView } from './CodexMarkdownView';
 import { codexLinkedArtifact, codexWebLink } from './CodexMarkdownLinks';
 import { CodexClient } from './CodexClient';
 import { CodexCredentialStore } from './CodexCredentialStore';
@@ -26,9 +26,12 @@ import { CodexHelpParams, CodexHelpSection } from './CodexHelpContent';
 import {
   CODEX_MAX_FILE_BYTES, CodexConnection, CodexModel, CodexWorkspace, CodexTask, CodexTaskSummary,
   CodexAttachment, CodexItem, CodexApproval, CodexAnswer, CodexEffort, CodexServiceTier, CodexTurnBody, CodexArtifact, CodexLocalArtifact,
+  CodexEnvelope, CodexHistoryLoad,
   normalizeCodexOrigin, codexTaskBusy, codexStatusLabel, CodexSavedConnection, CodexScreen, CODEX_PAIRING_PREFIX,
   codexApprovalLabel, codexExecutionNotice, codexLinkLabel, mergeCodexTask, codexTimeline, codexTimelineKey, CodexTimelineEntry
 } from './CodexTypes';
+
+const COMPUTER_HISTORY_REFRESH_MS: number = 30000;
 
 @Component
 export struct CodexPage {
@@ -87,7 +90,12 @@ export struct CodexPage {
   @State private historyScope: string = 'phone';
   @State private computerTasks: CodexTaskSummary[] = [];
   @State private computerCursor: string = '';
-  @State private computerLoading: boolean = false;
+  @State private computerHistoryLoad: CodexHistoryLoad = CodexHistoryLoad.Idle;
+  private computerHistoryCheckedAt: number = 0;
+  private computerHistoryLoaded: boolean = false;
+  private computerFirstPageCursor: string = '';
+  private pendingComputerHistory: CodexEnvelope | null = null;
+  private historyScroller: Scroller = new Scroller();
   @State private historyError: string = '';
   @State private olderItems: CodexItem[] = [];
   @State private historyCursor: string = '';
@@ -186,7 +194,7 @@ export struct CodexPage {
     this.pairedConnection = null; this.pairingInput = '';
     this.draft = ''; this.models = []; this.workspaces = []; this.serverName = ''; this.expandedTools = [];
     this.modelsRefreshing = false; this.modelsStale = false; this.serviceTiersSupported = false; this.serviceTier = '';
-    this.networkText = ''; this.busy = false; this.polling = false;
+    this.errorText = ''; this.networkText = ''; this.busy = false; this.polling = false;
     this.localArtifacts = []; this.receivingArtifactId = ''; this.artifactProgress = ''; this.artifactError = '';
     this.artifactsSupported = false; this.artifactRetryAt = 0;
     this.resetComputerHistory();
@@ -278,11 +286,12 @@ export struct CodexPage {
     });
     if (!confirmed || this.busy) { return; }
     if (this.connectedOrigin === item.origin) { this.disconnect(); }
+    const epoch = this.epoch;
     this.busy = true; this.errorText = '';
     try {
       await CodexCredentialStore.forget(item.id); await this.restoreConnections();
-    } catch (e) { this.errorText = '未能删除安全凭据，请重试'; }
-    finally { this.busy = false; }
+    } catch (e) { if (epoch === this.epoch) { this.errorText = '未能删除安全凭据，请重试'; } }
+    finally { if (epoch === this.epoch) { this.busy = false; } }
   }
   private async scanPairingCode(): Promise<void> {
     if (this.busy) { return; }
@@ -414,6 +423,9 @@ export struct CodexPage {
   }
   private running(): boolean { return this.task !== null && codexTaskBusy(this.task.status); }
   private linkLabel(): string { return codexLinkLabel(this.lastNetworkSuccess, this.lastNetworkFailure, this.statusNow, this.healthChecking); }
+  private showDisconnectInStatus(): boolean {
+    return this.linkLabel() !== '已连接' || this.task?.progress?.kind === 'reconnecting';
+  }
   private startHeartbeat(): void {
     if (this.healthTimer >= 0) { clearInterval(this.healthTimer); this.healthTimer = -1; }
     if (!this.connected || !this.active) { return; }
@@ -478,42 +490,105 @@ export struct CodexPage {
   }
   private openHistory(): void {
     this.taskSettingsOpen = false; this.historyOpen = true;
+    this.refreshVisibleHistory();
+  }
+  private refreshVisibleHistory(): void {
+    if (this.historyScope === 'computer') {
+      this.applyPendingComputerHistory();
+      if (Date.now() - this.computerHistoryCheckedAt >= COMPUTER_HISTORY_REFRESH_MS) {
+        this.loadComputerHistory(this.computerHistoryLoaded ? CodexHistoryLoad.Background : CodexHistoryLoad.Refresh);
+      }
+      return;
+    }
     const epoch = this.epoch;
     this.refreshTasks().catch(() => {
       if (epoch === this.epoch) { this.networkText = '历史暂未刷新，请稍后重试'; }
     });
-    if (this.historyScope === 'computer') { this.loadComputerHistory(true); }
   }
   private resetComputerHistory(): void {
     this.existingSessionsSupported = false; this.historyScope = 'phone'; this.computerTasks = [];
     this.sameSessionSupported = false;
     this.permissionSettingsSupported = false; this.taskUpdatesSupported = false;
-    this.computerCursor = ''; this.computerLoading = false; this.historyError = '';
+    this.computerCursor = ''; this.computerHistoryLoad = CodexHistoryLoad.Idle; this.historyError = '';
+    this.computerHistoryCheckedAt = 0; this.computerHistoryLoaded = false;
+    this.computerFirstPageCursor = ''; this.pendingComputerHistory = null;
     this.olderItems = []; this.historyCursor = ''; this.pendingResumeRequestId = ''; this.pendingResumeFingerprint = '';
   }
   private changeHistoryScope(scope: string): void {
-    if (this.busy) { return; }
-    this.historyScope = scope; this.historyError = '';
-    if (scope === 'computer') { this.loadComputerHistory(true); }
+    if (this.busy || scope === this.historyScope) { return; }
+    this.historyScope = scope;
+    this.refreshVisibleHistory();
   }
-  private async loadComputerHistory(reset: boolean = false): Promise<void> {
-    if (!this.connected || !this.existingSessionsSupported || this.computerLoading) { return; }
-    const epoch = this.epoch;
-    this.computerLoading = true; this.historyError = '';
+  private applyPendingComputerHistory(): void {
+    const result = this.pendingComputerHistory;
+    if (result === null || this.computerHistoryLoad !== CodexHistoryLoad.Idle) { return; }
+    this.pendingComputerHistory = null;
+    this.updateComputerHistory(result, CodexHistoryLoad.Background);
+  }
+  private computerHistoryScrolled(): boolean {
+    return this.historyOpen && this.historyScope === 'computer' && (this.historyScroller.currentOffset()?.yOffset ?? 0) > 0;
+  }
+  private updateComputerHistory(result: CodexEnvelope, mode: CodexHistoryLoad): void {
+    const page = result.threads ?? [];
+    const nextCursor = result.nextThreadCursor || '';
+    const more = mode === CodexHistoryLoad.More;
+    const background = mode === CodexHistoryLoad.Background;
+    let cached: CodexTaskSummary[] = more ? this.computerTasks : [];
+    if (background && nextCursor) {
+      // Keep entries beyond the refreshed page. At equal timestamps the server decides the page boundary.
+      const oldest = page.length > 0 ? page[page.length - 1].updatedAt : Number.MAX_SAFE_INTEGER;
+      cached = this.computerTasks.filter((item: CodexTaskSummary) => item.updatedAt <= oldest);
+    }
+    const pageIds: Set<string> = new Set(page.map((item: CodexTaskSummary) => item.id));
+    const retained = cached.filter((item: CodexTaskSummary) => !pageIds.has(item.id));
+    const combined = more ? retained.concat(page).sort((a: CodexTaskSummary, b: CodexTaskSummary) => b.updatedAt - a.updatedAt) :
+      page.concat(retained);
+    this.computerTasks = combined.slice(0, 1000);
+    if (!background || nextCursor !== this.computerFirstPageCursor) { this.computerCursor = nextCursor; }
+    if (!more) { this.computerFirstPageCursor = nextCursor; }
+    if (combined.length >= 1000) {
+      this.computerCursor = '';
+      this.historyError = '当前显示最近 1000 个会话，更早记录可在电脑查看。';
+    } else { this.historyError = ''; }
+  }
+  private async loadComputerHistory(mode: CodexHistoryLoad): Promise<void> {
+    if (!this.connected || !this.existingSessionsSupported) { return; }
+    if (mode === CodexHistoryLoad.Refresh && this.computerHistoryLoad === CodexHistoryLoad.Background) {
+      this.computerHistoryLoad = CodexHistoryLoad.Refresh;
+      this.historyError = '';
+      return;
+    }
+    if (this.computerHistoryLoad !== CodexHistoryLoad.Idle) { return; }
+    const more = mode === CodexHistoryLoad.More;
+    if (more && !this.computerCursor) { return; }
+    const client = this.client;
+    this.computerHistoryLoad = mode;
+    if (mode !== CodexHistoryLoad.Background) { this.historyError = ''; }
+    if (!more) { this.computerHistoryCheckedAt = Date.now(); }
     try {
-      const route = '/v1/threads' + (!reset && this.computerCursor ? '?cursor=' + encodeURIComponent(this.computerCursor) : '');
-      const result = await this.client.call(route);
-      if (epoch !== this.epoch) { return; }
-      const base: CodexTaskSummary[] = reset ? [] : this.computerTasks;
-      this.computerTasks = base.concat((result.threads ?? []).filter((item: CodexTaskSummary) =>
-        !base.some((entry: CodexTaskSummary) => entry.id === item.id)));
-      this.computerCursor = result.nextThreadCursor || '';
-      if (this.computerTasks.length >= 1000) {
-        this.computerTasks = this.computerTasks.slice(0, 1000); this.computerCursor = '';
-        this.historyError = '当前显示最近 1000 个会话，更早记录可在电脑查看。';
+      const route = '/v1/threads' + (more ? '?cursor=' + encodeURIComponent(this.computerCursor) : '');
+      const result = await client.call(route);
+      if (!this.connected || client !== this.client) { return; }
+      const completedMode = this.computerHistoryLoad;
+      if (!more) {
+        this.computerHistoryLoaded = true; this.computerHistoryCheckedAt = Date.now();
+        this.pendingComputerHistory = null;
       }
-    } catch (e) { if (epoch === this.epoch) { this.historyError = (e as Error).message || '电脑历史读取失败，请点击刷新'; } }
-    finally { if (epoch === this.epoch) { this.computerLoading = false; } }
+      if (completedMode === CodexHistoryLoad.Background && this.computerHistoryScrolled()) {
+        this.pendingComputerHistory = result;
+      } else { this.updateComputerHistory(result, completedMode); }
+    } catch (e) {
+      if (this.connected && client === this.client && this.computerHistoryLoad !== CodexHistoryLoad.Background) {
+        this.historyError = (e as Error).message || '电脑历史读取失败，请点击刷新';
+      }
+    } finally {
+      if (this.connected && client === this.client) {
+        this.computerHistoryLoad = CodexHistoryLoad.Idle;
+        if (more && this.pendingComputerHistory !== null && !this.computerHistoryScrolled()) {
+          this.applyPendingComputerHistory();
+        }
+      }
+    }
   }
   private async loadOlderHistory(): Promise<void> {
     if (this.busy || this.task === null || !this.historyCursor) { return; }
@@ -943,12 +1018,6 @@ export struct CodexPage {
     Scroll() {
       Column({ space: 18 }) {
         this.TaskSettings()
-        Text('空闲时可修改设置，从下一条消息生效；正在执行或等待确认时不能更改。')
-          .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#747B87')).width('100%')
-        if (this.task?.executionTransport === 'desktop') {
-          Text('此会话与电脑实时共享。这里的权限设置用于下一次由手机发起的执行；电脑发起的任务使用电脑端设置，桌面运行目录与组织策略仍然生效。')
-            .fontSize(12).lineHeight(19).fontColor(AppTheme.text('#747B87')).width('100%')
-        }
         Row({ space: 12 }) {
           Column({ space: 4 }) {
             Text('自动跟随输出').fontSize(15).fontColor(AppTheme.text('#172033'))
@@ -971,7 +1040,7 @@ export struct CodexPage {
 
   @Builder private MessageBody(item: CodexItem) {
     if (item.kind === 'user' || item.kind === 'assistant' || item.kind === 'plan') {
-      MarkdownView({ text: item.text, variant: 'chat_assistant',
+      CodexMarkdownView({ text: item.text,
         onLinkClick: (target: string): void => { this.openMarkdownLink(target); } })
     } else {
       Text(this.expandedTools.includes(item.id) ? item.text : item.text.slice(0, 160) + (item.text.length > 160 ? '\n点击展开…' : ''))
@@ -1101,12 +1170,18 @@ export struct CodexPage {
   }
   @Builder private Content() {
     Column({ space: 0 }) {
-      if (this.connected && this.screen === CodexScreen.Workspace && (this.networkText || codexExecutionNotice(this.task, this.statusNow))) {
+      if (this.connected && this.screen === CodexScreen.Workspace &&
+        (this.showDisconnectInStatus() || this.networkText || codexExecutionNotice(this.task, this.statusNow))) {
         Row({ space: 8 }) {
           LoadingProgress().width(16).height(16).color(AppTheme.text('#AD6500'))
-          Text(this.networkText || codexExecutionNotice(this.task, this.statusNow))
+          Text(this.networkText || codexExecutionNotice(this.task, this.statusNow) || this.linkLabel())
             .fontSize(12).lineHeight(18).fontColor(AppTheme.text('#AD6500')).layoutWeight(1)
             .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.showDisconnectInStatus()) {
+            Button('断开连接').height(44).padding({ left: 8, right: 8 }).fontSize(12)
+              .fontColor(AppTheme.text('#B94D4D')).backgroundColor(Color.Transparent)
+              .onClick(() => { this.disconnect(); })
+          }
         }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 8 })
           .backgroundColor(AppTheme.background('#FFF7E8'))
       }
@@ -1121,6 +1196,7 @@ export struct CodexPage {
               onCreate: () => { this.openConnectionSetup(); },
               onHelp: (section: CodexHelpSection) => { this.openHelp(section); },
               onConnect: (item: CodexSavedConnection) => { this.openSavedConnection(item); },
+              onCancelConnect: () => { this.cancelConnectionWork(); },
               onForget: (item: CodexSavedConnection) => { this.forgetSavedConnection(item); },
               onDisconnect: () => { this.disconnect(); },
               onResume: () => { this.screen = CodexScreen.Workspace; } })
@@ -1197,11 +1273,14 @@ export struct CodexPage {
         CodexHistoryDrawer({ tasks: this.historyScope === 'computer' ? this.computerTasks : this.tasks, workspaces: this.workspaces,
           selectedId: this.task?.id || '', serverName: this.serverName,
           scope: this.historyScope, supportsComputerHistory: this.existingSessionsSupported,
-          loading: this.computerLoading, hasMore: this.computerCursor.length > 0,
-          busy: this.busy, notice: this.historyError || this.errorText || this.networkText, bottomInset: this.navigationBottomInset,
+          load: this.computerHistoryLoad, hasMore: this.computerCursor.length > 0, scroller: this.historyScroller,
+          busy: this.busy, notice: (this.historyScope === 'computer' ? this.historyError : '') || this.errorText || this.networkText,
+          bottomInset: this.navigationBottomInset,
           onClose: () => { this.historyOpen = false; }, onNewTask: () => { this.newTask(); },
           onScope: (scope: string) => { this.changeHistoryScope(scope); },
-          onRefresh: () => { this.loadComputerHistory(true); }, onMore: () => { this.loadComputerHistory(false); },
+          onRefresh: () => { this.loadComputerHistory(CodexHistoryLoad.Refresh); },
+          onMore: () => { this.loadComputerHistory(CodexHistoryLoad.More); },
+          onReachTop: () => { if (this.historyScope === 'computer') { this.applyPendingComputerHistory(); } },
           onSelect: (id: string) => { this.selectTask(id, this.historyScope === 'computer'); },
           onConnections: () => { this.historyOpen = false; this.screen = CodexScreen.Connections; } })
       }

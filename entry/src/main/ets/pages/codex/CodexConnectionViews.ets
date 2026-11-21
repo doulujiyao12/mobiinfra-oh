@@ -38,6 +38,7 @@ export struct CodexConnectionsView {
   @Prop busy: boolean = false;
   onCreate: () => void = () => {};
   onConnect: (item: CodexSavedConnection) => void = () => {};
+  onCancelConnect: () => void = () => {};
   onForget: (item: CodexSavedConnection) => void = () => {};
   onResume: () => void = () => {};
   onDisconnect: () => void = () => {};
@@ -48,7 +49,9 @@ export struct CodexConnectionsView {
     if (this.currentOrigin === item.origin) {
       entries.push({ value: '断开连接', action: () => { this.onDisconnect(); } });
     }
-    entries.push({ value: '删除此连接', action: () => { this.onForget(item); } });
+    if (!this.busy) {
+      entries.push({ value: '删除此连接', action: () => { this.onForget(item); } });
+    }
     return entries;
   }
 
@@ -68,9 +71,15 @@ export struct CodexConnectionsView {
       }.layoutWeight(1).padding({ left: 18, top: 18, bottom: 18 })
       .enabled(!this.busy).accessibilityGroup(true).accessibilityText('连接到' + item.name)
       .onClick(() => { this.onConnect(item); })
-      Button('···').width(44).height(44).padding(0).fontSize(24).fontColor(AppTheme.text('#747B87'))
-        .backgroundColor(Color.Transparent).enabled(!this.busy).accessibilityText('管理' + item.name)
-        .bindMenu(this.connectionMenu(item))
+      if (this.busy && this.connectingOrigin === item.origin && this.currentOrigin !== item.origin) {
+        Button('取消连接').height(44).padding({ left: 10, right: 10 }).fontSize(12)
+          .fontColor(AppTheme.text('#B94D4D')).backgroundColor(Color.Transparent)
+          .onClick(() => { this.onCancelConnect(); })
+      } else {
+        Button('···').width(44).height(44).padding(0).fontSize(24).fontColor(AppTheme.text('#747B87'))
+          .backgroundColor(Color.Transparent).enabled(!this.busy || this.currentOrigin === item.origin)
+          .accessibilityText('管理' + item.name).bindMenu(this.connectionMenu(item))
+      }
     }.width('100%').padding({ right: 6 })
   }
 
@@ -98,7 +107,7 @@ export struct CodexConnectionsView {
             rowEnabled: !this.busy, onAction: () => { this.onResume(); } })
           Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 60, right: 18 })
           Button('断开连接').width('100%').height(46).fontSize(14).fontColor(AppTheme.text('#B94D4D'))
-            .backgroundColor(Color.Transparent).enabled(!this.busy).onClick(() => { this.onDisconnect(); })
+            .backgroundColor(Color.Transparent).onClick(() => { this.onDisconnect(); })
         }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20)
       }
       if (this.connections.length > 0) {
