@@ -31,7 +31,7 @@ const manifestPath = path.join(root, `pc-companion/dist/${data.CODEX_BRIDGE_VERS
 if (fs.existsSync(manifestPath)) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath));
   assert.equal(manifest.version, data.CODEX_BRIDGE_VERSION);
-  assert.equal(JSON.stringify(downloads.map(d => d.filename).sort()), JSON.stringify(manifest.artifacts.map(a => a.file).sort()));
+  assert.deepEqual(Array.from(downloads, d => d.filename).sort(), manifest.artifacts.map(a => a.file).sort());
 }
 assert.equal(data.codexHelpSection('download'), 'download');
 assert.equal(data.codexHelpSection('tailscale'), 'tailscale');
@@ -63,6 +63,7 @@ for (const guide of guides) {
   assert.ok(text.includes(guide.notice));
   for (const [index, step] of guide.steps.entries()) {
     assert.ok(text.includes(`${index + 1}. ${step.title}\n${step.body}`));
+    if (step.emphasis) assert.ok(text.includes(step.emphasis));
     if (step.command) assert.ok(text.includes(step.command), 'copy retains complete multiline commands');
   }
   for (const note of guide.notes) assert.ok(text.includes(note));
@@ -71,8 +72,12 @@ for (const guide of guides) {
 }
 assert.ok(!data.codexGuideText(guides.find(g => g.id === 'windows')).includes('Touch ID'), 'platform-specific copy stays isolated');
 assert.ok(guides.find(g => g.id === 'tailscale').notice.includes('卓易通'));
+for (const guide of guides.filter(g => g.id !== 'tailscale')) {
+  assert.ok(guide.steps.some(step => step.emphasis?.includes('Tailscale 教程组网')), guide.id + ' highlights Tailscale setup');
+}
 const linux = guides.find(g => g.id === 'linux');
 const commands = linux.steps.map(step => step.command).join('\n');
+assert.ok(commands.includes(downloads.find(d => d.id === 'linux').url), 'Linux guide uses the published CLI package');
 for (const command of ['setup --project', ' login', ' start', ' status', 'pair --origin https://100.', '--output phone.', 'cat phone.']) {
   assert.ok(commands.includes(command), command);
 }
@@ -86,7 +91,7 @@ const page = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/codex/Cod
 assert.ok(page.includes('router.back()'));
 assert.ok(page.includes('context.openLink(url)'));
 assert.ok(page.includes('pasteboard.MIMETYPE_TEXT_PLAIN, value'));
-for (const expression of ['item.title', 'item.body', 'this.guide().intro', 'this.guide().notice', 'note', 'link.url']) {
+for (const expression of ['item.title', 'item.body', 'item.emphasis', 'this.guide().intro', 'this.guide().notice', 'note', 'link.url']) {
   const start = page.indexOf(`Text(${expression})`, page.indexOf('@Builder private Step'));
   assert.ok(start >= 0, 'visible guide text: ' + expression);
   const nextText = page.indexOf('Text(', start + 5);
@@ -103,6 +108,7 @@ const folder = path.join(root, 'docs/codex');
 const files = new Map();
 for (const guide of guides) {
   const steps = guide.steps.map((s, i) => `## ${i + 1}. ${s.title}\n\n${s.body}\n` +
+    (s.emphasis ? `\n**${s.emphasis}**\n` : '') +
     (s.command ? `\n\`\`\`bash\n${s.command}\n\`\`\`\n` : '')).join('\n');
   const links = guide.links.filter(link => !link.url.includes('/docs/codex/')).map(link => `- [${link.title}](${link.url})`).join('\n');
   const markdown = `# ${guide.title}\n\n[返回下载与指南](README.md) · ClawMate Codex ${data.CODEX_BRIDGE_VERSION}\n\n` +
@@ -115,15 +121,15 @@ for (const guide of guides) {
 const rows = downloads.map(d => `| ${d.title} | ${d.detail} | [下载](${d.url}) |`).join('\n');
 const version = data.CODEX_BRIDGE_VERSION;
 files.set('README.md', `# ClawMate Codex 连接器\n\n在手机中继续自己电脑或服务器上的 Codex 工作。电脑运行连接器，手机扫码或粘贴一次性配对信息。\n\n` +
-  `## 下载 ${data.CODEX_BRIDGE_VERSION}\n\n| 平台 | 适用设备 | 安装包 |\n| --- | --- | --- |\n${rows}\n\n` +
+  `## 下载 ${version}\n\n| 平台 | 适用设备 | 安装包 |\n| --- | --- | --- |\n${rows}\n\n` +
   `[Release 与 SHA256 校验清单](${data.CODEX_RELEASE_URL})\n\n${data.CODEX_DOWNLOAD_NOTICE}\n\n` +
   `Windows 是安装向导；macOS 按芯片选择 M 系列或 Intel ZIP，解压后移入「应用程序」；Linux 为解压使用的便携包，服务器优先选 CLI。当前没有 Linux ARM64、DMG、DEB 或 RPM 安装包。\n\n` +
   `## 连接指南\n\n- [Windows](windows.md)\n- [macOS · M 系列 / Intel](macos.md)\n- [Linux · CLI](linux.md)\n- [Tailscale：异地手机与服务器组网](tailscale.md)\n\n` +
   `手机入口：**Codex → 我的连接 → 下载 PC 端的 Codex 连接器 / 连接指南 / Tailscale 组网教程**。内置指南无需加载网页；下载文件和打开外部资料需要网络。\n\n` +
-  `## 校验与升级\n\n从同一 Release 下载 SHA256SUMS.txt，核对对应文件的哈希，再安装或解压。\n\n` +
+  `## 校验与升级\n\n从安装包所在的 Release 下载 SHA256SUMS.txt，核对对应文件的哈希，再安装或解压。\n\n` +
   `- Windows PowerShell：\`Get-FileHash .\\ClawMate-Codex-${version}-win-x64.exe -Algorithm SHA256\`\n` +
   `- macOS：\`shasum -a 256 ClawMate-Codex-${version}-darwin-arm64-unsigned.zip\`\n` +
-  `- Linux：\`sha256sum ClawMate-Codex-Terminal-${version}-linux-x64.tar.gz\`\n\n` +
+  `- Linux 桌面版：\`sha256sum ClawMate-Codex-${version}-linux-x64-unsigned.tar.gz\`\n\n` +
   `升级前先结束任务并退出旧后台；不要覆盖正在运行的解压目录。配置、手机配对和任务数据位于用户配置目录，替换程序通常无需重新配对。\n\n` +
   `更完整的能力及维护说明见 [电脑端使用指南](../../pc-companion/USER-GUIDE.md)。\n\n` +
   `<!-- 平台内容源：${sourceFile}；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->\n`);

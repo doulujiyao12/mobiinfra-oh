@@ -1,5 +1,5 @@
 // Keep downloads pinned to a verified release; never guess the latest asset name.
-export const CODEX_BRIDGE_VERSION: string = '1.1.16';
+export const CODEX_BRIDGE_VERSION: string = '1.1.17';
 export const CODEX_BRIDGE_TAG: string = 'codex-bridge-v' + CODEX_BRIDGE_VERSION;
 export const CODEX_REPOSITORY_URL: string = 'https://github.com/doulujiyao12/mobiinfra-oh';
 export const CODEX_RELEASE_URL: string = CODEX_REPOSITORY_URL + '/releases/tag/' + CODEX_BRIDGE_TAG;
@@ -17,7 +17,7 @@ export interface CodexDownload {
   filename: string;
   url: string;
 }
-export interface CodexGuideStep { title: string; body: string; command: string; }
+export interface CodexGuideStep { title: string; body: string; command: string; emphasis?: string; }
 export interface CodexHelpLink { title: string; url: string; }
 export interface CodexGuide {
   id: string;
@@ -33,6 +33,7 @@ export function codexGuideText(guide: CodexGuide): string {
   const lines: string[] = [guide.title, '', guide.intro, '', guide.notice];
   guide.steps.forEach((step: CodexGuideStep, index: number) => {
     lines.push('', (index + 1).toString() + '. ' + step.title, step.body);
+    if (step.emphasis) { lines.push(step.emphasis); }
     if (step.command) { lines.push('', step.command); }
   });
   if (guide.notes.length > 0) {
@@ -57,7 +58,7 @@ export function codexDownloads(): CodexDownload[] {
       'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-darwin-arm64-unsigned.zip'),
     download('macos-intel', 'macOS · Intel', 'Intel 芯片 · 解压后移入应用程序',
       'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-darwin-x64-unsigned.zip'),
-    download('linux', 'Linux · CLI', 'x64 · 适合云服务器和无桌面环境',
+    download('linux', 'Linux · CLI', 'x64 · 适合云服务器',
       'ClawMate-Codex-Terminal-' + CODEX_BRIDGE_VERSION + '-linux-x64.tar.gz'),
     download('linux-desktop', 'Linux · 桌面', 'x64 · 解压后启动，需要图形环境',
       'ClawMate-Codex-' + CODEX_BRIDGE_VERSION + '-linux-x64-unsigned.tar.gz'),
@@ -93,7 +94,8 @@ function desktopGuide(platform: CodexPlatform): CodexGuide {
   steps.push(
     { title: '连接 Codex 账号', body: '连接器会查找电脑上已安装的 Codex。找不到时，在「Codex 账号」点击「选择 Codex 程序」。需要登录时，点击「使用浏览器登录」并在官方页面完成授权。', command: '' },
     { title: '选择允许操作的目录', body: '点击「选择项目」，添加实际项目文件夹。保留「局域网 · 自动安全配对」，监听范围选择「允许局域网 / 远程设备访问」，保存设置。只添加你希望手机操作的项目。', command: '' },
-    { title: '启动手机连接', body: '点击「启动手机连接」，确认服务已启动。手机和电脑先连接同一个可互访的 Wi-Fi；异地连接请先按 Tailscale 教程组网。默认端口为 8787，以电脑实际显示为准。', command: '' },
+    { title: '启动手机连接', body: '点击「启动手机连接」，确认服务已启动。同一地点连接时，手机和电脑需接入同一个可互访的 Wi-Fi。局域网 IP 变更后需要重新配对。默认端口为 8787，以电脑实际显示为准。',
+      emphasis: '异地连接或局域网 IP 经常变化时，建议先按 Tailscale 教程组网。', command: '' },
     { title: '生成配对二维码', body: '在电脑「手机配对」选择手机能访问的本机地址：同一 Wi-Fi 选局域网 IP，Tailscale 选 100 开头的 IP。点击「生成配对信息」，保持二维码页面打开。', command: '' },
     { title: '手机扫码或粘贴配对', body: '手机打开 Codex → 创建连接 → 扫描二维码，核对电脑名称和地址后连接。也可导入电脑导出的配对文件，或粘贴完整配对信息；不要填写「连接保护」里的指纹。', command: '' },
     { title: '开始第一条任务', body: '连接后选择项目，发送「概括这个项目的结构」。之后可在「我的连接」轻点电脑重连，右侧菜单可断开或删除连接。电脑端连接器需保持运行。', command: '' }
@@ -126,7 +128,8 @@ function linuxGuide(): CodexGuide {
       { title: '配置工作目录', body: '将 /absolute/project 替换为服务器已有项目的绝对路径，电脑名称可自定义。该步骤只配置桥接，不会新建或克隆项目。', command:
         './bin/clawmate-codex setup --project /absolute/project --name MyServer --host 0.0.0.0 --port 8787' },
       { title: '登录 Codex', body: '终端会显示官方验证网址和一次性登录码。在自己的手机或电脑浏览器打开该网址，输入码并完成授权，等待终端显示登录成功。不要把登录码发给其他人。', command: './bin/clawmate-codex login' },
-      { title: '启动并查看地址', body: '确认服务器和手机网络可互访；异地服务器先完成 Tailscale 组网。启动后用 status 查看实际监听地址和网络状态。', command:
+      { title: '启动并查看地址', body: '确认服务器和手机网络可互访。启动后用 status 查看实际监听地址和网络状态。',
+        emphasis: '连接异地服务器时，建议先按 Tailscale 教程组网。', command:
         './bin/clawmate-codex start\n./bin/clawmate-codex status' },
       { title: '导出一次性配对信息', body: '将下方示例 100.101.102.103 替换为 status 中服务器本机的 Tailscale IPv4；同一 Wi-Fi 可用局域网 IP。这里填写服务器地址，不是手机地址。', command:
         './bin/clawmate-codex pair --origin https://100.101.102.103:8787 --output phone.clawmate-codex-pair.json\ncat phone.clawmate-codex-pair.json' },
@@ -140,7 +143,7 @@ function linuxGuide(): CodexGuide {
       'Tailscale 使用用户态模式且未显示 100 开头地址时，可在首次启动后台前设置 CLAWMATE_TAILSCALE_SOCKET=/实际路径/tailscaled.sock。已有后台须在空闲时先退出，才会继承新环境变量。',
       '新任务默认允许工作目录内修改并请求批准。超时检查网络、status、服务端口与 Tailscale 策略；不要通过关闭 TLS 校验解决证书错误。'
     ],
-    links: [{ title: '下载连接器', url: CODEX_RELEASE_URL }, { title: '网页版指南', url: GUIDE_ROOT + 'linux.md' }]
+    links: [{ title: '下载终端版连接器', url: CODEX_RELEASE_URL }, { title: '网页版指南', url: GUIDE_ROOT + 'linux.md' }]
   };
 }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findCodexRuntime } from '../host/codex-runtime.mjs';
@@ -134,4 +134,68 @@ test('local management can save and clear a valid Codex selection without restar
   assert.equal(automatic.hasCustomCodex, false);
   assert.equal(automatic.codexExecutable, '/auto/codex');
   assert.equal(closed, 2);
+});
+
+test('start restores the same port after Codex exits and a failed recovery can be retried', async t => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'clawmate-runtime-recovery-'));
+  const workspace = path.join(directory, 'project');
+  mkdirSync(workspace);
+  const tailscale = { refresh: async () => {}, status: () => ({ addresses: [] }) };
+  let unavailable = false;
+  let launches = 0;
+  const manager = new CompanionManager(path.join(directory, 'state'), { launcher: '/clawmate/launcher' }, { tailscale, rpcFactory() {
+    launches++;
+    if (unavailable) throw new Error('fixture: Codex is temporarily unavailable');
+    const rpc = new EventEmitter();
+    rpc.initialize = async () => {};
+    rpc.close = () => { rpc.closed = true; rpc.emit('stopped', 'exit code 1'); };
+    rpc.request = async method => {
+      if (method === 'account/read') return { account: { type: 'chatgpt' } };
+      assert.equal(method, 'model/list');
+      return { data: [{ model: 'test', supportedReasoningEfforts: [] }] };
+    };
+    return rpc;
+  } });
+  t.after(async () => { await manager.close(); rmSync(directory, { recursive: true, force: true }); });
+  // A loopback-only HTTP fixture tests the listener without a certificate toolchain.
+  Object.assign(manager.settings.value, { networkMode: 'public', host: '127.0.0.1', port: 0,
+    workspaces: [{ id: 'project', name: 'Fixture', path: workspace }] });
+  assert.equal((await manager.start()).state, 'running');
+  assert.equal((await manager.start()).state, 'running');
+  assert.equal(launches, 1, 'a healthy start is idempotent');
+  const oldServer = manager.server;
+  manager.settings.value.port = oldServer.address().port;
+  const client = { headers: { Authorization: 'Bearer ' + manager.settings.value.token } };
+  const info = `http://127.0.0.1:${manager.settings.value.port}/v1/info`;
+  manager.rpc.close();
+  assert.equal(manager.status().state, 'error');
+  assert.equal(manager.status().listening, true);
+  let response = await fetch(info, client);
+  assert.equal(response.status, 503);
+  await response.text();
+
+  manager.core.locks.add('finishing');
+  await assert.rejects(manager.start(), /仍有任务/);
+  await assert.rejects(manager.stop(), /仍有任务/);
+  assert.equal(manager.server, oldServer);
+  assert.equal(manager.core.ready, false);
+  manager.core.locks.delete('finishing');
+
+  const restarted = await manager.start();
+  assert.equal(restarted.state, 'running');
+  assert.equal(restarted.listening, true);
+  assert.equal(restarted.runtimeError, '');
+  assert.equal(oldServer.listening, false);
+  response = await fetch(info, client);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ready, true);
+
+  manager.rpc.close();
+  unavailable = true;
+  await assert.rejects(manager.start(), /temporarily unavailable/);
+  assert.equal(manager.status().listening, false);
+  assert.equal(manager.status().state, 'error');
+  unavailable = false;
+  assert.equal((await manager.start()).state, 'running');
+  assert.equal(launches, 4);
 });

@@ -1,7 +1,31 @@
 import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
+import { BridgeError } from './errors.mjs';
 import { readContext, cancelledRead } from './read-coordinator.mjs';
+
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+export const RESPONSE_TOO_LARGE = 'CODEX_RESPONSE_TOO_LARGE';
+
+function readFrames(stream, onFrame, onOversized) {
+  let chunks = []; let size = 0; let header = Buffer.alloc(0); let dropping = false;
+  stream.on('data', packet => {
+    for (let start = 0; start < packet.length;) {
+      const newline = packet.indexOf(10, start);
+      const end = newline < 0 ? packet.length : newline;
+      const chunk = packet.subarray(start, end);
+      if (!dropping && chunk.length) {
+        if (header.length < 256) header = Buffer.concat([header, chunk.subarray(0, 256 - header.length)]);
+        if (size + chunk.length > MAX_RESPONSE_BYTES) {
+          chunks = []; dropping = true; onOversized(header.toString('utf8'));
+        } else { chunks.push(chunk); size += chunk.length; }
+      }
+      if (newline < 0) break;
+      if (!dropping && size) onFrame(Buffer.concat(chunks, size).toString('utf8'));
+      chunks = []; size = 0; header = Buffer.alloc(0); dropping = false;
+      start = end + 1;
+    }
+  });
+}
 
 // Only stdio is used. No unauthenticated Codex listener is opened.
 export class CodexRpc extends EventEmitter {
@@ -16,9 +40,7 @@ export class CodexRpc extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'] });
     // Do not forward stderr: it may contain paths, prompts or credentials.
     this.child.stderr.resume();
-    const lines = createInterface({ input: this.child.stdout });
-    lines.on('line', line => {
-      if (line.length > 16 * 1024 * 1024) return this.child.kill();
+    readFrames(this.child.stdout, line => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
       if (!message.method && message.id !== undefined) {
@@ -30,13 +52,33 @@ export class CodexRpc extends EventEmitter {
         if (message.error) request.reject(new Error(message.error.message || 'Codex RPC failed'));
         else request.resolve(message.result);
       } else this.emit('message', message);
-    });
-    this.child.stdin.on('error', () => this.fail());
-    this.child.on('error', () => this.fail());
-    this.child.on('exit', () => this.fail());
+    }, prefix => this.rejectOversized(prefix));
+    this.child.stdin.on('error', error => this.fail(`stdin ${error.code || 'error'}`));
+    this.child.on('error', error => this.fail(`process ${error.code || 'error'}`));
+    this.child.on('exit', (code, signal) => this.fail(signal ? `signal ${signal}` : `exit code ${code}`));
   }
 
-  fail() {
+  rejectOversized(prefix) {
+    // Codex replies start with the numeric request ID. An uncorrelated frame
+    // may be a notification and must never cancel another request.
+    const match = /^\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(\d+)\s*,\s*"(?:result|error)"\s*:/.exec(prefix);
+    const id = match ? Number(match[1]) : NaN;
+    const request = this.pending.get(id);
+    this.emit('oversized', request?.method || 'unmatched frame');
+    if (!request) return;
+    clearTimeout(request.timer);
+    request.cleanup?.();
+    this.pending.delete(id);
+    const error = new BridgeError(413, 'Codex 返回的单条数据过大，请在电脑端查看。');
+    error.code = RESPONSE_TOO_LARGE;
+    if (request.method === 'turn/start') {
+      error.outcomeUnknown = true;
+      error.message = 'Codex 返回的数据过大，无法确认任务状态。请先在电脑端检查。';
+    }
+    request.reject(error);
+  }
+
+  fail(reason) {
     if (this.closed) return;
     this.closed = true;
     for (const p of this.pending.values()) {
@@ -45,7 +87,7 @@ export class CodexRpc extends EventEmitter {
       p.reject(new Error('Codex process stopped; restart the bridge'));
     }
     this.pending.clear();
-    this.emit('stopped');
+    this.emit('stopped', reason);
   }
 
   send(message) {
@@ -66,7 +108,7 @@ export class CodexRpc extends EventEmitter {
       }, 45000);
       const abort = () => { clearTimeout(timer); this.pending.delete(id); cleanup(); reject(cancelledRead()); };
       const cleanup = () => signal?.removeEventListener('abort', abort);
-      this.pending.set(id, { resolve, reject, timer, cleanup }); signal?.addEventListener('abort', abort, { once: true });
+      this.pending.set(id, { method, resolve, reject, timer, cleanup }); signal?.addEventListener('abort', abort, { once: true });
       try { this.send({ id, method, params }); } catch (error) { clearTimeout(timer); this.pending.delete(id); cleanup(); reject(error); }
     });
   }
@@ -97,5 +139,5 @@ export class CodexRpc extends EventEmitter {
     });
   }
 
-  close() { this.child.kill(); this.fail(); }
+  close() { this.child.kill(); this.fail('closed by bridge'); }
 }

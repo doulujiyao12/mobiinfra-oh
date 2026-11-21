@@ -1,6 +1,6 @@
 # macOS 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.16
+[返回下载与指南](README.md) · ClawMate Codex 1.1.17
 
 在电脑安装 Codex 桌面版或 CLI，再安装 ClawMate Codex 连接器。选好项目后，用手机扫码配对。
 
@@ -29,7 +29,9 @@ open "/Applications/ClawMate Codex.app"
 
 ## 5. 启动手机连接
 
-点击「启动手机连接」，确认服务已启动。手机和电脑先连接同一个可互访的 Wi-Fi；异地连接请先按 Tailscale 教程组网。默认端口为 8787，以电脑实际显示为准。
+点击「启动手机连接」，确认服务已启动。同一地点连接时，手机和电脑需接入同一个可互访的 Wi-Fi。局域网 IP 变更后需要重新配对。默认端口为 8787，以电脑实际显示为准。
+
+**异地连接或局域网 IP 经常变化时，建议先按 Tailscale 教程组网。**
 
 ## 6. 生成配对二维码
 
@@ -53,7 +55,7 @@ open "/Applications/ClawMate Codex.app"
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.16)
+- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.17)
 - [Apple 官方：打开未公证的 App](https://support.apple.com/zh-cn/102445)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->

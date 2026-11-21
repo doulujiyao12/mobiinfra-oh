@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { BridgeError } from './errors.mjs';
+import { RESPONSE_TOO_LARGE } from './rpc.mjs';
 import { DELIVERY_INSTRUCTIONS } from './artifacts.mjs';
 import { executionSettings } from './permissions.mjs';
 
@@ -147,12 +148,12 @@ export class CodexHistory {
     }
     let result;
     if (mode === 'items') {
-      try { result = await this.core.rpc.request('thread/items/list', { threadId: id, limit: 40,
-        cursor: position, sortDirection: 'desc' }); }
+      try { result = await this.readBoundedPage('thread/items/list', { threadId: id,
+        cursor: position, sortDirection: 'desc' }, [40, 10, 1]); }
       catch (error) { if (cursor || !unsupported(error)) throw error; mode = 'turns'; }
     }
-    if (mode === 'turns') result = await this.core.rpc.request('thread/turns/list', {
-      threadId: id, limit: 2, cursor: position, sortDirection: 'desc', itemsView: 'full' });
+    if (mode === 'turns') result = await this.readBoundedPage('thread/turns/list', {
+      threadId: id, cursor: position, sortDirection: 'desc', itemsView: 'full' }, [2, 1]);
     // Recheck metadata before returning any content: permissions/cwd may have changed during paging.
     const current = await this.metadata(id);
     if (current.workspace.id !== workspace.id || current.thread.cwd !== thread.cwd) throw unavailable();
@@ -172,6 +173,12 @@ export class CodexHistory {
       status: 'history', turnId: '', items, approvals: [], artifacts: [], artifactWarning: '', revision: 0,
       updatedAt: updatedAt(thread), error: '', external: true,
       historyCursor: next ? mode + ':' + next : '', truncated: clipped };
+  }
+  async readBoundedPage(method, params, limits) {
+    for (const limit of limits) {
+      try { return await this.core.rpc.request(method, { ...params, limit }); }
+      catch (error) { if (error.code !== RESPONSE_TOO_LARGE || limit === limits.at(-1)) throw error; }
+    }
   }
   async resume(id, body) {
     this.core.requireReady();

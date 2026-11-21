@@ -1,6 +1,6 @@
 # Linux CLI 连接指南
 
-[返回下载与指南](README.md) · ClawMate Codex 1.1.16
+[返回下载与指南](README.md) · ClawMate Codex 1.1.17
 
 适用于 x64 Linux 服务器，无需桌面环境。下面命令在服务器执行；把项目目录和示例 IP 换成自己的实际值。
 
@@ -11,10 +11,10 @@
 下载终端版，先比对 Release 的 SHA256 校验清单，再解压到用户目录。目标目录应为空；升级时先结束任务并退出旧服务。
 
 ```bash
-curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz \
-  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.16/ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz
+curl -fL --retry 3 -o ClawMate-Codex-Terminal-1.1.17-linux-x64.tar.gz \
+  https://github.com/doulujiyao12/mobiinfra-oh/releases/download/codex-bridge-v1.1.17/ClawMate-Codex-Terminal-1.1.17-linux-x64.tar.gz
 mkdir -p "$HOME/ClawMate-Codex"
-tar -xzf ClawMate-Codex-Terminal-1.1.16-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
+tar -xzf ClawMate-Codex-Terminal-1.1.17-linux-x64.tar.gz -C "$HOME/ClawMate-Codex"
 cd "$HOME/ClawMate-Codex"
 ```
 
@@ -36,7 +36,9 @@ cd "$HOME/ClawMate-Codex"
 
 ## 4. 启动并查看地址
 
-确认服务器和手机网络可互访；异地服务器先完成 Tailscale 组网。启动后用 status 查看实际监听地址和网络状态。
+确认服务器和手机网络可互访。启动后用 status 查看实际监听地址和网络状态。
+
+**连接异地服务器时，建议先按 Tailscale 教程组网。**
 
 ```bash
 ./bin/clawmate-codex start
@@ -79,6 +81,6 @@ cat phone.clawmate-codex-pair.json
 
 ## 相关链接
 
-- [下载连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.16)
+- [下载终端版连接器](https://github.com/doulujiyao12/mobiinfra-oh/releases/tag/codex-bridge-v1.1.17)
 
 <!-- 内容源：entry/src/main/ets/pages/codex/CodexHelpContent.ets；通过 scripts/check_codex_help.cjs --write-docs 同步。 -->

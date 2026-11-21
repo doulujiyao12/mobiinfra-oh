@@ -19,7 +19,10 @@ struct CodexHelpPage {
   @State private platform: CodexPlatform = CodexPlatform.Windows;
   private pageScroller: Scroller = new Scroller();
   private platforms: CodexPlatform[] = [CodexPlatform.Windows, CodexPlatform.Mac, CodexPlatform.Linux];
-  private downloads: CodexDownload[] = codexDownloads();
+  private desktopDownloads: CodexDownload[] = codexDownloads().filter((item: CodexDownload): boolean =>
+    !item.filename.startsWith('ClawMate-Codex-Terminal-'));
+  private terminalDownloads: CodexDownload[] = codexDownloads().filter((item: CodexDownload): boolean =>
+    item.filename.startsWith('ClawMate-Codex-Terminal-'));
 
   aboutToAppear(): void {
     const params = router.getParams() as CodexHelpParams | undefined;
@@ -106,20 +109,28 @@ struct CodexHelpPage {
         .fontSize(14).lineHeight(22).fontColor(AppTheme.text('#747B87'))
         .copyOption(CopyOptions.LocalDevice)
     }.width('100%').alignItems(HorizontalAlign.Start)
-    Column() {
-      ForEach(this.downloads, (item: CodexDownload, index: number) => {
-        if (index > 0) { Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 18, right: 18 }) }
-        this.DownloadRow(item)
-      }, (item: CodexDownload) => item.id)
-    }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).clip(true)
-    Text('版本 ' + CODEX_BRIDGE_VERSION + ' · ' + CODEX_DOWNLOAD_NOTICE).fontSize(12).lineHeight(20)
+    this.DownloadGroup('桌面版 · ' + CODEX_BRIDGE_VERSION, this.desktopDownloads)
+    this.DownloadGroup('终端版 · ' + CODEX_BRIDGE_VERSION, this.terminalDownloads)
+    Text(CODEX_DOWNLOAD_NOTICE).fontSize(12).lineHeight(20)
       .fontColor(AppTheme.text('#747B87')).width('100%').copyOption(CopyOptions.LocalDevice)
-    Button('查看 Release 与校验清单').height(42).fontSize(14).backgroundColor(Color.Transparent)
+    Button('查看发布页与校验清单').height(42).fontSize(14).backgroundColor(Color.Transparent)
       .fontColor(AppTheme.text('#5968FF')).onClick(() => { this.openLink(CODEX_RELEASE_URL); })
     Button('如何连接？').height(42).fontSize(14).backgroundColor(Color.Transparent)
       .fontColor(AppTheme.text('#5968FF')).onClick(() => {
         this.section = CodexHelpSection.Connect; this.pageScroller.scrollEdge(Edge.Top);
       })
+  }
+
+  @Builder private DownloadGroup(title: string, downloads: CodexDownload[]) {
+    Column({ space: 8 }) {
+      Text(title).fontSize(14).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#747B87'))
+      Column() {
+        ForEach(downloads, (item: CodexDownload, index: number) => {
+          if (index > 0) { Divider().color(AppTheme.border('#E9EBF0')).margin({ left: 18, right: 18 }) }
+          this.DownloadRow(item)
+        }, (item: CodexDownload) => item.id)
+      }.width('100%').backgroundColor(AppTheme.background('#FFFFFF')).borderRadius(20).clip(true)
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   @Builder private Step(item: CodexGuideStep, index: number) {
@@ -132,6 +143,10 @@ struct CodexHelpPage {
           .copyOption(CopyOptions.LocalDevice)
         Text(item.body).fontSize(14).lineHeight(23).fontColor(AppTheme.text('#626B7C')).width('100%')
           .copyOption(CopyOptions.LocalDevice)
+        if (item.emphasis) {
+          Text(item.emphasis).fontSize(14).lineHeight(23).fontWeight(FontWeight.Bold)
+            .fontColor(AppTheme.text('#172033')).width('100%').copyOption(CopyOptions.LocalDevice)
+        }
         if (item.command) {
           Column({ space: 8 }) {
             Text(item.command).fontSize(12).fontFamily('monospace').lineHeight(20)

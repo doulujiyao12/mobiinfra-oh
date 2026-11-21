@@ -38,16 +38,21 @@ async function refresh() {
   snapshot = await window.companion.call('status');
   document.querySelector('.version').textContent = 'v' + snapshot.version;
   const running = snapshot.state === 'running';
-  $('sideState').textContent = running ? '手机连接服务已启动' : snapshot.state === 'error' ? '服务需要检查' : '手机连接服务未启动';
+  const transitioning = snapshot.state === 'starting' || snapshot.state === 'stopping';
+  const settingsLocked = snapshot.listening || running || transitioning;
+  const stateLabels = { running: '手机连接服务已启动', starting: '正在启动手机连接', stopping: '正在停止手机连接', error: '服务需要检查' };
+  $('sideState').textContent = stateLabels[snapshot.state] || '手机连接服务未启动';
   $('sideDot').classList.toggle('running', running);
   const account = snapshot.account;
   $('accountBadge').textContent = snapshot.runtimeError ? 'Codex 不可用' : account ? '已登录' : '尚未登录';
   $('accountBadge').classList.toggle('good', !!account && !snapshot.runtimeError);
   $('accountDescription').textContent = snapshot.runtimeError || (account ?
     [account.email || account.type, account.planType].filter(Boolean).join(' · ') : '使用电脑上已安装的 Codex。');
-  $('start').disabled = running; $('stop').disabled = !running; $('save').disabled = running; $('addProject').disabled = running;
-  $('login').disabled = !!account; $('deviceLogin').disabled = !!account; $('logout').disabled = !account || running;
-  $('chooseCodex').disabled = $('autoFindCodex').disabled = running || snapshot.state === 'starting';
+  $('start').disabled = running || transitioning; $('stop').disabled = transitioning || !(snapshot.listening || running);
+  $('save').disabled = settingsLocked; $('addProject').disabled = settingsLocked;
+  $('login').disabled = !!account || transitioning; $('deviceLogin').disabled = !!account || transitioning;
+  $('logout').disabled = !account || settingsLocked;
+  $('chooseCodex').disabled = $('autoFindCodex').disabled = settingsLocked;
   $('autoFindCodex').hidden = !snapshot.hasCustomCodex;
   $('accountDescription').title = snapshot.codexExecutable || '';
   if (snapshot.login?.success) $('loginCode').hidden = true;
@@ -90,7 +95,10 @@ for (const [id, kind, target] of [['chooseCert', 'cert', 'certFile'], ['chooseKe
 $('save').addEventListener('click', () => act(async () => { await window.companion.call('configure', formConfig()); dirty = false; notice('配置已保存。'); }));
 $('start').addEventListener('click', () => act(async () => {
   if (dirty) { await window.companion.call('configure', formConfig()); dirty = false; }
-  notice('正在启动手机连接服务…'); await window.companion.call('start'); notice('连接服务已启动，接下来在“手机配对”中连接自己的手机。'); view('pairing');
+  notice('正在启动手机连接服务…');
+  const result = await window.companion.call('start');
+  if (result.state !== 'running') throw new Error(result.runtimeError || result.lastError || '手机连接服务尚未就绪。');
+  notice('连接服务已启动，接下来在“手机配对”中连接自己的手机。'); view('pairing');
 }));
 $('stop').addEventListener('click', () => act(async () => { await window.companion.call('stop'); $('pairingResult').hidden = true; notice('手机连接服务已停止。'); }));
 for (const [id, type] of [['login', 'chatgpt'], ['deviceLogin', 'chatgptDeviceCode']]) $(id).addEventListener('click', () => act(async () => {

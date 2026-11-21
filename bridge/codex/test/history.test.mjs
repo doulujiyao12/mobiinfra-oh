@@ -7,6 +7,7 @@ import path from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { BridgeCore } from '../core.mjs';
 import { createBridgeServer } from '../server.mjs';
+import { RESPONSE_TOO_LARGE } from '../rpc.mjs';
 
 async function fixture(t) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'clawmate-history-'));
@@ -93,6 +94,22 @@ test('legacy turn pagination is used only for unsupported item pagination; chron
   assert.equal(calls.filter(call => call.method === 'thread/turns/list').at(-1).params.cursor, 'older-turn');
   rpc.request = async (method, params) => { if (method === 'thread/items/list') throw new Error('transport timed out'); return original(method, params); };
   await assert.rejects(core.history.read('pc-1'), /timed out/);
+});
+
+test('large item pages retry with a smaller limit while retaining their cursor', async t => {
+  const { core, rpc } = await fixture(t); const original = rpc.request;
+  const requested = [];
+  rpc.request = async (method, params) => {
+    if (method === 'thread/items/list') {
+      requested.push({ cursor: params.cursor, limit: params.limit });
+      if (params.limit > 10) throw Object.assign(new Error('fixture too large'), { code: RESPONSE_TOO_LARGE });
+    }
+    return original(method, params);
+  };
+  const page = await core.history.read('pc-1', 'items:cursor');
+  assert.deepEqual(requested, [{ cursor: 'cursor', limit: 40 }, { cursor: 'cursor', limit: 10 }]);
+  assert.equal(page.historyCursor, 'items:older');
+  assert.equal(core.ready, true);
 });
 
 test('authorization is rechecked after content paging and no stale history is returned', async t => {

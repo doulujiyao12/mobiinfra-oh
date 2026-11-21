@@ -47,6 +47,9 @@ export class CompanionManager extends EventEmitter {
     try { rpc = this.rpcFactory(); }
     catch (error) { this.runtimeError = error.message; return; }
     this.rpc = rpc;
+    rpc.on('oversized', method => {
+      if (this.rpc === rpc) console.warn('本机 Codex 返回超大数据：' + method);
+    });
     rpc.on('message', message => {
       if (this.rpc !== rpc) return;
       if (message.method === 'account/login/completed') {
@@ -57,10 +60,13 @@ export class CompanionManager extends EventEmitter {
         rpc.send({ id: message.id, error: { code: -32601, message: 'Unsupported local interaction' } });
       }
     });
-    rpc.on('stopped', () => {
+    rpc.on('stopped', reason => {
       if (this.rpc !== rpc) return;
       this.account = null;
-      this.state = 'error'; this.runtimeError = '本机 Codex 已退出，请重新打开 ClawMate Codex。'; this.emit('change');
+      this.runtimeError = '本机 Codex 已退出，请重新启动手机连接。';
+      if (this.state !== 'starting' && this.state !== 'stopping') this.state = 'error';
+      console.error('本机 Codex 运行进程已退出：' + (reason || 'unknown'));
+      this.emit('change');
     });
     try { await rpc.initialize(); await this.readAccount(); this.runtimeError = ''; }
     catch {
@@ -86,7 +92,7 @@ export class CompanionManager extends EventEmitter {
     const addresses = this.connectionAddresses();
     const origins = config.networkMode === 'public' ? [config.publicOrigin].filter(Boolean) :
       (config.host === '127.0.0.1' ? ['127.0.0.1'] : addresses).map(ip => `https://${ip}:${config.port}`);
-    return { version: VERSION, state: this.state, lastError: this.lastError, account: this.account,
+    return { version: VERSION, state: this.state, listening: this.server?.listening === true, lastError: this.lastError, account: this.account,
       runtimeError: this.runtimeError, codexExecutable: this.rpc?.closed ? '' : this.rpc?.command || '',
       hasCustomCodex: !!this.settings.value.codexExecutable,
       login: this.lastLogin || null, config, origins, devices: this.pairing.list(),
@@ -136,10 +142,19 @@ export class CompanionManager extends EventEmitter {
     await this.rpc.request('account/logout'); await this.readAccount(); return this.status();
   }
   async start() {
-    if (this.server) return this.status();
     if (this.state === 'starting') throw new Error('服务正在启动，请稍候。');
+    if (this.state === 'stopping') throw new Error('服务正在停止，请稍候。');
+    if (this.state === 'running' && this.server?.listening && this.core?.ready && this.rpc && !this.rpc.closed) {
+      return this.status();
+    }
+    if (this.server) this.requireIdle();
     this.state = 'starting'; this.lastError = '';
     try {
+      if (this.server) {
+        if (this.core) this.core.ready = false;
+        this.pairing.cancel();
+        await this.closeServer(true);
+      }
       if (this.core) { this.rpc = null; this.core.close(); this.core = null; }
       if (!await this.ensureRuntime()) throw new Error(this.runtimeError);
       await this.readAccount();
@@ -153,30 +168,49 @@ export class CompanionManager extends EventEmitter {
         desktopCoordination: true };
       this.core = new BridgeCore(bridgeConfig, this.rpc);
       await this.core.initialize({ initializeRpc: false });
-      this.server = createBridgeServer(bridgeConfig, this.core, { pairing: this.pairing });
+      const server = createBridgeServer(bridgeConfig, this.core, { pairing: this.pairing });
+      this.server = server;
       await new Promise((resolve, reject) => {
-        this.server.once('error', reject); this.server.listen(config.port, config.host, resolve);
+        server.once('error', reject);
+        server.listen(config.port, config.host, () => { server.off('error', reject); resolve(); });
       });
+      if (!this.core.ready || this.rpc.closed) throw new Error(this.runtimeError || '本机 Codex 尚未就绪。');
       this.state = 'running';
-      this.server.on('error', () => { this.state = 'error'; this.lastError = '连接服务异常，请停止后重新启动。'; });
+      server.on('error', () => {
+        if (this.server !== server || this.state !== 'running') return;
+        this.core.ready = false;
+        this.state = 'error'; this.lastError = '连接服务异常，请重新启动手机连接。';
+      });
       return this.status();
     } catch (error) {
-      this.server?.close(); this.server = null; this.state = 'error'; this.lastError = error.message;
+      if (this.core) this.core.ready = false;
+      await this.closeServer(true);
+      this.state = 'error'; this.lastError = error.message;
       throw new Error('启动失败：' + error.message);
     }
   }
-  async stop() {
-    if (this.core) this.core.ready = false;
+  requireIdle() {
     if (this.core?.locks.size || this.core?.list().some(task => ['running', 'starting', 'waitingApproval', 'stopping', 'releasing'].includes(task.status))) {
-      this.core.ready = true;
       throw new Error('仍有任务在运行或等待审批。请先在手机中停止这些任务，再停止服务。');
     }
+  }
+  async closeServer(force = false) {
+    const server = this.server;
+    if (!server) return;
+    await new Promise(resolve => {
+      server.close(resolve);
+      if (force) server.closeAllConnections();
+      else server.closeIdleConnections();
+    });
+    if (this.server === server) this.server = null;
+  }
+  async stop() {
+    if (this.state === 'starting' || this.state === 'stopping') throw new Error('连接服务正在切换状态，请稍候。');
+    this.requireIdle();
+    this.state = 'stopping';
+    if (this.core) this.core.ready = false;
     this.pairing.cancel();
-    if (this.server) {
-      const server = this.server; this.server = null;
-      server.closeIdleConnections();
-      await new Promise(resolve => server.close(resolve));
-    }
+    await this.closeServer();
     this.state = 'stopped'; return this.status();
   }
   async createPairing(origin) {
@@ -237,7 +271,9 @@ export class CompanionManager extends EventEmitter {
     this.pairing.cancel();
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null; }
     const executors = [this.rpc, ...[...(this.core?.sharedSessions.entries.values() || [])].map(entry => entry.rpc)].filter(Boolean);
-    try { if (this.core) this.core.close(); else this.rpc?.close(); }
+    const rpc = this.rpc;
+    this.rpc = null;
+    try { if (this.core) this.core.close(); else rpc?.close(); }
     finally { await Promise.all(executors.map(rpc => rpc.shutdown?.())); }
   }
 }

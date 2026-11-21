@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ReadCoordinator, readContext } from '../read-coordinator.mjs';
-import { CodexRpc } from '../rpc.mjs';
+import { CodexRpc, RESPONSE_TOO_LARGE } from '../rpc.mjs';
 import { TaskSync } from '../task-sync.mjs';
 
 test('reads coalesce, time out, release their budget, and isolate independent mutations', async () => {
@@ -37,6 +37,26 @@ test('read timeout cancels one stdio pending request without killing or cancelli
   assert.equal((await mutation).ok, true);
   assert.equal(rpc.pending.size, 0); assert.equal(rpc.closed, false);
   assert.equal((await rpc.request('thread/list')).ok, true);
+});
+
+test('oversized history is rejected without stopping the executor or affecting another request', async t => {
+  const program = `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+    const {id,method}=JSON.parse(line);
+    if(method==='thread/items/list') {
+      process.stdout.write(' {"id":'+id+',"result":{"text":"');
+      process.stdout.write('中'.repeat(6000000));
+      process.stdout.write('"}}\\n');
+    } else process.stdout.write(JSON.stringify({id,result:{ok:true}})+'\\n');
+  });`;
+  const rpc = new CodexRpc(process.execPath, ['-e', program]);
+  t.after(() => rpc.close());
+  const history = rpc.request('thread/items/list');
+  const turn = rpc.request('turn/start');
+  await assert.rejects(history, error => error.code === RESPONSE_TOO_LARGE && error.status === 413);
+  assert.equal((await turn).ok, true);
+  assert.equal((await rpc.request('model/list')).ok, true);
+  assert.equal(rpc.pending.size, 0);
+  assert.equal(rpc.closed, false);
 });
 
 const task = (revision, items) => ({ id: 'session', revision, items, approvals: [], artifacts: [], status: 'running' });

@@ -1,4 +1,9 @@
-ClawMate Codex 1.1.16
+ClawMate Codex 1.1.17
+
+- Recover the phone connection service when the local Codex process has exited and the bridge port is still listening.
+- Report startup success only when the bridge and local Codex are ready. Record the local process exit reason in the bridge log.
+
+Previous release: 1.1.16
 
 - Refresh the available model catalog when the phone requests it. Keep the last complete catalog if Codex cannot refresh it.
 - Apply the selected model speed to the next message sent from the phone, using the tiers advertised by Codex. The updated phone app exposes the speed selector.
