@@ -10,6 +10,7 @@ import { CodexCredentialStore } from '../pages/codex/CodexCredentialStore';
 import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { appBackgroundTasks } from '../utils/AppBackgroundTasks';
+import { memorySyncBackground } from '../datamanager/MemorySyncBackground';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { getAppBundleName } from '../utils/AppIdentity';
@@ -130,6 +131,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    memorySyncBackground.onDestroy();
     this.releaseReminderWindow();
     clearPageStatusBarContext();
     AgentExecutionController.setFloatWindowSyncHandler(null);
@@ -235,6 +237,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    memorySyncBackground.onForeground();
     this.reminderAbilityForeground = true;
     AppTheme.syncSystemMode(this.context);
     refreshPageStatusBarAppearance();
@@ -263,6 +266,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    memorySyncBackground.onBackground();
     this.context.eventHub.emit('recording-analysis-background');
     this.reminderAbilityForeground = false;
     AppStorage.setOrCreate(COLLECTION_REMINDER_READY_KEY, false);

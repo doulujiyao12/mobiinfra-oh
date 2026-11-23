@@ -396,12 +396,13 @@ export class DataManagerFacade {
   }
 
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig,
-    fullCheck: boolean = false): Promise<RefreshSummary> {
+    fullCheck: boolean = false, checkpoint?: () => Promise<void>): Promise<RefreshSummary> {
     if (this.syncRunning) { throw new Error('个人记忆正在同步，请稍候'); }
     this.syncRunning = true;
     let metrics = new SyncMetrics(); let success = false;
     this.storage.beginReadSession(this.paths.indexesRoot); this.indexService.beginSyncRead();
     this.modelClient.resetSyncMetrics();
+    this.modelClient.syncCheckpoint = checkpoint;
     try {
       let result = await this.refreshInternal(modelConfig, (value: DataManagerProgress): void => {
         metrics.mark(value.stage);
@@ -410,6 +411,7 @@ export class DataManagerFacade {
       this.recordSuccessfulMemoryCheck();
       success = true; return result;
     } finally {
+      this.modelClient.syncCheckpoint = undefined;
       this.indexService.endSyncRead();
       let hits = this.storage.endReadSession();
       dataManagerInfo('SYNC_READ_CACHE hits=' + hits);

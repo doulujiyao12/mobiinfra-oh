@@ -74,8 +74,26 @@ function index() {
   const state = { accepted: true, login: true, memory: 0, calendar: 0, mail: 0, marks: [], failure: false, hasData: true,
     checked: 0, calendarFailure: false, mailFailure: false, calendarEnabled: true, mailEnabled: true,
     calendarReady: true, mailReady: true, calendarChecks: 0, mailChecks: 0, failures: [], stages: [] };
+  const reservations = [], released = [];
+  const coordinatorSource = fs.readFileSync(path.join(root, base, 'datamanager/MemorySyncBackground.ets'), 'utf8');
+  const coordinator = ts.transpileModule(coordinatorSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+  }).outputText;
+  const exports = {};
+  vm.runInNewContext(coordinator, { exports, require: name => name === '@kit.BackgroundTasksKit' ? {
+    backgroundTaskManager: {
+      requestSuspendDelay(_reason, expire) {
+        if (state.backgroundDenied) throw Error('quota unavailable');
+        reservations.push(expire);
+        return { requestId: reservations.length, actualDelayTime: 180000 };
+      },
+      cancelSuspendDelay(id) { released.push(id); }
+    }
+  } : { AppLogger: { info() {}, warnCause() {} } } });
+  const { memorySyncBackground } = exports;
   const page = probe('pages/Index.ets', 'Index', ['syncCollectedWorkflowTasks', 'refreshDataManager', 'retryMemoryOperation', 'updateDataManagerProgress',
     'beginMemoryOperation','endMemoryOperation','startMemoryProgressTimer','stopMemoryProgressTimer'], {
+    memorySyncBackground,
     PrivacyConsent: { isAccepted: () => state.accepted },
     CalendarMemoryStore: class { settings() { return { enabled: state.calendarEnabled }; } snapshot() { return { error: '', syncedAt: '' }; } },
     MailStore: class { settings() { return { enabled: state.mailEnabled }; } },
@@ -101,15 +119,17 @@ function index() {
     ensurePrivacyConsent: async () => state.accepted, ensureAiServiceLogin: () => state.login,
     appendCloudLog() {}, reloadDataManagerViewModels() {}, maybeShowCalendarConsent() {}, refreshModelActivities() {},
     getDataManagerModelConfig: () => ({ enabled: true, baseUrl: 'https://model.invalid', model: 'fixture' }),
-    dataManagerFacade: { hasDataToSync: () => state.hasData, recordSuccessfulMemoryCheck: () => { state.checked++; }, refresh: async (_config, progress) => {
+    dataManagerFacade: { hasDataToSync: () => state.hasData, recordSuccessfulMemoryCheck: () => { state.checked++; },
+      refresh: async (_config, progress, _grouping, _full, checkpoint) => {
       state.memory++; if (state.failure) throw Error('fixture model unavailable');
+      if (state.runMemory) await state.runMemory(checkpoint);
       progress({ stage: '生成画像', message: 'fixture progress', percent: 80, current: 4, total: 5 });
       return { message: 'fixture completed', skipped: false };
     } }
   });
   const update = page.updateDataManagerProgress.bind(page);
   page.updateDataManagerProgress = progress => { state.stages.push(progress.stage); update(progress); };
-  return { page, state };
+  return { page, state, memorySyncBackground, reservations, released };
 }
 const tests = [], test = (name, run) => tests.push([name, run]);
 test('phone and PC batches sync once after every task has saved its summaries', async () => {
@@ -316,6 +336,62 @@ test('sync keeps model/login failure handling without depending on a duplicate p
   assert.equal(empty.state.checked,1,'a successful no-change sync still records completion');
   const partial=index();partial.state.hasData=false;partial.state.calendarFailure=true;
   assert.equal(await partial.page.refreshDataManager(),false);assert.equal(partial.state.checked,0,'an incomplete source check must not count as a complete memory check');
+});
+test('locked-screen sync requests time only during sync and releases it on completion', async () => {
+  const f = index();
+  f.memorySyncBackground.onBackground(); f.memorySyncBackground.onForeground();
+  assert.equal(f.reservations.length, 0);
+  f.state.runMemory = async checkpoint => {
+    f.memorySyncBackground.onBackground();
+    await checkpoint();
+    assert.equal(f.reservations.length, 1);
+    assert.deepEqual(f.released, []);
+  };
+  assert.equal(await f.page.refreshDataManager(), true);
+  assert.deepEqual(f.released, [1]);
+  f.reservations[0]();
+  assert.deepEqual(f.released, [1], 'a late timeout must not release another request');
+});
+test('expired or denied background time postpones the next step until foreground', async () => {
+  for (const denied of [false, true]) {
+    const f = index(); f.state.backgroundDenied = denied;
+    let entered, continued = false;
+    const started = new Promise(resolve => { entered = resolve; });
+    f.state.runMemory = async checkpoint => {
+      f.memorySyncBackground.onBackground();
+      if (!denied) f.reservations[0]();
+      entered();
+      await checkpoint();
+      continued = true;
+    };
+    const work = f.page.refreshDataManager();
+    await started; await Promise.resolve();
+    assert.equal(continued, false);
+    assert.deepEqual(f.released, denied ? [] : [1]);
+    f.memorySyncBackground.onForeground();
+    assert.equal(await work, true);
+    assert.equal(f.state.memory, 1, 'resume the same run when it has not failed');
+  }
+});
+test('interrupted model work retries once after foreground without rereading calendar or mail', async () => {
+  const f = index();
+  let interrupted;
+  const started = new Promise(resolve => { interrupted = resolve; });
+  f.state.runMemory = async () => {
+    if (f.state.memory !== 1) return;
+    f.memorySyncBackground.onBackground();
+    f.reservations[0]();
+    interrupted();
+    throw Error('fixture request interrupted');
+  };
+  const work = f.page.refreshDataManager();
+  await started; await Promise.resolve();
+  assert.equal(f.state.memory, 1);
+  f.memorySyncBackground.onForeground();
+  assert.equal(await work, true);
+  assert.equal(f.state.memory, 2);
+  assert.equal(f.state.calendar, 1);
+  assert.equal(f.state.mail, 1);
 });
 (async () => {
   for (const [name, run] of tests) { await run(); console.log('PASS ' + name); }

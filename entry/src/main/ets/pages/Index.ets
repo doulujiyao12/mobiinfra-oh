@@ -3,6 +3,7 @@ import { HomeCodexRequest } from '../datamanager/HomeCodexContext';
 import { HOME_CODEX_DELIVERY_GOAL } from '../datamanager/HomeCodexBrief';
 import { prepareHomeCodexAttachments } from './home/HomeCodexAttachments';
 import { SyncMetrics } from '../datamanager/SyncMetrics';
+import { memorySyncBackground } from '../datamanager/MemorySyncBackground';
 import { ModelStreamActivity } from '../datamanager/ModelStreamActivity';
 import { ModelStreamActivityPanel } from '../components/ModelStreamActivityPanel';
 import { CalendarMemoryService } from '../utils/calendar/CalendarMemoryService';
@@ -2922,14 +2923,17 @@ struct Index {
       return false;
     }
     if (!this.beginMemoryOperation(afterCollection ? 'collection' : 'manual', '同步个人记忆')) { return false; }
-    let calendarEnabled = new CalendarMemoryStore(this.filesDir).settings().enabled;
-    let calendarError = '';
-    let mailEnabled = new MailStore(this.filesDir).settings().enabled;
-    let mailError = '';
     let memoryAttempted = false;
     let scheduler = new StartupSourceSync(this.filesDir);
     let syncMetrics = new SyncMetrics();
+    memorySyncBackground.begin();
+    const checkpoint = (): Promise<void> => memorySyncBackground.waitIfPaused();
     try {
+      let calendarEnabled = new CalendarMemoryStore(this.filesDir).settings().enabled;
+      let calendarError = '';
+      let mailEnabled = new MailStore(this.filesDir).settings().enabled;
+      let mailError = '';
+      await checkpoint();
       // Follow-up sync reads ready sources through the same services as manual
       // sync. It never opens an authorization/setup flow after a GUI batch.
       if (afterCollection) {
@@ -2945,6 +2949,7 @@ struct Index {
       }
       calendarError = calendarEnabled ? new CalendarMemoryStore(this.filesDir).snapshot().error : '';
       if (calendarEnabled) {
+        await checkpoint();
         this.dataManagerProgressStage = '更新日历';
         syncMetrics.mark('更新日历');
         try {
@@ -2962,6 +2967,7 @@ struct Index {
         this.reloadDataManagerViewModels();
       }
       if (mailEnabled) {
+        await checkpoint();
         this.dataManagerProgressStage = '更新邮件';
         syncMetrics.mark('更新邮件');
         try {
@@ -2975,6 +2981,7 @@ struct Index {
       }
       let sourceError = [calendarError ? '日历：' + calendarError : '', mailError ? '邮件：' + mailError : '']
         .filter((value: string): boolean => value.length > 0).join('；');
+      await checkpoint();
       if (!this.ensureAiServiceLogin()) {
         this.dataManagerProgressStage = sourceError ? '部分来源未更新' : '等待登录';
         this.dataManagerProgressMessage = sourceError || ((calendarEnabled || mailEnabled) ?
@@ -2995,9 +3002,18 @@ struct Index {
       syncMetrics.mark('个人记忆');
       scheduler.markAttempted('chat'); memoryAttempted = true;
       dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
-      let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
+      const report = (progress: DataManagerProgress): void => {
         this.updateDataManagerProgress(progress);
-      }, undefined, fullCheck);
+      };
+      const facade = this.dataManagerFacade;
+      const suspensions = memorySyncBackground.suspensionCount();
+      const summary = await facade.refresh(modelConfig, report, undefined, fullCheck, checkpoint).catch(async (error: Error) => {
+        if (memorySyncBackground.suspensionCount() === suspensions) { throw error; }
+        await checkpoint();
+        if (!this.ensureAiServiceLogin()) { throw error; }
+        this.dataManagerProgressStage = '继续同步';
+        return await facade.refresh(modelConfig, report, undefined, fullCheck, checkpoint);
+      });
       new StartupSourceSync(this.filesDir).markSynced('chat');
       this.reloadDataManagerViewModels();
       this.appendCloudLog('DataManager refresh: ' + summary.message);
@@ -3020,6 +3036,7 @@ struct Index {
       dataManagerError('refreshDataManager failed: ' + err.message);
       return false;
     } finally {
+      memorySyncBackground.finish();
       this.endMemoryOperation();
       syncMetrics.finish(!this.dataManagerSyncFailed && this.dataManagerProgressPercent === 100);
       dataManagerInfo('refreshDataManager finished');

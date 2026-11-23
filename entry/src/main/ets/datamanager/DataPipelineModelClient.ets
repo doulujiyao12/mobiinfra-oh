@@ -629,6 +629,7 @@ export interface EventAnalysisCallbacks {
 }
 
 export class DataPipelineModelClient implements ProfileBlockModel {
+  syncCheckpoint?: () => Promise<void>;
   private streamActivities: ModelStreamActivityStore = new ModelStreamActivityStore();
   private syncCalls: number = 0;
   private syncWaitMs: number = 0;
@@ -2092,6 +2093,7 @@ export class DataPipelineModelClient implements ProfileBlockModel {
       kind === 'enrich.batch' ? [0] : profileRequest ? [0, 0] : [0, 0.5, 1.0];
     try {
       for (let attempt = 0; attempt < temperatures.length; attempt++) {
+        if (this.syncCheckpoint) { await this.syncCheckpoint(); }
         if (profileRequest && profileBudget) {
           if (profileBudget.remaining <= 0) { throw new Error('本批画像多次未通过校验，已保留成功摘要，请检查模型服务后重试'); }
           profileBudget.remaining--;
