@@ -41,6 +41,14 @@ await build({ entryPoints: [path.join(root, 'host', 'cli.mjs')], outfile: path.j
   bundle: true, platform: 'node', format: 'esm', define, external: ['bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
 await build({ entryPoints: [path.join(root, 'host', 'update-helper.mjs')], outfile: path.join(resources, 'host', 'update-helper.mjs'),
   bundle: true, platform: 'node', format: 'esm', target: 'node22' });
+if (platform === 'darwin') {
+  const adapter = path.join(resources, 'bin', 'codex-shared-desktop');
+  copyFileSync(path.join(root, 'build', 'codex-shared-desktop.sh'), adapter);
+  if (process.platform !== 'win32') chmodSync(adapter, 0o755);
+  await build({ entryPoints: [path.resolve(root, '../bridge/codex/macos-shared-launch.mjs')],
+    outfile: path.join(resources, 'host', 'macos-shared-launch.mjs'),
+    bundle: true, platform: 'node', format: 'esm', define, external: ['bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
+}
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
 await build({ entryPoints: [path.join(root, 'desktop', 'main.mjs')], outfile: path.join(app, 'desktop', 'main.mjs'),
   bundle: true, platform: 'node', format: 'esm', define, external: ['electron', 'bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });

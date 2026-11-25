@@ -13,11 +13,13 @@ function windowsDesktopLocations(env) {
   } catch { return []; }
 }
 
+export const MAC_CODEX_BUNDLE_ID = 'com.openai.codex';
+
 function macDesktopLocations(roots) {
   return roots.flatMap(root => {
     try {
       return execFileSync('/usr/bin/mdfind',
-        ['-0', '-onlyin', root, 'kMDItemCFBundleIdentifier == "com.openai.codex"'],
+        ['-0', '-onlyin', root, `kMDItemCFBundleIdentifier == "${MAC_CODEX_BUNDLE_ID}"`],
         { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] })
         .split('\0').filter(filename => filename.startsWith(root + '/') && /\.app$/i.test(filename));
     } catch { return []; }
@@ -30,7 +32,7 @@ function macBundleExecutables(bundle) {
     path.posix.join(resources, 'codex')];
 }
 
-function* macExecutableCandidates(home, locate) {
+function* macBundleCandidates(home, locate) {
   const roots = ['/Applications', path.posix.join(home, 'Applications')];
   const checked = new Set();
   // Prefer the current desktop app before the historical standalone bundle.
@@ -38,13 +40,24 @@ function* macExecutableCandidates(home, locate) {
     for (const root of roots) {
       const bundle = path.posix.join(root, name);
       checked.add(bundle);
-      yield* macBundleExecutables(bundle);
+      yield bundle;
     }
   }
   // Spotlight can find renamed bundles at standard installation locations.
   for (const bundle of locate(roots)) {
-    if (!checked.has(bundle)) yield* macBundleExecutables(bundle);
+    if (!checked.has(bundle)) yield bundle;
   }
+}
+
+export function macCodexDesktopBundles(preferredExecutable, runningBundles, indexedBundles) {
+  const resources = preferredExecutable?.toLowerCase().indexOf('.app/contents/resources/') ?? -1;
+  const preferred = resources > 0 ? preferredExecutable.slice(0, resources + 4) : '';
+  return [...new Set([preferred, ...runningBundles, ...macBundleCandidates(os.homedir(), () => indexedBundles)])]
+    .flatMap(bundle => {
+      if (!bundle) return [];
+      const executable = macBundleExecutables(bundle).map(candidate => executablePath(candidate, 'darwin')).find(Boolean);
+      return executable ? [{ bundle, executable }] : [];
+    });
 }
 
 function executablePath(filename, platform) {
@@ -109,9 +122,11 @@ export function findCodexRuntime({ env = process.env, platform = process.platfor
     }
     candidates.push(paths.join(env.LOCALAPPDATA || paths.join(home, 'AppData', 'Local'), 'Programs', 'OpenAI', 'Codex', 'bin', executable));
   } else if (platform === 'darwin') {
-    for (const candidate of macExecutableCandidates(home, macLocations)) {
-      const found = validate(candidate);
-      if (found) return found;
+    for (const bundle of macBundleCandidates(home, macLocations)) {
+      for (const candidate of macBundleExecutables(bundle)) {
+        const found = validate(candidate);
+        if (found) return found;
+      }
     }
   }
   if (platform === 'win32' && env.APPDATA) folders.push(paths.join(env.APPDATA, 'npm'));

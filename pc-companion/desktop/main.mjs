@@ -12,6 +12,7 @@ import { writePrivate } from '../host/settings.mjs';
 import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from '../host/updates.mjs';
 import { desktopLayout } from './runtime-layout.mjs';
 import { discoverCodexProjects } from '../host/projects.mjs';
+import { MacDesktopSharing } from './macos-sharing.mjs';
 
 const directory = dataDirectory();
 const layout = desktopLayout({ resourcesPath: process.resourcesPath, appPath: app.getAppPath(), isPackaged: app.isPackaged });
@@ -19,6 +20,8 @@ const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui', 'ind
 const rendererUrl = pathToFileURL(entry).href;
 let window; let tray; let quitting = false; let pairing;
 let updater; let installingUpdate = false;
+const sharing = process.platform === 'darwin' ? new MacDesktopSharing(layout) : null;
+let sharingProfile;
 const lifecycle = new DesktopLifecycle({ hasTray: () => !!tray,
   confirm: options => window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
   hide: () => window?.hide(), show: showWindow,
@@ -86,12 +89,43 @@ ipcMain.handle('companion:call', async (event, method, body) => {
   await ensureDaemon(directory, layout);
   if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');
   const result = await controlRequest(directory, method, body);
+  if (sharing && method === 'status') sharingProfile = { executable: result.codexExecutable, home: result.codexHome };
   if (method === 'pair') pairing = result;
   if (method === 'login') {
     const url = result.authUrl || result.verificationUrl;
     if (url) await shell.openExternal(safeAuthUrl(url));
   }
   return result;
+});
+ipcMain.handle('companion:desktopSharing', async (event, method, threadId) => {
+  trusted(event);
+  if (!sharing) return null;
+  if (method === 'status') return sharing.status(sharingProfile);
+  if (method !== 'start') throw new Error('不支持的桌面共享操作。');
+  if (installingUpdate) throw new Error('正在准备安装更新，请稍后再启用会话共享。');
+  if (threadId != null && (typeof threadId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId))) {
+    throw new Error('无效的 Codex 会话 ID。');
+  }
+  await ensureDaemon(directory, layout);
+  const snapshot = await controlRequest(directory, 'status');
+  if (lifecycle.closing || installingUpdate) throw new Error('ClawMate 正在关闭或更新，请稍后再试。');
+  if (threadId) {
+    const task = snapshot.tasks.find(item => item.id === threadId && item.sharedThread);
+    if (!task) throw new Error('这条电脑会话已不在 ClawMate 中，请重新选择。');
+    if (['running', 'starting', 'waitingApproval', 'stopping', 'releasing'].includes(task.status)) {
+      throw new Error('请等所选电脑会话的任务结束后再启用共享。');
+    }
+  }
+  sharingProfile = { executable: snapshot.codexExecutable, home: snapshot.codexHome };
+  return sharing.restart(sharingProfile, threadId, async running => {
+    const action = running ? '重启 ChatGPT 并启用共享' : '以共享模式打开 ChatGPT';
+    const choice = await dialog.showMessageBox(window, { type: 'question', title: '桌面会话共享',
+      message: action + '？', detail: running ?
+        '请确认 ChatGPT 中正在执行的任务已结束。ClawMate 会等待 ChatGPT 正常退出后再重新打开。' :
+        '可以在 ChatGPT 打开目标会话，然后从 ClawMate 的「电脑会话」进入同一条。',
+      buttons: ['取消', action], defaultId: 1, cancelId: 0, noLink: true });
+    return choice.response === 1 && !lifecycle.closing;
+  });
 });
 ipcMain.handle('companion:choose', async (event, kind) => {
   trusted(event);
@@ -174,6 +208,7 @@ ipcMain.handle('companion:updates', async (event, method, body) => {
     }
     case 'install': {
       if (!updater.state.canInstall) throw new Error('当前版本请打开下载文件后手动安装');
+      if (sharing?.progress) throw new Error('正在切换 ChatGPT 共享模式，请稍后再安装更新。');
       installingUpdate = true; let wasRunning = false;
       try {
         const choice = await dialog.showMessageBox(window, { type: 'question', title: '安装连接器更新',

@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 let snapshot; let projects = []; let dirty = false; let working = false;
+let sharingStatus; let sharingAction = false; let sharingCheck = false; let sharingOptions = '';
 const titles = { setup: '让手机连接你的开发电脑', pairing: '与自己的手机安全配对', devices: '设备和任务，一眼掌握', terminal: '你熟悉的终端，同样可用', updates: '保持最新，继续协作' };
 function notice(message, error = false) { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', error); }
 function errorText(error) { return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
@@ -77,7 +78,47 @@ async function refresh() {
   for (const task of snapshot.tasks.slice(0, 20)) $('taskList').append(row(task.title, `${statuses[task.status] || task.status} · ${task.model}`,
     ['running', 'starting', 'waitingApproval'].includes(task.status) ? '停止任务' : '', async () => { await window.companion.call('interrupt', { id: task.id }); }));
   if (!snapshot.tasks.length) $('taskList').textContent = '手机发送的任务会在这里显示。';
+  renderSharing();
 }
+
+function renderSharing() {
+  $('desktopSharing').hidden = !sharingStatus;
+  if (!sharingStatus) return;
+  const labels = { ready: '共享已启用', restart: '需要重启', start: '可以启用', starting: '正在切换', unavailable: '暂不可用' };
+  $('sharingBadge').textContent = labels[sharingStatus.state];
+  $('sharingBadge').classList.toggle('good', sharingStatus.state === 'ready');
+  $('sharingMessage').textContent = sharingStatus.message;
+  $('sharingActions').hidden = !sharingStatus.canStart;
+  $('startSharing').textContent = sharingStatus.state === 'restart' ? '重启 ChatGPT 并启用共享' : '以共享模式打开 ChatGPT';
+  $('startSharing').disabled = sharingAction;
+  const sessions = (snapshot?.tasks || []).filter(task => task.sharedThread);
+  const select = $('sharingThread'); const selected = select.value;
+  $('sharingThreadField').hidden = !sharingStatus.canStart || !sessions.length;
+  select.disabled = sharingAction;
+  const options = JSON.stringify(sessions.map(task => [task.id, task.title]));
+  if (options !== sharingOptions) {
+    sharingOptions = options;
+    select.replaceChildren(new Option('由 ChatGPT 恢复', ''),
+      ...sessions.map(task => new Option(task.title || '电脑会话', task.id)));
+    if (sessions.some(task => task.id === selected)) select.value = selected;
+  }
+}
+async function refreshSharing() {
+  if (sharingCheck) return;
+  sharingCheck = true;
+  try { sharingStatus = await window.companion.desktopSharing('status'); renderSharing(); }
+  finally { sharingCheck = false; }
+}
+$('startSharing').addEventListener('click', async () => {
+  if (sharingAction) return;
+  sharingAction = true; renderSharing();
+  try {
+    const result = await window.companion.desktopSharing('start', $('sharingThread').value || null);
+    sharingStatus = result;
+    if (result?.state === 'ready') notice(result.message);
+  } catch (error) { notice(errorText(error), true); }
+  finally { sharingAction = false; renderSharing(); }
+});
 for (const id of ['computerName', 'port', 'host', 'networkMode', 'publicOrigin']) $(id).addEventListener('input', () => { dirty = true; $('publicSettings').hidden = $('networkMode').value !== 'public'; });
 let projectPicker;
 $('addProject').addEventListener('click', () => {
@@ -127,6 +168,8 @@ $('autoStart').addEventListener('change', () => act(async () => { await window.c
 $('shutdown').addEventListener('click', () => act(() => window.companion.shutdown()));
 refresh().catch(error => notice('本机服务启动失败：' + errorText(error), true));
 setInterval(() => { if (!working) refresh().catch(error => notice(errorText(error), true)); }, 3000);
+refreshSharing().catch(() => {});
+setInterval(() => { if (sharingStatus) refreshSharing().catch(() => {}); }, 3000);
 
 let updateState;
 function renderUpdate(state) {

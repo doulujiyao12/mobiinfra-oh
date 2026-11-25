@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { CodexRpc } from '../../bridge/codex/rpc.mjs';
 import { BridgeCore } from '../../bridge/codex/core.mjs';
@@ -94,6 +95,8 @@ export class CompanionManager extends EventEmitter {
       (config.host === '127.0.0.1' ? ['127.0.0.1'] : addresses).map(ip => `https://${ip}:${config.port}`);
     return { version: VERSION, state: this.state, listening: this.server?.listening === true, lastError: this.lastError, account: this.account,
       runtimeError: this.runtimeError, codexExecutable: this.rpc?.closed ? '' : this.rpc?.command || '',
+      ...(process.platform === 'darwin' ? { codexHome: path.resolve((this.rpc?.environment || process.env).CODEX_HOME ||
+        path.join(os.homedir(), '.codex')) } : {}),
       hasCustomCodex: !!this.settings.value.codexExecutable,
       login: this.lastLogin || null, config, origins, devices: this.pairing.list(),
       fingerprint: this.certificates?.fingerprint || '', tasks: this.core?.list() || [],
