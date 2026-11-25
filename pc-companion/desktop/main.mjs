@@ -14,6 +14,7 @@ import { desktopLayout } from './runtime-layout.mjs';
 import { discoverCodexProjects } from '../host/projects.mjs';
 import { createRequire } from 'node:module';
 import { probeSharing, switchDesktop } from './shared-launch.mjs';
+import { MacDesktopSharing } from './macos-sharing.mjs';
 
 const directory = dataDirectory();
 const layout = desktopLayout({ resourcesPath: process.resourcesPath, appPath: app.getAppPath(), isPackaged: app.isPackaged });
@@ -21,6 +22,8 @@ const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui', 'ind
 const rendererUrl = pathToFileURL(entry).href;
 let window; let tray; let quitting = false; let pairing;
 let updater; let installingUpdate = false;
+const sharing = process.platform === 'darwin' ? new MacDesktopSharing(layout) : null;
+let sharingProfile;
 const lifecycle = new DesktopLifecycle({ hasTray: () => !!tray,
   confirm: options => window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
   hide: () => window?.hide(), show: showWindow,
@@ -42,31 +45,70 @@ function safeAuthUrl(value) {
 }
 function showWindow() { if (window) { window.show(); window.focus(); } }
 let switchingDesktop = false;
-ipcMain.handle('companion:desktopSharing', async (event, action) => {
+ipcMain.handle('companion:desktopSharing', async (event, method, threadId) => {
   trusted(event);
-  if (action === 'status') {
+  if (!sharing && process.platform !== 'win32') return null;
+  if (method === 'status') {
+    if (sharing) {
+      if (!sharingProfile) {
+        await ensureDaemon(directory, layout);
+        const snapshot = await controlRequest(directory, 'status');
+        sharingProfile = { executable: snapshot.codexExecutable, home: snapshot.codexHome };
+      }
+      return { platform: 'darwin', ...await sharing.status(sharingProfile) };
+    }
     const { state, text } = await probeSharing(directory);
-    return { state, text };
+    return { platform: 'win32', state, message: text, canStart: ['off', 'private'].includes(state) };
   }
-  if (action !== 'switch' || switchingDesktop || installingUpdate) throw new Error('当前无法切换桌面连接方式。');
+  if (!(method === 'start' || method === 'switch' && !sharing) || switchingDesktop || installingUpdate) {
+    throw new Error('当前无法切换桌面连接方式。');
+  }
+  if (threadId != null && (typeof threadId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId))) {
+    throw new Error('无效的 Codex 会话 ID。');
+  }
+  if (threadId && !sharing) throw new Error('请在重新打开的 Codex 桌面中选择原会话。');
   switchingDesktop = true;
   try {
-    return await switchDesktop({ directory, layout,
+    const idle = async () => {
+      trusted(event);
+      if (installingUpdate) throw new Error('正在准备更新，请稍后再切换桌面连接方式。');
+      await ensureDaemon(directory, layout);
+      const snapshot = await controlRequest(directory, 'status');
+      if (snapshot.tasks.some(task => ['starting','running','waitingApproval','stopping','releasing'].includes(task.status))) {
+        throw new Error('连接器有任务正在执行，请待任务结束后再切换。');
+      }
+      return snapshot;
+    };
+    if (sharing) {
+      const snapshot = await idle();
+      if (threadId && !snapshot.tasks.some(task => task.id === threadId && task.sharedThread)) {
+        throw new Error('这条电脑会话已不在 ClawMate 中，请重新选择。');
+      }
+      sharingProfile = { executable: snapshot.codexExecutable, home: snapshot.codexHome };
+      const result = await sharing.restart(sharingProfile, threadId, async running => {
+        const action = running ? '重启 ChatGPT 并启用共享' : '以共享模式打开 ChatGPT';
+        const choice = await dialog.showMessageBox(window, { type: 'question', title: '桌面会话共享',
+          message: action + '？', detail: running ?
+            '请确认 ChatGPT 中正在执行的任务已结束。ClawMate 会等待 ChatGPT 正常退出后再重新打开。' :
+            '可以在 ChatGPT 打开目标会话，然后从 ClawMate 的「电脑会话」进入同一条。',
+          buttons: ['取消', action], defaultId: 0, cancelId: 0, noLink: true });
+        if (choice.response !== 1 || lifecycle.closing) return false;
+        await idle();
+        return true;
+      });
+      return { platform: 'darwin', ...result };
+    }
+    const message = await switchDesktop({ directory, layout,
       openStream: createRequire(import.meta.url)('original-fs').createReadStream,
       consent: async state => (await dialog.showMessageBox(window, {
         type:'question', title:'桌面会话共享', message: state === 'off' ? '以共享方式打开 Codex？' : '重启 Codex 并共享会话？',
         detail:'请先保存草稿并等待桌面任务结束。此次启动将连接本机共享后台，已配对手机可访问已授权项目。下次从原快捷方式打开时使用原启动方式。',
         buttons:['取消', state === 'off' ? '打开共享桌面' : '重启并共享'], defaultId:0, cancelId:0, noLink:true
       })).response === 1,
-      idle: async () => {
-        trusted(event);
-        await ensureDaemon(directory, layout);
-        const status = await controlRequest(directory,'status');
-        if (status.tasks.some(task => ['starting','running','waitingApproval','stopping','releasing'].includes(task.status))) {
-          throw new Error('连接器有任务正在执行，请待任务结束后再切换。');
-        }
-      }
+      idle
     });
+    const { state } = await probeSharing(directory);
+    return { platform: 'win32', state, message, canStart: ['off', 'private'].includes(state) };
   } finally { switchingDesktop = false; }
 });
 async function createWindow() {
@@ -116,6 +158,7 @@ ipcMain.handle('companion:call', async (event, method, body) => {
   await ensureDaemon(directory, layout);
   if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');
   const result = await controlRequest(directory, method, body);
+  if (sharing && method === 'status') sharingProfile = { executable: result.codexExecutable, home: result.codexHome };
   if (method === 'pair') pairing = result;
   if (method === 'login') {
     const url = result.authUrl || result.verificationUrl;
@@ -204,6 +247,7 @@ ipcMain.handle('companion:updates', async (event, method, body) => {
     }
     case 'install': {
       if (!updater.state.canInstall) throw new Error('当前版本请打开下载文件后手动安装');
+      if (switchingDesktop || sharing?.progress) throw new Error('正在切换桌面共享模式，请稍后再安装更新。');
       installingUpdate = true; let wasRunning = false;
       try {
         const choice = await dialog.showMessageBox(window, { type: 'question', title: '安装连接器更新',

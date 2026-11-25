@@ -11,7 +11,8 @@ const samePath = (a, b) => typeof a === 'string' && typeof b === 'string' &&
   (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
 const matches = (status, layout) => status.version === VERSION && samePath(status.launcher, layout.launcher) &&
   typeof status.codexExecutable === 'string' && typeof status.hasCustomCodex === 'boolean' &&
-  (process.platform !== 'win32' || status.sharedDesktopDiscovery === true);
+  (process.platform !== 'win32' || status.sharedDesktopDiscovery === true) &&
+  (process.platform !== 'darwin' || typeof status.codexHome === 'string');
 const newer = version => {
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) return null;
   const current = VERSION.split('.').map(Number); const installed = version.split('.').map(Number);
