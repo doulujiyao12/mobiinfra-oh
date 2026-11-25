@@ -3,6 +3,7 @@ import { CODEX_UPLOAD_ROUTE } from '../../utils/CodexRequestBudget';
 import { codexTaskWithDeliveryPolicy } from '../../utils/CodexDeliveryPolicy';
 import { fileIo } from '@kit.CoreFileKit';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
+import { isStudySession, studyExecutionNotice, studyFinalAnswer, studyStage, STUDY_PROGRESS_REQUEST } from './CodexStudyProgress';
 import { CodexClient } from './CodexClient';
 import { CodexCredentialStore } from './CodexCredentialStore';
 import { CodexArtifactStore, validateCodexArtifact } from './CodexArtifactStore';
@@ -42,12 +43,15 @@ export class CodexChatService {
     return service;
   }
   isActive(id: string): boolean { return this.active.has(id); }
+  isStopRequested(id: string): boolean { return this.active.get(id)?.stopRequested === true; }
   load(id: string): CodexChatRun | null { return this.store.load(id); }
   private save(operation: CodexChatOperation): void { this.store.save(operation.run); }
   private requireCurrent(operation: CodexChatOperation): void {
     const owner = operation.run.sessionId;
     const lesson = /^classroom:([a-f0-9-]{36})$/.exec(owner);
-    const exists = lesson ? fileIo.accessSync(this.filesDir + '/recording-analysis/' + lesson[1] + '/classroom') :
+    const course = /^course:([a-f0-9-]{36})$/.exec(owner);
+    const exists = course ? fileIo.accessSync(this.filesDir + '/recording-analysis/course-library/' + course[1]) :
+      lesson ? fileIo.accessSync(this.filesDir + '/recording-analysis/' + lesson[1] + '/classroom') :
       ChatSessionStorage.sessionExists(this.filesDir, owner);
     if (operation.paused || !exists) {
       throw new Error('聊天已关闭或删除，远端状态待同步');
@@ -128,6 +132,9 @@ export class CodexChatService {
           base64: base64, image: false });
         if (!reply.attachment) { throw new Error('电脑未确认收到课堂资料'); }
         return reply.attachment.id;
+      }, (notice: string): void => {
+        if (current.stopRequested || execution.isCancelled()) { throw new Error('已取消发送学习资料'); }
+        if (run.notice !== notice) { run.notice = notice; this.save(current); }
       }) : await this.uploadImages(operation, execution.imagePaths);
       this.requireCurrent(operation);
       if (execution.isCancelled() || operation.stopRequested) { run.status = 'cancelled'; this.save(operation); return codexChatResult(run); }
@@ -136,7 +143,7 @@ export class CodexChatService {
       run.submitted = true; run.notice = '任务正在下发，若断线将同步原任务'; this.save(operation);
       try {
         const envelope = await operation.client.call('/v1/tasks/' + run.taskId + '/turns', {
-          requestId: run.requestId, text: codexTaskWithDeliveryPolicy(preparedTask),
+          requestId: run.requestId, text: codexTaskWithDeliveryPolicy(preparedTask + (isStudySession(run.sessionId) ? STUDY_PROGRESS_REQUEST : '')),
           attachments: attachments, model: run.model, effort: run.effort, mode: 'workspace-write', approvalMode: 'ask' });
         this.acceptTask(operation, envelope);
       } catch (e) {
@@ -168,7 +175,8 @@ export class CodexChatService {
     const task = mergeCodexTask(run.task || null, envelope);
     if (task === undefined) {
       if (envelope.unchanged && run.task !== undefined) {
-        const notice = codexExecutionNotice(run.task, Date.now());
+        const notice = isStudySession(run.sessionId) ? studyExecutionNotice(run.task, run.studyStage || studyStage(run.task)) :
+          codexExecutionNotice(run.task, Date.now());
         if (notice !== run.notice) { run.notice = notice; this.save(operation); }
         return;
       }
@@ -179,10 +187,24 @@ export class CodexChatService {
       throw new Error('远端执行状态尚未确认或会话已变化，请手动同步，勿重复下发');
     }
     if (run.task !== undefined && task.revision < run.task.revision) { return; }
+    // Keep every bridge revision in memory for delta merging. Classroom views only
+    // need a new snapshot when their visible progress or available actions change.
+    const quietStudyUpdate = isStudySession(run.sessionId) && run.status === 'running' && task.status === 'running' &&
+      run.turnId === task.turnId && run.task?.approvals.length === 0 && task.approvals.length === 0 &&
+      !run.artifacts.length && !task.artifacts?.length && !run.error && !task.error;
+    const lastNotice = run.notice;
+    const lastStage = run.studyStage;
     run.task = task; run.turnId = task.turnId || run.turnId;
     run.status = task.status === 'interrupted' ? 'cancelled' : task.status;
-    run.notice = codexExecutionNotice(task, Date.now()); run.error = task.error || '';
-    run.answer = codexChatFinalAnswer(task, run.turnId);
+    if (isStudySession(run.sessionId)) {
+      run.studyStage = studyStage(task, run.studyStage);
+      run.notice = studyExecutionNotice(task, run.studyStage);
+      run.answer = studyFinalAnswer(task);
+    } else {
+      run.notice = codexExecutionNotice(task, Date.now());
+      run.answer = codexChatFinalAnswer(task, run.turnId);
+    }
+    run.error = task.error || '';
     const artifacts = (task.artifacts || []).filter((item: CodexArtifact) => !!run.turnId && item.turnId === run.turnId);
     artifacts.forEach((artifact: CodexArtifact): void => {
       validateCodexArtifact(artifact);
@@ -192,7 +214,7 @@ export class CodexChatService {
       throw new Error('本次交付超过 24 个文件或 512 MB，请在电脑端检查');
     }
     run.artifacts = artifacts;
-    this.save(operation);
+    if (!quietStudyUpdate || lastNotice !== run.notice || lastStage !== run.studyStage) { this.save(operation); }
   }
 
   private async follow(operation: CodexChatOperation, cancelled: () => boolean): Promise<void> {
@@ -201,13 +223,18 @@ export class CodexChatService {
     while (true) {
       this.requireCurrent(operation);
       if (cancelled()) { operation.stopRequested = true; }
-      if (operation.stopRequested && !operation.stopSent) { await this.sendStop(operation); }
+      if (operation.stopRequested && !operation.stopSent && operation.run.turnId && codexTaskBusy(operation.run.task?.status || '')) {
+        await this.sendStop(operation);
+      }
       const run = operation.run;
       if (run.task !== undefined && !codexTaskBusy(run.task.status)) {
         if (!['completed', 'failed', 'interrupted'].includes(run.task.status) || !run.turnId) {
           throw new Error('远端尚未返回本次执行的明确结束状态，请稍后同步');
         }
-        if (run.task.status === 'completed') { await this.receiveFiles(operation); }
+        if (run.task.status === 'completed') {
+          if (!cancelled() && isStudySession(run.sessionId)) { operation.stopRequested = false; }
+          await this.receiveFiles(operation);
+        }
         return;
       }
       if (Date.now() > deadline || (operation.stopAt > 0 && Date.now() - operation.stopAt > 20000)) {
@@ -227,7 +254,7 @@ export class CodexChatService {
         if (!suffix) { await this.delay(1200); }
       } catch (e) {
         this.requireCurrent(operation);
-        if (operation.stopRequested && !operation.stopSent) { continue; }
+        if (operation.stopRequested && !operation.stopSent && run.turnId && codexTaskBusy(run.task?.status || '')) { continue; }
         failures++;
         if (failures >= 3) { throw e as Error; }
         run.notice = '连接不稳定，正在同步原任务（' + failures + '/3）'; this.save(operation);
@@ -271,7 +298,7 @@ export class CodexChatService {
 
   private async receiveFiles(operation: CodexChatOperation): Promise<void> {
     const run = operation.run;
-    run.status = 'receiving'; this.save(operation);
+    run.status = 'receiving'; run.notice = ''; this.save(operation);
     const store = await CodexArtifactStore.create(this.filesDir, run.origin, run.taskId);
     const failures: string[] = [];
     for (const artifact of run.artifacts) {
@@ -302,7 +329,13 @@ export class CodexChatService {
   }
   async stop(id: string): Promise<void> {
     const operation = this.active.get(id);
-    if (operation !== undefined) { operation.stopRequested = true; operation.client.cancelTaskUpdates(); return; }
+    if (operation !== undefined) {
+      if (!operation.stopRequested) {
+        operation.stopRequested = true; operation.stopAt = Date.now();
+        operation.client.cancelTaskUpdates(); this.save(operation);
+      }
+      return;
+    }
     await this.synchronize(id, true);
   }
   stopSession(sessionId: string): void {
@@ -335,7 +368,7 @@ export class CodexChatService {
     try {
       await this.connect(operation);
       this.acceptTask(operation, await operation.client.call('/v1/tasks/' + run.taskId));
-      operation.stopRequested = stop && codexTaskBusy(run.task?.status || '');
+      if (stop && codexTaskBusy(run.task?.status || '')) { operation.stopRequested = true; operation.stopAt = Date.now(); }
       await this.follow(operation, (): boolean => false);
     } catch (e) { run.status = 'disconnected'; run.error = (e as Error).message; this.save(operation); throw e as Error; }
     finally { operation.client.close(); this.active.delete(id); this.sessions.delete(run.sessionId); this.save(operation); }

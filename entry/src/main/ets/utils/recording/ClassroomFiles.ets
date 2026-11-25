@@ -4,9 +4,9 @@ import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { util } from '@kit.ArkTS';
 import { zlib } from '@kit.BasicServicesKit';
-import { RecordingRecord } from './RecordingTypes';
 import { writeExact } from './RecordingWav';
-import { ClassroomPhoto, classroomPhoto, classroomText } from './ClassroomMaterials';
+import { ClassroomDocument, ClassroomPhoto, classroomDocumentFile, classroomPackDocumentName,
+  classroomPhoto } from './ClassroomMaterials';
 import { CODEX_MAX_FILE_BYTES } from '../../pages/codex/CodexTypes';
 
 function removeTemporary(path: string): void {
@@ -15,6 +15,7 @@ function removeTemporary(path: string): void {
 
 export function classroomPhotos(dir: string): ClassroomPhoto[] {
   const photos: ClassroomPhoto[] = [];
+  if (!fs.accessSync(dir)) { return photos; }
   for (const name of fs.listFileSync(dir)) {
     const photo = classroomPhoto(name);
     if (photo) { photos.push(photo); }
@@ -58,33 +59,60 @@ export async function photographLesson(context: common.UIAbilityContext, dir: st
 
 // Only material selected for this lesson enters the archive. In particular the
 // recording directory also contains the waveform and may contain voiceprints.
-export async function uploadClassroomPack(cacheDir: string, dir: string, record: RecordingRecord,
-  photos: ClassroomPhoto[], upload: (name: string, base64: string) => Promise<string>): Promise<string[]> {
+export async function uploadClassroomPack(cacheDir: string, dir: string, material: string,
+  photos: ClassroomPhoto[], documents: ClassroomDocument[],
+  upload: (name: string, base64: string) => Promise<string>,
+  report?: (notice: string) => void): Promise<string[]> {
+  const files: ClassroomPackFile[] = [];
+  for (const photo of photos) {
+    if (!classroomPhoto(photo.name)) { throw new Error('课堂照片无效'); }
+    files.push({ path: dir + '/' + photo.name, name: photo.name });
+  }
+  documents.forEach((doc: ClassroomDocument, index: number): void => {
+    files.push({ path: dir + '/' + classroomDocumentFile(doc), name: classroomPackDocumentName(doc, index), size: doc.size });
+  });
+  return uploadStudyArchive(cacheDir, 'lesson.md', material, files, upload, report);
+}
+
+export interface ClassroomPackFile { path: string; name: string; size?: number; }
+
+export async function uploadStudyArchive(cacheDir: string, manifestName: string, material: string,
+  files: ClassroomPackFile[], upload: (name: string, base64: string) => Promise<string>,
+  report?: (notice: string) => void): Promise<string[]> {
+  if (manifestName !== 'lesson.md' && manifestName !== 'course.md') { throw new Error('资料清单名称无效'); }
   const scratch = cacheDir + '/lesson-pack-' + util.generateRandomUUID();
   const staging = scratch + '/materials';
-  const notes = staging + '/lesson.md';
+  const notes = staging + '/' + manifestName;
   const archive = scratch + '/classroom.zip';
   fs.mkdirSync(scratch);
   try {
-    const material = classroomText(record, photos);
+    report?.('正在打包所选学习资料');
     fs.mkdirSync(staging);
-    for (const photo of photos) {
-      if (!classroomPhoto(photo.name)) { throw new Error('课堂照片无效'); }
-      const input = await fs.open(dir + '/' + photo.name, fs.OpenMode.READ_ONLY);
-      try { await fs.copyFile(input.fd, staging + '/' + photo.name); }
-      finally { await fs.close(input); }
+    for (const entry of files) {
+      if (!/^[a-zA-Z0-9-]+\.[a-zA-Z0-9]+$/.test(entry.name) || fs.accessSync(staging + '/' + entry.name) ||
+        entry.name === manifestName) { throw new Error('资料包文件名无效'); }
+      report?.('正在打包所选学习资料');
+      const input = await fs.open(entry.path, fs.OpenMode.READ_ONLY);
+      try {
+        if (entry.size !== undefined && (await fs.stat(input.fd)).size !== entry.size) {
+          throw new Error('所选文件已变更，请重新选择');
+        }
+        await fs.copyFile(input.fd, staging + '/' + entry.name);
+      } finally { await fs.close(input); }
     }
     const file = fs.openSync(notes, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
     try { writeExact(file.fd, new util.TextEncoder().encodeInto(material).buffer as ArrayBuffer); }
     finally { fs.closeSync(file); }
+    report?.('正在压缩学习资料');
     await zlib.compressFile(staging, archive, {});
     const size = (await fs.stat(archive)).size;
     const parts = Math.ceil(size / CODEX_MAX_FILE_BYTES);
-    if (parts < 1 || parts > 6) { throw new Error('资料包超过 48 MiB，请减少所选照片后重试'); }
+    if (parts < 1 || parts > 6) { throw new Error('资料包超过 48 MiB，请减少本次选中的照片或附件'); }
     const source = await fs.open(archive, fs.OpenMode.READ_ONLY);
     const ids: string[] = [];
     try {
       for (let n = 0; n < parts; n++) {
+        report?.('正在上传资料包 · 第 ' + (n + 1) + '/' + parts + ' 份');
         const start = n * CODEX_MAX_FILE_BYTES;
         const bytes = new Uint8Array(Math.min(CODEX_MAX_FILE_BYTES, size - start));
         let done = 0;

@@ -11,6 +11,7 @@ import galleryHdcPolicyUnitTest from './GalleryHdcPolicyUnit.test';
 import galleryWorkQueueUnitTest from './GalleryWorkQueueUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import codexPolicyUnitTest from './CodexPolicyUnit.test';
+import classroomUnitTest from './ClassroomUnit.test';
 import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
@@ -71,6 +72,7 @@ export default function testsuite() {
   galleryWorkQueueUnitTest();
   mainTabConfigUnitTest();
   codexPolicyUnitTest();
+  classroomUnitTest();
   firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();
   digitalAvatarTypesUnitTest();

@@ -31,7 +31,7 @@ export class CodexChatStore implements CodexChatRunStorage {
       connectionId: run.connectionId, computerName: run.computerName, origin: run.origin,
       workspaceId: run.workspaceId, workspaceName: run.workspaceName, model: run.model, effort: run.effort,
       taskText: run.taskText, taskId: run.taskId, requestId: run.requestId, submitted: run.submitted,
-      turnId: run.turnId, status: run.status, notice: run.notice, answer: run.answer, error: run.error,
+      turnId: run.turnId, status: run.status, notice: run.notice, studyStage: run.studyStage, answer: run.answer, error: run.error,
       createdAt: run.createdAt, updatedAt: run.updatedAt, artifacts: run.artifacts, files: run.files };
     if (run.task !== undefined) {
       const task: CodexTask = run.task;

@@ -22,6 +22,12 @@ import { AppTheme, APP_DARK_MODE_KEY } from '../../utils/AppTheme';
 import { FrostedPage } from '../../components/FrostedPage';
 import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { ClassroomMaterialsView, ClassroomPhotoStrip } from './ClassroomMaterialsView';
+import { CourseStudyView } from './CourseStudyView';
+import { courseLibraryPath, courseRunIds } from '../../utils/recording/CourseStudy';
+import { CodexChatService } from '../codex/CodexChatService';
+import { ClassroomCourseView } from './ClassroomCourseView';
+import { CLASSROOM_NOTE_LIMIT, CLASSROOM_UNASSIGNED, ClassroomCourse, ClassroomCourseRow, ClassroomCourseStore,
+  classroomCourseRows, classroomRecordCourse } from '../../utils/recording/ClassroomCourses';
 import { CLASSROOM_SOURCE, ClassroomPhoto, RecordingRouteParams } from '../../utils/recording/ClassroomMaterials';
 import { classroomPhotos, photographLesson } from '../../utils/recording/ClassroomFiles';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
@@ -56,6 +62,27 @@ interface PendingWatchProcessing { recordIds: string[]; queue: number; transferE
 struct RecordingPage {
   @StorageProp(APP_DARK_MODE_KEY) private darkMode: boolean = false;
   @State private classroom: boolean = false;
+  @State private courseScope: string = '';
+  @State private courseSection: string = 'lessons';
+  @State private studySelected: string[] = [];
+  @State private studyMode: string = '提取要点';
+  @State private studyInstruction: string = '';
+  private studyScroller: Scroller = new Scroller();
+  @State private courses: ClassroomCourse[] = [];
+  @State private courseRows: ClassroomCourseRow[] = [];
+  @State private classroomRecords: RecordingRecord[] = [];
+  @State private courseSheetOpen: boolean = false;
+  @State private courseSheetMode: string = '';
+  @State private courseDraft: string = '';
+  @State private courseSelection: string[] = [];
+  @State private courseError: string = '';
+  @State private noteSheetOpen: boolean = false;
+  @State private noteTitle: string = '';
+  @State private noteDraft: string = '';
+  @State private liveClassroomNotes: string = '';
+  private courseStore: ClassroomCourseStore | null = null;
+  private noteRecordId: string = '';
+  private originalNoteRecording: RecordingRecord | null = null;
   @State private takingPhoto: boolean = false;
   @State private livePhotos: ClassroomPhoto[] = [];
   @State private livePhotoDirectory: string = '';
@@ -151,6 +178,7 @@ struct RecordingPage {
   private preparingModels: boolean = false;
   private recordingDraft: RecordingRecord | null = null;
   private scroller: Scroller = new Scroller();
+  private classroomCourseScroller: Scroller = new Scroller();
   private recordingSettingsScroller: Scroller = new Scroller();
   private recordingListScroller: ListScroller = new ListScroller();
   private renameTarget: RecordingRecord | null = null;
@@ -170,6 +198,7 @@ struct RecordingPage {
     let context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
       this.store = new RecordingStore(context.filesDir); this.models = new RecordingModels(context);
+      if (this.classroom) { this.courseStore = new ClassroomCourseStore(this.store.root); }
       this.store.recoverCaptures(); this.reload(); this.modelCount = this.models.readyCount();
       this.modelDownloadUrl = this.models.downloadBaseUrl();
       context.eventHub.on('recording-analysis-background', this.backgroundHandler);
@@ -209,7 +238,13 @@ struct RecordingPage {
   private reload(): void {
     if (this.store === null) { return; }
     const records = this.store.list();
-    this.records = this.classroom ? records.filter((item: RecordingRecord): boolean => item.source === CLASSROOM_SOURCE) : records;
+    if (this.classroom) {
+      this.courses = this.courseStore?.list() || [];
+      this.classroomRecords = records.filter((item: RecordingRecord): boolean => item.source === CLASSROOM_SOURCE);
+      this.courseRows = classroomCourseRows(this.courses, this.classroomRecords);
+      this.records = this.classroomRecords.filter((item: RecordingRecord): boolean =>
+        classroomRecordCourse(item, this.courses) === this.courseScope);
+    } else { this.records = records.filter((item: RecordingRecord): boolean => !item.classroomNoteOnly); }
     this.refreshRecordingCalendar();
     if (!this.recordingAiSearch && this.recordingSearchActive()) {
       this.recordingSearchHits = searchRecordingKeywords(this.records, [this.recordingSearchQuery]);
@@ -224,7 +259,8 @@ struct RecordingPage {
   }
   private recordingSearchActive(): boolean { return this.recordingSearchQuery.trim().length > 0; }
   private recordingDockVisible(): boolean {
-    return !this.showRecordingSettings && (this.recording || (this.selected === null && !this.recordingSearchActive()));
+    return !this.showRecordingSettings && (this.recording || (this.selected === null && !this.recordingSearchActive() &&
+      (!this.classroom || (this.hasCourse() && this.courseSection === 'lessons'))));
   }
   private stopRecordingSearch(notify: boolean): void {
     let running = this.recordingSearchBusy;
@@ -278,9 +314,12 @@ struct RecordingPage {
     this.calendarDay = ''; this.calendarScope = 'all';
   }
   private recordingCardText(record: RecordingRecord): string {
+    if (this.classroom && record.classroomNotes?.trim()) { return record.classroomNotes; }
+    if (record.classroomNoteOnly) { return '可补充录音、笔记和课件'; }
     return this.recordingSearchActive() ? this.recordingSearchExcerpt(record.id) || recordingCardPreview(record) : recordingCardPreview(record);
   }
   private recordingCardMeta(record: RecordingRecord): string {
+    if (record.classroomNoteOnly) { return '课堂笔记'; }
     return recordingTime(record.duration) + ' · ' + (record.summary ? '已摘要' : record.analysis ?
       record.transcriptionComplete === false ? '部分转写' : '已转写' : '待转写');
   }
@@ -307,8 +346,133 @@ struct RecordingPage {
     }
   }
   private message(error: Error): void { if (this.alive) { this.error = error.message || '操作未完成，请重试'; } }
+  private hasCourse(): boolean { return this.courses.some((course: ClassroomCourse): boolean => course.id === this.courseScope); }
+  private courseName(id: string): string {
+    return this.courses.find((course: ClassroomCourse): boolean => course.id === id)?.name || '未归类';
+  }
+  private unassignedLessons(): RecordingRecord[] {
+    return this.classroomRecords.filter((record: RecordingRecord): boolean => classroomRecordCourse(record, this.courses) === CLASSROOM_UNASSIGNED);
+  }
+  private resetStudyDraft(): void {
+    this.studySelected = []; this.studyMode = '提取要点'; this.studyInstruction = '';
+  }
+  private studyLessons(fresh: boolean): RecordingRecord[] {
+    if (!fresh) { return this.records; }
+    if (!this.store || !this.courseStore?.list().some((c: ClassroomCourse): boolean => c.id === this.courseScope)) {
+      throw new Error('课程已变更，请重新打开');
+    }
+    return this.store.list().filter((r: RecordingRecord): boolean => r.source === CLASSROOM_SOURCE && r.classroomCourseId === this.courseScope);
+  }
+  private openCourse(id: string): void {
+    this.resetStudyDraft(); this.courseSection = 'lessons'; this.courseScope = id; this.error = ''; this.status = '';
+    try {
+      this.reload();
+      if (id) { this.recordingListScroller.scrollToIndex(0); }
+    } catch (e) { this.message(e as Error); }
+  }
+  private editCourse(id: string = ''): void {
+    this.courseDraft = id ? this.courseName(id) : ''; this.courseError = '';
+    this.courseSheetMode = id ? 'rename' : 'create'; this.courseSheetOpen = true;
+  }
+  private organizeLessons(record: RecordingRecord | null = null): void {
+    this.courseSelection = record ? [record.id] : [];
+    this.courseError = ''; this.courseSheetMode = record ? 'destination' : 'collect';
+    this.courseSheetOpen = true;
+  }
+  private assignLessons(id: string): boolean {
+    if (!this.store || !this.courseStore || !this.courseSelection.length) { return false; }
+    let count = 0;
+    try {
+      if (id && !this.courseStore.list().some((course: ClassroomCourse): boolean => course.id === id)) {
+        throw new Error('目标课程已不存在');
+      }
+      for (const record of this.store.list()) {
+        if (!this.courseSelection.includes(record.id) || record.source !== CLASSROOM_SOURCE || record.capturing) { continue; }
+        record.classroomCourseId = id || undefined;
+        this.store.save(record); count++;
+        if (this.selected?.id === record.id) { this.selected = record; }
+      }
+      this.reload();
+      if (!count) { throw new Error('所选课堂已不存在或正在录音'); }
+      if (this.selected !== null) {
+        this.resetStudyDraft(); this.courseSection = 'lessons'; this.courseScope = id || CLASSROOM_UNASSIGNED; this.reload();
+      }
+      this.courseSheetOpen = false;
+      promptAction.showToast({ message: '已整理 ' + count + ' 节课' });
+      return true;
+    } catch (e) {
+      this.courseError = (count ? '已保存 ' + count + ' 节。' : '') + (e as Error).message;
+      try { this.reload(); } catch (_) {}
+      return false;
+    }
+  }
+  private saveCourse(): void {
+    if (!this.courseStore) { return; }
+    try {
+      const mode = this.courseSheetMode;
+      const course = this.courseStore.saveCourse(this.courseDraft, mode === 'rename' ? this.courseScope : '');
+      this.reload();
+      if (mode === 'new-destination') {
+        this.courseSheetMode = 'destination';
+        if (this.assignLessons(course.id) && this.selected === null) { this.openCourse(course.id); }
+      } else {
+        this.courseSheetOpen = false;
+        if (mode === 'create') { this.openCourse(course.id); }
+      }
+    } catch (e) { this.courseError = (e as Error).message; }
+  }
+  private async removeCourse(): Promise<void> {
+    if (!this.hasCourse() || !this.store) { return; }
+    const id = this.courseScope;
+    const library = courseLibraryPath(this.store.root, id);
+    const service = CodexChatService.get(this.context().filesDir);
+    const pending = courseRunIds(library).some((runId: string): boolean => {
+      const run = service.load(runId);
+      return service.isActive(runId) || (!!run && run.submitted && !['completed', 'cancelled', 'failed'].includes(run.status));
+    });
+    if (pending) { this.courseError = '请先在课程学伴中结束或同步进行中的委托，再删除课程'; return; }
+    const result = await promptAction.showDialog({ title: '删除课程？', message: '课时和已绑定课件会移到「未归类」。课程内未绑定课件、往年试卷和学习成果入口将一并移除。',
+      buttons: [{ text: '取消', color: '#737D90' }, { text: '删除课程', color: '#B74D49' }] });
+    if (result.index !== 1 || !this.alive || this.courseScope !== id) { return; }
+    try {
+      this.courseStore?.remove(id); this.courseSheetOpen = false; this.openCourse('');
+      if (fs.accessSync(library)) { fs.rmdirSync(library); }
+    }
+    catch (e) { this.courseError = (e as Error).message; }
+  }
+  private editClassroomNote(record: RecordingRecord | null): void {
+    if (this.busy || (!record && !this.hasCourse())) { return; }
+    this.noteRecordId = record?.id || ''; this.noteTitle = record?.title || '';
+    this.noteDraft = record?.classroomNotes || ''; this.noteSheetOpen = true;
+  }
+  private saveClassroomNote(): void {
+    if (!this.store || this.busy || !this.noteTitle.trim()) { return; }
+    let created: RecordingRecord | null = null;
+    let saved = false;
+    try {
+      let record: RecordingRecord;
+      if (this.noteRecordId) {
+        const current = this.store.list().find((item: RecordingRecord): boolean => item.id === this.noteRecordId);
+        if (!current || current.capturing) { throw new Error('课堂记录已不存在或正在录音'); }
+        record = current;
+      } else {
+        if (!this.hasCourse()) { throw new Error('请先选择课程'); }
+        record = this.store.create(CLASSROOM_SOURCE); created = record;
+        record.classroomCourseId = this.courseScope; record.classroomNoteOnly = true;
+      }
+      if (created !== null || record.title !== this.noteTitle.trim()) { record.titleEdited = true; }
+      record.title = this.noteTitle.trim(); record.classroomNotes = this.noteDraft.trim();
+      this.store.save(record); saved = true;
+      this.noteSheetOpen = false;
+      this.reload(); this.openRecord(record); this.status = '笔记已保存';
+    } catch (e) {
+      if (created !== null && !saved) { try { this.store.remove(created.id); } catch (_) {} }
+      this.message(e as Error); promptAction.showToast({ message: (e as Error).message || '笔记保存失败' });
+    }
+  }
   private async importAudio(): Promise<void> {
-    if (this.busy || this.watchQueueRunning || this.store === null) { return; }
+    if (this.busy || this.watchQueueRunning || this.store === null || (this.classroom && !this.hasCourse())) { return; }
+    const courseId = this.classroom ? this.courseScope : '';
     this.busy = true; this.error = ''; let epoch = ++this.epoch;
     try {
       let options = new picker.DocumentSelectOptions(); options.maxSelectNumber = 1;
@@ -319,14 +483,18 @@ struct RecordingPage {
       this.externalInteraction = false;
       if (uris.length === 0 || epoch !== this.epoch) { return; }
       this.status = '正在保存音频';
-      let record = await this.store.importWav(uris[0]);
+      let record = await this.store.importWav(uris[0], undefined, 0, courseId);
       if (this.alive && epoch === this.epoch) { this.selected = record; this.reload(); this.filterSpeaker = -2; }
     } catch (e) { this.message(e as Error); }
     finally { this.externalInteraction = false; if (this.alive && epoch === this.epoch) { this.busy = false; this.status = ''; } }
   }
-  private async startRecording(): Promise<void> {
-    if (this.busy || this.watchQueueRunning || this.store === null) { return; }
+  private async startRecording(note: RecordingRecord | null = null): Promise<void> {
+    if (this.busy || this.watchQueueRunning || this.store === null || (this.classroom && !this.hasCourse() && note === null)) { return; }
+    if (note !== null && (!note.classroomNoteOnly || this.store.hasAudio(note.id))) { return; }
     let source = recordingAudioSource(this.classroom ? 'environment' : this.audioSource);
+    const courseId = this.courseScope;
+    this.originalNoteRecording = note;
+    this.liveClassroomNotes = note?.classroomNotes || '';
     this.captureStopPending = false;
     this.busy = true; this.startingRecording = true; this.jobKind = 'capture';
     this.status = source === 'environment' ? '正在准备麦克风' : '请确认系统屏幕授权，仅采集声音，不录制画面';
@@ -342,13 +510,21 @@ struct RecordingPage {
         if (grant.authResults[0] !== 0) { throw new Error('录音需要麦克风权限，可在系统设置中开启'); }
       }
       if (epoch !== this.epoch) { return; }
-      let record = this.store.create(this.classroom ? CLASSROOM_SOURCE : '录制');
+      let record: RecordingRecord;
+      if (note) {
+        record = { schema: note.schema, id: note.id, title: note.title, createdAt: note.createdAt,
+          source: CLASSROOM_SOURCE, duration: 0, analysis: null, titleEdited: note.titleEdited,
+          classroomCourseId: note.classroomCourseId, classroomNotes: note.classroomNotes };
+      } else {
+        record = this.store.create(this.classroom ? CLASSROOM_SOURCE : '录制');
+        record.title = (this.classroom ? '课堂 ' : '录音 ') + this.clockTime(new Date(record.createdAt));
+        if (this.classroom) { record.classroomCourseId = courseId; }
+      }
       this.recordingDraft = record;
-      record.title = (this.classroom ? '课堂 ' : '录音 ') + this.clockTime(new Date(record.createdAt));
       if (this.classroom) {
         this.livePhotoDirectory = this.store.directory(record.id) + '/classroom';
-        fs.mkdirSync(this.livePhotoDirectory);
-        this.livePhotos = [];
+        if (!fs.accessSync(this.livePhotoDirectory)) { fs.mkdirSync(this.livePhotoDirectory); }
+        this.livePhotos = classroomPhotos(this.livePhotoDirectory);
       }
       const systemAsr = this.useSystemAsr();
       const useLive = this.liveTranscribe && (systemAsr || this.models?.readyForTranscription(false) === true);
@@ -367,13 +543,13 @@ struct RecordingPage {
       }, source);
       this.externalInteraction = false;
       if (this.captureStopPending) { throw new Error(this.error || '系统已结束录音'); }
-      if (epoch !== this.epoch) { await this.capture.stop(); this.store.remove(record.id); this.recordingDraft = null; return; }
+      if (epoch !== this.epoch) { await this.capture.stop(); this.discardCapture(record); this.recordingDraft = null; return; }
       this.store.save(record);
       await appBackgroundTasks.set(context, 'recording', 'audioRecording', true);
       if (this.captureStopPending) { throw new Error(this.error || '系统已结束录音'); }
       if (epoch !== this.epoch || !this.alive) {
         record.duration = await this.capture.stop(); record.capturing = false;
-        if (record.duration >= 0.3) { this.store.save(record); } else { this.store.remove(record.id); }
+        if (record.duration >= 0.3) { this.store.save(record); } else { this.discardCapture(record); }
         this.recordingDraft = null;
         await appBackgroundTasks.set(context, 'recording', 'audioRecording', false); return;
       }
@@ -409,14 +585,34 @@ struct RecordingPage {
       if (this.recordingDraft !== null) {
         if (duration >= 0.3) {
           this.recordingDraft.duration = duration; this.recordingDraft.capturing = false; this.store.save(this.recordingDraft); this.reload();
-        } else { this.store.remove(this.recordingDraft.id); }
+        } else { this.discardCapture(this.recordingDraft); }
         this.recordingDraft = null;
       }
       this.busy = false;
     } finally {
       this.externalInteraction = false; this.startingRecording = false;
-      if (this.alive && !this.recording) { this.busy = false; this.jobKind = ''; }
+      if (!this.recording) {
+        this.originalNoteRecording = null;
+        if (this.alive) { this.busy = false; this.jobKind = ''; }
+      }
     }
+  }
+  private discardCapture(record: RecordingRecord): void {
+    if (!this.store) { return; }
+    const original = this.originalNoteRecording;
+    if (record.source !== CLASSROOM_SOURCE || (!original && !this.liveClassroomNotes.trim() && this.livePhotos.length === 0)) {
+      this.store.remove(record.id); return;
+    }
+    // Keep previously created notes and newly written notes when a recording is too short.
+    const retained = original || record;
+    retained.capturing = false; retained.duration = 0; retained.analysis = null;
+    retained.transcriptionComplete = undefined; retained.classroomNoteOnly = true;
+    retained.classroomNotes = this.liveClassroomNotes.trim();
+    this.store.save(retained);
+    const audio = this.store.audioPath(record.id);
+    if (fs.accessSync(audio)) { fs.unlinkSync(audio); }
+    this.store.clearLiveDraft(record.id); this.store.clearSystemAsrDraft(record.id);
+    if (this.alive) { this.selected = retained; this.reload(); }
   }
   private async takeLessonPhoto(): Promise<void> {
     if (!this.recording || !this.classroom || !this.recordingDraft || this.takingPhoto) { return; }
@@ -440,7 +636,8 @@ struct RecordingPage {
       await appBackgroundTasks.set(this.context(), 'recording', 'audioRecording', false).catch((): void => {}); released = true;
       if (this.capture.errorMessage()) { this.error = this.capture.errorMessage(); }
       if (record !== null && this.store !== null) {
-        if (duration < 0.3) { live?.cancel(); this.store.remove(record.id); throw new Error('录音过短，请至少录制一秒'); }
+        if (duration < 0.3) { live?.cancel(); this.discardCapture(record); throw new Error('录音过短，请至少录制一秒'); }
+        if (record.source === CLASSROOM_SOURCE) { record.classroomNotes = this.liveClassroomNotes.trim(); }
         record.duration = duration; record.capturing = false; this.store.save(record);
         if (this.alive && epoch === this.epoch) { this.selected = record; this.filterSpeaker = -2; this.reload(); }
         if (live !== null) {
@@ -459,8 +656,12 @@ struct RecordingPage {
     } finally {
       if (!released) { await appBackgroundTasks.set(this.context(), 'recording', 'audioRecording', false).catch((): void => {}); }
       live?.cancel();
+      this.originalNoteRecording = null;
       if (this.live === live) { this.live = null; }
-      if (this.alive && epoch === this.epoch) { this.busy = false; this.jobKind = ''; this.status = saved?.transcriptionComplete ? '录音与转写已保存' : '录音已保存'; }
+      if (this.alive && epoch === this.epoch) {
+        this.busy = false; this.jobKind = '';
+        this.status = saved?.transcriptionComplete ? '录音与转写已保存' : saved ? '录音已保存' : '';
+      }
     }
     if (this.alive && epoch === this.epoch && saved && this.selected?.id === saved.id &&
       this.classroom && !saved.transcriptionComplete && !this.error) {
@@ -671,7 +872,7 @@ struct RecordingPage {
   private openRecord(record: RecordingRecord): void {
     if (this.busy) { return; }
     this.stopRecordingSearch(false);
-    this.recordingListScroller.closeAllSwipeActions();
+    if (this.courseSection === 'lessons') { this.recordingListScroller.closeAllSwipeActions(); }
     this.playback.stop().catch((): void => {}); this.playing = -2;
     this.selected = record; this.detailTab = record.summary ? 'summary' : 'text'; this.visibleSegments = 60;
     this.filterSpeaker = -2; this.comparison = ''; this.error = ''; this.status = '';
@@ -689,7 +890,8 @@ struct RecordingPage {
         source: record.source, duration: record.duration, analysis: record.analysis, summary: record.summary, watch: record.watch,
         capturing: record.capturing, audioSource: record.audioSource, titleEdited: record.titleEdited,
         localSummaryDraft: record.localSummaryDraft, audioDeleted: record.audioDeleted,
-        transcriptionComplete: record.transcriptionComplete, transcriptionEngine: record.transcriptionEngine };
+        transcriptionComplete: record.transcriptionComplete, transcriptionEngine: record.transcriptionEngine,
+        classroomCourseId: record.classroomCourseId, classroomNotes: record.classroomNotes, classroomNoteOnly: record.classroomNoteOnly };
     }
   }
   private beginRename(record: RecordingRecord): void {
@@ -710,8 +912,8 @@ struct RecordingPage {
   private async remove(record: RecordingRecord | null = this.selected): Promise<void> {
     if (this.busy || this.watchQueueRunning || record === null || this.store === null) { return; }
     this.recordingListScroller.closeAllSwipeActions();
-    let result = await promptAction.showDialog({ title: '删除这条录音？',
-      message: this.recordTitle(record) + (record.source === CLASSROOM_SOURCE ? '\n录音、转写、摘要、课堂照片和本课的资料入口将一起删除。' : '\n录音、转写和摘要将一起删除。') + (record.watch ? '手表原录音会保留。' : ''),
+    let result = await promptAction.showDialog({ title: record.source === CLASSROOM_SOURCE ? '删除这节课？' : '删除这条录音？',
+      message: this.recordTitle(record) + (record.source === CLASSROOM_SOURCE ? '\n录音、笔记、照片、附件和本课的资料入口将一起删除。' : '\n录音、转写和摘要将一起删除。') + (record.watch ? '手表原录音会保留。' : ''),
       buttons: [{ text: '取消', color: '#8E8E93' }, { text: '删除', color: '#FF3B30' }] });
     if (result.index !== 1 || this.busy || !this.alive || this.store === null) { return; }
     await this.playback.stop(); this.playing = -2;
@@ -778,6 +980,8 @@ struct RecordingPage {
   private context(): common.UIAbilityContext { return this.getUIContext().getHostContext() as common.UIAbilityContext; }
   onBackPress(): boolean { this.goBack(); return true; }
   private goBack(): void {
+    if (this.courseSheetOpen) { this.courseSheetOpen = false; return; }
+    if (this.noteSheetOpen) { this.noteSheetOpen = false; return; }
     if (this.showWatch) {
       if (this.busy) { this.cancel(); }
       this.showWatch = false; return;
@@ -798,6 +1002,7 @@ struct RecordingPage {
       this.save(); this.selected = null; this.playback.stop().catch((): void => {}); this.playing = -2; this.status = ''; return;
     }
     if (this.recordingSearchActive()) { this.changeRecordingSearch(''); return; }
+    if (this.classroom && this.courseScope) { this.openCourse(''); return; }
     router.back();
   }
   private openRecordingSettings(): void {
@@ -1229,15 +1434,39 @@ struct RecordingPage {
       }.width('100%')
     }.width('100%').padding({ top: 4, bottom: 8 })
   }
+  @Builder private CourseSectionButton(key: string, label: string) {
+    Button(label).layoutWeight(1).height(37).fontSize(14).padding(0)
+      .fontWeight(this.courseSection === key ? FontWeight.Bold : FontWeight.Normal)
+      .fontColor(this.courseSection === key ? Color.White : AppTheme.text('#526B68'))
+      .backgroundColor(this.courseSection === key ? AppTheme.filledBackground('#316B69') : Color.Transparent)
+      .onClick((): void => { this.courseSection = key; })
+  }
+  @Builder private CourseSections() {
+    Row({ space: 3 }) {
+      this.CourseSectionButton('lessons', '课时')
+      this.CourseSectionButton('handouts', '课件')
+      this.CourseSectionButton('exams', '往年试卷')
+      this.CourseSectionButton('study', '学伴')
+    }.padding(3).borderRadius(24).backgroundColor(AppTheme.background('#E7F2EF'))
+      .margin({ left: 20, right: 20, top: 3, bottom: 3 })
+  }
   @Builder private Home() {
     List({ scroller: this.recordingListScroller, space: 14 }) {
       ListItem() {
         Column({ space: 18 }) {
           if (this.classroom) {
-            Row() {
-              Text('课堂记录').fontSize(19).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+            Row({ space: 10 }) {
+              Text(this.records.length + ' 节课').fontSize(15).fontColor(AppTheme.text('#737D90'))
               Blank()
-              Text(this.records.length + ' 节').fontSize(14).fontColor(AppTheme.text('#737D90'))
+              if (this.unassignedLessons().length > 0) {
+                Button(this.hasCourse() ? '加入已有笔记' : '批量归类').fontSize(13).height(37)
+                  .fontColor(AppTheme.text('#316B69')).backgroundColor(AppTheme.background('#E7F2EF'))
+                  .enabled(!this.busy).onClick((): void => { this.organizeLessons(); })
+              }
+              if (this.hasCourse()) {
+                Button('编辑课程').fontSize(13).height(37).fontColor(AppTheme.text('#737D90')).backgroundColor(Color.Transparent)
+                  .enabled(!this.busy).onClick((): void => { this.editCourse(this.courseScope); })
+              }
             }.width('100%').padding({ top: 6, bottom: 4 })
           } else if (this.recordingSearchActive()) { this.SearchFeedback() } else { this.HomeHeader() }
         }.width('100%')
@@ -1251,7 +1480,11 @@ struct RecordingPage {
               this.recordingSearchRan ? '没有匹配的录音' : '点搜索，我来帮你找') :
               this.classroom ? '还没有课堂记录' : this.calendarScope === 'day' ? '这一天还没有录音' : this.calendarScope === 'month' ? '本月还没有录音' : '暂无录音')
               .fontSize(18).fontColor(AppTheme.text('#737D90'))
-            if (!this.recordingSearchActive()) { Text(this.classroom ? '开始上课后，可以随手拍下板书和课件。' : '轻点下方录音，也可以导入 WAV。').fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93')) }
+            if (!this.recordingSearchActive()) {
+              Text(this.classroom ? (this.hasCourse() ? '开始录音、新建笔记，或加入已有的课堂记录。' : '已有课堂都已归入课程。') :
+                '轻点下方录音，也可以导入 WAV。')
+                .fontSize(15).lineHeight(24).fontColor(AppTheme.text('#8E8E93')).textAlign(TextAlign.Center)
+            }
           }.width('100%').padding({ top: 44, bottom: 44 })
         }
       } else {
@@ -1276,8 +1509,13 @@ struct RecordingPage {
           }
         }.height(42).backgroundColor(Color.Transparent).enabled(!this.takingPhoto)
           .onClick((): void => { this.takeLessonPhoto(); })
+      } else {
+        Button('笔记').fontSize(14).height(42).fontColor(AppTheme.text('#316B69')).backgroundColor(Color.Transparent)
+          .enabled(!this.busy).onClick((): void => { this.editClassroomNote(null); })
+        Button('导入').fontSize(14).height(42).fontColor(AppTheme.text('#316B69')).backgroundColor(Color.Transparent)
+          .enabled(!this.busy).onClick((): void => { this.importAudio(); })
       }
-      Button(this.recording ? '结束课堂' : '开始上课').fontSize(15).fontWeight(FontWeight.Medium).height(42)
+      Button(this.recording ? '结束课堂' : '上课录音').fontSize(15).fontWeight(FontWeight.Medium).height(42)
         .padding({ left: 24, right: 24 }).fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#316B69'))
         .enabled(!this.takingPhoto && (!this.busy || this.recording)).onClick((): void => {
           if (this.recording) { this.stopRecording().catch((e: Error): void => { this.message(e); }); }
@@ -1329,13 +1567,60 @@ struct RecordingPage {
       })
     }.height(6).width('100%').clip(true).accessibilityText('人声在整段录音中的分布')
   }
+  @Builder private ClassroomNote(record: RecordingRecord) {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Text('我的笔记').fontSize(17).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+        Blank()
+        Button(record.classroomNotes ? '编辑笔记' : '写笔记').fontSize(14).height(38).padding({ left: 8, right: 8 })
+          .backgroundColor(Color.Transparent).fontColor(AppTheme.text('#316B69')).enabled(!this.busy)
+          .onClick((): void => { this.editClassroomNote(record); })
+      }.width('100%')
+      Text(record.classroomNotes || '记下老师强调的要点、问题或补充说明。')
+        .fontSize(15).lineHeight(23).fontColor(AppTheme.text(record.classroomNotes ? '#172033' : '#737D90')).width('100%')
+      if (record.classroomNoteOnly && this.classroom) {
+        Button('为本节课录音').fontSize(14).height(40).width('100%').backgroundColor(AppTheme.background('#E7F2EF'))
+          .fontColor(AppTheme.text('#316B69')).enabled(!this.busy).onClick((): void => { this.startRecording(record); })
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start).padding(16).borderRadius(18)
+      .backgroundColor(AppTheme.background('#FFFFFF'))
+  }
+  private saveLiveClassroomNotes(): void {
+    if (!this.store || !this.recordingDraft || !this.recording) { return; }
+    try {
+      this.recordingDraft.classroomNotes = this.liveClassroomNotes.trim();
+      this.store.save(this.recordingDraft);
+      promptAction.showToast({ message: '笔记已保存，录音仍在继续' });
+    } catch (e) { this.message(e as Error); }
+  }
+  @Builder private LiveClassroomNote() {
+    Column({ space: 8 }) {
+      Row() {
+        Text('随堂笔记').fontSize(17).fontWeight(FontWeight.Medium).fontColor(AppTheme.text('#172033'))
+        Blank()
+        Button('保存').fontSize(14).height(36).fontColor(AppTheme.text('#316B69')).backgroundColor(Color.Transparent)
+          .onClick((): void => { this.saveLiveClassroomNotes(); })
+      }.width('100%')
+      TextArea({ text: this.liveClassroomNotes, placeholder: '随手记下重点，结束录音时会一起保存' })
+        .width('100%').height(116).fontSize(15).maxLength(CLASSROOM_NOTE_LIMIT)
+        .fontColor(AppTheme.text('#172033')).backgroundColor(AppTheme.background('#F4F5FA'))
+        .onChange((value: string): void => { this.liveClassroomNotes = value; })
+    }.width('100%').padding(16).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
+  }
   @Builder private Detail() {
     if (this.selected !== null) {
       Column({ space: 14 }) {
         Row({ space: 10 }) {
           Text(this.recordDate(this.selected, false)).fontSize(13).fontColor(AppTheme.text('#737D90'))
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          if (this.classroom) {
+            Button(this.courseName(this.selected.classroomCourseId || '') + '  ›').fontSize(13).height(36).constraintSize({ maxWidth: '56%' })
+              .fontColor(AppTheme.text('#316B69')).backgroundColor(AppTheme.background('#E7F2EF')).enabled(!this.busy)
+              .accessibilityText('更改课程归属')
+              .onClick((): void => { if (this.selected) { this.organizeLessons(this.selected); } })
+          }
         }.width('100%')
+        if (!this.selected.classroomNoteOnly) {
         Row({ space: 12 }) {
           Button({ type: ButtonType.Circle }) {
             Image(this.playing === -1 ? $r('app.media.recording_stop') : $r('app.media.recording_play')).width(21).height(21)
@@ -1350,17 +1635,22 @@ struct RecordingPage {
             this.VoiceTimeline()
           }.layoutWeight(1)
         }.width('100%').padding(12).borderRadius(18).backgroundColor(AppTheme.background('#FFFFFF'))
+        }
         if (this.selected.source === CLASSROOM_SOURCE && this.store !== null) {
+          this.ClassroomNote(this.selected)
           ClassroomMaterialsView({ directory: this.store.directory(this.selected.id) + '/classroom',
             getRecord: (): RecordingRecord | null => this.selected, working: this.busy || this.takingPhoto,
             photoRevision: this.livePhotos.length,
+            courseTitle: this.classroom && this.courseScope !== CLASSROOM_UNASSIGNED ? this.courseName(this.courseScope) : '',
+            noteAvailable: !!this.selected.classroomNotes?.trim(),
             needsTranscript: !this.selected.analysis || this.selected.transcriptionComplete === false,
-            canPrepare: this.audioAvailable() || (!!this.selected.analysis && this.selected.transcriptionComplete !== false),
+            canPrepare: (!this.selected.summary || this.selected.summary.complete === false) &&
+              (this.audioAvailable() || (!!this.selected.analysis && this.selected.transcriptionComplete !== false)),
             onPrepare: (): void => {
               if (!this.selected?.analysis || this.selected.transcriptionComplete === false) { this.analyze(false, true); }
               else { this.summarize(); }
             },
-            ready: this.selected.transcriptionComplete !== false && !!this.selected.summary && this.selected.summary.complete !== false })
+            ready: this.classroomHasText(this.selected) })
         }
         if (this.selected.source !== CLASSROOM_SOURCE && !this.busy && this.audioAvailable() && this.analysis() !== null && (this.canResumeAnalysis() || this.selected.transcriptionComplete === false)) {
           Button(this.canResumeAnalysis() ? '继续转写' : '完成转写').fontSize(17).height(48).padding({ left: 28, right: 28 })
@@ -1373,7 +1663,9 @@ struct RecordingPage {
               .width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#5260ED'))
               .onClick((): void => { this.analyze(); })
           }
-          if (!this.audioAvailable()) { Text('音频已删除，这条记录没有可用的转写文字。').fontSize(15).fontColor(AppTheme.text('#8E8E93')).width('100%') }
+          if (!this.audioAvailable() && !this.selected.classroomNoteOnly) {
+            Text('音频已删除，这条记录没有可用的转写文字。').fontSize(15).fontColor(AppTheme.text('#8E8E93')).width('100%')
+          }
         } else {
           Row({ space: 8 }) {
             Button('转写文本').fontSize(15).fontWeight(FontWeight.Medium).height(36).padding({ left: 18, right: 18 })
@@ -1408,6 +1700,10 @@ struct RecordingPage {
         }
       }.width('100%').alignItems(HorizontalAlign.Start).enabled(!this.watchQueueRunning)
     }
+  }
+  private classroomHasText(record: RecordingRecord): boolean {
+    return (record.summary !== undefined && record.summary.complete !== false) ||
+      (record.transcriptionComplete !== false && record.analysis?.segments.some((segment: RecordingSegment): boolean => !!segment.text.trim()) === true);
   }
   @Builder private Transcript() {
     // One reading column owns all paragraph spacing. Expanded builder children
@@ -1602,8 +1898,26 @@ struct RecordingPage {
       Column() {
         if (this.showRecordingSettings) { this.SettingsContent() }
         else if (this.selected === null && !this.recording) {
-          if (!this.classroom) { this.SearchControls() }
-          this.Home()
+          if (this.classroom && !this.courseScope) {
+            ClassroomCourseView({ courses: this.courseRows, scroller: this.classroomCourseScroller,
+              onCreate: (): void => { this.editCourse(); },
+              onOpen: (id: string): void => { this.openCourse(id); } })
+            if (this.error) { Text(this.error).fontSize(14).fontColor(AppTheme.text('#B74D49')).padding(16).width('100%') }
+          } else {
+            if (this.classroom && this.hasCourse()) { this.CourseSections() }
+            if (this.classroom && this.hasCourse() && this.courseSection !== 'lessons' && this.store !== null) {
+              CourseStudyView({ root: this.store.root, courseId: this.courseScope, courseTitle: this.courseName(this.courseScope),
+                section: $courseSection, selected: $studySelected, mode: $studyMode, instruction: $studyInstruction,
+                scroller: this.studyScroller, getLessons: (fresh: boolean): RecordingRecord[] => this.studyLessons(fresh),
+                onLesson: (id: string): void => {
+                  const record = this.records.find((row: RecordingRecord): boolean => row.id === id);
+                  if (record) { this.openRecord(record); }
+                } })
+            } else {
+              if (!this.classroom) { this.SearchControls() }
+              this.Home()
+            }
+          }
         }
         else {
           Scroll(this.scroller) {
@@ -1617,6 +1931,7 @@ struct RecordingPage {
                 if (this.classroom && this.livePhotos.length > 0) {
                   ClassroomPhotoStrip({ photos: this.livePhotos, directory: this.livePhotoDirectory })
                 }
+                if (this.classroom) { this.LiveClassroomNote() }
                 if (this.liveStatus) {
                   Column({ space: 14 }) {
                     Row() {
@@ -1656,9 +1971,99 @@ struct RecordingPage {
     }.width('100%').height('100%')
   }
   @Builder private PageHeader() {
-    AppHeader({ title: this.showRecordingSettings ? '录音设置' : this.selected === null ? (this.classroom ? '智慧课堂' : '录音') : this.recordTitle(this.selected),
+    AppHeader({ title: this.showRecordingSettings ? '录音设置' : this.selected === null ?
+      (this.classroom ? (this.courseScope ? this.courseName(this.courseScope) : '智慧课堂') : '录音') : this.recordTitle(this.selected),
       showBackButton: true, actionLabel: this.showRecordingSettings ? '' : '更多',
       onBackClick: (): void => { this.goBack(); }, onActionClick: (): void => { this.openRecordingSettings(); } })
+  }
+  @Builder private ClassroomCourseSheet() {
+    Column({ space: 14 }) {
+      Text(this.courseSheetMode === 'collect' ? '选择已有课堂' : this.courseSheetMode === 'destination' ? '归入课程' :
+        this.courseSheetMode === 'rename' ? '编辑课程' : '新建课程')
+        .fontSize(23).fontWeight(FontWeight.Bold).fontColor(AppTheme.text('#172033')).width('100%')
+      if (this.courseSheetMode === 'collect') {
+        Row() {
+          Text('已选 ' + this.courseSelection.length + ' 节').fontSize(14).fontColor(AppTheme.text('#737D90'))
+          Blank()
+          Button(this.courseSelection.length === this.unassignedLessons().length ? '清空' : '全选')
+            .fontSize(14).height(36).fontColor(AppTheme.text('#316B69')).backgroundColor(Color.Transparent)
+            .onClick((): void => {
+              this.courseSelection = this.courseSelection.length === this.unassignedLessons().length ? [] :
+                this.unassignedLessons().map((record: RecordingRecord): string => record.id);
+            })
+        }.width('100%')
+        List({ space: 8 }) {
+          ForEach(this.unassignedLessons(), (record: RecordingRecord) => {
+            ListItem() {
+              Row({ space: 12 }) {
+                Column({ space: 4 }) {
+                  Text(this.recordTitle(record)).fontSize(16).fontColor(AppTheme.text('#172033'))
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                  Text(this.recordDate(record, false)).fontSize(12).fontColor(AppTheme.text('#737D90'))
+                }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Text(this.courseSelection.includes(record.id) ? '✓' : '○').fontSize(20).fontColor(AppTheme.text('#316B69'))
+              }.width('100%').padding(13).borderRadius(14).backgroundColor(AppTheme.background('#F4F5FA'))
+                .onClick((): void => {
+                  this.courseSelection = this.courseSelection.includes(record.id) ?
+                    this.courseSelection.filter((id: string): boolean => id !== record.id) : this.courseSelection.concat([record.id]);
+                })
+            }
+          }, (record: RecordingRecord): string => record.id)
+        }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+        Button(this.hasCourse() ? '加入当前课程' : '选择课程').height(42).width('100%').fontColor(Color.White)
+          .backgroundColor(AppTheme.filledBackground('#316B69')).enabled(this.courseSelection.length > 0)
+          .onClick((): void => { if (this.hasCourse()) { this.assignLessons(this.courseScope); } else { this.courseSheetMode = 'destination'; } })
+      } else if (this.courseSheetMode === 'destination') {
+        Text('将 ' + this.courseSelection.length + ' 节课归入已有或新课程。')
+          .fontSize(14).fontColor(AppTheme.text('#737D90')).width('100%')
+        List({ space: 8 }) {
+          ForEach(this.courses, (course: ClassroomCourse) => {
+            ListItem() {
+              Button(course.name).height(46).width('100%').fontSize(15).fontColor(AppTheme.text('#172033'))
+                .backgroundColor(AppTheme.background('#F4F5FA')).onClick((): void => { this.assignLessons(course.id); })
+            }
+          }, (course: ClassroomCourse): string => course.id)
+          if (this.selected && classroomRecordCourse(this.selected, this.courses) !== CLASSROOM_UNASSIGNED) {
+            ListItem() {
+              Button('移到未归类').height(46).width('100%').fontSize(14).fontColor(AppTheme.text('#737D90'))
+                .backgroundColor(AppTheme.background('#F4F5FA')).onClick((): void => { this.assignLessons(''); })
+            }
+          }
+        }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+        Button('+ 新建课程并加入').height(42).width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#316B69'))
+          .onClick((): void => { this.courseDraft = ''; this.courseError = ''; this.courseSheetMode = 'new-destination'; })
+      } else {
+        TextInput({ text: this.courseDraft, placeholder: '例如：线性代数' }).maxLength(48).width('100%').height(50)
+          .backgroundColor(AppTheme.background('#F4F5FA')).fontColor(AppTheme.text('#172033'))
+          .onChange((value: string): void => { this.courseDraft = value; this.courseError = ''; })
+        Button(this.courseSheetMode === 'new-destination' ? '创建并加入' : '保存课程').height(42).width('100%').fontColor(Color.White)
+          .backgroundColor(AppTheme.filledBackground('#316B69')).enabled(this.courseDraft.trim().length > 0)
+          .onClick((): void => { this.saveCourse(); })
+        if (this.courseSheetMode === 'rename') {
+          Button('删除课程').height(42).width('100%').fontColor(AppTheme.text('#B74D49')).backgroundColor(Color.Transparent)
+            .onClick((): void => { this.removeCourse().catch((e: Error): void => { this.courseError = e.message; }); })
+        } else if (this.courseSheetMode === 'new-destination') {
+          Button('返回课程选择').height(38).width('100%').fontColor(AppTheme.text('#737D90')).backgroundColor(Color.Transparent)
+            .onClick((): void => { this.courseSheetMode = 'destination'; })
+        }
+      }
+      if (this.courseError) { Text(this.courseError).fontSize(13).fontColor(AppTheme.text('#B74D49')).width('100%') }
+    }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
+      .padding({ left: 22, right: 22, top: 36, bottom: 24 })
+  }
+  @Builder private ClassroomNoteSheet() {
+    Column({ space: 14 }) {
+      Text(this.noteRecordId ? '编辑课堂笔记' : '新建课堂笔记').fontSize(23).fontWeight(FontWeight.Bold)
+        .fontColor(AppTheme.text('#172033')).width('100%')
+      TextInput({ text: this.noteTitle, placeholder: '本节课的标题' }).width('100%').height(48).maxLength(80)
+        .backgroundColor(AppTheme.background('#F4F5FA')).fontColor(AppTheme.text('#172033'))
+        .onChange((value: string): void => { this.noteTitle = value; })
+      TextArea({ text: this.noteDraft, placeholder: '记下重点、例题和问题' }).width('100%').layoutWeight(1)
+        .fontSize(15).maxLength(CLASSROOM_NOTE_LIMIT).backgroundColor(AppTheme.background('#F4F5FA'))
+        .fontColor(AppTheme.text('#172033')).onChange((value: string): void => { this.noteDraft = value; })
+      Button('保存笔记').height(42).width('100%').fontColor(Color.White).backgroundColor(AppTheme.filledBackground('#316B69'))
+        .enabled(this.noteTitle.trim().length > 0).onClick((): void => { this.saveClassroomNote(); })
+    }.width('100%').height('100%').padding({ left: 22, right: 22, top: 36, bottom: 24 })
   }
   @Builder private AudioSourcesPanel() {
     Column({ space: 16 }) {
@@ -1680,7 +2085,9 @@ struct RecordingPage {
     Stack() {
       FrostedPage({ pageBackgroundColor: '#F6F7FA', titleFadeHeight: RECORDING_TITLE_FADE_HEIGHT,
         scrollers: this.showRecordingSettings ? [this.recordingSettingsScroller] :
-          (this.selected === null && !this.recording ? [this.recordingListScroller] : [this.scroller]),
+          (this.selected === null && !this.recording ?
+            (this.classroom && !this.courseScope ? [this.classroomCourseScroller] :
+              this.classroom && this.courseSection !== 'lessons' ? [this.studyScroller] : [this.recordingListScroller]) : [this.scroller]),
         headerBuilder: (): void => { this.PageHeader(); }, contentBuilder: (): void => { this.Content(); } })
       Row().width(0).height(0)
         .bindSheet(this.showAudioSources, this.AudioSourcesPanel(), { height: 460, showClose: true,
@@ -1697,6 +2104,12 @@ struct RecordingPage {
       Row().width(0).height(0)
         .bindSheet(this.showRename, this.RenamePanel(), { height: 300, showClose: true,
           backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.showRename = false; this.renameTarget = null; } })
+      Row().width(0).height(0)
+        .bindSheet(this.courseSheetOpen, this.ClassroomCourseSheet(), { height: SheetSize.LARGE, showClose: true,
+          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.courseSheetOpen = false; } })
+      Row().width(0).height(0)
+        .bindSheet(this.noteSheetOpen, this.ClassroomNoteSheet(), { height: SheetSize.LARGE, showClose: true,
+          backgroundColor: AppTheme.pageBackground('#FFFFFF'), onDisappear: (): void => { this.noteSheetOpen = false; } })
     }.width('100%').height('100%')
   }
 }

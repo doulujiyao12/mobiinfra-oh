@@ -58,7 +58,7 @@ export async function pickCodexChatTarget(uiContext: UIContext, task: string,
         message: computer.name + ' · ' + workspace.name + '\n\n' + task +
           '\n\n将新建独立会话，允许工作目录内修改，额外操作请求批准。' +
           (imageCount > 0 ? '\n会发送本条消息附带的 ' + imageCount + ' 张图片。' : '') +
-          (classroom ? '\n生成的 Word 文件会返回本节课的详情页。' : '\n文本及最终交付文件将返回此聊天，由手机 Agent 继续处理。'),
+          (classroom ? '\n生成的文件会返回发起委托的课堂或课程页面。' : '\n文本及最终交付文件将返回此聊天，由手机 Agent 继续处理。'),
         buttons: [{ text: '取消', color: AppTheme.dialogText('#747B87') },
           { text: '开始委托', color: AppTheme.dialogText('#5968FF') }] });
       confirmed = result.index;

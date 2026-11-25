@@ -9,6 +9,8 @@ import { RECORDING_ANALYSIS_FILES, recordingAnalysisCheckpointPath } from './Rec
 import { RECORDING_LIVE_FILE } from './RecordingLiveTypes';
 import { RecordingLiveCheckpoint } from './RecordingLiveCheckpoint';
 import { SYSTEM_ASR_FILE } from './RecordingSystemAsrPolicy';
+import { CLASSROOM_SOURCE } from './ClassroomMaterials';
+import { writeRecordingMetadata } from './RecordingMetadata';
 
 export class RecordingStore {
   readonly root: string;
@@ -45,23 +47,13 @@ export class RecordingStore {
     return record;
   }
   save(record: RecordingRecord): void {
-    this.checkId(record.id);
-    let text = ArkJSON.stringify(record); let path = this.directory(record.id) + '/record.json';
-    let file = fs.openSync(path + '.tmp', fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-    try {
-      let buffer = new util.TextEncoder().encodeInto(text); let done = 0;
-      while (done < buffer.byteLength) {
-        let n = fs.writeSync(file.fd, buffer.buffer.slice(buffer.byteOffset + done, buffer.byteOffset + buffer.byteLength));
-        if (n <= 0) { throw new Error('保存录音信息失败'); } done += n;
-      }
-      fs.fsyncSync(file.fd);
-    } finally { fs.closeSync(file); }
-    fs.renameSync(path + '.tmp', path);
+    writeRecordingMetadata(this.directory(record.id) + '/record.json', record);
   }
   recoverCaptures(): void {
     for (let record of this.list()) {
       let changed = false;
-      if (record.capturing) {
+      const interruptedNoteRecording = record.classroomNoteOnly === true && this.hasAudio(record.id);
+      if (record.capturing || interruptedNoteRecording) {
         let file = fs.openSync(this.audioPath(record.id), fs.OpenMode.READ_WRITE);
         try {
           let bytes = Math.max(0, fs.statSync(file.fd).size - 44); bytes -= bytes % 2;
@@ -69,6 +61,10 @@ export class RecordingStore {
           fs.lseek(file.fd, 0, fs.WhenceType.SEEK_SET); writeExact(file.fd, wavHeader(bytes)); fs.fsyncSync(file.fd);
           record.duration = bytes / 32000; record.capturing = false; changed = true;
         } finally { fs.closeSync(file); }
+        if (interruptedNoteRecording) {
+          if (record.duration >= 0.3) { record.classroomNoteOnly = undefined; }
+          else { fs.unlinkSync(this.audioPath(record.id)); record.duration = 0; }
+        }
       }
       const draft = record.transcriptionEngine === 'system' ? this.systemAsrPath(record.id) : this.livePath(record.id);
       if (record.transcriptionComplete === false && fs.accessSync(draft)) {
@@ -111,7 +107,8 @@ export class RecordingStore {
       if (!fs.accessSync(path)) { continue; }
       let record = ArkJSON.parse(fs.readTextSync(path)) as RecordingRecord;
       if (record.schema !== 1 || record.id !== id || typeof record.title !== 'string' ||
-        !Number.isFinite(record.duration) || (!record.audioDeleted && !this.hasAudio(id))) {
+        !Number.isFinite(record.duration) ||
+        (!record.audioDeleted && !(record.source === CLASSROOM_SOURCE && record.classroomNoteOnly) && !this.hasAudio(id))) {
         throw new Error('有录音记录损坏，请保留数据后重试');
       }
       normalizeRecordingSummaryTitles(record);
@@ -120,12 +117,13 @@ export class RecordingStore {
     }
     return result.sort((a: RecordingRecord, b: RecordingRecord): number => b.createdAt.localeCompare(a.createdAt));
   }
-  async importWav(uri: string, watch?: RecordingWatchSource, createdAt: number = 0): Promise<RecordingRecord> {
+  async importWav(uri: string, watch?: RecordingWatchSource, createdAt: number = 0, courseId: string = ''): Promise<RecordingRecord> {
     let source = await fs.open(uri, fs.OpenMode.READ_ONLY);
     let record: RecordingRecord | null = null;
     try {
       let info = inspectWav(source.fd);
-      record = this.create(watch ? '手表' : '导入'); record.watch = watch;
+      record = this.create(courseId ? CLASSROOM_SOURCE : watch ? '手表' : '导入'); record.watch = watch;
+      if (courseId) { record.classroomCourseId = courseId; }
       let name = decodeURIComponent(uri.substring(uri.lastIndexOf('/') + 1)).replace(/\.wav$/i, '');
       record.title = name.length > 0 ? name.substring(0, 80) : '导入的录音';
       if (watch) {
@@ -166,7 +164,6 @@ export class RecordingStore {
     }
     const lesson = dir + '/classroom';
     if (fs.accessSync(lesson)) {
-      for (const entry of fs.listFileSync(lesson)) { fs.unlinkSync(lesson + '/' + entry); }
       fs.rmdirSync(lesson);
     }
     fs.rmdirSync(dir);

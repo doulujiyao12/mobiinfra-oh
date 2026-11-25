@@ -3,6 +3,7 @@ import { AppTheme } from '../../utils/AppTheme';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { CodexMarkdownView } from './CodexMarkdownView';
 import { codexLinkedArtifact, codexMarkdownExcerpt, codexWebLink } from './CodexMarkdownLinks';
+import { isStudySession } from './CodexStudyProgress';
 import { CodexChatService } from './CodexChatService';
 import { CodexChatRun, codexChatStatus } from './CodexChatTypes';
 import { CodexAnswer, CodexApproval, CodexArtifact, CodexLocalArtifact } from './CodexTypes';
@@ -37,12 +38,37 @@ export struct CodexChatRunCard {
       return '执行完成 · 部分文件待接收';
     }
     if (['starting', 'running', 'waitingApproval', 'stopping', 'receiving'].includes(status) && !this.service().isActive(this.runId)) {
+      if (this.study() && !this.run?.submitted) { return '发送已中断，可重新委托'; }
       return '等待同步 · 远端可能仍在执行';
     }
     return codexChatStatus(status);
   }
+  private study(): boolean { return isStudySession(this.run?.sessionId || ''); }
+  private studyTitle(): string {
+    const task = this.run?.taskText || '';
+    for (const title of ['提取要点', '真题分析', '生成模拟卷']) {
+      if (task.startsWith(title + '。')) { return title; }
+    }
+    return '课堂学习资料';
+  }
   private canStop(): boolean {
-    return this.run?.submitted === true && !['completed', 'cancelled', 'failed'].includes(this.run?.status || '');
+    const run = this.run;
+    if (!run || ['completed', 'cancelled', 'failed'].includes(run.status)) { return false; }
+    if (this.study() && run.status === 'receiving') { return false; }
+    return run.submitted || (this.study() && this.service().isActive(this.runId));
+  }
+  private studyNotice(): string {
+    const run = this.run;
+    if (!run) { return ''; }
+    if (['completed', 'cancelled', 'failed'].includes(run.status)) { return ''; }
+    if (!this.service().isActive(this.runId)) {
+      return run.studyStage ? '上次进展 · ' + run.studyStage : '';
+    }
+    if (this.service().isStopRequested(this.runId)) {
+      return run.submitted ? '已请求停止，正在确认电脑状态' : '正在取消本次发送';
+    }
+    if (run.status === 'receiving') { return run.notice || '已接收 ' + run.files.length + '/' + run.artifacts.length + ' 份文件'; }
+    return run.notice;
   }
   private answerText(): string { return codexMarkdownExcerpt(this.run?.answer || '', this.expanded); }
   private async openMarkdownLink(target: string): Promise<void> {
@@ -89,25 +115,38 @@ export struct CodexChatRunCard {
       Row({ space: 10 }) {
         Image($r('app.media.codex_document')).width(24).height(24).fillColor(AppTheme.text('#5968FF'))
         Column({ space: 4 }) {
-          Text('Codex · ' + (this.run?.computerName || '电脑委托')).fontSize(15).fontWeight(FontWeight.Medium)
+          Text(this.study() ? this.studyTitle() : 'Codex · ' + (this.run?.computerName || '电脑委托')).fontSize(15).fontWeight(FontWeight.Medium)
             .fontColor(AppTheme.text('#172033')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.status()).fontSize(12).fontColor(AppTheme.text('#5968FF'))
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         if (this.canStop()) {
-          Button('停止').fontSize(13).fontColor(AppTheme.text('#D34A54')).backgroundColor(Color.Transparent)
-            .height(36).onClick(() => { this.stop(); })
+          Button(this.study() ? (this.service().isStopRequested(this.runId) ? '正在停止' : this.run?.submitted ? '停止生成' : '取消发送') : '停止')
+            .fontSize(14).fontColor(AppTheme.text('#B63C49'))
+            .backgroundColor(this.study() ? AppTheme.background('#FBECEF') : Color.Transparent)
+            .enabled(!this.service().isStopRequested(this.runId)).height(38).onClick(() => { this.stop(); })
         }
       }.width('100%')
-      Text(this.run?.taskText || '').fontSize(13).fontColor(AppTheme.text('#747B87')).maxLines(3)
-        .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-      if (this.run?.workspaceName) {
-        Text(this.run?.workspaceName || '').fontSize(12).fontColor(AppTheme.text('#747B87')).maxLines(1)
+      if (this.study()) {
+        if (this.studyNotice()) {
+          Row({ space: 8 }) {
+            if (this.service().isActive(this.runId) && this.run?.status !== 'waitingApproval') {
+              LoadingProgress().width(16).height(16).color(AppTheme.text('#316B69'))
+            }
+            Text(this.studyNotice()).fontSize(14).lineHeight(21).fontColor(AppTheme.text('#316B69')).layoutWeight(1)
+          }.width('100%')
+        }
+      } else {
+        Text(this.run?.taskText || '').fontSize(13).fontColor(AppTheme.text('#747B87')).maxLines(3)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        if (this.run?.workspaceName) {
+          Text(this.run?.workspaceName || '').fontSize(12).fontColor(AppTheme.text('#747B87')).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        }
+        if (this.run?.notice) {
+          Text(this.run?.notice || '').fontSize(12).fontColor(AppTheme.text('#747B87')).width('100%')
+        }
       }
-      if (this.run?.notice) {
-        Text(this.run?.notice || '').fontSize(12).fontColor(AppTheme.text('#747B87')).width('100%')
-      }
-      if (this.run?.answer) {
+      if (this.run?.answer && (!this.study() || this.run?.status === 'completed')) {
         AiGeneratedBadge({ compact: true })
         CodexMarkdownView({ text: this.answerText(),
           onLinkClick: (target: string): void => { this.openMarkdownLink(target); } })

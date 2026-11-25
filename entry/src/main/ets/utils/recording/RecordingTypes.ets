@@ -31,6 +31,9 @@ export interface RecordingRecord {
   audioDeleted?: boolean;
   transcriptionComplete?: boolean;
   transcriptionEngine?: string;
+  classroomCourseId?: string;
+  classroomNotes?: string;
+  classroomNoteOnly?: boolean;
 }
 export interface RecordingWatchSource { sourceId: string; recordingId: string; }
 export interface RecordingSummary {
