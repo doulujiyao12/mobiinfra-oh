@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,9 +12,9 @@ export function secureDaemonSocket(socketPath, uid = process.getuid?.()) {
   } catch { return false; }
 }
 
-const privateWindowsDirectory = `
+const privateWindowsSocket = String.raw`
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:CLAWMATE_CODEX_SOCKET_DIRECTORY
+$acl = [IO.Directory]::GetAccessControl($env:CLAWMATE_CODEX_SOCKET_DIRECTORY)
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -23,26 +23,31 @@ if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Equals($sid) -
     $rules[0].IdentityReference.Equals($sid) -and $rules[0].AccessControlType -eq 'Allow' -and
     $rules[0].FileSystemRights -eq 'FullControl' -and
     $rules[0].InheritanceFlags -eq $inheritance -and
-    $rules[0].PropagationFlags -eq 'None') { exit 0 }
+    $rules[0].PropagationFlags -eq 'None') {
+  # IO_REPARSE_TAG_AF_UNIX. A symlink or junction has a different tag.
+  $socket = $env:CLAWMATE_CODEX_SOCKET_PATH
+  $tag = & ([IO.Path]::Combine($env:SystemRoot, 'System32/fsutil.exe')) reparsepoint query $socket
+  if ($LASTEXITCODE -eq 0 -and $tag[0] -match '(?i)\b0x80000023\s*$') { exit 0 }
+}
 exit 1
 `;
 
-function checkWindowsDirectory(directory) {
+function checkWindowsSocket(directory, socket) {
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  return new Promise(resolve => execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', privateWindowsDirectory], {
-    env: { ...process.env, CLAWMATE_CODEX_SOCKET_DIRECTORY: directory }, windowsHide: true, timeout: 3000
+  return new Promise(resolve => execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', privateWindowsSocket], {
+    env: { ...process.env, CLAWMATE_CODEX_SOCKET_DIRECTORY: directory, CLAWMATE_CODEX_SOCKET_PATH: socket }, windowsHide: true, timeout: 3000
   }, error => resolve(!error)));
 }
 
-async function managedDaemonSocket(home) {
-  const directory = path.join(home, 'app-server-control');
-  const socket = path.join(directory, 'app-server-control.sock');
+export async function validatedDaemonSocket(socket) {
+  const directory = path.dirname(socket);
   try {
     const stat = lstatSync(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !existsSync(socket)) return null;
-    // The Codex proxy relays bytes but does not validate the rendezvous ACL.
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
     if (process.platform === 'win32') {
-      return !lstatSync(socket).isSymbolicLink() && await checkWindowsDirectory(directory) ? socket : null;
+      // Node can list an AF_UNIX entry but lstat/existsSync cannot open it.
+      if (!readdirSync(directory).includes(path.basename(socket))) return null;
+      return await checkWindowsSocket(directory, socket) ? socket : null;
     }
     if (stat.uid !== process.getuid() || (stat.mode & 0o077)) return null;
     // Codex can use a short, private physical socket and expose its default
@@ -58,7 +63,7 @@ export async function discoverDaemons(environment = process.env) {
   let home;
   try { home = realpathSync(environment.CODEX_HOME || path.join(os.homedir(), '.codex')); }
   catch { return []; }
-  const managed = await managedDaemonSocket(home);
+  const managed = await validatedDaemonSocket(path.join(home, 'app-server-control', 'app-server-control.sock'));
   const results = new Set(managed ? [managed] : []);
   if (process.platform !== 'linux') return [...results];
   return discoverLinuxDaemons(home, results);

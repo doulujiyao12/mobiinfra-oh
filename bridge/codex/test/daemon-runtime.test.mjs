@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -61,7 +61,8 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
   const environment = { ...process.env, CODEX_HOME: home, OPENAI_API_KEY: '', CHATGPT_API_KEY: '' };
   const socket = path.join(home, 'app-server-control', 'app-server-control.sock');
   if (process.platform !== 'win32') mkdirSync(path.dirname(socket), { mode: 0o700 });
-  const daemon = spawn(process.env.CLAWMATE_TEST_DAEMON, ['app-server', '--listen', 'unix://' + socket], {
+  const listener = process.platform === 'win32' ? 'unix://' : 'unix://' + socket;
+  const daemon = spawn(process.env.CLAWMATE_TEST_DAEMON, ['app-server', '--listen', listener], {
     cwd, env: environment, stdio: ['ignore', 'ignore', 'pipe']
   }); daemon.stderr.resume();
   const clients = []; let core, observer;
@@ -72,7 +73,7 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     rmSync(directory, { recursive: true, force: true });
   });
-  await until(() => existsSync(socket));
+  await until(() => existsSync(path.dirname(socket)) && readdirSync(path.dirname(socket)).includes(path.basename(socket)));
   const proxy = { command: process.env.CLAWMATE_TEST_DAEMON, environment };
   const canonicalSocket = process.platform === 'win32' ? socket : realpathSync(socket);
   if (process.platform !== 'win32') assert.equal(secureDaemonSocket(canonicalSocket), true);
