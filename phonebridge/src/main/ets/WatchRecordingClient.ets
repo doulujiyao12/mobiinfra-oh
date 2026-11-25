@@ -2,7 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { wearEngine } from '@kit.WearEngine';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
-import { AudioCodecJob, createAudioCodecJob } from 'libwatchaudio.so';
+import { createAudioCodecJob } from 'libwatchaudio.so';
+import type { AudioCodecJob } from '../cpp/types/libwatchaudio/index';
 import { BusinessError, zlib } from '@kit.BasicServicesKit';
 
 // Match the phone recording library's bounded WAV limit. One watch recording
@@ -359,7 +360,7 @@ export class WatchRecordingClient {
   }
 
   private async restoreAac(source: string, path: string, offer: Message, generation: number): Promise<number> {
-    const job = createAudioCodecJob();
+    const job: AudioCodecJob = createAudioCodecJob();
     this.decoding = job;
     const timer = setInterval((): void => {
       if (generation !== this.generation || this.incoming?.offer !== offer) { job.cancel(); }
@@ -367,7 +368,7 @@ export class WatchRecordingClient {
     }, 300);
     try {
       this.incoming?.onProgress?.(0, false, true);
-      const bytes = await job.run(source, path, true, offer.recording.sampleRate, offer.bytes);
+      const bytes: number = await job.run(source, path, true, offer.recording.sampleRate, offer.bytes);
       this.ensureActive(generation);
       if (this.incoming?.offer !== offer) { throw new Error('录音接收已结束'); }
       return bytes;
