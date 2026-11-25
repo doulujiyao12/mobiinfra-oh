@@ -13,19 +13,27 @@ import { TaskSync } from './task-sync.mjs';
 
 const digest = value => createHash('sha256').update(value).digest();
 const loopback = host => ['127.0.0.1', '::1', 'localhost'].includes(host);
+const REQUEST_BODY_MS = 90_000;
+// Allows the phone's five-minute attachment transfer plus connection overhead.
+const UPLOAD_REQUEST_MS = 330_000;
 
-async function bodyJson(req, limit) {
+async function bodyJson(req, limit, timeoutMs = REQUEST_BODY_MS) {
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
     throw new BridgeError(415, 'Content-Type must be application/json');
   }
   if (Number(req.headers['content-length'] || 0) > limit) throw new BridgeError(413, 'Request too large');
   const chunks = [];
   let length = 0;
-  for await (const chunk of req) {
-    length += chunk.length;
-    if (length > limit) throw new BridgeError(413, 'Request too large');
-    chunks.push(chunk);
-  }
+  // Node's requestTimeout applies to every route. Retain the shorter body
+  // deadline for small JSON calls; only authenticated uploads get the larger budget.
+  const deadline = setTimeout(() => req.destroy(), timeoutMs).unref();
+  try {
+    for await (const chunk of req) {
+      length += chunk.length;
+      if (length > limit) throw new BridgeError(413, 'Request too large');
+      chunks.push(chunk);
+    }
+  } finally { clearTimeout(deadline); }
   let body;
   try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new BridgeError(400, 'Invalid JSON'); }
@@ -114,7 +122,10 @@ export function createBridgeServer(config, core, extensions = {}) {
         const cursor = url.searchParams.get('cursor') || undefined;
         const result = await reads.run('history:' + (historyRoute[1] || 'list') + ':' + (cursor || ''), () =>
           historyRoute[1] ? core.history.read(historyRoute[1], cursor) : core.history.list(cursor));
-        return send(200, historyRoute[1] ? { task: result } : result);
+        if (!historyRoute[1]) return send(200, result);
+        // Seed only the live snapshot. Older history pages must not replace a delta base.
+        return send(200, !cursor && result.sharedThread && result.desktopConnected ?
+          sync.envelope(result, null, true) : { task: result });
       }
       if (req.method === 'GET' && downloadRoute) {
         core.get(downloadRoute[1]);
@@ -160,7 +171,7 @@ export function createBridgeServer(config, core, extensions = {}) {
       const isUpload = route === '/v1/uploads';
       if (isUpload && uploadsInFlight >= 2) throw new BridgeError(429, 'Upload busy; retry shortly');
       if (isUpload) { uploadsInFlight++; releasingUpload = true; }
-      const body = await bodyJson(req, isUpload ? MAX_BODY_BYTES : 64000);
+      const body = await bodyJson(req, isUpload ? MAX_BODY_BYTES : 64000, isUpload ? UPLOAD_REQUEST_MS : REQUEST_BODY_MS);
       if (historyRoute?.[2] === '/fork') return send(201, { task: await core.history.fork(historyRoute[1], body) });
       if (historyRoute?.[2] === '/resume') return send(200, { task: await core.history.resume(historyRoute[1], body) });
       if (route === '/v1/tasks') return send(201, { task: await core.create(body) });
@@ -178,7 +189,7 @@ export function createBridgeServer(config, core, extensions = {}) {
   };
   const server = tls ? https.createServer({ cert: readFileSync(config.tls.cert),
     key: readFileSync(config.tls.key), minVersion: 'TLSv1.2' }, handler) : http.createServer(handler);
-  server.requestTimeout = 90000;
+  server.requestTimeout = UPLOAD_REQUEST_MS;
   server.headersTimeout = 60000;
   server.keepAliveTimeout = 30000;
   server.timeout = 100000;

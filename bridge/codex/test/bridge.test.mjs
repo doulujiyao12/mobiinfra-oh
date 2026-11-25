@@ -124,6 +124,24 @@ test('gzip, delta, unchanged and full fallback responses preserve the same task 
   for (const query of ['sync=bad', 'sync=delta&sync=delta']) assert.equal((await fetch(base + '/v1/tasks/' + task.id + '?' + query, { headers })).status, 400);
 });
 
+test('opening a live desktop chat seeds the first delta without overwriting it with paged history', async t => {
+  const { config, core } = await fixture(t);
+  const task = { ...await core.create(createBody), sharedThread: true, desktopConnected: true };
+  core.item(task, 'live', 'assistant', 'Full history '.repeat(500), true); core.touch(task);
+  core.history.read = async (_id, cursor) => cursor ? { ...task, items: [] } : task;
+  core.snapshot = async () => task;
+  const server = createBridgeServer(config, core);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port; const headers = { Authorization: 'Bearer ' + config.token };
+  const get = async route => (await fetch(base + route, { headers })).json();
+  const selected = await get('/v1/threads/' + task.id);
+  assert.equal(selected.task.items[0].text, task.items[0].text);
+  await get('/v1/threads/' + task.id + '?cursor=older');
+  task.items[0].text += 'delta'; core.touch(task);
+  const update = await get('/v1/tasks/' + task.id + '?sync=delta&revision=' + selected.task.revision);
+  assert.deepEqual(update.taskDelta.items.map(item => [item.text, item.append]), [['delta', true]]);
+});
+
 test('new sessions default to workspace writes; idle sessions can select ask, auto-review and full access per turn', async t => {
   const { core, rpc } = await fixture(t);
   const task = await core.create({ workspaceId: 'project', model: 'test', effort: 'medium' });

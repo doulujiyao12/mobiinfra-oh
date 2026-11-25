@@ -14,6 +14,7 @@ const cache = new Map();
 let response = { statusCode: 200, body: new ArrayBuffer(2), toString: () => '{}' };
 let sessionConfiguration;
 let sentRequest;
+let requestSession;
 let sessionCloses = 0;
 let sessionCreates = 0;
 let sessionCancels = 0;
@@ -130,10 +131,11 @@ const kitMocks = {
     Request: class { constructor(url, method, headers, body) { Object.assign(this, { url, method, headers, body }); } },
     createSession: configuration => {
       sessionCreates++;
+      const sessionId = sessionCreates;
       sessionConfiguration = configuration;
       return {
         fetch: async request => {
-          sentRequest = request; fetchCount++;
+          sentRequest = request; requestSession = sessionId; fetchCount++;
           if (fetchErrors.length) throw fetchErrors.shift();
           if (fetchReplies.length) return fetchReplies.shift();
           return deferred ? new Promise(resolve => { resolveFetch = resolve; }) : response;
@@ -185,8 +187,8 @@ async function main() {
   assert.equal(types.validCodexToken('password'), false);
   assert.equal(types.codexLinkLabel(1000, 0, 2000), '已连接');
   assert.equal(types.codexLinkLabel(1000, 0, 27000), '正在确认连接');
-  assert.equal(types.codexLinkLabel(1000, 2000, 3000), '连接已中断');
-  assert.equal(types.codexLinkLabel(1000, 2000, 3000, true), '正在重连');
+  assert.equal(types.codexLinkLabel(1000, 2000, 3000), '电脑连接已中断');
+  assert.equal(types.codexLinkLabel(1000, 2000, 3000, true), '正在重连电脑');
   assert.equal(types.codexLinkLabel(0, 0, 3000), '正在确认连接');
   const timeline = types.codexTimeline([
     { id: 't1:user', kind: 'user', text: 'create' }, { id: 't1:answer', kind: 'assistant', text: 'done' },
@@ -252,8 +254,11 @@ async function main() {
   const healthCount = fetchCount; await assert.rejects(client.call('/v1/health'), /超时/);
   assert.equal(fetchCount, healthCount + 1, 'heartbeat retry is paced by the page');
   fetchErrors = []; await client.call('/v1/info');
+  const regularSession = requestSession;
   const cancels = sessionCancels; const closed = sessionCloses;
   deferred = true; const pollRequest = client.call('/v1/tasks/a?revision=1&waitMs=12000');
+  assert.notEqual(requestSession, regularSession, 'long polling uses an independent network session');
+  assert.equal(sessionConfiguration.requestConfiguration.transfer.timeout.transferMs, 30000);
   client.cancelTaskUpdates(); assert.equal(sessionCancels, cancels + 1); assert.equal(sessionCloses, closed);
   assert.equal(cancelledRequest.url, 'https://example.com/v1/tasks/a?revision=1&waitMs=12000');
   resolveFetch(response); await assert.rejects(pollRequest, /取消/); deferred = false;
@@ -265,6 +270,14 @@ async function main() {
   await assert.rejects(codexResponseText(damaged.buffer, null));
   const bomb = Uint8Array.from(encoded); new DataView(bomb.buffer).setUint32(bomb.length - 4, 16777217, true);
   await assert.rejects(codexResponseText(bomb.buffer, null), /过大/);
+  const updateClient = new CodexClient(); updateClient.configure({ origin: 'https://example.com', token: 'c'.repeat(43) });
+  fetchReplies = [{ statusCode: 200, body: damaged.buffer, toString: () => null }, response];
+  const updateCount = fetchCount;
+  await updateClient.call('/v1/tasks/a?revision=1&waitMs=12000&sync=delta');
+  assert.equal(fetchCount, updateCount + 2);
+  assert.match(sentRequest.url, /revision=1&waitMs=0&sync=delta$/);
+  assert.equal(sentRequest.headers['Accept-Encoding'], 'identity', 'a broken compressed update recovers immediately on the same revision');
+  updateClient.close();
   fetchReplies = [{ statusCode: 200, body: damaged.buffer, toString: () => null }, response];
   await client.call('/v1/info'); assert.equal(sentRequest.headers['Accept-Encoding'], 'identity', 'bad gzip falls back to a plain GET');
   captureTimers = true; timerJobs = []; deferred = true;
@@ -294,7 +307,7 @@ async function main() {
   const cancelled = client.call('/v1/info');
   client.close();
   resolveFetch(response); await assert.rejects(cancelled);
-  assert.equal(sessionCloses, before + 1, 'explicit disconnect closes the session exactly once');
+  assert.equal(sessionCloses, before + 2, 'explicit disconnect closes both transports');
   await assert.rejects(client.call('/v1/info'));
 
   const { CodexCredentialStore } = load('entry/src/main/ets/pages/codex/CodexCredentialStore.ets');
@@ -665,10 +678,18 @@ async function main() {
   assert.equal((await CodexCredentialStore.list()).length, savedCount, 'disconnect preserves saved connections');
   const weakPage = new CodexPage(); weakPage.connected = true; weakPage.active = true; weakPage.screen = types.CodexScreen.Workspace;
   weakPage.healthSupported = true; weakPage.lastNetworkSuccess = Date.now() - 60000;
-  weakPage.client.call = async route => { assert.equal(route, '/v1/health'); throw new Error('network timeout'); };
+  weakPage.client.call = async route => {
+    assert.equal(route, '/v1/health'); weakPage.recordReachability(false, 'network timeout', Date.now());
+    throw new Error('network timeout');
+  };
   await weakPage.checkConnection(); assert.match(weakPage.linkLabel(), /中断/); assert.equal(weakPage.healthChecking, false);
   weakPage.client.call = async () => ({ ready: true }); await weakPage.checkConnection();
   assert.equal(weakPage.linkLabel(), '已连接'); assert.equal(weakPage.networkText, '');
+  weakPage.recordReachability(false, 'late timeout', weakPage.lastNetworkSuccess - 1000);
+  assert.equal(weakPage.linkLabel(), '已连接', 'a delayed poll error cannot reverse a newer successful heartbeat');
+  weakPage.lastNetworkSuccess -= 9000;
+  weakPage.client.call = async () => { throw new Error('backend HTTP 502'); };
+  await weakPage.checkConnection(); assert.equal(weakPage.linkLabel(), '已连接', 'a backend response is not a phone network failure');
   captureTimers = true; timerJobs = [];
   weakPage.followOutput = false;
   weakPage.client.call = async () => ({ task: { ...pcHistory, id: 'open-at-bottom', external: false } });
@@ -688,11 +709,49 @@ async function main() {
     return { task: { ...weakPage.task, revision: 2 } };
   };
   await weakPage.poll(); assert.equal(syncReads, 2); assert.equal(weakPage.task.revision, 2, 'a missing delta base triggers a full read');
+
+  const livePage = new CodexPage();
+  livePage.active = true; livePage.connected = true; livePage.screen = types.CodexScreen.Workspace;
+  livePage.taskUpdatesSupported = true; livePage.taskDeltaSupported = true; livePage.followOutput = false;
+  livePage.task = { ...pcHistory, id: 'live', external: false, sharedThread: true, desktopConnected: true,
+    executionTransport: 'desktop', status: 'idle', revision: 1 };
+  let listReads = 0; let resolveList; let rejectSubmission; let submissionId;
+  const liveReads = [];
+  livePage.client.call = (route, body) => {
+    if (route === '/v1/tasks') {
+      listReads++;
+      return new Promise(resolve => { resolveList = resolve; });
+    }
+    if (route.endsWith('/turns')) {
+      submissionId = body.requestId;
+      return new Promise((_, reject) => { rejectSubmission = reject; });
+    }
+    liveReads.push(route);
+    if (!submissionId) return Promise.resolve({ unchanged: true });
+    return Promise.resolve({ taskDelta: { baseRevision: 1,
+      task: { ...livePage.task, items: [], revision: 2, status: 'running', lastRequestId: submissionId, lastRequestConfirmed: true },
+      items: [{ id: 'live-reply', kind: 'assistant', text: 'Partial reply', append: false }], itemOrder: ['live-reply'] } });
+  };
+  await livePage.poll();
+  assert.match(liveReads[0], /waitMs=12000/, 'the idle phone listens for a desktop-initiated turn');
+  assert.equal(listReads, 1); assert.equal(livePage.polling, false, 'a stalled history list does not block live polling');
+  livePage.draft = 'Continue the shared conversation';
+  const submission = livePage.send();
+  assert.ok(submissionId, 'the POST has started but has not replied');
+  await livePage.poll();
+  assert.equal(livePage.task.items[0].text, 'Partial reply', 'the phone applies output before the turn POST returns');
+  assert.equal(livePage.draft, '', 'live acknowledgement clears only the submitted draft');
+  assert.equal(listReads, 1, 'a background refresh does not start duplicate task-list requests');
+  rejectSubmission(new Error('Late POST failure')); await submission;
+  assert.equal(livePage.errorText, '', 'a late transport error does not report an already confirmed submission as failed');
+  resolveList({ tasks: [] }); await new Promise(setImmediate);
+  livePage.disconnect();
+
   weakPage.lastNetworkFailure = Date.now(); weakPage.lastNetworkSuccess = weakPage.lastNetworkFailure - 1;
   let resolveHealth;
   weakPage.client.call = async () => new Promise(resolve => { resolveHealth = resolve; });
   const reconnecting = weakPage.checkConnection();
-  assert.equal(weakPage.linkLabel(), '正在重连');
+  assert.equal(weakPage.linkLabel(), '正在重连电脑');
   assert.equal(weakPage.showDisconnectInStatus(), true);
   weakPage.disconnect();
   resolveHealth({ ready: true }); await reconnecting;

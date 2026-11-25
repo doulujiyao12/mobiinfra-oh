@@ -152,7 +152,7 @@ export interface CodexEnvelope {
 }
 
 export function codexLinkLabel(lastSuccess: number, lastFailure: number, now: number, checking: boolean = false): string {
-  if (lastFailure > 0 && lastFailure >= lastSuccess) { return checking ? '正在重连' : '连接已中断'; }
+  if (lastFailure > 0 && lastFailure >= lastSuccess) { return checking ? '正在重连电脑' : '电脑连接已中断'; }
   if (!lastSuccess || now - lastSuccess > 25000) { return '正在确认连接'; }
   return '已连接';
 }

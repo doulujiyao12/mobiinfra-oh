@@ -2,11 +2,16 @@ import { rcp } from '@kit.RemoteCommunicationKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AppRequests } from '../../utils/AppRequests';
 import { codexResponseText } from './CodexResponseText';
-import { checkCodexJsonBudget } from '../../utils/CodexRequestBudget';
+import { checkCodexJsonBudget, CODEX_UPLOAD_ROUTE } from '../../utils/CodexRequestBudget';
 import {
   CodexConnection, CodexEnvelope, CodexCreateBody, CodexTurnBody, CodexUploadBody, CodexApprovalBody,
   normalizeCodexOrigin, validCodexToken, validCodexCa, CodexPairBody, CodexPairingBundle, validateCodexPairing, CodexForkBody, CodexResumeBody
 } from './CodexTypes';
+
+const UPLOAD_TRANSFER_MS: number = 5 * 60 * 1000;
+const UPLOAD_DEADLINE_MS: number = UPLOAD_TRANSFER_MS + 30000;
+const TASK_UPDATE_TRANSFER_MS: number = 30000;
+const TASK_UPDATE_DEADLINE_MS: number = 35000;
 
 class CodexRequestFailure extends Error {
   retryable: boolean;
@@ -16,17 +21,23 @@ class CodexRequestFailure extends Error {
   }
 }
 
+class CodexCompressionFailure extends CodexRequestFailure {
+  constructor(message: string) { super(message, true); }
+}
+
 export class CodexClient {
   private origin: string = '';
   private token: string = '';
   private caCertificate: string = '';
   private generation: number = 0;
+  private updateGeneration: number = 0;
   private cancellers: (() => void)[] = [];
   private updateCancellers: (() => void)[] = [];
   private session: rcp.Session | null = null;
+  private updateSession: rcp.Session | null = null;
   private compressionEnabled: boolean = true;
   private chunkBytes: number = 1024 * 1024;
-  onReachability: (reachable: boolean, message: string) => void = () => {};
+  onReachability: (reachable: boolean, message: string, startedAt: number) => void = () => {};
 
   setArtifactChunkBytes(bytes: number): void {
     this.chunkBytes = Number.isSafeInteger(bytes) && bytes >= 16384 && bytes <= 1048576 ? bytes : 1048576;
@@ -44,11 +55,14 @@ export class CodexClient {
 
   close(): void {
     this.generation++;
+    this.cancelTaskUpdates();
     this.cancellers.forEach((cancel: () => void) => { cancel(); });
-    this.cancellers = []; this.updateCancellers = []; this.token = ''; this.origin = ''; this.caCertificate = '';
+    this.cancellers = []; this.token = ''; this.origin = ''; this.caCertificate = '';
+    this.updateSession?.close(); this.updateSession = null;
     this.session?.close(); this.session = null; this.chunkBytes = 1048576; this.compressionEnabled = true;
   }
   cancelTaskUpdates(): void {
+    this.updateGeneration++;
     this.updateCancellers.forEach((cancel: () => void) => { cancel(); }); this.updateCancellers = [];
   }
 
@@ -70,47 +84,70 @@ export class CodexClient {
   private async request(route: string, body: CodexCreateBody | CodexTurnBody | CodexUploadBody | CodexApprovalBody | CodexPairBody | CodexForkBody | CodexResumeBody | undefined,
     authenticated: boolean): Promise<CodexEnvelope> {
     const generation = this.generation;
+    const waitingForTaskUpdate = body === undefined && route.includes('waitMs=');
+    const updateGeneration = this.updateGeneration;
+    let requestRoute = route;
     for (let attempt: number = 0; ; attempt++) {
-      try { return await this.fetchOnce(route, body, authenticated); }
+      try { return await this.fetchOnce(requestRoute, body, authenticated, waitingForTaskUpdate); }
       catch (e) {
         const failure = e as CodexRequestFailure;
         // Only idempotent reads may retry. Never resend a task, upload, pairing,
         // stop or approval after an ambiguous transport failure.
-        if (body !== undefined || route === '/v1/health' || route.includes('waitMs=') || attempt >= 1 ||
+        if (body !== undefined || route === '/v1/health' || attempt >= 1 ||
           !failure.retryable || generation !== this.generation) { throw failure; }
+        if (waitingForTaskUpdate) {
+          if (!(failure instanceof CodexCompressionFailure) || updateGeneration !== this.updateGeneration) { throw failure; }
+          requestRoute = route.replace(/([?&])waitMs=\d+/, '$1waitMs=0');
+          continue;
+        }
         await new Promise<void>((resolve) => { setTimeout(resolve, 600 + Math.floor(Math.random() * 600)); });
         if (generation !== this.generation) { throw new Error('连接已更换'); }
       }
     }
   }
 
-  private transport(): rcp.Session {
-    if (this.session !== null) { return this.session; }
+  private requestConfiguration(transferMs: number): rcp.Configuration {
     const security: rcp.SecurityConfiguration = this.caCertificate ?
       { remoteValidation: { content: this.caCertificate } } : { remoteValidation: 'system' };
-    this.session = rcp.createSession({ requestConfiguration: {
-      transfer: { autoRedirect: false, timeout: { connectMs: 25000, transferMs: 65000 } },
+    return {
+      transfer: { autoRedirect: false, timeout: { connectMs: 25000, transferMs: transferMs } },
       tracing: { verbose: false }, security: security
-    } });
+    };
+  }
+
+  private transport(waitingForTaskUpdate: boolean): rcp.Session {
+    if (waitingForTaskUpdate) {
+      if (this.updateSession === null) {
+        this.updateSession = rcp.createSession({ requestConfiguration: this.requestConfiguration(TASK_UPDATE_TRANSFER_MS) });
+      }
+      return this.updateSession;
+    }
+    if (this.session === null) { this.session = rcp.createSession({ requestConfiguration: this.requestConfiguration(65000) }); }
     return this.session;
   }
 
   private async fetchOnce(route: string, body: CodexCreateBody | CodexTurnBody | CodexUploadBody | CodexApprovalBody | CodexPairBody | CodexForkBody | CodexResumeBody | undefined,
-    authenticated: boolean): Promise<CodexEnvelope> {
+    authenticated: boolean, waitingForTaskUpdate: boolean): Promise<CodexEnvelope> {
     if (!this.origin || !this.token) { throw new Error('请先连接 Codex 服务器'); }
     const generation = this.generation;
-    const session = this.transport();
+    const session = this.transport(waitingForTaskUpdate);
+    const startedAt = Date.now();
     const headers: rcp.RequestHeaders = { 'Content-Type': 'application/json', 'Accept-Encoding': this.compressionEnabled ? 'gzip' : 'identity' };
     if (authenticated) { headers['Authorization'] = 'Bearer ' + this.token; }
     const encoded = body === undefined ? undefined : JSON.stringify(body);
     if (encoded !== undefined) { checkCodexJsonBudget(route, encoded); }
     const request = new rcp.Request(this.origin + route, body === undefined ? 'GET' : 'POST', headers, encoded);
+    const uploading = route === CODEX_UPLOAD_ROUTE && body !== undefined;
+    if (uploading) { request.configuration = this.requestConfiguration(UPLOAD_TRANSFER_MS); }
+    const deadlineMs = uploading ? UPLOAD_DEADLINE_MS : waitingForTaskUpdate ? TASK_UPDATE_DEADLINE_MS : route === '/v1/health' ? 18000 : 70000;
+    const timeoutMessage = uploading ? '上传文件超时，请检查与电脑的连接后重试' : waitingForTaskUpdate ?
+      '会话同步等待超时，正在重试' : '连接电脑超时，请检查网络后重试；已下发的任务请先同步状态';
     let cancelled: boolean = false;
     const close = (): void => {
       if (!cancelled) { cancelled = true; try { session.cancel(request); } catch (e) { } }
     };
-    this.cancellers.push(close);
-    if (route.includes('waitMs=')) { this.updateCancellers.push(close); }
+    if (waitingForTaskUpdate) { this.updateCancellers.push(close); }
+    else { this.cancellers.push(close); }
     const unregister = AppRequests.registerExternalRequest(() => { this.close(); });
     let timer: number = -1;
     let transportFailed: boolean = false;
@@ -119,27 +156,27 @@ export class CodexClient {
       const deadline = new Promise<rcp.Response>((resolve, reject) => {
         timer = setTimeout(() => {
           timedOut = true;
-          reject(new CodexRequestFailure('连接电脑超时，请检查网络后重试；已下发的任务请先同步状态', true, true));
+          reject(new CodexRequestFailure(timeoutMessage, true, true));
           close();
-        },
-          route === '/v1/health' ? 18000 : 70000);
+        }, deadlineMs);
       });
       const response = await Promise.race([session.fetch(request), deadline]);
       if (generation !== this.generation) { throw new Error('连接已更换'); }
       if (cancelled) { throw new Error('请求已取消'); }
-      if (response.statusCode !== 401) { this.onReachability(true, ''); }
+      if (response.statusCode !== 401) { this.onReachability(true, '', startedAt); }
       if (response.statusCode >= 300 && response.statusCode < 400) { throw new Error('服务器重定向已拒绝，请填写最终 HTTPS 地址'); }
       if (response.statusCode === 401) {
-        this.onReachability(false, '连接授权已失效，请重新配对'); throw new Error('令牌无效或已撤销，请在连接设置中更新');
+        this.onReachability(false, '连接授权已失效，请重新配对', Date.now()); throw new Error('令牌无效或已撤销，请在连接设置中更新');
       }
       if (response.statusCode === 429) { throw new Error('请求过于频繁，请稍后重试'); }
+      if (uploading && response.statusCode === 408) { throw new CodexRequestFailure(timeoutMessage); }
       let responseText: string;
       try { responseText = await codexResponseText(response.body, response.toString()); }
       catch (e) {
         const bytes = new Uint8Array(response.body || new ArrayBuffer(0));
         if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
           this.compressionEnabled = false;
-          throw new CodexRequestFailure('压缩响应未能解析，将改用普通传输，请同步会话后重试', true);
+          throw new CodexCompressionFailure('压缩响应未能解析，将改用普通传输，请同步会话后重试');
         }
         throw new Error((e as Error).message);
       }
@@ -152,33 +189,39 @@ export class CodexClient {
     } catch (e) {
       if (generation !== this.generation || cancelled && !timedOut && !(e instanceof CodexRequestFailure)) { throw new Error('请求已取消或连接已更换'); }
       if (timedOut) {
-        transportFailed = true; this.onReachability(false, '连接电脑超时，请检查网络后重试');
-        throw new CodexRequestFailure('连接电脑超时，请检查网络后重试；已下发的任务请先同步状态', true, true);
+        transportFailed = true; this.onReachability(false, timeoutMessage, startedAt);
+        throw new CodexRequestFailure(timeoutMessage, true, true);
       }
       const error = e as Error;
       if (error instanceof CodexRequestFailure) {
-        if (error.transportFailure) { transportFailed = true; this.onReachability(false, error.message); }
+        if (error.transportFailure) { transportFailed = true; this.onReachability(false, error.message, startedAt); }
         throw error;
       }
       const code = (e as BusinessError).code;
       if (code === 1007900061 && this.compressionEnabled) {
         this.compressionEnabled = false;
-        throw new CodexRequestFailure('网络组件未能解压响应，将改用普通传输，请同步会话后重试', true);
+        throw new CodexCompressionFailure('网络组件未能解压响应，将改用普通传输，请同步会话后重试');
       }
       const transient = [1007900005, 1007900006, 1007900007, 1007900018, 1007900028, 1007900035,
         1007900052, 1007900055, 1007900056, 1007900092, 1007900095].includes(code);
       if (transient) {
-        transportFailed = true; this.onReachability(false, '网络暂时中断，正在尝试恢复');
-        throw new CodexRequestFailure(code === 1007900028 ? '连接电脑超时，请稍后重试' : '与电脑的网络连接中断，请稍后重试', true, true);
+        transportFailed = true; this.onReachability(false, '网络暂时中断，正在尝试恢复', startedAt);
+        throw new CodexRequestFailure(code === 1007900028 ? timeoutMessage : '与电脑的网络连接中断，请稍后重试', true, true);
       }
       throw error;
     } finally {
       if (timer >= 0) { clearTimeout(timer); }
       unregister();
-      this.cancellers = this.cancellers.filter((cancel: () => void) => cancel !== close);
-      this.updateCancellers = this.updateCancellers.filter((cancel: () => void) => cancel !== close);
-      if (transportFailed && this.cancellers.length === 0 && this.session === session) {
-        session.close(); this.session = null;
+      if (waitingForTaskUpdate) {
+        this.updateCancellers = this.updateCancellers.filter((cancel: () => void) => cancel !== close);
+        if (transportFailed && this.updateCancellers.length === 0 && this.updateSession === session) {
+          session.close(); this.updateSession = null;
+        }
+      } else {
+        this.cancellers = this.cancellers.filter((cancel: () => void) => cancel !== close);
+        if (transportFailed && this.cancellers.length === 0 && this.session === session) {
+          session.close(); this.session = null;
+        }
       }
     }
   }

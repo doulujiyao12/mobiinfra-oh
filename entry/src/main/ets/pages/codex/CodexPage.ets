@@ -32,6 +32,8 @@ import {
 } from './CodexTypes';
 
 const COMPUTER_HISTORY_REFRESH_MS: number = 30000;
+const TASK_LIST_REFRESH_MS: number = 10000;
+const LIVE_TASK_POLL_GAP_MS: number = 500;
 
 @Component
 export struct CodexPage {
@@ -114,7 +116,9 @@ export struct CodexPage {
   private pollGeneration: number = 0;
   private epoch: number = 0;
   private polling: boolean = false;
-  private pollCount: number = 0;
+  private taskListRefreshEpoch: number = -1;
+  private taskListCheckedAt: number = 0;
+  private submittingTaskId: string = '';
   private retryDelay: number = 2000;
   private pendingRequestId: string = '';
   private pairedConnection: CodexConnection | null = null;
@@ -178,14 +182,15 @@ export struct CodexPage {
     this.pollGeneration++; this.client.cancelTaskUpdates(); this.polling = false;
   }
   private schedulePoll(delay: number = 2000): void {
-    this.clearTimer();
+    if (this.timer >= 0) { clearTimeout(this.timer); this.timer = -1; }
     if (this.active && this.connected && this.screen === CodexScreen.Workspace) {
       this.timer = setTimeout(() => { this.poll(); }, delay);
-      this.statusTimer = setInterval(() => { this.statusNow = Date.now(); }, 1000);
+      if (this.statusTimer < 0) { this.statusTimer = setInterval(() => { this.statusNow = Date.now(); }, 1000); }
     }
   }
   private disconnect(): void {
     this.epoch++; this.clearTimer(); this.cancelTaskPoll(); this.client.close(); this.pendingClient?.close(); this.pendingClient = null;
+    this.submittingTaskId = ''; this.taskListCheckedAt = 0;
     this.connectionOperation = false; this.connected = false; this.connectedOrigin = ''; this.connectingOrigin = ''; this.task = null;
     if (this.healthTimer >= 0) { clearInterval(this.healthTimer); this.healthTimer = -1; }
     this.healthRun++; this.healthChecking = false; this.lastNetworkSuccess = 0; this.lastNetworkFailure = 0;
@@ -245,16 +250,15 @@ export struct CodexPage {
       this.taskUpdatesSupported = info.taskUpdatesSupported === true;
       this.healthSupported = info.healthSupported === true; this.taskDeltaSupported = info.taskDeltaSupported === true;
       candidate.setArtifactChunkBytes(info.artifactChunkBytes || 1048576);
-      candidate.onReachability = (reachable: boolean, message: string): void => {
+      candidate.onReachability = (reachable: boolean, message: string, startedAt: number): void => {
         if (this.client !== candidate || !this.connected) { return; }
-        this.statusNow = Date.now();
-        if (reachable) { this.lastNetworkSuccess = this.statusNow; this.lastNetworkFailure = 0; this.networkText = ''; }
-        else { this.lastNetworkFailure = this.statusNow; this.networkText = message || '连接已中断，正在重试'; }
+        this.recordReachability(reachable, message, startedAt);
       };
       this.workspaceId = this.workspaces[0].id;
       this.mode = 'workspace-write'; this.approvalMode = 'ask';
       this.chooseModel((this.models.find((m: CodexModel) => m.isDefault) ?? this.models[0]).model);
       this.task = null; this.tasks = []; this.attachments = []; this.draft = ''; this.pendingRequestId = '';
+      this.submittingTaskId = ''; this.taskListCheckedAt = 0;
       this.expandedTools = []; this.historyOpen = false; this.taskSettingsOpen = false;
       this.localArtifacts = []; this.artifactError = ''; this.artifactRetryAt = 0;
       this.connected = true; this.connectionOperation = false; this.screen = CodexScreen.Workspace;
@@ -424,7 +428,19 @@ export struct CodexPage {
   private running(): boolean { return this.task !== null && codexTaskBusy(this.task.status); }
   private linkLabel(): string { return codexLinkLabel(this.lastNetworkSuccess, this.lastNetworkFailure, this.statusNow, this.healthChecking); }
   private showDisconnectInStatus(): boolean {
-    return this.linkLabel() !== '已连接' || this.task?.progress?.kind === 'reconnecting';
+    return this.linkLabel() !== '已连接';
+  }
+  private recordReachability(reachable: boolean, message: string, startedAt: number): void {
+    const now = Date.now();
+    if (!reachable && this.lastNetworkSuccess > startedAt && now - this.lastNetworkSuccess < 15000) { return; }
+    this.statusNow = now;
+    if (reachable) {
+      const recovered = this.lastNetworkFailure > 0 || this.retryDelay > 2000;
+      this.lastNetworkSuccess = now; this.lastNetworkFailure = 0; this.networkText = ''; this.retryDelay = 2000;
+      if (recovered && !this.polling) { this.schedulePoll(10); }
+    } else {
+      this.lastNetworkFailure = now; this.networkText = message || '连接已中断，正在重试';
+    }
   }
   private startHeartbeat(): void {
     if (this.healthTimer >= 0) { clearInterval(this.healthTimer); this.healthTimer = -1; }
@@ -436,14 +452,14 @@ export struct CodexPage {
   private async checkConnection(): Promise<void> {
     if (!this.active || !this.connected || this.healthChecking || Date.now() - this.lastNetworkSuccess < 8000 && !this.lastNetworkFailure) { return; }
     const epoch = this.epoch; const run = ++this.healthRun; this.healthChecking = true;
+    const startedAt = Date.now();
     try {
       const result = await this.client.call(this.healthSupported ? '/v1/health' : '/v1/info');
       if (epoch !== this.epoch) { return; }
-      this.lastNetworkSuccess = Date.now(); this.lastNetworkFailure = 0; this.statusNow = Date.now();
+      this.recordReachability(true, '', startedAt);
       this.networkText = result.ready === false ? '电脑连接正常，Codex 后台尚未就绪' : '';
     } catch (e) {
-      if (epoch === this.epoch) {
-        this.lastNetworkFailure = Date.now(); this.statusNow = Date.now();
+      if (epoch === this.epoch && this.lastNetworkFailure >= startedAt) {
         this.networkText = (e as Error).message || '连接已中断，正在重试';
       }
     } finally { if (run === this.healthRun) { this.healthChecking = false; } }
@@ -610,7 +626,20 @@ export struct CodexPage {
   private async refreshTasks(): Promise<void> {
     const epoch = this.epoch;
     const result = await this.client.call('/v1/tasks');
-    if (epoch === this.epoch) { this.tasks = result.tasks ?? []; }
+    if (epoch === this.epoch) { this.tasks = result.tasks ?? []; this.taskListCheckedAt = Date.now(); }
+  }
+  private refreshTasksInBackground(): void {
+    const epoch = this.epoch;
+    if (this.taskListRefreshEpoch === epoch) { return; }
+    this.taskListRefreshEpoch = epoch;
+    this.taskListCheckedAt = Date.now();
+    this.refreshTasks().catch(() => {}).finally(() => {
+      if (this.taskListRefreshEpoch === epoch) { this.taskListRefreshEpoch = -1; }
+    });
+  }
+  private waitsForLiveTask(task: CodexTask | null): boolean {
+    return this.taskUpdatesSupported && task !== null && !task.external &&
+      (task.desktopConnected === true || codexTaskBusy(task.status) || task.id === this.submittingTaskId);
   }
   private applyTask(task: CodexTask): void {
     if (this.task !== null && this.task.id === task.id && task.revision < this.task.revision) { return; }
@@ -625,18 +654,19 @@ export struct CodexPage {
   }
   private async poll(): Promise<void> {
     if (!this.active || !this.connected || this.screen !== CodexScreen.Workspace || this.polling) { return; }
-    if (this.busy) { this.schedulePoll(); return; }
+    const task = this.task;
+    const taskId = task?.id ?? '';
+    if (this.busy && (!taskId || this.submittingTaskId !== taskId)) { this.schedulePoll(); return; }
     this.polling = true;
     const epoch = this.epoch;
     const generation = this.pollGeneration;
-    const taskId = this.task?.id ?? '';
     try {
-      if (taskId && !this.task?.external) {
-        const wait = this.taskUpdatesSupported && this.running() ? '&waitMs=12000' : '';
-        let result = await this.client.call('/v1/tasks/' + taskId + '?revision=' + this.task!.revision + wait +
+      if (task !== null && taskId && !task.external) {
+        const wait = this.waitsForLiveTask(task) ? '&waitMs=12000' : '';
+        let result = await this.client.call('/v1/tasks/' + taskId + '?revision=' + task.revision + wait +
           (this.taskDeltaSupported ? '&sync=delta' : ''));
         if (epoch !== this.epoch || generation !== this.pollGeneration) { return; }
-        if (!this.busy && this.task?.id === taskId) {
+        if (this.task?.id === taskId && (!this.busy || this.submittingTaskId === taskId)) {
           let next: CodexTask | undefined;
           try { next = mergeCodexTask(this.task, result); }
           catch (e) {
@@ -647,7 +677,7 @@ export struct CodexPage {
           if (next !== undefined) { this.applyTask(next); }
         }
       }
-      if (++this.pollCount % 5 === 0 || !taskId) { await this.refreshTasks(); }
+      if (!taskId || Date.now() - this.taskListCheckedAt >= TASK_LIST_REFRESH_MS) { this.refreshTasksInBackground(); }
       if (epoch !== this.epoch || generation !== this.pollGeneration) { return; }
       if (this.task !== null && epoch === this.epoch) { this.receiveArtifacts(this.task); }
       if (epoch === this.epoch) { this.networkText = ''; this.retryDelay = 2000; }
@@ -659,7 +689,9 @@ export struct CodexPage {
     } finally {
       if (generation === this.pollGeneration) {
         this.polling = false;
-        if (epoch === this.epoch) { this.schedulePoll(this.taskUpdatesSupported && this.running() && !this.networkText ? 750 : this.retryDelay); }
+        if (epoch === this.epoch) {
+          this.schedulePoll(this.waitsForLiveTask(this.task) && !this.networkText ? LIVE_TASK_POLL_GAP_MS : this.retryDelay);
+        }
       }
     }
   }
@@ -702,6 +734,7 @@ export struct CodexPage {
     if (this.busy || this.running() || (!this.draft.trim() && !this.attachments.length)) { return; }
     this.busy = true; this.errorText = '';
     const epoch = this.epoch;
+    let submittedRequestId: string = '';
     try {
       if (!this.permissionSettingsSupported && this.approvalMode !== 'ask') { throw new Error('请升级电脑端至 1.1.5 或更高版本，以修改审批方式'); }
       if (this.task === null) {
@@ -736,14 +769,20 @@ export struct CodexPage {
         model: this.modelId, effort: this.effort, mode: this.mode, approvalMode: this.approvalMode,
         serviceTier: this.serviceTier || undefined
       };
-      const result = await this.client.call('/v1/tasks/' + this.task.id + '/turns', turn);
+      submittedRequestId = turn.requestId;
+      this.submittingTaskId = this.task.id;
+      // A desktop turn can already be streaming while the submission response is in flight.
+      this.schedulePoll(10);
+      const result = await this.client.call('/v1/tasks/' + this.submittingTaskId + '/turns', turn);
       if (epoch === this.epoch && result.task !== undefined) {
         this.applyTask(result.task);
-        await this.refreshTasks();
+        this.refreshTasksInBackground();
       }
     } catch (e) {
-      if (epoch === this.epoch) { this.errorText = ((e as Error).message || '发送失败') + '。请刷新任务状态确认；重试会沿用同一请求编号。'; }
-    } finally { if (epoch === this.epoch) { this.busy = false; this.schedulePoll(500); } }
+      if (epoch === this.epoch && (!submittedRequestId || this.pendingRequestId === submittedRequestId)) {
+        this.errorText = ((e as Error).message || '发送失败') + '。请刷新任务状态确认；重试会沿用同一请求编号。';
+      }
+    } finally { if (epoch === this.epoch) { this.submittingTaskId = ''; this.busy = false; this.schedulePoll(LIVE_TASK_POLL_GAP_MS); } }
   }
   private async stop(): Promise<void> {
     if (this.task === null || this.busy) { return; }
