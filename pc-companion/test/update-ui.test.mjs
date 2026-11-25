@@ -13,7 +13,7 @@ test('desktop UI renders updates safely and only confirms a ready connection', a
   const initial = { phase: 'idle', currentVersion: '1.1.13', autoCheck: true, channel: 'stable', progress: 0, downloadedBytes: 0, totalBytes: 0,
     platform: 'win32', canInstall: true, hasUpdate: false, latestVersion: '', notes: '', error: '' };
   const context = { document: { getElementById: id => { assert.ok(nodes.has(id), id); return nodes.get(id); }, querySelectorAll: () => [] },
-    window: { companion: { call: method => method === 'start' ? Promise.resolve({ state: 'error', runtimeError: '本机 Codex 已退出' }) :
+    window: { addEventListener() {}, companion: { call: method => method === 'start' ? Promise.resolve({ state: 'error', runtimeError: '本机 Codex 已退出' }) :
       new Promise(() => {}), onUpdate: callback => { render = callback; }, updates: async () => initial } },
     setInterval() {}, console };
   vm.runInNewContext(source, context); await Promise.resolve();

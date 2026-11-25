@@ -14,7 +14,8 @@ function fixture(t) {
   const layout = { base, launcher: path.join(base, 'launcher'), node: path.join(base, 'node'),
     cli: path.join(base, 'cli.mjs') };
   for (const name of [layout.launcher, layout.node, layout.cli]) writeFileSync(name, 'test fixture');
-  const current = { version: VERSION, launcher: layout.launcher, state: 'stopped', codexExecutable: '', hasCustomCodex: false };
+  const current = { version: VERSION, launcher: layout.launcher, state: 'stopped', codexExecutable: '', hasCustomCodex: false,
+    sharedDesktopDiscovery: process.platform === 'win32' };
   const previous = { version: '1.1.0', launcher: path.join(directory, 'old-C-drive', 'launcher'), state: 'error' };
   let status = previous; const calls = []; let launches = 0; let time = 0;
   const dependencies = { locked: () => false, now: () => time, pause: async ms => { time += ms; },
@@ -45,7 +46,7 @@ test('same-version services at another installation path are also replaced', asy
   const f = fixture(t); f.setStatus({ ...f.previous, version: VERSION });
   await ensureDaemon(f.directory, f.layout, f.dependencies); assert.equal(f.launches(), 1);
 });
-for (const field of ['codexExecutable', 'hasCustomCodex']) {
+for (const field of ['codexExecutable', 'hasCustomCodex', ...(process.platform === 'win32' ? ['sharedDesktopDiscovery'] : [])]) {
   test(`the same-version daemon missing ${field} is upgraded`, async t => {
     const f = fixture(t);
     const previous = { ...f.current };

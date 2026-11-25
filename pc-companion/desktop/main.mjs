@@ -12,6 +12,8 @@ import { writePrivate } from '../host/settings.mjs';
 import { ReleaseUpdater, quiesceForUpdate, startUpdateJob } from '../host/updates.mjs';
 import { desktopLayout } from './runtime-layout.mjs';
 import { discoverCodexProjects } from '../host/projects.mjs';
+import { createRequire } from 'node:module';
+import { probeSharing, switchDesktop } from './shared-launch.mjs';
 
 const directory = dataDirectory();
 const layout = desktopLayout({ resourcesPath: process.resourcesPath, appPath: app.getAppPath(), isPackaged: app.isPackaged });
@@ -39,6 +41,34 @@ function safeAuthUrl(value) {
   return url.href;
 }
 function showWindow() { if (window) { window.show(); window.focus(); } }
+let switchingDesktop = false;
+ipcMain.handle('companion:desktopSharing', async (event, action) => {
+  trusted(event);
+  if (action === 'status') {
+    const { state, text } = await probeSharing(directory);
+    return { state, text };
+  }
+  if (action !== 'switch' || switchingDesktop || installingUpdate) throw new Error('当前无法切换桌面连接方式。');
+  switchingDesktop = true;
+  try {
+    return await switchDesktop({ directory, layout,
+      openStream: createRequire(import.meta.url)('original-fs').createReadStream,
+      consent: async state => (await dialog.showMessageBox(window, {
+        type:'question', title:'桌面会话共享', message: state === 'off' ? '以共享方式打开 Codex？' : '重启 Codex 并共享会话？',
+        detail:'请先保存草稿并等待桌面任务结束。此次启动将连接本机共享后台，已配对手机可访问已授权项目。下次从原快捷方式打开时使用原启动方式。',
+        buttons:['取消', state === 'off' ? '打开共享桌面' : '重启并共享'], defaultId:0, cancelId:0, noLink:true
+      })).response === 1,
+      idle: async () => {
+        trusted(event);
+        await ensureDaemon(directory, layout);
+        const status = await controlRequest(directory,'status');
+        if (status.tasks.some(task => ['starting','running','waitingApproval','stopping','releasing'].includes(task.status))) {
+          throw new Error('连接器有任务正在执行，请待任务结束后再切换。');
+        }
+      }
+    });
+  } finally { switchingDesktop = false; }
+});
 async function createWindow() {
   window = new BrowserWindow({ width: 1120, height: 800, minWidth: 900, minHeight: 650,
     title: 'ClawMate Codex', backgroundColor: '#f5f6fb', autoHideMenuBar: true,

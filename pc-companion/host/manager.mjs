@@ -10,6 +10,8 @@ import { ensureCertificates, lanAddresses } from './certificates.mjs';
 import { VERSION } from './paths.mjs';
 import { TailscaleDiscovery } from './tailscale.mjs';
 import { findCodexRuntime, resolveCodexSelection } from './codex-runtime.mjs';
+import { discoverDaemons, validatedDaemonSocket } from '../../bridge/codex/daemon-discovery.mjs';
+import { sharedDesktopState } from './shared-desktop.mjs';
 import QRCode from 'qrcode';
 
 export class CompanionManager extends EventEmitter {
@@ -94,7 +96,7 @@ export class CompanionManager extends EventEmitter {
       (config.host === '127.0.0.1' ? ['127.0.0.1'] : addresses).map(ip => `https://${ip}:${config.port}`);
     return { version: VERSION, state: this.state, listening: this.server?.listening === true, lastError: this.lastError, account: this.account,
       runtimeError: this.runtimeError, codexExecutable: this.rpc?.closed ? '' : this.rpc?.command || '',
-      hasCustomCodex: !!this.settings.value.codexExecutable,
+      hasCustomCodex: !!this.settings.value.codexExecutable, sharedDesktopDiscovery: process.platform === 'win32',
       login: this.lastLogin || null, config, origins, devices: this.pairing.list(),
       fingerprint: this.certificates?.fingerprint || '', tasks: this.core?.list() || [],
       dataDirectory: this.settings.directory, launcher: this.layout.launcher,
@@ -166,7 +168,12 @@ export class CompanionManager extends EventEmitter {
         { cert: config.certFile, key: config.keyFile, caCertificate: '', fingerprint: '' };
       const bridgeConfig = { ...config, stateDir: path.join(this.settings.directory, 'tasks'), tls: this.certificates,
         desktopCoordination: true };
-      this.core = new BridgeCore(bridgeConfig, this.rpc);
+      this.core = new BridgeCore(bridgeConfig, this.rpc, { discoverDaemons: async () => {
+        const sockets = await discoverDaemons(this.rpc.environment);
+        const shared = process.platform === 'win32' && sharedDesktopState(this.settings.directory);
+        if (shared && await validatedDaemonSocket(shared.socket)) sockets.push(shared.socket);
+        return sockets;
+      } });
       await this.core.initialize({ initializeRpc: false });
       const server = createBridgeServer(bridgeConfig, this.core, { pairing: this.pairing });
       this.server = server;

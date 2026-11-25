@@ -45,6 +45,7 @@ mkdirSync(path.join(app, 'desktop'), { recursive: true });
 await build({ entryPoints: [path.join(root, 'desktop', 'main.mjs')], outfile: path.join(app, 'desktop', 'main.mjs'),
   bundle: true, platform: 'node', format: 'esm', define, external: ['electron', 'bufferutil', 'utf-8-validate'], target: 'node22', banner: { js: banner } });
 cpSync(path.join(root, 'desktop', 'preload.cjs'), path.join(app, 'desktop', 'preload.cjs'));
+cpSync(path.join(root, 'desktop', 'quit-codex.ps1'), path.join(app, 'desktop', 'quit-codex.ps1'));
 cpSync(path.join(root, 'desktop', 'ui'), path.join(app, 'desktop', 'ui'), { recursive: true });
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 writeFileSync(path.join(app, 'package.json'), JSON.stringify({ name: pkg.name, productName: pkg.productName, version: pkg.version,

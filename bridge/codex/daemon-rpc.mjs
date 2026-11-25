@@ -20,17 +20,21 @@ function connectThroughCodex(socketPath, { command, environment }) {
   return stream;
 }
 
+export function openDaemonWebSocket(socketPath, proxy) {
+  return new WebSocket('ws://localhost/', {
+    createConnection: () => proxy ? connectThroughCodex(socketPath, proxy) : net.connect({ path: socketPath }),
+    handshakeTimeout: 5000, perMessageDeflate: false, maxPayload: 16 * 1024 * 1024,
+    followRedirects: false
+  });
+}
+
 // A client of an existing App Server. This transport never starts, updates or
 // terminates Codex; closing ClawMate only closes its own WebSocket connection.
 export class DaemonRpc extends EventEmitter {
   pending = new Map(); sequence = 0; closed = false;
   constructor(socketPath, { timeout = 15000, proxy } = {}) {
     super(); this.timeout = timeout;
-    this.socket = new WebSocket('ws://localhost/', {
-      createConnection: () => proxy ? connectThroughCodex(socketPath, proxy) : net.connect({ path: socketPath }),
-      handshakeTimeout: 5000, perMessageDeflate: false, maxPayload: 16 * 1024 * 1024,
-      followRedirects: false
-    });
+    this.socket = openDaemonWebSocket(socketPath, proxy);
     this.opened = new Promise((resolve, reject) => {
       this.socket.once('open', resolve);
       this.socket.once('error', () => reject(new Error('无法连接本机 Codex daemon')));

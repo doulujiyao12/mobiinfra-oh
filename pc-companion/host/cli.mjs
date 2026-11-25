@@ -3,6 +3,7 @@ import { stdin, stdout } from 'node:process';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { CompanionManager } from './manager.mjs';
+import { sharedDesktopWorker } from './shared-desktop.mjs';
 import { Settings, writePrivate } from './settings.mjs';
 import { dataDirectory, installLayout, VERSION } from './paths.mjs';
 import { controlRequest, serveControl, acquireDaemonLock } from './control.mjs';
@@ -70,6 +71,7 @@ async function main() {
   if (['help', '--help', '-h'].includes(command)) return console.log(HELP);
   if (command === '--version') return console.log(VERSION);
   const directory = dataDirectory(); const layout = installLayout();
+  if (command === 'desktop-share-worker') return sharedDesktopWorker(directory, args[0]);
   if (['check-update', 'update'].includes(command)) {
     const updater = new ReleaseUpdater(directory);
     if (args.includes('--preview')) updater.configure({ autoCheck: updater.preferences.autoCheck, channel: 'preview' });

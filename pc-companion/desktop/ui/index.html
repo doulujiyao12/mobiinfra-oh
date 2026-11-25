@@ -19,6 +19,8 @@
 <article class="update-preferences"><label class="checkbox"><input id="autoCheckUpdates" type="checkbox" checked>自动检查更新</label><label class="checkbox"><input id="previewUpdates" type="checkbox">接收测试版更新</label><p class="muted">正式版默认不包含预发布版本。更新会保留配对、项目目录和任务记录；任务执行中暂缓安装。</p></article>
 </section>
 <section id="setup" class="view">
+<article id="sharingCard" hidden><div class="card-head"><div><h2>桌面会话共享</h2><p id="sharingState" role="status"></p></div></div>
+<div class="actions"><button id="switchSharing" class="primary" hidden>重启并共享</button><button id="checkSharing">重新检查</button></div></article>
 <div class="steps"><span>01 登录 Codex</span><span>02 选择项目</span><span>03 连接手机</span></div>
 <article><div class="card-head"><div><h2>Codex 账号</h2><p>使用官方登录，凭据保存在这台电脑。</p></div><span id="accountBadge" class="badge">尚未登录</span></div>
 <p id="accountDescription">使用电脑上已安装的 Codex。</p><div class="actions"><button class="primary" id="login">使用浏览器登录</button><button id="deviceLogin">使用设备验证码</button><button id="logout">退出账号</button><button id="chooseCodex">选择 Codex 程序</button><button id="autoFindCodex" hidden>恢复自动查找</button></div><div id="loginCode" class="callout" hidden></div></article>

@@ -1,5 +1,29 @@
 const $ = id => document.getElementById(id);
 let snapshot; let projects = []; let dirty = false; let working = false;
+let checkingSharing = false;
+async function checkSharing() {
+  if (checkingSharing || !window.companion.desktopSharing) return;
+  checkingSharing = true;
+  try {
+    const { state, text } = await window.companion.desktopSharing('status');
+    $('sharingCard').hidden = state === 'notApplicable';
+    $('sharingState').textContent = text;
+    $('switchSharing').hidden = !['off','private'].includes(state);
+    $('switchSharing').textContent = state === 'off' ? '以共享方式打开' : '重启并共享';
+  } catch {
+    $('sharingCard').hidden = false; $('switchSharing').hidden = true;
+    $('sharingState').textContent = '暂时无法识别桌面状态。';
+  } finally { checkingSharing = false; }
+}
+$('checkSharing').addEventListener('click', checkSharing);
+$('switchSharing').addEventListener('click', () => act(async () => {
+  $('switchSharing').disabled = true;
+  $('sharingState').textContent = '正在检查桌面并准备共享连接…';
+  try { notice(await window.companion.desktopSharing('switch')); }
+  finally { $('switchSharing').disabled = false; await checkSharing(); }
+}));
+checkSharing();
+window.addEventListener('focus', () => { if (!working) checkSharing(); });
 const titles = { setup: '让手机连接你的开发电脑', pairing: '与自己的手机安全配对', devices: '设备和任务，一眼掌握', terminal: '你熟悉的终端，同样可用', updates: '保持最新，继续协作' };
 function notice(message, error = false) { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', error); }
 function errorText(error) { return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
