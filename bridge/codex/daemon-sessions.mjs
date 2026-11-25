@@ -11,7 +11,8 @@ export class DaemonSessions {
   constructor(core, dependencies = {}) {
     this.core = core;
     this.discover = dependencies.discoverDaemons || (() => discoverDaemons(core.rpc.environment));
-    this.connect = dependencies.daemonRpc || (socket => new DaemonRpc(socket));
+    this.connect = dependencies.daemonRpc || (socket => new DaemonRpc(socket, process.platform === 'win32' ?
+      { proxy: { command: core.rpc.command, environment: core.rpc.environment } } : {}));
   }
   has(id) { return this.entries.has(id); }
   rpc(id) {

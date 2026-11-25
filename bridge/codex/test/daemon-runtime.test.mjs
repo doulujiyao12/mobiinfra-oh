@@ -15,11 +15,12 @@ import { discoverDaemons, secureDaemonSocket } from '../daemon-discovery.mjs';
 
 const until = async predicate => { const deadline = Date.now() + 10000; while (!predicate() && Date.now() < deadline) await new Promise(r => setTimeout(r, 20)); assert.ok(predicate(), 'condition reached before deadline'); };
 test('native Unix daemon shares PC/phone turns, stop, permissions and safe disconnect', {
-  skip: process.platform !== 'linux' || !process.env.CLAWMATE_TEST_DAEMON, timeout: 60000
+  skip: !process.env.CLAWMATE_TEST_DAEMON, timeout: 60000
 }, async t => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cm-native-'));
   const home = path.join(directory, 'home'), cwd = path.join(directory, 'project'); mkdirSync(home); mkdirSync(cwd);
   let hold = false; let requests = 0; let approvalFixture = false; let approvalIssued = false; let finalReply = '';
+  let holdAfterDelta = false; let releaseOutput;
   const server = http.createServer((request, response) => {
     requests++; const chunks = []; request.on('data', bytes => chunks.push(bytes));
     request.on('end', () => {
@@ -38,13 +39,17 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
         }
         const output = { id: 'resp_fixture_' + requests, status: 'completed', output: [item], usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } };
         response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        for (const event of [
-          { type: 'response.created', response: { ...output, status: 'in_progress', output: [] } },
-          { type: 'response.output_item.added', output_index: 0, item },
-          { type: 'response.output_item.done', output_index: 0, item },
-          { type: 'response.completed', response: output }
-        ]) response.write('event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n');
-        response.end(); return;
+        const send = event => response.write('event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n');
+        send({ type: 'response.created', response: { ...output, status: 'in_progress', output: [] } });
+        send({ type: 'response.output_item.added', output_index: 0, item: finalReply ? { ...item, content: [] } : item });
+        if (finalReply) send({ type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: item.id, delta: finalReply });
+        const finish = () => {
+          send({ type: 'response.output_item.done', output_index: 0, item });
+          send({ type: 'response.completed', response: output });
+          response.end();
+        };
+        if (holdAfterDelta) releaseOutput = finish; else finish();
+        return;
       }
       response.writeHead(400, { 'Content-Type': 'application/json' });
       response.end('{"error":{"message":"Isolated test: no real inference","type":"invalid_request_error"}}');
@@ -54,7 +59,8 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
   writeFileSync(path.join(home, 'config.toml'), 'model="test-model"\nmodel_provider="fixture"\n' +
     '[model_providers.fixture]\nname="Fixture"\nbase_url="http://127.0.0.1:' + server.address().port + '/v1"\nwire_api="responses"\nrequest_max_retries=0\nstream_max_retries=0\n');
   const environment = { ...process.env, CODEX_HOME: home, OPENAI_API_KEY: '', CHATGPT_API_KEY: '' };
-  const socket = path.join(directory, 'daemon.sock');
+  const socket = path.join(home, 'app-server-control', 'app-server-control.sock');
+  if (process.platform !== 'win32') mkdirSync(path.dirname(socket), { mode: 0o700 });
   const daemon = spawn(process.env.CLAWMATE_TEST_DAEMON, ['app-server', '--listen', 'unix://' + socket], {
     cwd, env: environment, stdio: ['ignore', 'ignore', 'pipe']
   }); daemon.stderr.resume();
@@ -67,16 +73,18 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
     rmSync(directory, { recursive: true, force: true });
   });
   await until(() => existsSync(socket));
-  const canonicalSocket = realpathSync(socket); // Native Codex creates a symlink to its private, hashed listener.
-  assert.equal(secureDaemonSocket(canonicalSocket), true);
-  assert.ok(discoverDaemons(environment).includes(canonicalSocket), 'discovers the native process with matching private socket and CODEX_HOME');
-  const pc = new DaemonRpc(socket); clients.push(pc); await pc.initialize();
+  const proxy = { command: process.env.CLAWMATE_TEST_DAEMON, environment };
+  const canonicalSocket = process.platform === 'win32' ? socket : realpathSync(socket);
+  if (process.platform !== 'win32') assert.equal(secureDaemonSocket(canonicalSocket), true);
+  assert.ok((await discoverDaemons(environment)).includes(canonicalSocket), 'discovers the managed socket in the same CODEX_HOME');
+  const pc = new DaemonRpc(canonicalSocket, { proxy }); clients.push(pc); await pc.initialize();
   const { thread } = await pc.request('thread/start', { cwd, model: 'test-model', sandbox: 'read-only', approvalPolicy: 'on-request' });
-  let completed = 0; const pcRequests = []; const resolved = [];
+  let completed = 0; const pcRequests = []; const resolved = []; const pcDeltas = [];
   pc.on('message', message => {
     if (message.method === 'turn/completed' && message.params.threadId === thread.id) completed++;
     if (message.method === 'item/commandExecution/requestApproval') pcRequests.push(message);
     if (message.method === 'serverRequest/resolved') resolved.push(message.params.requestId);
+    if (message.method === 'item/agentMessage/delta' && message.params.threadId === thread.id) pcDeltas.push(message.params);
   });
   await pc.request('turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'PC original fixture' }] });
   await until(() => completed === 1);
@@ -129,9 +137,21 @@ test('native Unix daemon shares PC/phone turns, stop, permissions and safe disco
   await until(() => resolved.includes(pcRequests[1].id) && completed === 6);
   const outputPath = path.join(cwd, 'delivered.pdf'); writeFileSync(outputPath, '%PDF-1.7\nisolated fixture');
   finalReply = `[delivered.pdf](${outputPath})`;
+  holdAfterDelta = true;
   await core.start(task.id, { ...body, requestId: randomUUID(), text: 'Deliver isolated final file' });
+  await until(() => pcDeltas.some(delta => delta.turnId === task.turnId && delta.delta === finalReply));
+  assert.equal(task.status, 'running'); assert.equal(completed, 6);
+  releaseOutput();
   await until(() => task.status === 'completed' && completed === 7);
   assert.equal(task.artifacts.length, 1); assert.equal(task.artifacts[0].name, 'delivered.pdf');
+  finalReply = 'live output from the PC in the original session';
+  const { turn } = await pc.request('turn/start', { threadId: task.id, input: [{ type: 'text', text: 'PC stream fixture' }] });
+  await until(() => task.items.some(item => item.turnId === turn.id && item.text === finalReply));
+  assert.equal(task.status, 'running'); assert.equal(completed, 7);
+  releaseOutput();
+  await until(() => task.status === 'completed' && completed === 8);
+  assert.equal(task.executionSource, 'computer'); assert.equal(task.turnId, turn.id);
+  assert.ok(task.items.some(item => item.turnId === turn.id && item.text === finalReply));
   assert.equal(daemon.exitCode, null, 'disconnect did not kill Codex');
   console.log(JSON.stringify({ nativeSharedDaemon: 'passed', sameThread: true, twoWayTurns: true, explicitPermissions: true, stop: true, safeDisconnect: true, reconnect: true, nativeApprovalReplayAndBothClients: true, finalDeliverable: true }));
 });

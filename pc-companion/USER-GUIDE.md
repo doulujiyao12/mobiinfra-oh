@@ -2,7 +2,9 @@
 
 ClawMate 桥接使用电脑上已安装的 Codex 桌面版或 CLI。桥接自带 Node.js。更新本机 Codex 后，完全退出并重新打开桥接应用，或重启终端桥接服务，下次连接会使用当前安装的版本。
 
-Windows 会优先查找已安装的官方桌面版，macOS 会在「应用程序」中查找 Codex，Linux 优先使用 PATH 中的 CLI。自定义安装时，在桌面端的「Codex 账号」中点击「选择 Codex 程序」，选择已安装的可执行文件，macOS 也可以选 `Codex.app`。选择会保存在本机，文件移走后会重新查找。点击「恢复自动查找」可清除保存的位置。命令行环境也可以通过 `CLAWMATE_CODEX_EXECUTABLE` 指定可执行文件的绝对路径。
+Windows 会优先按 `OpenAI.Codex` 包标识查找官方桌面版。macOS 优先查找「应用程序」中包含 Codex 的新版 `ChatGPT.app`，也支持旧版 `Codex.app` 和独立 CLI。Linux 优先使用 PATH 中的 CLI。
+
+自定义安装时，在「Codex 账号」中点击「选择 Codex 程序」。macOS 可以直接选择包含 Codex 的 `ChatGPT.app` 或 `Codex.app`，也可以选择可执行文件。选择会保存在本机，文件移走后会重新查找。点击「恢复自动查找」可清除保存的位置。命令行环境也可以通过 `CLAWMATE_CODEX_EXECUTABLE` 指定可执行文件的绝对路径。
 
 [下载安装包与分平台步骤](../docs/codex/README.md) · [Windows](../docs/codex/windows.md) · [macOS](../docs/codex/macos.md) · [Linux CLI](../docs/codex/linux.md) · [Tailscale 组网教程](../docs/codex/tailscale.md)
 
@@ -137,7 +139,9 @@ clawmate-codex check-update --preview
 
 1.1.8 修复 1.1.7 手机消息缺少桌面渲染必需的 `text_elements` 数组，导致后台能回答而官方窗口显示“出了点问题”的错误；同时将相邻文本用换行分隔。若已触发，先暂停 1.1.7 手机下发，待当前执行结束后退出并重开官方 Codex，让它从原生持久历史重载，再使用修复版连接服务。修复不改官方安装文件或历史记录。
 
-Linux 终端版 **1.1.10** 起也支持原生 Codex App Server daemon：保持服务器上的原 Codex 终端和 ClawMate 服务同时运行，在手机的“电脑会话”重新打开原条目即可。程序自动寻找同一用户、网络命名空间和 `CODEX_HOME` 下持有该会话的私有 Unix WebSocket，不需要填写后台端口、退出终端或重新配对。已在 **0.163.0** 上验证双向消息、审批、断线重连和停止。关闭 ClawMate 只断开它自己的连接；原后台继续管理任务。暂不接管其他用户、其他容器/网络命名空间、`--no-daemon` 独占 CLI 或任意 TCP App Server。登录、MCP 授权等特殊确认继续在电脑端处理。
+Windows、macOS 和 Linux 均可尝试连接本机已运行的 Codex App Server daemon。电脑端需要已通过这个后台打开原会话。保持电脑和连接服务在线，在手机的“电脑会话”重新打开原条目即可。程序寻找同一系统用户、同一 `CODEX_HOME` 下的默认控制 socket，Linux 也会寻找同一网络命名空间内兼容的自定义 Unix socket。Windows 的这一途径需要所选 Codex 支持 `app-server proxy`。退出 ClawMate 时，Codex 后台和正在执行的原会话继续运行。登录和 MCP 授权等特殊确认在电脑端处理。
+
+可在电脑终端运行 `codex app-server daemon version` 查看当前是否有托管后台。托管后台存在时，电脑端客户端仍需在其中打开原会话。在 macOS 上，支持托管后台模式的桌面版本可以在启动时读取 `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`。请先完成当前任务，再重新启动桌面端并打开原会话。桌面版能否连接取决于该版本对托管后台和协调通道的支持。
 
 没有兼容的在线会话持有者时，仍走 1.1.4 的原 session 接力：每轮独立恢复完整上下文，完成后释放原生写锁。若旧客户端提示“电脑仍持有此会话”，须先由原客户端释放；仅停止生成或切换窗口不一定释放，必要时退出旧客户端后重试。手机新建的独立会话和此前生成的副本保留原执行方式，不会自动合并为官方桌面会话。
 

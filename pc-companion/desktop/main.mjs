@@ -109,15 +109,12 @@ ipcMain.handle('companion:codexRuntime', async (event, action) => {
     const windows = process.platform === 'win32';
     const mac = process.platform === 'darwin';
     const selection = await dialog.showOpenDialog(window, {
-      title: mac ? '选择 Codex.app 或 Codex CLI' : '选择 Codex 可执行文件',
+      title: mac ? '选择 ChatGPT.app、Codex.app 或 Codex CLI' : '选择 Codex 可执行文件',
       properties: windows ? ['openFile'] : ['openFile', 'showHiddenFiles'],
       ...(windows ? { filters: [{ name: 'Codex 可执行文件', extensions: ['exe'] }] } : {})
     });
     if (selection.canceled || !selection.filePaths.length) return null;
     filename = selection.filePaths[0];
-    if (mac && path.extname(filename).toLowerCase() === '.app') {
-      filename = path.join(filename, 'Contents', 'Resources', 'codex');
-    }
   }
   await ensureDaemon(directory, layout);
   if (lifecycle.closing) throw new Error('应用正在关闭，正在停止后台服务。');

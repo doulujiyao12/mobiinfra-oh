@@ -9,7 +9,7 @@ import { Settings, writePrivate } from './settings.mjs';
 import { ensureCertificates, lanAddresses } from './certificates.mjs';
 import { VERSION } from './paths.mjs';
 import { TailscaleDiscovery } from './tailscale.mjs';
-import { findCodexRuntime, validateCodexSelection } from './codex-runtime.mjs';
+import { findCodexRuntime, resolveCodexSelection } from './codex-runtime.mjs';
 import QRCode from 'qrcode';
 
 export class CompanionManager extends EventEmitter {
@@ -108,8 +108,8 @@ export class CompanionManager extends EventEmitter {
     if (this.server || ['running', 'starting'].includes(this.state)) throw new Error('请先停止手机连接服务，再切换 Codex。');
     if (this.runtimeSetup) throw new Error('正在连接 Codex，请稍候。');
     if (typeof filename !== 'string') throw new Error('无效的 Codex 程序路径。');
-    if (filename) validateCodexSelection(filename, this.layout.base);
-    this.settings.setCodexExecutable(filename);
+    const executable = filename ? resolveCodexSelection(filename, this.layout.base) : '';
+    this.settings.setCodexExecutable(executable);
 
     const previous = this.rpc;
     this.rpc = null;

@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -11,18 +12,67 @@ export function secureDaemonSocket(socketPath, uid = process.getuid?.()) {
   } catch { return false; }
 }
 
-// Read only our UID/namespace/CODEX_HOME. Never expose process environments or
-// connect arbitrary network listeners. Linux daemon sockets have private parents.
-export function discoverDaemons(environment = process.env) {
-  if (process.platform !== 'linux') return [];
-  const uid = process.getuid(); const results = new Set();
-  let home, namespace, unix;
+const privateWindowsDirectory = `
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:CLAWMATE_CODEX_SOCKET_DIRECTORY
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Equals($sid) -and
+    $acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and
+    $rules[0].IdentityReference.Equals($sid) -and $rules[0].AccessControlType -eq 'Allow' -and
+    $rules[0].FileSystemRights -eq 'FullControl' -and
+    $rules[0].InheritanceFlags -eq $inheritance -and
+    $rules[0].PropagationFlags -eq 'None') { exit 0 }
+exit 1
+`;
+
+function checkWindowsDirectory(directory) {
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return new Promise(resolve => execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', privateWindowsDirectory], {
+    env: { ...process.env, CLAWMATE_CODEX_SOCKET_DIRECTORY: directory }, windowsHide: true, timeout: 3000
+  }, error => resolve(!error)));
+}
+
+async function managedDaemonSocket(home) {
+  const directory = path.join(home, 'app-server-control');
+  const socket = path.join(directory, 'app-server-control.sock');
   try {
-    home = realpathSync(environment.CODEX_HOME || path.join(os.homedir(), '.codex'));
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !existsSync(socket)) return null;
+    // The Codex proxy relays bytes but does not validate the rendezvous ACL.
+    if (process.platform === 'win32') {
+      return !lstatSync(socket).isSymbolicLink() && await checkWindowsDirectory(directory) ? socket : null;
+    }
+    if (stat.uid !== process.getuid() || (stat.mode & 0o077)) return null;
+    // Codex can use a short, private physical socket and expose its default
+    // control path as a symlink. Validate both ends before dialing it.
+    const physical = realpathSync(socket);
+    return secureDaemonSocket(physical) ? physical : null;
+  } catch { return null; }
+}
+
+// Discover the managed per-user socket on each OS. Linux additionally searches
+// custom local daemons in the same UID, network namespace and CODEX_HOME.
+export async function discoverDaemons(environment = process.env) {
+  let home;
+  try { home = realpathSync(environment.CODEX_HOME || path.join(os.homedir(), '.codex')); }
+  catch { return []; }
+  const managed = await managedDaemonSocket(home);
+  const results = new Set(managed ? [managed] : []);
+  if (process.platform !== 'linux') return [...results];
+  return discoverLinuxDaemons(home, results);
+}
+
+function discoverLinuxDaemons(home, results) {
+  const uid = process.getuid();
+  let namespace, unix, entries;
+  try {
     namespace = readlinkSync('/proc/self/ns/net');
     unix = readFileSync('/proc/net/unix', 'utf8').split('\n').map(line => line.trim().split(/\s+/));
-  } catch { return []; }
-  for (const pid of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
+    entries = readdirSync('/proc');
+  } catch { return [...results]; }
+  for (const pid of entries.filter(name => /^\d+$/.test(name))) {
     try {
       const proc = '/proc/' + pid;
       if (lstatSync(proc).uid !== uid || readlinkSync(proc + '/ns/net') !== namespace) continue;
@@ -45,5 +95,5 @@ export function discoverDaemons(environment = process.env) {
       }
     } catch { /* A process may exit or be hidden while discovery is running. */ }
   }
-  return [...results].sort().slice(0, 8);
+  return [...results].slice(0, 8);
 }

@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findCodexRuntime } from '../host/codex-runtime.mjs';
+import { findCodexRuntime, resolveCodexSelection } from '../host/codex-runtime.mjs';
 import { CompanionManager } from '../host/manager.mjs';
 
 test('Windows prefers the installed desktop and discovers its new location after an update', () => {
@@ -54,6 +54,46 @@ test('macOS bundle discovery, executable override and rejection of legacy bundle
   assert.throws(() => findCodexRuntime({ ...config, env: { PATH: '/tmp/clawmate/runtime/bin:.' } }), { code: 'CODEX_NOT_FOUND' });
 });
 
+test('macOS prefers ChatGPT desktop over legacy Codex and CLI', () => {
+  const chatgpt = '/Users/test/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
+  const legacy = '/Applications/Codex.app/Contents/Resources/codex';
+  const cli = '/opt/codex/bin/codex';
+  const files = new Set([chatgpt, legacy, cli]);
+  const options = { platform: 'darwin', home: '/Users/test', env: { PATH: '/opt/codex/bin' },
+    resolve: filename => files.has(filename) ? filename : null };
+  assert.equal(findCodexRuntime(options), chatgpt);
+  assert.equal(findCodexRuntime({ ...options, preferredExecutable: cli }), cli);
+  files.delete(chatgpt);
+  assert.equal(findCodexRuntime(options), legacy);
+});
+
+test('macOS finds an indexed desktop bundle with a custom name before falling back to CLI', () => {
+  const bundle = '/Applications/ChatGPT Work.app';
+  const codex = bundle + '/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
+  const cli = '/opt/homebrew/bin/codex';
+  assert.equal(findCodexRuntime({ platform: 'darwin', env: { PATH: '/opt/homebrew/bin' },
+    macLocations: () => [bundle], resolve: file => [codex, cli].includes(file) ? file : null }), codex);
+});
+
+test('macOS file picker can select the desktop app bundle without entering it', t => {
+  // The same resolver is called by the daemon for both Electron selections and explicit paths.
+  if (process.platform === 'win32') return t.skip('The macOS resolver uses POSIX executable paths');
+  const root = mkdtempSync(path.join(os.tmpdir(), 'clawmate-codex-app-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const chatgpt = path.join(root, 'ChatGPT.app');
+  const legacy = path.join(root, 'Codex.app');
+  const modernExecutable = path.join(chatgpt, 'Contents', 'Resources', 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS', 'codex');
+  const legacyExecutable = path.join(legacy, 'Contents', 'Resources', 'codex');
+  for (const executable of [modernExecutable, legacyExecutable]) {
+    mkdirSync(path.dirname(executable), { recursive: true });
+    writeFileSync(executable, 'fixture', { mode: 0o700 });
+  }
+  assert.equal(resolveCodexSelection(chatgpt, undefined, 'darwin'), modernExecutable);
+  assert.equal(resolveCodexSelection(legacy, undefined, 'darwin'), legacyExecutable);
+  assert.throws(() => resolveCodexSelection(chatgpt, root, 'darwin'), /已安装的 Codex/);
+  assert.throws(() => resolveCodexSelection(path.join(root, 'ChatGPT Classic.app'), undefined, 'darwin'), /已安装的 Codex/);
+});
+
 test('macOS and Linux discover CLI-only installations with application and terminal PATHs', () => {
   for (const [platform, env, cli] of [
     ['darwin', { PATH: '/usr/bin' }, '/opt/homebrew/bin/codex'],
@@ -61,7 +101,8 @@ test('macOS and Linux discover CLI-only installations with application and termi
     ['linux', { PATH: '/usr/bin' }, '/home/test/.local/bin/codex'],
     ['linux', { PATH: '/opt/npm/bin:/usr/bin' }, '/opt/npm/bin/codex']
   ]) {
-    assert.equal(findCodexRuntime({ platform, home: '/home/test', env, resolve: file => file === cli ? file : null }), cli);
+    assert.equal(findCodexRuntime({ platform, home: '/home/test', env, macLocations: () => [],
+      resolve: file => file === cli ? file : null }), cli);
   }
 });
 

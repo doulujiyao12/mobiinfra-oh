@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { BridgeCore } from '../core.mjs';
 import { DELIVERY_INSTRUCTIONS } from '../artifacts.mjs';
 
-async function fixture(t) {
+async function fixture(t, desktopAttach = async () => false) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'clawmate-daemon-test-'));
   const cwd = path.join(directory, 'project'); mkdirSync(cwd);
   const source = { id: 'original', source: 'cli', cwd, model: 'test', status: { type: 'idle' }, updatedAt: 100 };
@@ -44,13 +44,21 @@ async function fixture(t) {
   const ipc = new EventEmitter(); ipc.close = () => {}; ipc.findOwner = async () => null;
   // DesktopIpc's public owner method is stubbed at the boundary, preserving the Windows implementation.
   const core = new BridgeCore(config, main, { discoverDaemons: () => ['fixture.sock'], daemonRpc: () => rpc });
-  core.desktopSessions.attach = async () => false;
+  core.desktopSessions.attach = desktopAttach;
   await core.initialize();
   t.after(() => { core.close(); rmSync(directory, { recursive: true, force: true }); });
   const body = () => ({ requestId: randomUUID(), text: 'Phone task', attachments: [], model: 'test', effort: '', mode: 'workspace-write', approvalMode: 'ask' });
   const task = await core.history.resume(source.id, { requestId: randomUUID(), workspaceId: 'project', model: 'test', mode: 'workspace-write' });
   return { core, rpc, source, task, emit, body, cwd, peers: () => peers, setReplay: message => { replay = message; } };
 }
+
+test('a failing desktop router falls back to the daemon that already owns the original session', async t => {
+  const f = await fixture(t, async () => { throw new Error('incompatible desktop router'); });
+  await f.core.start(f.task.id, f.body());
+  assert.equal(f.task.executionBackend, 'daemon');
+  assert.equal(f.rpc.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(f.peers(), 0);
+});
 
 test('a cached session moved to another authorized directory reconnects to the original daemon', async t => {
   const f = await fixture(t); const next = path.join(path.dirname(f.cwd), 'new-chat'); mkdirSync(next);

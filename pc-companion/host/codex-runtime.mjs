@@ -13,6 +13,40 @@ function windowsDesktopLocations(env) {
   } catch { return []; }
 }
 
+function macDesktopLocations(roots) {
+  return roots.flatMap(root => {
+    try {
+      return execFileSync('/usr/bin/mdfind',
+        ['-0', '-onlyin', root, 'kMDItemCFBundleIdentifier == "com.openai.codex"'],
+        { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] })
+        .split('\0').filter(filename => filename.startsWith(root + '/') && /\.app$/i.test(filename));
+    } catch { return []; }
+  });
+}
+
+function macBundleExecutables(bundle) {
+  const resources = path.posix.join(bundle, 'Contents', 'Resources');
+  return [path.posix.join(resources, 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS', 'codex'),
+    path.posix.join(resources, 'codex')];
+}
+
+function* macExecutableCandidates(home, locate) {
+  const roots = ['/Applications', path.posix.join(home, 'Applications')];
+  const checked = new Set();
+  // Prefer the current desktop app before the historical standalone bundle.
+  for (const name of ['ChatGPT.app', 'Codex.app']) {
+    for (const root of roots) {
+      const bundle = path.posix.join(root, name);
+      checked.add(bundle);
+      yield* macBundleExecutables(bundle);
+    }
+  }
+  // Spotlight can find renamed bundles at standard installation locations.
+  for (const bundle of locate(roots)) {
+    if (!checked.has(bundle)) yield* macBundleExecutables(bundle);
+  }
+}
+
 function executablePath(filename, platform) {
   try {
     const resolved = realpathSync(filename);
@@ -35,14 +69,21 @@ function externalExecutableValidator(resources, platform, resolve) {
   };
 }
 
-export function validateCodexSelection(filename, resources) {
-  if (!externalExecutableValidator(resources, process.platform, executablePath)(filename)) {
+export function resolveCodexSelection(filename, resources, platform = process.platform) {
+  const validate = externalExecutableValidator(resources, platform, executablePath);
+  const candidates = platform === 'darwin' && path.posix.isAbsolute(filename) && /\.app$/i.test(filename)
+    ? macBundleExecutables(filename) : [filename];
+  const executable = candidates.find(candidate => validate(candidate));
+  if (!executable) {
     throw new Error('请选择电脑上已安装的 Codex 可执行文件。');
   }
+  // Preserve the selected path so an executable symlink can follow upgrades.
+  return executable;
 }
 
 export function findCodexRuntime({ env = process.env, platform = process.platform, arch = process.arch, home = os.homedir(),
-  resources, preferredExecutable, desktopLocations = windowsDesktopLocations, resolve = executablePath } = {}) {
+  resources, preferredExecutable, desktopLocations = windowsDesktopLocations, macLocations = macDesktopLocations,
+  resolve = executablePath } = {}) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const executable = platform === 'win32' ? 'codex.exe' : 'codex';
   const validate = externalExecutableValidator(resources, platform, resolve);
@@ -68,8 +109,10 @@ export function findCodexRuntime({ env = process.env, platform = process.platfor
     }
     candidates.push(paths.join(env.LOCALAPPDATA || paths.join(home, 'AppData', 'Local'), 'Programs', 'OpenAI', 'Codex', 'bin', executable));
   } else if (platform === 'darwin') {
-    const app = 'Codex.app/Contents/Resources/codex';
-    candidates.push(paths.join('/Applications', app), paths.join(home, 'Applications', app));
+    for (const candidate of macExecutableCandidates(home, macLocations)) {
+      const found = validate(candidate);
+      if (found) return found;
+    }
   }
   if (platform === 'win32' && env.APPDATA) folders.push(paths.join(env.APPDATA, 'npm'));
   if (platform !== 'win32') folders.push(paths.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin');

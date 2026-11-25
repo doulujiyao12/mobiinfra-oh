@@ -73,7 +73,7 @@ export class SharedSessions {
     } catch (error) {
       await this.release(task, task.status);
       if (writerConflict(error)) throw new BridgeError(409,
-        '电脑仍持有此会话，尚未下发任务。请先退出电脑上的该会话以释放它，再在手机重试；仅停止生成或切换标签可能不会释放。');
+        '电脑仍持有此会话，但桥接器没接入它的实时共享通道。本次尚未下发。请确认电脑会话由支持共享的 Codex 桌面通道或本机 App Server daemon 持有，再在手机重新打开原会话。');
       throw error;
     }
   }

@@ -174,8 +174,17 @@ export class BridgeCore {
   async attachShared(task) {
     if (task.sharedThread) await this.history.reconcileWorkspace(task);
     if (this.daemonSessions.has(task.id)) return this.daemonSessions.attach(task);
-    if (await this.desktopSessions.attach(task)) return true;
-    return this.daemonSessions.attach(task);
+    let desktopFailure;
+    try {
+      if (await this.desktopSessions.attach(task)) return true;
+    } catch (error) {
+      desktopFailure = error;
+    }
+    // Discovery only, before submitting a turn: a newer native daemon can
+    // own the original even when the legacy desktop router is incompatible.
+    if (await this.daemonSessions.attach(task)) return true;
+    if (desktopFailure) throw desktopFailure;
+    return false;
   }
   waitForChange(id, revision, milliseconds, signal) {
     if (this.closed || signal?.aborted || this.get(id).revision !== revision || !milliseconds) return Promise.resolve();

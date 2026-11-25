@@ -1,16 +1,33 @@
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import net from 'node:net';
+import { Duplex } from 'node:stream';
 import WebSocket from 'ws';
 import { readContext, cancelledRead } from './read-coordinator.mjs';
+
+// Node interprets Windows IPC paths as named pipes. Codex's official proxy
+// opens its native AF_UNIX control socket and relays the WebSocket bytes.
+function connectThroughCodex(socketPath, { command, environment }) {
+  const child = spawn(command, ['app-server', 'proxy', '--sock', socketPath], {
+    env: environment, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, shell: false
+  });
+  const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
+  child.once('error', error => stream.destroy(error));
+  child.once('close', code => { if (code !== 0) stream.destroy(new Error('Codex control socket proxy closed')); });
+  stream.once('close', () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  return stream;
+}
 
 // A client of an existing App Server. This transport never starts, updates or
 // terminates Codex; closing ClawMate only closes its own WebSocket connection.
 export class DaemonRpc extends EventEmitter {
   pending = new Map(); sequence = 0; closed = false;
-  constructor(socketPath, { timeout = 15000 } = {}) {
+  constructor(socketPath, { timeout = 15000, proxy } = {}) {
     super(); this.timeout = timeout;
     this.socket = new WebSocket('ws://localhost/', {
-      createConnection: () => net.connect({ path: socketPath }),
+      createConnection: () => proxy ? connectThroughCodex(socketPath, proxy) : net.connect({ path: socketPath }),
       handshakeTimeout: 5000, perMessageDeflate: false, maxPayload: 16 * 1024 * 1024,
       followRedirects: false
     });
